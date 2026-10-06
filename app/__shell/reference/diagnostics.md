@@ -183,8 +183,12 @@ never an archive candidate during its session. Best for plumbing: stuck
 spinner, sentinel anomalies, route errors, agent-turn-end detection,
 heartbeat drift, close-cycle verification (`grep "[issue-close-queue]
 op=closed" resources/bram-traces/bram-trace.log` — one line per issue
-the host auto-closed after a Push; absence around a known close
-timestamp means the commit hadn't reached the default branch yet, or no
+the host auto-closed once its commit reached the default branch. The
+queue is checked on Push, on local ref changes, on the ~45 s issue
+refresh and at startup, so a close can land with no Push at all, for
+example when a PR merges on the forge. Absence around a known close
+timestamp means the commit hadn't reached the default branch yet
+(`op=awaiting-push` / `op=deferred-not-on-default` say which), or no
 close was queued at the commit gate; see also
 `op=retired-already-closed` and `op=closed-via-pr`).
 

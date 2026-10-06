@@ -403,10 +403,20 @@ the discipline for completing them serially.
 
 - At the commit gate the host parses these verified selections and
   records, for the requested ids only, a pending close bound to the new
-  commit SHA. Nothing closes or pushes at commit time. On the user's
-  next explicit **Push**, once each commit reaches the default branch,
-  the host closes its issue with a `Closed by <commit-url>` comment
-  (prefixed with the user's comment when given).
+  commit SHA. Nothing closes or pushes at commit time. Once each commit
+  reaches the default branch, the host closes its issue with a
+  `Closed by <commit-url>` comment (prefixed with the user's comment
+  when given).
+- **When the queue is checked.** A Push is the usual way a commit gets
+  there, but it is not the only trigger, and a pending close does not
+  wait for one. The queue is re-checked on the **Push** button
+  (`trigger=button`), on any local ref change such as a fetch
+  (`refs-watch`, debounced), on the background issue refresh about
+  every 45 s (`issues-poll`, added for #329 because a merge made on the
+  forge moves no local ref), and at startup. Until a commit qualifies,
+  each check traces why: `op=awaiting-push` (not on origin yet),
+  `op=deferred-not-on-default` (on origin, not yet merged to the
+  default branch), or `op=deferred-unknown-default`.
 - A record whose issue is already closed by other means retires quietly
   (`op=retired-already-closed`). On GitHub, a **merged PR** containing
   the bound commit completes the close (`op=closed-via-pr`,

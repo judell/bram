@@ -3552,8 +3552,109 @@ window.__bramInflightBlocker = function (claim) {
 // Un-begun sharers are ignored on the same reasoning __bramWorklistOverlapGroups
 // uses: an item that has never been approved has not run, so it cannot have
 // contributed.
+//
+// issue-273-pane-reads-membership: when the board carries the host's
+// line-level membership partition (`membership`, served beside the items
+// since membership-crosses-the-wire; each changed line credited to the claim
+// window that wrote it, 93830b1), ownership comes from THAT instead of from
+// declared-path exclusivity. A path counts for the item only where the item
+// owns lines, and only those lines are counted; a declared path the item
+// wrote nothing on contributes nothing — #273's opening report, where a
+// chat/skip-worklist/hand edit read as the item's work and offered Commit.
+// Display only: the gate, staging and refusals still decide by the replay
+// (#273 step 4a), and the tooltip's "Commits +X" still quotes the host's
+// willCommit, i.e. what the gate will actually take.
+window.__bramBoardMembership = function () {
+  var p = __bramWlAccepted;
+  if (!p || !p.membership || !p.membership.byPath) return null;
+  return { byPath: p.membership.byPath, stale: !!p.membershipStale };
+};
+var __bramPaneAttributionLast = "";
 window.__bramItemChangedSplit = function (item, items, claim, coSelected) {
-  var out = { exclusive: [], shared: [], sharedDeclared: [], added: 0, removed: 0, sharedAdded: 0, sharedRemoved: 0 };
+  var m = window.__bramBoardMembership();
+  var traceKey = (m ? "membership" : "fallback") + "|" + (m && m.stale ? "1" : "0") + "|" + (__bramWlSeen === null ? "" : __bramWlSeen);
+  if (traceKey !== __bramPaneAttributionLast) {
+    __bramPaneAttributionLast = traceKey;
+    window.__bramIframeTrace("pane-attribution", { source: m ? "membership" : "fallback", stale: !!(m && m.stale), version: __bramWlSeen });
+  }
+  if (m) return window.__bramItemChangedSplitMembership(item, items, claim, coSelected, m);
+  return window.__bramItemChangedSplitDeclared(item, items, claim, coSelected);
+};
+// Ownership from membership. Same output shape as the declared split, so
+// every caller (strip, tooltip, committable predicate, gate notes) follows.
+window.__bramItemChangedSplitMembership = function (item, items, claim, coSelected, m) {
+  var out = { exclusive: [], shared: [], sharedDeclared: [], added: 0, removed: 0, sharedAdded: 0, sharedRemoved: 0, unowned: [] };
+  var id = item && item.id;
+  var files = (item && item.changedFiles) || [];
+  var byId = {};
+  var list = items || [];
+  for (var i = 0; i < list.length; i++) byId[list[i].id] = list[i];
+  var co = coSelected || [];
+  var outsideBegun = function (other) {
+    if (other === id || co.indexOf(other) !== -1) return false;
+    var o = byId[other];
+    return !!(o && window.__bramWorklist2Begun(o, claim));
+  };
+  for (var j = 0; j < files.length; j++) {
+    var f = files[j];
+    if (!f) continue;
+    // Declared-shared stays a fact about DECLARATIONS (the stage tooltip's
+    // "what this item shares"), independent of who wrote what.
+    var sharers = f.sharedWith || [];
+    for (var k = 0; k < sharers.length; k++) {
+      if (outsideBegun(sharers[k])) { out.sharedDeclared.push(f.path); break; }
+    }
+    if ((f.added || 0) <= 0 && (f.removed || 0) <= 0) continue;
+    var bp = m.byPath[f.path];
+    if (!bp) {
+      // Fresh partition and no entry: nothing on this path is anyone's
+      // change by the partition's diff, so nothing to credit. A STALE
+      // partition may simply predate this change — display may lag, so fall
+      // back to the declared reading for this one path rather than hide work.
+      if (m.stale) {
+        var one = window.__bramItemChangedSplitDeclared(Object.assign({}, item, { changedFiles: [f] }), items, claim, coSelected);
+        out.exclusive = out.exclusive.concat(one.exclusive);
+        out.shared = out.shared.concat(one.shared);
+        out.added += one.added; out.removed += one.removed;
+        out.sharedAdded += one.sharedAdded; out.sharedRemoved += one.sharedRemoved;
+      }
+      continue;
+    }
+    var mineA = 0, mineR = 0;
+    var entries = bp.perItem || [];
+    for (var e = 0; e < entries.length; e++) {
+      var members = entries[e].members || [];
+      if (members.indexOf(id) === -1) continue;
+      var c = entries[e].counts || {};
+      mineA += Number(c.added) || 0;
+      mineR += Number(c.removed) || 0;
+    }
+    if (mineA + mineR === 0) continue; // declared, but none of these lines are its
+    var owners = bp.owners || [];
+    var entangled = false;
+    for (var o = 0; o < owners.length; o++) {
+      if (outsideBegun(owners[o])) { entangled = true; break; }
+    }
+    if (entangled) {
+      out.shared.push(f.path);
+      out.sharedAdded += mineA;
+      out.sharedRemoved += mineR;
+    } else {
+      out.exclusive.push(f.path);
+      out.added += mineA;
+      out.removed += mineR;
+    }
+    var un = bp.unowned || {};
+    if ((Number(un.added) || 0) + (Number(un.removed) || 0) > 0) {
+      out.unowned.push({ path: f.path, added: Number(un.added) || 0, removed: Number(un.removed) || 0 });
+    }
+  }
+  return out;
+};
+// The declared-path exclusivity reading: the fallback when the board has no
+// membership partition, and the per-path fallback on a stale one.
+window.__bramItemChangedSplitDeclared = function (item, items, claim, coSelected) {
+  var out = { exclusive: [], shared: [], sharedDeclared: [], added: 0, removed: 0, sharedAdded: 0, sharedRemoved: 0, unowned: [] };
   var files = (item && item.changedFiles) || [];
   var byId = {};
   var list = items || [];
@@ -3639,6 +3740,19 @@ window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTo
       );
     }
     lines.push("Files: " + changed + " of " + (cs.total || 0) + " planned");
+    // issue-273-pane-reads-membership: the strip counts only this item's
+    // lines, but a whole-file commit (every unentangled path, until #273's
+    // step 4a) still takes the lines no item wrote. Say so, by path, rather
+    // than let them pass as the item's work.
+    var takenUnowned = (split.unowned || []).filter(function (u) {
+      return split.exclusive.indexOf(u.path) !== -1;
+    });
+    if (takenUnowned.length) {
+      lines.push(
+        "Also takes lines no item wrote (chat-turn or hand edits): " +
+          takenUnowned.map(function (u) { return u.path + " +" + u.added + " −" + u.removed; }).join(", "),
+      );
+    }
     if (split.shared.length) {
       lines.push(
         "Shares " + split.shared.length + " file" +
@@ -5378,8 +5492,14 @@ window.__bramStartConsequence = function (items, sel, claim) {
     var itb = byId[begun[b]];
     if ((itb.status || "proposed") === "applied") continue;
     var split = window.__bramItemChangedSplit(itb, list, claim);
+    // issue-273-pane-reads-membership: with the membership partition on the
+    // board, "has changes" means changes of ITS OWN — the same test the
+    // Commit button uses. changeSummary counts any change on a declared
+    // path, so an item that wrote nothing read as committable here while the
+    // button stayed dark ("Commit makes one commit…" beside a lone Drop).
+    var ownOnly = !!window.__bramBoardMembership();
     var hasAnyChange =
-      (itb.changeSummary && itb.changeSummary.changed > 0) ||
+      (!ownOnly && itb.changeSummary && itb.changeSummary.changed > 0) ||
       split.exclusive.length > 0 ||
       split.shared.length > 0;
     if (!hasAnyChange) empty.push(itb.id);
@@ -5388,7 +5508,9 @@ window.__bramStartConsequence = function (items, sel, claim) {
     return (
       window.__bramNameList(empty) +
       (empty.length === 1 ? " has" : " have") +
-      " no changes yet — nothing to commit."
+      (window.__bramBoardMembership()
+        ? " no changes of " + (empty.length === 1 ? "its" : "their") + " own — nothing to commit."
+        : " no changes yet — nothing to commit.")
     );
   }
 
@@ -5416,13 +5538,10 @@ window.__bramStartConsequence = function (items, sel, claim) {
     return false;
   });
   if (!changedShared.length) return oneCommit;
-  var whatChanged = changedShared.length === 1
-    ? changedShared[0]
-    : changedShared.length + " files";
-  return (
-    "These share " + whatChanged + ", which has uncommitted changes. " +
-    "Commit them together."
-  );
+  // issue-273-pane-reads-membership: no file names here (Jon, 2026-10-06):
+  // naming one file misled when the set shared several, and which files are
+  // shared is the overlaps view's job.
+  return "These share files with uncommitted changes. Commit them together.";
 };
 
 // issue-275-a1: the Transcript's unmount cleanup as ONE synchronous call.

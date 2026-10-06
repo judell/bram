@@ -1,7 +1,8 @@
 <Component
   name="MessageAgentComposer"
   var.voiceRecording="{false}"
-  var.skillsRequestTick="{0}">
+  var.skillsRequestTick="{0}"
+  var.toChat="{false}">
   <!-- A user-defined component is the deliberate performance boundary: the
        TextArea's high-frequency internal state cannot invalidate Main.xmlui's
        App-scope footer sources, listeners, pages, or status bindings. See
@@ -9,6 +10,11 @@
   <!-- issue-278: one message box. The Worklist's own "Message about the
        selection" box is gone; this one names its target instead. -->
   <PushSource id="w2Sel" subscribe="{window.bramSubscribeW2Selection()}" />
+  <!-- composer-addressee-line: the per-message chat override resets when the
+       selection changes, so a fresh tick defaults to feedback. -->
+  <ChangeListener
+    listenTo="{(w2Sel.value || []).join(',')}"
+    onDidChange="toChat = false" />
   <PushSource
     id="composerClear"
     initial="{0}"
@@ -48,8 +54,32 @@
        debounced in helpers.js; blur and submit flush/clear explicitly. -->
   <Form
     width="100%"
-    onSubmit="window.__bramComposerEnterSubmit(composerBox)">
+    onSubmit="window.__bramComposerEnterSubmit(composerBox, toChat)">
     <property name="buttonRowTemplate"><Fragment/></property>
+    <!-- composer-addressee-line: where Enter will send, shown BEFORE sending.
+         Replaces the Chat button: with items ticked, "Send as chat instead"
+         switches this one message to chat without unticking anything.
+         Wrapped with the input row in one tight VStack: as separate Form
+         children they sat gap-Form ($space-4) apart and the line read as
+         unrelated to the box (https://www.xmlui.org/docs/reference/components/Form). -->
+    <VStack width="100%" gap="0">
+    <HStack width="100%" gap="$space-2" verticalAlignment="center" paddingLeft="3rem">
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+        value="{window.__bramComposerAddressee(w2Sel.value || [], toChat, $props.activeProvider)}"
+        tooltip="{window.__bramComposerAddresseeTooltip(w2Sel.value || [], toChat)}" />
+      <Button
+        when="{(w2Sel.value || []).length > 0 &amp;&amp; !toChat}"
+        label="Send as chat instead"
+        variant="ghost"
+        size="xs"
+        onClick="toChat = true" />
+      <Button
+        when="{(w2Sel.value || []).length > 0 &amp;&amp; toChat}"
+        label="Back to feedback"
+        variant="ghost"
+        size="xs"
+        onClick="toChat = false" />
+    </HStack>
     <HStack width="100%" gap="$space-2" verticalAlignment="center">
       <Button
         label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
@@ -71,7 +101,7 @@
         <TextArea
           id="composerBox"
           initialValue="{window.__bramRestoreWorklistDraft()}"
-          placeholder="{window.__bramComposerPlaceholder($props.route, w2Sel.value || [])}"
+          placeholder="{window.__bramComposerPlaceholder($props.route, w2Sel.value || [], toChat)}"
           enterSubmits="true"
           autoSize="true"
           minRows="2"
@@ -92,14 +122,9 @@
            fit-content closes the dead gap before the ▲/▼ column (whose own
            end-anchored spread is deliberate — position carries meaning). -->
       <VStack width="fit-content" horizontalAlignment="start" itemWidth="fit-content" gap="$space-1">
-        <Button
-          when="{(w2Sel.value || []).length > 0}"
-          label="Chat"
-          variant="ghost"
-          size="xs"
-          tooltip="Message the agent about anything"
-          onClick="window.__bramSubmitMessageAgentComposer(composerBox, '')" />
-        <!-- switch-to-transcript-on-action: the Feedback button retired one
+        <!-- composer-addressee-line: the Chat button retired; the addressee
+             line above the box ("Send as chat instead") replaces it.
+             switch-to-transcript-on-action: the Feedback button retired one
              round after it arrived — with a selection, Enter and every gate
              button already send the message as feedback, so a third
              affordance was redundant (Jon: "clicking any button already
@@ -183,6 +208,7 @@
         </VStack>
       </Theme>
     </HStack>
+    </VStack>
   </Form>
   <!-- issue-407: live dictation. Each partial is written into composerBox
        (window.__bramVoiceShowLive); the delivered transcript restores the

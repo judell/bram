@@ -2373,8 +2373,9 @@ window.__bramComposerTargetsSelection = function () {
 // that turns into a status message conflates teaching with reporting — the
 // combined footer context line (__bramFooterContextLine) carries in-flight
 // status now, and the placeholder always tells you what Enter will do.
-window.__bramComposerPlaceholder = function (pathname, sel) {
-  var selection = sel || window.__bramW2Selection || [];
+window.__bramComposerPlaceholder = function (pathname, sel, toChat) {
+  // composer-addressee-line: switched to chat, the box is a chat box.
+  var selection = toChat ? [] : (sel || window.__bramW2Selection || []);
   var route = String(
     pathname != null ? pathname : (function () { try { return location.hash; } catch (e) { return ""; } })()
   );
@@ -2392,9 +2393,9 @@ window.__bramComposerPlaceholder = function (pathname, sel) {
     // verb now, and the gate buttons are pure lifecycle — each sends this
     // message along WITH its action. The wording teaches that split.
     if (onWorklist) {
-      return "Feedback about selection: Enter sends it; the buttons above send it with their action. Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot. Chat to talk with the agent about anything.";
+      return "Feedback about selection: Enter sends it; the buttons above send it with their action. Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
     }
-    return "Feedback about selection: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot. Chat to talk with the agent about anything.";
+    return "Feedback about selection: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
   }
   return "Chat with agent: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
 };
@@ -2431,11 +2432,40 @@ window.__bramSubmitFeedbackForSelection = function (box) {
 // Enter routes by selection (spec cases 1 / 2A / 2B): a live selection makes
 // Enter send feedback about it; idle, Enter chats. The Chat button bypasses
 // this router and always chats — the per-message escape the placeholder names.
-window.__bramComposerEnterSubmit = function (box) {
-  if ((window.__bramW2Selection || []).length > 0) {
+// composer-addressee-line: Enter follows the addressee line above the box.
+// With items ticked it sends feedback to them unless the line has been
+// switched to chat for this message (`toChat`, component state that resets
+// when the selection changes). Two misroutes on 2026-10-06 — a chat message
+// sent with an item ticked, the sender unsure where it went — are why the
+// destination is shown before sending instead of inferred silently.
+window.__bramComposerEnterSubmit = function (box, toChat) {
+  var sel = window.__bramW2Selection || [];
+  var feedback = sel.length > 0 && !toChat;
+  try {
+    var text = box && typeof box.value === "string" ? box.value : "";
+    if (String(text).trim()) {
+      window.__bramIframeTrace("composer-send", { to: feedback ? "feedback" : "chat", override: !!(toChat && sel.length > 0), selected: sel.length });
+    }
+  } catch (e) {}
+  if (feedback) {
     return window.__bramSubmitFeedbackForSelection(box);
   }
   return window.__bramSubmitMessageAgentComposer(box, "");
+};
+// The addressee line's text. `provider` is the active agent ("claude" |
+// "codex"); `toChat` the per-message override.
+window.__bramComposerAddressee = function (sel, toChat, provider) {
+  var ids = Array.isArray(sel) ? sel : [];
+  var p = String(provider || "").toLowerCase();
+  var agent = p === "codex" ? "Codex" : "Claude";
+  if (!ids.length || toChat) return "To: " + agent + " (chat)";
+  return "To: " + (ids.length === 1 ? ids[0] : ids.length + " items") + " (feedback)";
+};
+window.__bramComposerAddresseeTooltip = function (sel, toChat) {
+  var ids = Array.isArray(sel) ? sel : [];
+  if (!ids.length) return "Enter sends this to the agent as chat. Tick Worklist items to send feedback on them instead.";
+  if (toChat) return "Enter sends this one message as chat. The ticked items stay ticked; changing the selection switches back to feedback.";
+  return "Enter files this as feedback on: " + ids.join(", ");
 };
 
 // The Footer composer is now the Worklist's message box too, so the gate

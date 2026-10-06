@@ -124,10 +124,13 @@ dropped after. The overlap index counts declared claims from unbegun items.
 - **No** radio group (needs 2+)
 - **No** explainer line (single unbegun item is an unsurprising combo)
 
-**Then:** look at the composer. Its placeholder reads "Feedback about
-selection: Enter sends it; the buttons above send it with their action…",
-and a **Chat** button shows beside it. Clear the selection: **Chat**
-hides and the placeholder returns to general chat.
+**Then:** look at the composer. The line above it reads "To: p1
+(feedback)" with a **Send as chat instead** control, and the placeholder
+reads "Feedback about selection: Enter sends it; the buttons above send it
+with their action…". Click **Send as chat instead**: the line reads "To:
+Claude (chat)" and the placeholder returns to general chat, with `p1`
+still ticked. Change the selection and it switches back to feedback.
+Clear the selection: the line reads "To: Claude (chat)" with no control.
 
 **Then:** expand `p1`'s row. **No Diff surface** — an unbegun item shows
 "No changes yet" and nothing else (Diff is gated on the begun predicate,

@@ -577,7 +577,7 @@ right item commits.
 
 ## Edits made in chat turns
 
-A chat turn (nothing selected, or **Chat**) is addressed to no item, so its
+A chat turn (nothing selected, or **Send as chat instead**) is addressed to no item, so its
 edits are credited to no item, even when they're for an item that has
 begun. The gate builds an item's commit from the item's own turns, so work
 done between them is a gap it can't account for. This stays true until the

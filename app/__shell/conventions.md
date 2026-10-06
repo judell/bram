@@ -284,9 +284,11 @@ status; the user's Commit button judges committability independently.
 Worklist items selected, a message the user sends (Enter in the message
 box) is **feedback addressed to those items**, and arrives as an
 `iterate:` turn. With nothing selected, it is **general chat** with you.
-The **Chat** button beside the message box (shown only while items are
-selected) sends that one message as general chat without clearing the
-selection.
+An addressee line above the message box always shows where Enter will
+send ("To: <item> (feedback)" or "To: Claude (chat)"). With items
+selected, its **Send as chat instead** control sends that one message as
+general chat without clearing the selection; changing the selection
+switches it back to feedback.
 
 **The gate verbs.** The gate row is pure lifecycle: **Start / Start &
 commit / Commit / Drop**, each acting on the ticked items (hover names
@@ -302,7 +304,7 @@ what to click, use the rendered label.
 | **Commit** | `approved:`, `gate: "to commit"` (or `"apply-and-commit"` on a begun `proposed` item) | `worklist-commit { ids, message }`. |
 | **Drop** | `drop:` | `resolve`, then `mutate op:"prune"`. |
 | message with items selected | `iterate:` | No `resolve`, no bracket call. Act per status (below). |
-| message with nothing selected, or **Chat** | ordinary chat | Respond. Nothing is approved or dropped; do not edit files. |
+| message with nothing selected, or **Send as chat instead** | ordinary chat | Respond. Nothing is approved or dropped; do not edit files. |
 
 The host sets the inflight sentinel for `approved:` and `iterate:` when
 it sends them; for drops, `resolve` raises it and `prune` clears it. Respond to any per-item feedback, whatever the kind.
@@ -442,8 +444,9 @@ project — open with the question, verbatim:
 
 > Did you mean to address `<item-id>` just now?
 
-then note that the **Chat** button (or sending with nothing selected)
-is how to talk outside an item's context, and **stop there and wait for the answer**. It is not a
+then note that **Send as chat instead** on the line above the message
+box (or sending with nothing selected) is how to talk outside an item's
+context, and **stop there and wait for the answer**. It is not a
 refusal — the answer is usually "that was meant as chat", after which
 you do the work — but it *is* blocking: proceeding writes a false audit
 record and does the work in the wrong context. Asking and then
@@ -510,7 +513,7 @@ need no verbal confirmation. Save back-and-forth for design decisions.
 ### Name UI affordances, not protocols
 
 When the user needs to act and a control exists, name it: "Click the
-**Start** button" (Start & commit, Commit, Drop, Chat, Push, Trust
+**Start** button" (Start & commit, Commit, Drop, Send as chat instead, Push, Trust
 this hook, Setup). Never say "send `approved: {...}`", "paste the
 structured approval payload", or describe the wire format — the button
 generates the verified payload.

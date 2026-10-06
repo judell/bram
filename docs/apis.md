@@ -395,7 +395,8 @@ to unqueue one.
 
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
-| `/__issues` | HTTP GET | — | `[{ number, title, state, … }, …]` | agent pane iframe |
+| `/__issues` | HTTP GET | `limit=<n>` (optional, clamped to the project's issue limit); `fresh=1` bypasses the cache | `[{ number, title, state, commentSummary, latestCommentAuthor, latestCommentAt, activityAt, bramState, … }, …]` — served from the cached `issues:list` row. Raw `comments` arrays are stripped at serve time (issues-status-lightweight: they were ~90% of a 3 MB response no list consumer read); the derived comment fields remain, and full comments come from `/__issue`. | agent pane iframe (Issues tab, Worklist cite-an-issue picker) |
+| `/__issues/status` | HTTP GET | `numbers=<n>,<n>,…` (optional; omit for every issue) | `[{ number, state, updatedAt }, …]`; unknown numbers are absent | The lightweight "is #N open?" check: same cached list, no forge call, current to the last re-index (`refresh_issue_now` updates it at once for closes Bram makes). Agents can use it instead of `gh issue view N --json state`, which is a network round trip. |
 | `/__issue` | HTTP GET | `n=<number>` | `{ number, title, body, state, comments: [...] }` | agent pane iframe |
 | `/__issue/comment` | HTTP GET | `number=<n>&body=<urlencoded>` | `gh issue comment` JSON on success, 400 if `number` missing | agent pane iframe |
 | `/__issue-close-queue` | HTTP GET | — | `{ pending: [{ issue, commitSha, createdAtMs }, …] }` | agent pane iframe (Commits tab `closeQueue` DataSource) |

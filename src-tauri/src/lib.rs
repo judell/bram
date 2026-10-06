@@ -14492,6 +14492,81 @@ fn attach_bram_issue_states<R: tauri::Runtime>(app: &AppHandle<R>, bytes: Vec<u8
     serde_json::to_vec(&arr).unwrap_or(bytes)
 }
 
+// issues-status-lightweight: /__issues served every row's raw `comments`
+// array — 2.77 MB of a 3.03 MB response for 423 issues (2026-10-06) — yet
+// no list consumer reads it: the row fields the Issues tab shows
+// (commentSummary, latestCommentAuthor, latestCommentAt, activityAt) are
+// derived from it before caching, and the detail modal loads comments via
+// /__issue. Strip at serve time only; the cache and index keep them.
+fn strip_issue_list_comments(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(mut arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
+        return bytes;
+    };
+    for row in arr.iter_mut() {
+        if let Some(obj) = row.as_object_mut() {
+            obj.remove("comments");
+        }
+    }
+    serde_json::to_vec(&arr).unwrap_or(bytes)
+}
+
+// issues-status-lightweight: /__issues/status — number, state and updatedAt
+// only, from the same cached list. `numbers` empty means every issue; an
+// unknown number is simply absent.
+fn issue_status_rows(bytes: &[u8], numbers: &[u64]) -> Vec<u8> {
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(bytes).unwrap_or_default();
+    let rows: Vec<serde_json::Value> = arr
+        .iter()
+        .filter_map(|row| {
+            let n = row.get("number").and_then(|v| v.as_u64())?;
+            if !numbers.is_empty() && !numbers.contains(&n) {
+                return None;
+            }
+            Some(serde_json::json!({
+                "number": n,
+                "state": row.get("state").cloned().unwrap_or(serde_json::Value::Null),
+                "updatedAt": row.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
+            }))
+        })
+        .collect();
+    serde_json::to_vec(&rows).unwrap_or_else(|_| b"[]".to_vec())
+}
+
+#[cfg(test)]
+mod issue_list_slim_tests {
+    use super::*;
+
+    const LIST: &str = r#"[
+        {"number":1,"state":"OPEN","title":"a","updatedAt":"2026-10-01T00:00:00Z","comments":[{"body":"x"}],"commentSummary":"me: 1"},
+        {"number":2,"state":"CLOSED","title":"b","updatedAt":"2026-10-02T00:00:00Z"}
+    ]"#;
+
+    #[test]
+    fn strip_removes_comments_and_keeps_derived_fields() {
+        let out = strip_issue_list_comments(LIST.as_bytes().to_vec());
+        let v: Vec<serde_json::Value> = serde_json::from_slice(&out).unwrap();
+        assert!(v[0].get("comments").is_none());
+        assert_eq!(v[0]["commentSummary"], "me: 1");
+        assert_eq!(v[1]["title"], "b");
+    }
+
+    #[test]
+    fn status_rows_all_and_filtered() {
+        let all: Vec<serde_json::Value> =
+            serde_json::from_slice(&issue_status_rows(LIST.as_bytes(), &[])).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[1],
+            serde_json::json!({"number":2,"state":"CLOSED","updatedAt":"2026-10-02T00:00:00Z"})
+        );
+        let one: Vec<serde_json::Value> =
+            serde_json::from_slice(&issue_status_rows(LIST.as_bytes(), &[1, 99])).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0]["state"], "OPEN");
+        assert!(one[0].get("title").is_none());
+    }
+}
+
 fn attach_pending_closes<R: tauri::Runtime>(app: &AppHandle<R>, arr: &mut Vec<serde_json::Value>) {
     let Some(path) = issue_close_queue_file(app) else {
         return;
@@ -66364,6 +66439,32 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", bytes);
     }
 
+    // issues-status-lightweight: "is #N open?" without the full list. Served
+    // from the cached issues:list row (no forge call), which
+    // refresh_issue_now updates at once for closes Bram makes.
+    if path == "__issues/status" {
+        let mut numbers: Vec<u64> = Vec::new();
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("numbers=") {
+                numbers = percent_decode(v)
+                    .split(',')
+                    .filter_map(|s| s.trim().trim_start_matches('#').parse().ok())
+                    .collect();
+            }
+        }
+        return match gh_issues_list(app, project_search_issue_limit(app), false) {
+            Ok(bytes) => (
+                200,
+                "application/json; charset=utf-8",
+                issue_status_rows(&bytes, &numbers),
+            ),
+            Err(e) => {
+                eprintln!("[http /__issues/status] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
     if path == "__issues" {
         let issue_limit = project_search_issue_limit(app);
         let mut limit = issue_limit;
@@ -66378,10 +66479,12 @@ fn route_request<R: tauri::Runtime>(
         }
         return match gh_issues_list(app, limit, fresh) {
             // issues-page-bram-lifecycle-column: the second column's data.
+            // issues-status-lightweight: strip raw comments first, so the
+            // annotation pass parses the slim payload.
             Ok(bytes) => (
                 200,
                 "application/json; charset=utf-8",
-                attach_bram_issue_states(app, bytes),
+                attach_bram_issue_states(app, strip_issue_list_comments(bytes)),
             ),
             Err(e) => {
                 eprintln!("[http /__issues] {}", e);

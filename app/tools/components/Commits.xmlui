@@ -69,7 +69,11 @@
     listenTo="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
     onDidChange="() => { commitsExpanded = false; }" />
 
-  <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
+  <!-- result-list-tabs-virtualize: no overflowY / height wrapper — a second
+       scroll container here defeats ResultList's virtualization (every row
+       mounted; see Issues.xmlui, issues-status-lightweight, for the receipts).
+       https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region -->
+  <VStack padding="$space-4" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Commits</Heading>
       <SearchBox
@@ -226,7 +230,10 @@
            author, +/- stats, pending-close annotation) stays Commits-owned
            in the slot. Inline CommitDetail expansion and selectedSha retire
            in favor of the shell's modal. -->
-      <ResultList data="{commitRows}" query="{searchQuery.trim()}">
+      <!-- pinKey: a search change replaces the rows wholesale; pin the page
+           to top so virtua's re-anchor can't drag it down the new list. -->
+      <ResultList data="{commitRows}" query="{searchQuery.trim()}"
+        pinKey="{searchNeedle}" pinVia="commits">
         <property name="rowTemplate">
           <HStack gap="$space-3" verticalAlignment="center">
             <Text when="{$item.pushed}" value="✓" color="$color-success-600" fontSize="$fontSize-xs" width="12px" />

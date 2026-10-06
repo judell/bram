@@ -56,7 +56,11 @@
        the former FTS union admitted rows whose match lived in indexed prose
        the detail never displays ("subagent": 9 FTS hits vs 5 title
        matches). -->
-  <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
+  <!-- result-list-tabs-virtualize: no overflowY / height wrapper — a second
+       scroll container here defeats ResultList's virtualization (every row
+       mounted; see Issues.xmlui, issues-status-lightweight, for the receipts).
+       https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region -->
+  <VStack padding="$space-4" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">History</Heading>
       <SearchBox
@@ -75,7 +79,10 @@
            ResultList shell; the history row anatomy (date / title / phase
            path) stays History-owned in the slot. Inline HistoryDetail
            expansion and expandedId retire in favor of the shell's modal. -->
-      <ResultList data="{historyRows}" query="{searchQuery.trim()}">
+      <!-- pinKey: a search change replaces the rows wholesale; pin the page
+           to top so virtua's re-anchor can't drag it down the new list. -->
+      <ResultList data="{historyRows}" query="{searchQuery.trim()}"
+        pinKey="{searchNeedle}" pinVia="history">
         <property name="rowTemplate">
           <HStack gap="$space-3" verticalAlignment="center">
             <Text

@@ -54,18 +54,16 @@
        path. No polling — the agent-turn-end event covers locally-filed
        issues, comment/close bump issueRefreshTick, and Refresh is manual for
        remote (GitHub/GitLab) changes with no push channel. -->
+  <!-- issues-status-lightweight: the first page is a real first page — a
+       small fast paint, loaded once per mount. It used to fetch the whole
+       unlimited list, duplicating issuesFull on every refresh (two 3 MB
+       fetches per issues-changed, 2026-10-06). issuesFull alone handles
+       refreshes and the new-issue membership signature: a partial page's
+       signature would read as a membership change against the full list's. -->
   <DataSource
     id="issuesFirstPage"
     url="/__issues"
-    onLoaded="(data) => {
-      const currentSig = ((data || []).map(i => i && i.number).filter(Boolean).sort()).join(',');
-      if (newIssueSubmitting &amp;&amp; newIssueStartSig &amp;&amp; currentSig !== newIssueStartSig) {
-        newIssueSubmitting = false; newIssueStartSig = ''; newIssueTurnEnded = false;
-      } else if (newIssueSubmitting &amp;&amp; newIssueTurnEnded) {
-        newIssueSubmitting = false; newIssueStartSig = ''; newIssueTurnEnded = false;
-      }
-      lastIssuesSig = currentSig;
-    }" />
+    queryParams="{{ limit: 50 }}" />
 
   <DataSource
     id="issuesFull"
@@ -89,7 +87,7 @@
     method="post"
     queryParams="{{ number: $param.number, body: $param.body }}"
     completedNotificationMessage="Comment posted."
-    onSuccess="issueRefreshTick = issueRefreshTick + 1; issuesFirstPage.refetch(); issuesFull.refetch()" />
+    onSuccess="issueRefreshTick = issueRefreshTick + 1; issuesFull.refetch()" />
 
   <ModalDialog
     when="{showNewIssueHint}"
@@ -132,7 +130,7 @@
     subscribe="{window.bramSubscribeTauriEvent('agent-turn-end')}" />
   <ChangeListener
     listenTo="{issuesAgentTurnEndEvt.value &amp;&amp; issuesAgentTurnEndEvt.value.tick}"
-    onDidChange="() => { if (newIssueSubmitting) { newIssueTurnEnded = true; } issuesFirstPage.refetch(); issuesFull.refetch(); }" />
+    onDidChange="() => { if (newIssueSubmitting) { newIssueTurnEnded = true; } issuesFull.refetch(); }" />
 
   <!-- Host synthesizes issues-changed when its background poll of the forge
        detects a change; the client only refetches on the event — no polling,
@@ -143,7 +141,7 @@
     subscribe="{window.bramSubscribeTauriEvent('issues-changed')}" />
   <ChangeListener
     listenTo="{issuesChangedEvt.value &amp;&amp; issuesChangedEvt.value.tick}"
-    onDidChange="() => { issuesFirstPage.refetch(); issuesFull.refetch(); }" />
+    onDidChange="() => { issuesFull.refetch(); }" />
   <!-- issues-tab-optimistic-close: a close in flight renders CLOSED via
        pendingCloses; each fresh fetch of the raw list retires the entries
        the forge data now confirms (the host re-indexes on success and emits
@@ -151,7 +149,18 @@
   <ChangeListener
     listenTo="{rawIssuesSource}"
     onDidChange="pendingCloses = window.__bramReconcilePendingIssueCloses(rawIssuesSource)" />
-  <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
+  <!-- issues-status-lightweight: no overflowY / height here. This wrapper
+       was a second scroll container between the ResultList's virtua List and
+       the App's scroll container; the List defers its scroll outward
+       (hasOutsideScroll) and, measured, then rendered EVERY row — domRows 423
+       of 423 hits in an 876px viewport (2026-10-06), and every Issues trace
+       since September tracks the issue count the same way, while Search,
+       whose wrapper has no overflow, stays at ~25-60 DOM rows. Each filter
+       switch rebuilt all ~400 row cards: 4.3 s / 5.4 s per click in the
+       Inspector export. Same differencing fix as
+       https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region
+       ("delete the wrapper"). -->
+  <VStack padding="$space-4" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Issues</Heading>
       <RadioGroup
@@ -229,11 +238,22 @@
            virtualized). Row anatomy (state / title+meta / age) and the
            comment/close controls stay Issues-owned via the two slots; the
            inline expansion and its expandedNumber state retire. -->
+      <!-- result-list-tabs-virtualize: pinKey pins the page to top whenever
+           the rows are replaced wholesale (state filter, sort, search).
+           Without it, once the list virtualizes against the App scroller,
+           virtua re-anchors on a previously visible row and drags the page
+           down the new list — open→closed landed at row 362 of 388
+           (2026-10-06 03:46Z). The visible jump-then-back on transitions
+           that change the first row is upstream: List's useShift reads any
+           first-key change as a prepend (xmlui-org/xmlui#3936); the pin stays
+           either way, but the flash should go when that lands. -->
       <ResultList
         id="issueResults"
         data="{issueRows}"
         query="{searchQuery.trim()}"
-        detailRefreshTick="{issueRefreshTick}">
+        detailRefreshTick="{issueRefreshTick}"
+        pinKey="{stateFilter + '|' + sortField + '|' + sortDir + '|' + searchNeedle}"
+        pinVia="issues">
         <property name="rowTemplate">
           <HStack gap="$space-3" verticalAlignment="center">
             <HStack width="64px" verticalAlignment="center">

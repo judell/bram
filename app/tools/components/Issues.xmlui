@@ -9,7 +9,7 @@
   var.issueRefreshTick="{0}"
   var.sortField="activityAt"
   var.sortDir="desc"
-  var.stateFilter="open"
+  var.stateFilter="both"
   var.pendingCloses="{window.__bramPendingIssueCloseList()}"
   var.rawIssuesSource="{(issuesFull.value &amp;&amp; issuesFull.value.length > 0) ? issuesFull.value : (issuesFirstPage.value || [])}"
   var.issuesSource="{window.__bramApplyPendingIssueCloses(rawIssuesSource, pendingCloses)}"
@@ -164,13 +164,13 @@
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Issues</Heading>
       <RadioGroup
-        initialValue="open"
+        initialValue="both"
         orientation="horizontal"
         gap="$space-3"
         onDidChange="(v) => stateFilter = v">
+        <Option value="both" label="both" />
         <Option value="open" label="open" />
         <Option value="closed" label="closed" />
-        <Option value="both" label="both" />
       </RadioGroup>
       <SearchBox
         boxWidth="22rem"

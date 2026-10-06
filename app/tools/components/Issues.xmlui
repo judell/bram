@@ -11,7 +11,7 @@
   var.sortDir="desc"
   var.stateFilter="both"
   var.pendingCloses="{window.__bramPendingIssueCloseList()}"
-  var.rawIssuesSource="{(issuesFull.value &amp;&amp; issuesFull.value.length > 0) ? issuesFull.value : (issuesFirstPage.value || [])}"
+  var.rawIssuesSource="{issuesFull.value || []}"
   var.issuesSource="{window.__bramApplyPendingIssueCloses(rawIssuesSource, pendingCloses)}"
   var.sortedIssues="{(issuesSource || []).filter(i => stateFilter === 'both' || (stateFilter === 'open') === (i.state === 'OPEN')).sort(function(a, b) {
     // AGE is an elapsed-time ordering: compare the activity timestamp that
@@ -54,21 +54,14 @@
        path. No polling — the agent-turn-end event covers locally-filed
        issues, comment/close bump issueRefreshTick, and Refresh is manual for
        remote (GitHub/GitLab) changes with no push channel. -->
-  <!-- issues-status-lightweight: the first page is a real first page — a
-       small fast paint, loaded once per mount. It used to fetch the whole
-       unlimited list, duplicating issuesFull on every refresh (two 3 MB
-       fetches per issues-changed, 2026-10-06). issuesFull alone handles
-       refreshes and the new-issue membership signature: a partial page's
-       signature would read as a membership change against the full list's. -->
-  <DataSource
-    id="issuesFirstPage"
-    url="/__issues"
-    queryParams="{{ limit: 50 }}" />
-
+  <!-- issues-single-fetch-no-load-jump: ONE fetch. The 50-row first page
+       (a fast paint from when /__issues was 3 MB) retired once the list
+       slimmed to ~240 KB: its swap to the full list changed the top row, so
+       List's useShift read it as a prepend and the tab opened ~50 rows from
+       the bottom (06:10:57Z, rows 372-381 of 424; xmlui-org/xmlui#3936). -->
   <DataSource
     id="issuesFull"
     url="/__issues"
-    when="{issuesFirstPage.loaded || issuesFirstPage.value}"
     onLoaded="(data) => {
       const currentSig = ((data || []).map(i => i && i.number).filter(Boolean).sort()).join(',');
       if (newIssueSubmitting &amp;&amp; newIssueStartSig &amp;&amp; currentSig !== newIssueStartSig) {
@@ -176,7 +169,7 @@
         boxWidth="22rem"
         placeholder="Filter issues…"
         initialValue="{searchQuery}"
-        inProgress="{issuesFirstPage.inProgress || issuesFull.inProgress}"
+        inProgress="{issuesFull.inProgress}"
         onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
         onClear="searchQuery = ''; setLastSearchQuery('')" />
       <Button
@@ -186,7 +179,7 @@
         enabled="{!newIssueSubmitting}"
         onClick="showNewIssueHint = true" />
       <Theme size-Spinner="16px">
-        <Spinner when="{newIssueSubmitting || (issuesFirstPage.inProgress &amp;&amp; !issuesFirstPage.loaded)}" />
+        <Spinner when="{newIssueSubmitting || (issuesFull.inProgress &amp;&amp; !issuesFull.loaded)}" />
       </Theme>
     </HStack>
 
@@ -196,7 +189,7 @@
       No forge remote detected for this project. Add an origin remote (GitHub or GitLab) to populate this tab.
     </Text>
     <Text
-      when="{repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFirstPage.loaded &amp;&amp; !issuesFirstPage.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
+      when="{repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFull.loaded &amp;&amp; !issuesFull.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
       color="$textColor-secondary">
       No issues found. (The repo may have none, `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` may not be installed / authenticated, or the last fetch failed — it will retry shortly.)
     </Text>
@@ -246,13 +239,16 @@
            (2026-10-06 03:46Z). The visible jump-then-back on transitions
            that change the first row is upstream: List's useShift reads any
            first-key change as a prepend (xmlui-org/xmlui#3936); the pin stays
-           either way, but the flash should go when that lands. -->
+           either way, but the flash should go when that lands.
+           issues-single-fetch-no-load-jump: the load phase is in the key too,
+           so the pin also fires once when the data first arrives. -->
+
       <ResultList
         id="issueResults"
         data="{issueRows}"
         query="{searchQuery.trim()}"
         detailRefreshTick="{issueRefreshTick}"
-        pinKey="{stateFilter + '|' + sortField + '|' + sortDir + '|' + searchNeedle}"
+        pinKey="{(issuesFull.loaded ? 'loaded' : 'loading') + '|' + stateFilter + '|' + sortField + '|' + sortDir + '|' + searchNeedle}"
         pinVia="issues">
         <property name="rowTemplate">
           <HStack gap="$space-3" verticalAlignment="center">

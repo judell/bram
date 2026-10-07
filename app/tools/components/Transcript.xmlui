@@ -257,7 +257,7 @@
       data="{(findPlan &amp;&amp; findPlan.rows) || events}"
       idKey="{findPlan ? '__findKey' : 'id'}"
       onScroll="(ev) => atBottom = window.__bramFollowClassify(atBottom, ev.atEnd, $props.agentId)"
-      onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range)">
+      onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range, transcriptList, $props.agentId)">
       <property name="emptyListTemplate"><Fragment/></property>
       <VStack gap="$space-1" paddingVertical="$space-1">
         <!-- user message -->
@@ -449,12 +449,29 @@
            the Worklist page is unmounted on this tab, so this is the one live
            instance, and ticks ride the shared window.__bramW2Selection
            (Worklist.xmlui) to and from the Worklist tab. -->
-      <VStack when="{worklistOpen}" height="100%" overflowY="auto" paddingTop="$space-2">
-        <Worklist />
-        <WorklistGateBar />
+      <!-- The `when` VStack stays plain: with onMount/onUnmount on it, a
+           false `when` still counted as the Splitter's second child, so Hide
+           left the two-pane layout up (2026-10-07). The inner VStack is the
+           scroller and carries testId + lifecycle, so the pane remembers its
+           own scroll position (helpers.js __bramWorklistPaneMounted) across
+           Hide/Show and tab switches. Lifecycle events:
+           https://www.xmlui.org/docs/howto/clean-up-when-a-panel-closes -->
+      <VStack when="{worklistOpen}" height="100%">
+        <VStack height="100%" overflowY="auto" paddingTop="$space-2"
+          testId="transcript-worklist-pane"
+          onMount="window.__bramWorklistPaneMounted()"
+          onUnmount="window.__bramWorklistPaneUnmounted()">
+          <Worklist />
+          <WorklistGateBar />
+        </VStack>
       </VStack>
     </VSplitter>
-    <!-- Opening the pane shrinks the transcript; land it on the newest
+    <!-- Closing the pane REMOUNTS the List (XMLUI's Splitter renders one
+         child and two children in different trees), which starts at the
+         top. The toggle records follow/row and the remounted List's first
+         onVisibleRangeDidChange re-lands it (helpers.js
+         __bramSplitToggleLanding); hence the List passes itself there.
+         Opening the pane shrinks the transcript; land it on the newest
          turn, the message most likely to name the rows to act on. Same
          follow-then-retry jump as the agent-chip switch below. Jumping
          here alone landed ~285px short (demo trace, 2026-10-07): the pane

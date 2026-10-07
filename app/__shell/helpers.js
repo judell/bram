@@ -6504,9 +6504,16 @@ window.__bramFlipExpansionKey = function (keys, key) {
 };
 window.__bramPruneWorklist2Expansion = function (validIds) {
   var ids = validIds || [];
-  var kept = window.__bramRestoreWorklist2Expansion().filter(function (k) {
+  var onBoard = function (k) {
     return ids.indexOf(String(k).split("::")[0]) !== -1;
-  });
+  };
+  // Saved file-diff keys share the itemId:: prefix, so the same rule prunes
+  // them; the live diffKeys var keeps any stale key harmlessly until the
+  // next remount reads the pruned copy.
+  if (window.__bramRestoreWorklist2DiffKeys) {
+    window.__bramPersistWorklist2DiffKeys(window.__bramRestoreWorklist2DiffKeys().filter(onBoard));
+  }
+  var kept = window.__bramRestoreWorklist2Expansion().filter(onBoard);
   return window.__bramPersistWorklist2Expansion(kept);
 };
 
@@ -10565,7 +10572,13 @@ var __BRAM_DESCRIBE_CONCURRENCY = 3;
 // Primary signal: the List's visibleRangeDidChange event (first-class API,
 // added upstream in xmlui feat/list-visible-range). The [data-index] DOM
 // scrape remains as fallback for the window before the first event lands.
-window.__bramSetVisibleRange = function (range) {
+window.__bramSetVisibleRange = function (range, listRef, agentId) {
+  // A pending Worklist-pane close re-lands BEFORE the new range is stored,
+  // so the reading row recorded at the toggle isn't overwritten by the
+  // remounted List's top-of-list report.
+  if (window.__bramSplitToggleLand && listRef) {
+    try { __bramSplitToggleLanding(listRef, agentId); } catch (e0) {}
+  }
   window.__bramVisibleRange = range || null;
   try { __bramPumpDescribeQueue(); } catch (e) {}
   // #427: the List's first render is the moment its splitter exists to
@@ -10588,6 +10601,8 @@ window.bramSubscribeTranscriptSplitHeight = (function () {
   var factory;
   var subscribers = new Set();
   var value = 0;
+  var prevValue = -1;
+  var lastEmitAt = 0;
   var ro = null;
   var observed = [];
   var hooked = false;
@@ -10609,22 +10624,37 @@ window.bramSubscribeTranscriptSplitHeight = (function () {
     if (!sp) return;
     var page = sp.parentElement;
     while (page && !__bramIsScrollable(page)) page = page.parentElement;
-    var pageTop = page ? page.getBoundingClientRect().top : 0;
     var scrolled = page ? page.scrollTop : 0;
-    // Splitter top relative to the page scroller's content box, then back to
-    // the viewport as if the page were at scrollTop 0.
-    var spTop = sp.getBoundingClientRect().top + scrolled;
-    var bottom = ft ? ft.getBoundingClientRect().top : (window.innerHeight || 0);
-    var next = Math.max(0, Math.floor(bottom - spTop));
+    // Scroll-invariant by construction: the page scroller's visible height,
+    // minus the splitter's offset within the page CONTENT, minus the footer's
+    // own height. The first cut subtracted the sticky footer's on-screen top,
+    // which moves with page scroll; a 160px page scroll then fed back through
+    // the height it set (629 <-> 505px every 30-80ms, 2026-10-07 20:17:38,
+    // until a reload). None of these three terms changes when the page
+    // scrolls, so the same layout always yields the same height.
+    var pageTop = page ? page.getBoundingClientRect().top : 0;
+    var viewH = page ? page.clientHeight : (window.innerHeight || 0);
+    var spOffset = sp.getBoundingClientRect().top - pageTop + scrolled;
+    var footH = ft ? ft.getBoundingClientRect().height : 0;
+    var next = Math.max(0, Math.floor(viewH - spOffset - footH));
     var watch = [];
     if (ft) watch.push(ft);
     var sib = sp.previousElementSibling;
     while (sib) { watch.push(sib); sib = sib.previousElementSibling; }
     observe(watch);
     if (next !== value) {
+      // A return to the value before last within a second is a flip: the
+      // signature of a measure/resize feedback loop. Flag it rather than
+      // leave it to be spotted in a run of lines.
+      var now = Date.now();
+      var flip = next === prevValue && (now - lastEmitAt) < 1000;
       window.__bramIframeTrace("transcript-split-height", {
-        px: next, prev: value, pageTop: Math.round(pageTop), scrolled: Math.round(scrolled),
+        px: next, prev: value, scrolled: Math.round(scrolled),
+        viewH: Math.round(viewH), spOffset: Math.round(spOffset), footH: Math.round(footH),
+        flip: flip,
       });
+      prevValue = value;
+      lastEmitAt = now;
       value = next;
       subscribers.forEach(function (fn) {
         try { fn(); } catch (e) { console.error("[bramSubscribeTranscriptSplitHeight] subscriber threw:", e); }
@@ -10658,9 +10688,100 @@ window.__bramRestoreTranscriptWorklistOpen = function () {
 window.__bramToggleTranscriptWorklistOpen = function (open) {
   var next = !open;
   __bramWriteSS("bram.transcriptWorklistOpen", next ? "1" : "");
-  window.__bramIframeTrace("transcript-worklist", { op: next ? "open" : "close" });
+  // XMLUI's Splitter renders one child and two children in different trees,
+  // so toggling the pane REMOUNTS the transcript List, which starts at the
+  // top. Record what the reader was looking at; the remounted List's first
+  // visible-range report re-lands it (__bramSplitToggleLanding). Opening
+  // keeps its deliberate jump to the newest turn, so only a close is
+  // recorded. (transcript-split-toggle-keeps-reading-position)
+  var following = window.__bramFollowAtBottom !== false;
+  var vr = window.__bramVisibleRange;
+  var row = (vr && typeof vr.startIndex === "number") ? vr.startIndex : -1;
+  window.__bramSplitToggleLand = next ? null : { following: following, row: row };
+  window.__bramIframeTrace("transcript-worklist", {
+    op: next ? "open" : "close", follow: following, row: row,
+  });
   return next;
 };
+// The Worklist pane's own scroll position (transcript-split-toggle-keeps-
+// reading-position). FOCUS, so sessionStorage. Saved continuously while the
+// pane is mounted (a tab switch unmounts it as surely as Hide does), and
+// restored on mount as the Worklist's rows load: a ResizeObserver waits for
+// the content to be tall enough -- no timed wait -- and the restore stands
+// down the moment the user scrolls the pane themselves.
+var __bramWorklistPaneState = null;
+window.__bramWorklistPaneMounted = function () {
+  var KEY = "bram.transcriptWorklistPaneScroll";
+  var el = null;
+  try { el = document.querySelector('[data-testid="transcript-worklist-pane"]'); } catch (e) { el = null; }
+  if (!el) return;
+  if (__bramWorklistPaneState) window.__bramWorklistPaneUnmounted();
+  var saved = Number(__bramReadSS(KEY, "0")) || 0;
+  var st = { el: el, restoring: saved > 0, ro: null, listeners: [] };
+  __bramWorklistPaneState = st;
+  var finish = function (how) {
+    if (!st.restoring) return;
+    st.restoring = false;
+    if (st.ro) { try { st.ro.disconnect(); } catch (e) {} st.ro = null; }
+    window.__bramIframeTrace("transcript-worklist", {
+      op: "pane-restore", saved: saved, landed: Math.round(el.scrollTop), how: how,
+    });
+  };
+  var tryRestore = function () {
+    if (!st.restoring) return;
+    var max = el.scrollHeight - el.clientHeight;
+    el.scrollTop = Math.min(saved, Math.max(0, max));
+    if (max >= saved) finish("content");
+  };
+  var onScroll = function () {
+    if (st.restoring) return;
+    __bramWriteSS(KEY, String(Math.round(el.scrollTop)));
+  };
+  var onUser = function () { finish("user"); };
+  var add = function (type, fn) {
+    el.addEventListener(type, fn, { passive: true });
+    st.listeners.push([type, fn]);
+  };
+  add("scroll", onScroll);
+  add("wheel", onUser);
+  add("pointerdown", onUser);
+  add("keydown", onUser);
+  if (st.restoring && typeof ResizeObserver !== "undefined") {
+    st.ro = new ResizeObserver(tryRestore);
+    st.ro.observe(el);
+    if (el.firstElementChild) st.ro.observe(el.firstElementChild);
+  }
+  tryRestore();
+};
+window.__bramWorklistPaneUnmounted = function () {
+  var st = __bramWorklistPaneState;
+  __bramWorklistPaneState = null;
+  if (!st) return;
+  if (st.ro) { try { st.ro.disconnect(); } catch (e) {} }
+  st.listeners.forEach(function (l) {
+    try { st.el.removeEventListener(l[0], l[1]); } catch (e) {}
+  });
+};
+
+// Re-land the transcript after a close remounted it: the bottom if the
+// reader was following (the jump yields if they scroll first), else the row
+// they were reading. Called with the List's first visible-range report after
+// the toggle; one-shot.
+function __bramSplitToggleLanding(listRef, agentId) {
+  var p = window.__bramSplitToggleLand;
+  window.__bramSplitToggleLand = null;
+  if (!p || !listRef) return;
+  if (p.following) {
+    window.__bramBottomJumpRetry(listRef, "worklist-close", agentId, null);
+    return;
+  }
+  if (p.row > 0) {
+    try { listRef.scrollToIndex(p.row); } catch (e) { /* ignore */ }
+  }
+  window.__bramIframeTrace("follow-state", {
+    op: "restore", cause: "worklist-close", row: p.row, agentId: agentId || "main",
+  });
+}
 // #427: the split's resize event. Saves the divider as a percentage (a
 // DECISION, via __bramSaveSplitterSize -> localStorage) only while the
 // Worklist pane is open -- closed, the transcript fills the splitter and
@@ -15267,7 +15388,24 @@ window.__bramDiffToggleFile = function (keys, itemId, path) {
     return String(k).indexOf(prefix) !== 0;
   });
   if (!wasOpen) next.push(key);
-  return next;
+  return window.__bramPersistWorklist2DiffKeys(next);
+};
+// Which file diffs are open survives a Worklist remount (Hide/Show of the
+// Transcript's Worklist pane, a tab switch), as row expansion does: FOCUS,
+// so sessionStorage, keyed `itemId::path` and pruned with expandedKeys.
+// (transcript-split-toggle-keeps-reading-position)
+window.__bramPersistWorklist2DiffKeys = function (keys) {
+  try {
+    sessionStorage.setItem("bram.worklist2.diffKeys", JSON.stringify(keys || []));
+  } catch (e) {}
+  return keys || [];
+};
+window.__bramRestoreWorklist2DiffKeys = function () {
+  try {
+    return JSON.parse(sessionStorage.getItem("bram.worklist2.diffKeys") || "[]") || [];
+  } catch (e) {
+    return [];
+  }
 };
 window.__bramDiffToggleTooltip = function (keys, itemId, path) {
   return window.__bramDiffExpanded(keys, itemId, path) ? "Hide this file's diff" : "Show this file's diff";

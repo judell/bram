@@ -2,7 +2,7 @@
   name="Worklist"
   var.expandedKeys="{window.__bramRestoreWorklist2Expansion($queryParams.expand)}"
   var.worklistPendingOrder="{null}"
-  var.diffKeys="{[]}"
+  var.diffKeys="{window.__bramRestoreWorklist2DiffKeys()}"
   var.diffScopes="{{}}"
   var.hunkNavKeys="{{}}"
   var.worklist2Feedback="{{}}"

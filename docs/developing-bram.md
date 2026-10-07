@@ -17,6 +17,12 @@ indexes, claim and safety refs, selective commits, linked worktrees,
 scenario branches, and remote-tracking state—see
 [`git-as-infrastructure.md`](git-as-infrastructure.md).
 
+When a choice between alternatives gets settled (with evidence) and
+would otherwise be re-argued later, record it as a short note in
+[`decisions/`](decisions/README.md) instead of an issue: one file per
+decision, with its evidence, the alternatives rejected, and when to
+revisit.
+
 ## Code organization (helpers.js / Globals.xs / window)
 
 Iframe-side code spans four surfaces. The rules below describe where

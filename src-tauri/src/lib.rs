@@ -62350,6 +62350,16 @@ fn classify_worklist_removals(
     (dropped_via_auth, violations)
 }
 
+// issue-426: is this raw read a complete worklist document? A JSON object with
+// an `items` array. Empty, truncated or otherwise partial reads are not, and
+// must never be judged (or cached) as a board.
+fn worklist_raw_parseable(s: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(v) => v.get("items").map(|i| i.is_array()).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
     app: &AppHandle<R>,
     prior_str: &str,
@@ -62406,10 +62416,36 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
         .map(|(id, status)| format!("\"{}\" (status={})", id, status))
         .collect::<Vec<_>>()
         .join(", ");
+    // issue-426: compare before reverting. If the file has changed since the
+    // read that triggered this check, a newer write has landed; reverting now
+    // would overwrite it with the stale prior copy. Let that write's own
+    // watcher event be judged instead.
+    match std::fs::read_to_string(&path) {
+        Ok(now) if now == current_str => {}
+        _ => {
+            append_bram_trace_line(
+                app,
+                "worklist-enforce",
+                &format!("op=revert-skipped-file-changed ids={}", bad),
+            );
+            return false;
+        }
+    }
     eprintln!(
         "[worklist-enforce] reverting unauthorized removal of {} via watcher fallback; last auth kind={}",
         bad,
         auth.as_ref().map(|a| a.kind.as_str()).unwrap_or("none")
+    );
+    // issue-426: the revert used to reach stderr only, so a reverted write
+    // left no line in bram-trace.log.
+    append_bram_trace_line(
+        app,
+        "worklist-enforce",
+        &format!(
+            "op=revert ids={} auth={}",
+            bad,
+            auth.as_ref().map(|a| a.kind.as_str()).unwrap_or("none")
+        ),
     );
     if let Err(e) = std::fs::write(&path, prior_str) {
         eprintln!(
@@ -62713,6 +62749,20 @@ fn maybe_snapshot_worklist<R: tauri::Runtime>(app: &AppHandle<R>) {
         Ok(s) => s,
         Err(_) => return,
     };
+    // issue-426: a writer that truncates then writes (cp, a shell redirect)
+    // exposes an empty or partial file. Parsing that with unwrap_or_default
+    // read as an EMPTY board, every proposed item looked removed, and the
+    // policy below wrote the cached prior board back over the writer's
+    // complete write. Never act on an unparseable read: the watcher event
+    // that follows the finished write carries the real content.
+    if !worklist_raw_parseable(&current_raw_str) {
+        append_bram_trace_line(
+            app,
+            "worklist",
+            &format!("op=skip-unparsed bytes={}", current_raw_str.len()),
+        );
+        return;
+    }
     let current_raw_doc: serde_json::Value =
         serde_json::from_str(&current_raw_str).unwrap_or_default();
     let drafts_dir = worklist_drafts_dir(app);
@@ -72627,10 +72677,10 @@ mod worklist_authorization_tests {
         validate_worklist_mutate_authorization, worklist_auth_feedback_for_ids,
         worklist_commit_add_args, worklist_commit_consumed_retry_message,
         worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
-        worklist_iteration_comment_body, worklist_lifecycle_comment_body,
+        worklist_items, worklist_iteration_comment_body, worklist_lifecycle_comment_body,
         worklist_lifecycle_item_issue_numbers, worklist_pushed_lifecycle_comment_body,
-        ParsedWorklistAuthorization, PendingWorklistPushMirror, WorklistAuthRetirement,
-        WORKLIST_AUTH_TTL_MS,
+        worklist_raw_parseable, ParsedWorklistAuthorization, PendingWorklistPushMirror,
+        WorklistAuthRetirement, WORKLIST_AUTH_TTL_MS,
     };
     use serde_json::json;
     use std::path::Path;
@@ -73429,6 +73479,42 @@ mod worklist_authorization_tests {
         let (dropped, violations) = classify_worklist_removals(&prior, &current, None, &empty);
         assert!(dropped.is_empty());
         assert_eq!(violations, vec![("a".to_string(), "proposed".to_string())]);
+    }
+
+    #[test]
+    fn worklist_raw_parseable_rejects_partial_reads() {
+        // issue-426: the reads a truncate-then-write exposes.
+        assert!(!worklist_raw_parseable(""));
+        assert!(!worklist_raw_parseable("{\"description\": \"\", \"ite"));
+        assert!(!worklist_raw_parseable("[]"));
+        assert!(!worklist_raw_parseable("null"));
+        assert!(!worklist_raw_parseable("{\"version\": 3}"));
+        assert!(!worklist_raw_parseable("{\"items\": {}}"));
+        // Complete documents, including a genuinely empty board.
+        assert!(worklist_raw_parseable("{\"items\": []}"));
+        assert!(worklist_raw_parseable(
+            "{\"description\": \"\", \"items\": [{\"id\": \"a\", \"status\": \"proposed\"}], \"version\": 4}"
+        ));
+    }
+
+    #[test]
+    fn empty_read_never_reaches_revert_classification() {
+        use std::collections::HashSet;
+        // issue-426: before the guard, an empty read parsed (via
+        // unwrap_or_default) to a board with no items, so every proposed item
+        // classified as an unauthorized removal and was reverted.
+        let prior = vec![json!({"id": "a", "status": "proposed"})];
+        let empty: HashSet<String> = HashSet::new();
+        let empty_doc: serde_json::Value = serde_json::from_str("").unwrap_or_default();
+        let (_, violations) =
+            classify_worklist_removals(&prior, &worklist_items(&empty_doc), None, &empty);
+        assert_eq!(
+            violations,
+            vec![("a".to_string(), "proposed".to_string())],
+            "the unguarded path does classify an empty read as a removal"
+        );
+        // The guard maybe_snapshot_worklist applies first stops that read.
+        assert!(!worklist_raw_parseable(""));
     }
 
     #[test]

@@ -74,14 +74,6 @@
 
   <DataSource id="repoOrigin" url="/__repo/origin" />
 
-  <APICall
-    id="commentIssueCall"
-    url="/__issue/comment"
-    method="post"
-    queryParams="{{ number: $param.number, body: $param.body }}"
-    completedNotificationMessage="Comment posted."
-    onSuccess="issueRefreshTick = issueRefreshTick + 1; issuesFull.refetch()" />
-
   <ModalDialog
     when="{showNewIssueHint}"
     title="File an issue"
@@ -135,6 +127,12 @@
   <ChangeListener
     listenTo="{issuesChangedEvt.value &amp;&amp; issuesChangedEvt.value.tick}"
     onDidChange="() => { issuesFull.refetch(); }" />
+  <!-- issue-comment-optimistic-and-reindexed: the open detail refetches on
+       issues-changed too, so a comment's re-index (or anyone else's edit)
+       lands in it without a click. -->
+  <ChangeListener
+    listenTo="{issuesChangedEvt.value &amp;&amp; issuesChangedEvt.value.tick}"
+    onDidChange="issueRefreshTick = issueRefreshTick + 1" />
   <!-- issues-tab-optimistic-close: a close in flight renders CLOSED via
        pendingCloses; each fresh fetch of the raw list retires the entries
        the forge data now confirms (the host re-indexes on success and emits
@@ -339,25 +337,19 @@
               minRows="2"
               maxRows="12"
               voiceTarget="{'issue-comment:' + $item.number}"
-              voiceTooltip="Dictate comment"
-              enabled="{!commentIssueCall.inProgress}" />
+              voiceTooltip="Dictate comment" />
             <HStack gap="$space-2">
               <Button
                 label="Comment"
                 variant="outlined"
                 size="sm"
-                enabled="{!commentIssueCall.inProgress}"
-                onClick="const text = (closeCommentBox.getValue() || '').trim(); if (text) { commentIssueCall.execute({ number: $item.number, body: text }); closeCommentBox.clear(); }" />
+                onClick="window.__bramCommentIssue($item.number, closeCommentBox, toast)" />
               <Button
                 when="{$item.state === 'OPEN'}"
                 label="Close issue"
                 variant="outlined"
                 size="sm"
-                enabled="{!commentIssueCall.inProgress}"
                 onClick="pendingCloses = window.__bramCloseIssue($item.number, closeCommentBox.getValue() || '', toast, (list) => pendingCloses = list); issueResults.closeDetail()" />
-              <Theme size-Spinner="16px">
-                <Spinner when="{commentIssueCall.inProgress}" />
-              </Theme>
             </HStack>
           </VStack>
         </property>

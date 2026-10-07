@@ -13136,7 +13136,7 @@ window.__bramCommitMarkedText = function (row) {
 // (block 0) bakes the header fields so the row template never reads issue.value
 // from a frozen List-row scope (first-click-stuck-Loading trap); one comment
 // row per comment (blocks 1+N).
-window.__bramIssueBlockRows = function (issue) {
+window.__bramIssueBlockRows = function (issue, _pendingTick) {
   var rows = [{
     id: "body", kind: "body",
     body: (issue && issue.body) || "",
@@ -13152,7 +13152,10 @@ window.__bramIssueBlockRows = function (issue) {
     var c = comments[i] || {};
     rows.push({ id: "comment:" + i, kind: "comment", body: c.body || "", author: c.author });
   }
-  return rows;
+  // issue-comment-optimistic-and-reindexed: pending comments after the real
+  // ones. `_pendingTick` is unused here; IssueDetail passes it so the binding
+  // re-evaluates when a pending comment is added, posted or dropped.
+  return rows.concat(__bramPendingCommentRows(issue));
 };
 // Marked surface (counted == highlighted): the body text for both kinds.
 window.__bramIssueMarkedText = function (row) {
@@ -15663,6 +15666,119 @@ var __BRAM_PENDING_CLOSE_MAX_MS = 120000;
 window.__bramPendingIssueCloseList = function () {
   return Object.keys(__bramPendingIssueCloses).map(Number);
 };
+// issue-comment-optimistic-and-reindexed: a comment posts the way a close
+// does (4173873). The click records a pending comment, clears the box, and
+// POSTs /__issue/comment in the background; the host re-indexes the issue on
+// success (refresh_issue_now, issues-changed). IssueDetail shows pending
+// comments after the real ones -- "posting…" until the POST returns, then
+// unmarked -- and drops each one once its own fetch contains a comment with
+// the same text, so nothing flickers out before the re-index lands. On
+// failure the entry is dropped, a toast says why, and the text goes back into
+// the box. Module state, so it survives the tab remounting; 120 s expiry, as
+// close has.
+var __bramPendingIssueComments = {};
+var __bramPendingCommentSubs = new Set();
+var __bramPendingCommentTick = 0;
+function __bramPendingCommentsChanged() {
+  __bramPendingCommentTick += 1;
+  __bramPendingCommentSubs.forEach(function (fn) {
+    try { fn(); } catch (e) { console.error("[bramSubscribeIssueComments] subscriber threw:", e); }
+  });
+}
+window.bramSubscribeIssueComments = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(__bramPendingCommentTick); };
+      __bramPendingCommentSubs.add(fire);
+      fire();
+      return function () { __bramPendingCommentSubs.delete(fire); };
+    };
+    return factory;
+  };
+})();
+window.__bramCommentIssue = function (number, box, toastApi) {
+  if (!number || !box || typeof box.getValue !== "function") return;
+  // A user-defined component's <method>s (IsolatedDraftEditor's getValue /
+  // setValue / clear) return Promises when called from real JS. Using the
+  // return value directly posted "[object Promise]" as the comment
+  // (2026-10-07, #428). Resolve it first.
+  Promise.resolve(box.getValue()).then(function (raw) {
+    __bramCommentIssuePost(number, String(raw || "").trim(), box, toastApi);
+  });
+};
+function __bramCommentIssuePost(number, body, box, toastApi) {
+  if (!body) return;
+  var say = function (msg) {
+    if (!toastApi) return;
+    if (typeof toastApi.error === "function") toastApi.error(msg);
+    else if (typeof toastApi === "function") toastApi(msg);
+  };
+  var startedAt = Date.now();
+  var entry = { body: body, at: startedAt, state: "posting" };
+  var list = __bramPendingIssueComments[number] || (__bramPendingIssueComments[number] = []);
+  list.push(entry);
+  try { Promise.resolve(box.clear()).catch(function () {}); } catch (e) { /* ignore */ }
+  window.__bramIframeTrace("click", { target: "comment-issue", op: "act", number: number, bodyBytes: body.length });
+  __bramPendingCommentsChanged();
+  var drop = function () {
+    var l = __bramPendingIssueComments[number] || [];
+    var i = l.indexOf(entry);
+    if (i !== -1) l.splice(i, 1);
+  };
+  window
+    .fetch("/__issue/comment?number=" + encodeURIComponent(number) + "&body=" + encodeURIComponent(body), {
+      method: "POST",
+    })
+    .then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) { throw new Error(t || ("HTTP " + r.status)); });
+      }
+      entry.state = "posted";
+      window.__bramIframeTrace("issue-comment", { op: "ok", number: number, elapsedMs: Date.now() - startedAt });
+      __bramPendingCommentsChanged();
+    })
+    .catch(function (e) {
+      drop();
+      window.__bramIframeTrace("issue-comment", { op: "err", number: number, elapsedMs: Date.now() - startedAt, error: String(e) });
+      say("Couldn't comment on #" + number + ": " + String(e && e.message || e));
+      // Put the text back, unless the user has typed something new since.
+      Promise.resolve(box.getValue())
+        .then(function (now) {
+          if (!String(now || "").trim()) return box.setValue(body);
+        })
+        .catch(function () {});
+      __bramPendingCommentsChanged();
+    });
+}
+// The issue's display rows plus its pending comments. A pending comment whose
+// text the fetched issue already contains has landed: it is retired here.
+function __bramPendingCommentRows(issue) {
+  var number = issue && issue.number;
+  var list = __bramPendingIssueComments[number];
+  if (!list || !list.length) return [];
+  var have = {};
+  ((issue && issue.comments) || []).forEach(function (c) {
+    have[String((c && c.body) || "").trim()] = true;
+  });
+  var now = Date.now();
+  var keep = list.filter(function (p) {
+    if (have[p.body]) {
+      window.__bramIframeTrace("issue-comment", { op: "confirmed", number: number, elapsedMs: now - p.at });
+      return false;
+    }
+    return now - p.at < 120000;
+  });
+  __bramPendingIssueComments[number] = keep;
+  return keep.map(function (p, i) {
+    return {
+      id: "pending:" + p.at + ":" + i, kind: "comment", body: p.body,
+      author: { login: "you" }, pending: p.state,
+    };
+  });
+}
+
 window.__bramCloseIssue = function (number, comment, toastApi, onPendingChange) {
   var invoke = getTauriInvoke();
   var say = function (msg) {

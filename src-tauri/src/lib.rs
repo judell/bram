@@ -66600,6 +66600,21 @@ fn route_request<R: tauri::Runtime>(
                 "ok": result.is_ok(),
             }),
         );
+        // issue-comment-optimistic-and-reindexed: re-index the issue now, as
+        // the manual close does. refresh_issue_now upserts the cached
+        // issues:list row and emits issues-changed, so /__issues and search
+        // show the comment without waiting for the next issues pass. On its
+        // own thread: the pane no longer waits on this route, but the route
+        // shouldn't hold the server for a second forge round trip either. A
+        // refresh failure doesn't fail the comment, which already posted.
+        if result.is_ok() {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = refresh_issue_now(&app, number) {
+                    eprintln!("[issue comment #{}] refresh failed: {}", number, e);
+                }
+            });
+        }
         return match result {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {

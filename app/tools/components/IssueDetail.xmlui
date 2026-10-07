@@ -10,6 +10,11 @@
        xmlui-org/xmlui#3713. -->
   <DataSource id="issue" url="/__issue"
     queryParams="{{ number: $props.number, _r: $props.refreshTick }}" when="{!!$props.number}" />
+  <!-- issue-comment-optimistic-and-reindexed: pending comments (helpers.js
+       __bramCommentIssue) render after the real ones; this feed's tick makes
+       the rows binding re-evaluate when one is added, posted or dropped. -->
+  <PushSource id="pendingComments" initial="{0}"
+    subscribe="{window.bramSubscribeIssueComments()}" />
   <VStack gap="$space-2" padding="$space-2">
 
     <!-- Loading indicator is a component-scope sibling: the List row is a
@@ -23,7 +28,7 @@
          frozen row template. Search state is decorated onto each $item by
          FindableList and read back through the rowTemplate slot. -->
     <FindableList when="{issue.value}"
-      data="{window.__bramIssueBlockRows(issue.value)}"
+      data="{window.__bramIssueBlockRows(issue.value, pendingComments.value)}"
       markedText="__bramIssueMarkedText"
       query="{$props.query || ''}"
       placeholder="Find in issue…"
@@ -45,7 +50,7 @@
         </VStack>
         <VStack when="{$item.kind === 'comment'}" gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
           <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-            value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown')}" />
+            value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ($item.pending === 'posting' ? ' · posting…' : '')}" />
           <Markdown interpolateBindings="false" allowHtml="false" content="{$item.body}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />

@@ -94,6 +94,14 @@ Skip the worklist only in these contexts, never because the change is
   the project's forge CLI (`gh` on GitHub, `glab` on GitLab). If paired
   with repo changes, the repo changes still go through the worklist.
 
+**Point to the button, not the opt-out.** When a change request arrives
+without authorization, name the control that grants it: **Start**, or
+**Start & commit** when the user asked for a commit too. Don't offer the
+"just do it" phrase as an alternative, since the opt-out is the user's
+to reach for and is the path with less record. Mention it only when the
+user asks how to skip the Worklist, or the request can't go through the
+Worklist at all.
+
 - **How the opt-outs are enforced (sidecar, audit breadcrumbs)** → read `.claude/bram-reference/worklist-mechanics.md` (§Opt-out plumbing).
 - **Using `gh` / `glab`** → read `.claude/bram-reference/environment.md` (§Updating forge issues via gh / glab).
 

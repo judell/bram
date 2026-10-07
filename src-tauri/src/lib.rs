@@ -70517,10 +70517,45 @@ fn worklist_item_landed<R: tauri::Runtime>(
     paths: &[String],
     known_clean: Option<bool>,
 ) -> Option<LandedInfo> {
+    let begun_ms = item.get("begunAtMs").and_then(|v| v.as_i64())?;
+    worklist_item_landed_since(app, item, paths, known_clean, begun_ms, None)
+}
+
+// clear-landed-never-begun-rows (#406): a row whose work was done in a "just
+// do it" turn was never started, so it has no begunAtMs and the rule above
+// refuses it however clearly the work landed. Anchor instead on when the
+// state mirror first saw the row, and require that the landing commit's
+// message NAME the item: never-begun rows (proposals, reminders) sit for days
+// and often list busy files, so "a commit touched the file" alone would accept
+// unrelated work. Used by clear-landed only -- the board builder still labels
+// begun rows alone, since it runs per row per serve.
+fn worklist_item_landed_never_begun<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    item: &serde_json::Value,
+    paths: &[String],
+) -> Option<LandedInfo> {
+    let id = item.get("id").and_then(|v| v.as_str())?;
+    let conn = worklist_state_open(app)?;
+    let first_seen_ms = worklist_state::item_first_seen_ms(&conn, id).ok()??;
+    worklist_item_landed_since(app, item, paths, None, first_seen_ms, Some(id))
+}
+
+// The landed check proper: `paths` clean against HEAD, and a commit since
+// `since_ms` that the gate didn't make touched them. `must_name`, when set,
+// also requires that commit's message to contain that string (git log
+// --fixed-strings --grep, which searches the whole message, not just the
+// subject).
+fn worklist_item_landed_since<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    item: &serde_json::Value,
+    paths: &[String],
+    known_clean: Option<bool>,
+    since_ms: i64,
+    must_name: Option<&str>,
+) -> Option<LandedInfo> {
     if paths.is_empty() {
         return None;
     }
-    let begun_ms = item.get("begunAtMs").and_then(|v| v.as_i64())?;
     let clean = match known_clean {
         Some(c) => c,
         None => {
@@ -70536,14 +70571,19 @@ fn worklist_item_landed<R: tauri::Runtime>(
     // newest first, with the files each touched. Commits the Worklist made
     // (its own gate commits, for this item or a sibling sharing a file)
     // don't count: they are not work landing outside the Worklist.
-    let since = format!("--since=@{}", begun_ms / 1000);
+    let since = format!("--since=@{}", since_ms / 1000);
+    let grep = must_name.map(|n| format!("--grep={}", n));
     let mut args = vec![
         "log",
         "--format=%x00%H%x09%s",
         "--name-only",
         since.as_str(),
-        "--",
     ];
+    if let Some(g) = grep.as_deref() {
+        args.push("--fixed-strings");
+        args.push(g);
+    }
+    args.push("--");
     args.extend(paths.iter().map(|p| p.as_str()));
     let out = git_run(app, &args).ok()?;
     let mut newest: Option<(String, String)> = None;
@@ -70758,6 +70798,7 @@ fn handle_worklist_clear_landed<R: tauri::Runtime>(
         .unwrap_or_default();
     let mut cleared: Vec<(String, String)> = Vec::new();
     let mut refused: Vec<serde_json::Value> = Vec::new();
+    let mut never_begun_cleared = 0usize;
     for id in &ids {
         let item = items
             .iter()
@@ -70767,11 +70808,26 @@ fn handle_worklist_clear_landed<R: tauri::Runtime>(
             continue;
         };
         let paths = worklist_item_declared_paths(item);
-        match worklist_item_landed(app, item, &paths, None) {
-            Some(info) => cleared.push((id.clone(), info.sha)),
-            None => {
+        let begun = item.get("begunAtMs").is_some();
+        let landed = if begun {
+            worklist_item_landed(app, item, &paths, None)
+        } else {
+            worklist_item_landed_never_begun(app, item, &paths)
+        };
+        match landed {
+            Some(info) => {
+                if !begun {
+                    never_begun_cleared += 1;
+                }
+                cleared.push((id.clone(), info.sha))
+            }
+            None if begun => {
                 refused.push(serde_json::json!({ "id": id, "reason": "not verified as committed" }))
             }
+            None => refused.push(serde_json::json!({
+                "id": id,
+                "reason": "not verified as committed (never started: needs a commit since the row appeared, outside the Worklist, whose message names the item)"
+            })),
         }
     }
     if cleared.is_empty() {
@@ -70834,11 +70890,12 @@ fn handle_worklist_clear_landed<R: tauri::Runtime>(
         app,
         "worklist",
         &format!(
-            "op=clear-landed via={} cleared={} refused={} ids={}",
+            "op=clear-landed via={} cleared={} refused={} ids={} never_begun={}",
             via,
             cleared.len(),
             refused.len(),
-            cleared_ids.join(",")
+            cleared_ids.join(","),
+            never_begun_cleared
         ),
     );
     emit_replayable_signal(app, "worklist-changed");

@@ -981,6 +981,20 @@ pub fn compare_divergence(
 /// `.inflight-claim.json` — at most one row should ever match, but the
 /// `ORDER BY ... LIMIT 1` is a defensive tie-break, not a claim that more
 /// than one can exist under normal operation.
+/// When the mirror first saw `item_id` on the board (`items.first_seen_ms`),
+/// or None if it never did. clear-landed-never-begun-rows: the anchor for a
+/// row that was never started, so has no `begunAtMs`. For an item older than
+/// this database it is when the mirror first saw it, later than the true
+/// proposal, which errs safe (an earlier commit is refused, never accepted).
+pub fn item_first_seen_ms(conn: &Connection, item_id: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT first_seen_ms FROM items WHERE id = ?1",
+        params![item_id],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 pub fn live_claim(conn: &Connection) -> Result<Option<(String, String, i64)>> {
     conn.query_row(
         "SELECT kind, ids, written_at_ms FROM claims WHERE cleared_at_ms IS NULL \
@@ -1193,6 +1207,19 @@ mod tests {
             files_json,
             closes_issues_json,
         }
+    }
+
+    #[test]
+    fn item_first_seen_ms_is_the_first_sync_and_none_when_unseen() {
+        // clear-landed-never-begun-rows anchors a never-started row on this.
+        let conn = open_in_memory().unwrap();
+        assert_eq!(item_first_seen_ms(&conn, "item-a").unwrap(), None);
+        let items = vec![snap("item-a", "proposed", None, "[\"a.rs\"]", "[]")];
+        mirror_items_sync(&conn, 1000, &items, "watcher").unwrap();
+        // A later sync of the same item must not move the anchor forward.
+        mirror_items_sync(&conn, 5000, &items, "watcher").unwrap();
+        assert_eq!(item_first_seen_ms(&conn, "item-a").unwrap(), Some(1000));
+        assert_eq!(item_first_seen_ms(&conn, "item-b").unwrap(), None);
     }
 
     #[test]

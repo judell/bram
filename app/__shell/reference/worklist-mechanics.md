@@ -577,15 +577,20 @@ so the row says it can't tell whether the work is finished.
 
 If the user asks you to clear such rows, POST `/__worklist/clear-landed`
 with `{"ids": [...], "via": "agent"}`. The host clears only rows it verifies
-as landed: begun, files clean against `HEAD`, and a commit **not made by the
-Worklist itself** since the item began touched them. It lists any others as
-refused. Rows it refuses still need the user's Drop. Cleared rows are
+as landed: files clean against `HEAD`, and a commit **not made by the
+Worklist itself** touched them since the item began. A row that was **never
+started** (its work was done in a "just do it" turn) counts from when the row
+first appeared on the board instead, and only if the landing commit's message
+**names the item id**. Never-started rows such as proposals and reminders
+often list busy files, so without the id an unrelated commit could look like
+their landing. It lists any others as refused. Rows it refuses still need the user's Drop. Cleared rows are
 recorded in history under *Items cleared*, linked to the landing commit.
 
 **When you commit an item's work yourself outside the gate** (a "just do
 it" or `skip-worklist:` turn, or a recovery commit after a refusal or a
-partial landing), clear the rows you landed with `clear-landed` in the
-**same turn**, without being asked. The user's go-ahead for the commit
+partial landing), **put the item id in the commit message**, then clear the
+rows you landed with `clear-landed` in the **same turn**, without being
+asked. A row you never started clears only if the commit names it. The user's go-ahead for the commit
 covers it, and the host verifies each row, so nothing on disk can be lost.
 Report any refused ids and leave them for the user's Drop. **Never use
 `mutate op:"prune"` for this:** it needs the authorization only a Drop click

@@ -10568,6 +10568,114 @@ var __BRAM_DESCRIBE_CONCURRENCY = 3;
 window.__bramSetVisibleRange = function (range) {
   window.__bramVisibleRange = range || null;
   try { __bramPumpDescribeQueue(); } catch (e) {}
+  // #427: the List's first render is the moment its splitter exists to
+  // measure; later range changes re-measure for free (emits only on change).
+  try { if (window.__bramTranscriptSplitMeasure) window.__bramTranscriptSplitMeasure(); } catch (e2) {}
+};
+
+// #427: the height the Transcript's Worklist VSplitter may fill -- from its
+// own top edge to the top of the sticky App footer. This tab's page scrolls,
+// so nothing above bounds a "*" height, and a guessed calc(100vh - 300px)
+// overflowed the page by 134px (demo trace, 2026-10-07): the List was at its
+// end but its last lines sat under the message box until the page scrolled.
+// Measured, never guessed; re-measured on window resize, on a ResizeObserver
+// over the footer and everything stacked above the splitter, and on the
+// List's visible-range changes. Elements are found by XMLUI testId
+// (Transcript.xmlui's VSplitter, Main.xmlui's Footer). Emits px, or 0 before the first measurement
+// (the markup's fallback). Splitter top is taken in page coordinates (adds
+// the page scroller's scrollTop) so an already-scrolled page measures right.
+window.bramSubscribeTranscriptSplitHeight = (function () {
+  var factory;
+  var subscribers = new Set();
+  var value = 0;
+  var ro = null;
+  var observed = [];
+  var hooked = false;
+  function observe(els) {
+    if (typeof ResizeObserver === "undefined") return;
+    if (!ro) ro = new ResizeObserver(function () { measure(); });
+    var same = els.length === observed.length && els.every(function (e, i) { return e === observed[i]; });
+    if (same) return;
+    observed.forEach(function (e) { try { ro.unobserve(e); } catch (x) {} });
+    observed = els;
+    els.forEach(function (e) { try { ro.observe(e); } catch (x) {} });
+  }
+  function measure() {
+    var sp = null, ft = null;
+    try {
+      sp = document.querySelector('[data-testid="transcript-split"]');
+      ft = document.querySelector('[data-testid="app-footer"]');
+    } catch (e) { return; }
+    if (!sp) return;
+    var page = sp.parentElement;
+    while (page && !__bramIsScrollable(page)) page = page.parentElement;
+    var pageTop = page ? page.getBoundingClientRect().top : 0;
+    var scrolled = page ? page.scrollTop : 0;
+    // Splitter top relative to the page scroller's content box, then back to
+    // the viewport as if the page were at scrollTop 0.
+    var spTop = sp.getBoundingClientRect().top + scrolled;
+    var bottom = ft ? ft.getBoundingClientRect().top : (window.innerHeight || 0);
+    var next = Math.max(0, Math.floor(bottom - spTop));
+    var watch = [];
+    if (ft) watch.push(ft);
+    var sib = sp.previousElementSibling;
+    while (sib) { watch.push(sib); sib = sib.previousElementSibling; }
+    observe(watch);
+    if (next !== value) {
+      window.__bramIframeTrace("transcript-split-height", {
+        px: next, prev: value, pageTop: Math.round(pageTop), scrolled: Math.round(scrolled),
+      });
+      value = next;
+      subscribers.forEach(function (fn) {
+        try { fn(); } catch (e) { console.error("[bramSubscribeTranscriptSplitHeight] subscriber threw:", e); }
+      });
+    }
+  }
+  window.__bramTranscriptSplitMeasure = measure;
+  return function () {
+    if (factory) return factory;
+    if (!hooked) {
+      hooked = true;
+      try { window.addEventListener("resize", measure); } catch (e) {}
+    }
+    factory = function (emit) {
+      var fire = function () { emit(value); };
+      subscribers.add(fire);
+      fire();
+      measure();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
+// #427: the Transcript's Worklist pane, open or closed. FOCUS (what the user
+// is looking at now), so sessionStorage: it survives a tab switch or pane
+// reload, which remount the Transcript, but not a relaunch.
+window.__bramRestoreTranscriptWorklistOpen = function () {
+  return __bramReadSS("bram.transcriptWorklistOpen", "") === "1";
+};
+window.__bramToggleTranscriptWorklistOpen = function (open) {
+  var next = !open;
+  __bramWriteSS("bram.transcriptWorklistOpen", next ? "1" : "");
+  window.__bramIframeTrace("transcript-worklist", { op: next ? "open" : "close" });
+  return next;
+};
+// #427: the split's resize event. Saves the divider as a percentage (a
+// DECISION, via __bramSaveSplitterSize -> localStorage) only while the
+// Worklist pane is open -- closed, the transcript fills the splitter and
+// that is not a divider position. Then re-lands the transcript on its
+// newest turn (the jump yields if the user has scrolled up).
+window.__bramTranscriptSplitResized = function (primaryPx, totalPx, open, listRef, agentId) {
+  var p = Number(primaryPx), t = Number(totalPx);
+  if (open && p > 0 && t > p) window.__bramSaveSplitterSize("transcript-worklist", [p, t - p]);
+  window.__bramBottomJumpRetry(listRef, "worklist-resize", agentId, null);
+};
+
+// Markup helper: the measured px, or a viewport-relative stand-in until the
+// first measurement lands (one render at most).
+window.__bramTranscriptSplitHeightCss = function (px) {
+  return (typeof px === "number" && px > 0) ? (px + "px") : "70vh";
 };
 function __bramVisibleToolIds() {
   var ids = {};
@@ -11725,6 +11833,15 @@ function __bramLastRowProbe(total) {
     out.lastRowRendered = true;
     var r = node.getBoundingClientRect();
     var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    // #427: the fold is the scroller's bottom edge, not the window's, when the
+    // List scrolls itself (the Transcript's Worklist split bounds it above the
+    // window bottom). Measuring against the window read a row 125px below the
+    // scroller's fold as gap 0, so jumps stopped short.
+    var info = __bramTranscriptScrollerInfo();
+    if (info.el && info.how === "scoped-self") {
+      var sb = info.el.getBoundingClientRect().bottom;
+      if (sb > 0 && sb < vh) vh = sb;
+    }
     out.lastRowGap = Math.max(0, Math.round(r.bottom - vh));
   } catch (e) { /* ignore */ }
   return out;
@@ -11750,6 +11867,12 @@ function __bramLastRowProbe(total) {
 // constant error, so a fudge factor would fix one and miss the other.
 window.__bramBottomJumpRetry = function (listRef, cause, agentId, total) {
   window.__bramJumpListRef = listRef;
+  // #427: one live retry loop at a time. The Transcript's Worklist split
+  // calls this on every splitter resize, which fires per frame during a
+  // divider drag; each call used to start its own 40-attempt loop (hundreds
+  // in flight for one drag). A newer jump supersedes an older one.
+  var gen = (window.__bramJumpGen || 0) + 1;
+  window.__bramJumpGen = gen;
   var MAX_ATTEMPTS = 40; // ~2s at 50ms; a jump from the top of a long
                          // virtualized list needs virtua to render and measure
                          // its way down, which the old 600ms budget cut short.
@@ -11757,8 +11880,20 @@ window.__bramBottomJumpRetry = function (listRef, cause, agentId, total) {
   var settled = 0;
   function jump() {
     try { if (listRef && listRef.scrollToBottom) listRef.scrollToBottom(); } catch (e) { /* ignore */ }
+    // #427: after the List's scroller shrinks (the Transcript's Worklist
+    // split), scrollToBottom() undershot by a constant 125px across all 40
+    // attempts, consistent with a stale viewport size in the List. Finish the
+    // jump on the measured scroller itself; virtua renders from the resulting
+    // scroll event like any other scroll.
+    try {
+      var el = __bramTranscriptScrollerInfo().el;
+      if (el && el.scrollHeight - (el.scrollTop + el.clientHeight) > 4) {
+        el.scrollTop = el.scrollHeight;
+      }
+    } catch (e2) { /* ignore */ }
   }
   function step() {
+    if (window.__bramJumpGen !== gen) return;
     // The user scrolling up mid-retry takes precedence: __bramFollowTransition
     // sets this false on a corroborated user scroll, and a retry that fought
     // that would be worse than the miss it fixes.
@@ -11904,6 +12039,28 @@ window.__bramFollowVerify = function (cause, agentId, total) {
           // so a run of `scoped-miss` / `unmounted` is legible as "this reading
           // is index-only" instead of passing for a pixel verdict.
           var landed = (pixelAtEnd === null) ? indexAtEnd : pixelAtEnd;
+          // #427: when the List scrolls itself (the Transcript's Worklist
+          // split), "at end" can still hide the last lines if the PAGE around
+          // it overflows: the List's bottom edge then sits under the footer
+          // or below the window. `page` is the nearest scrolling ancestor
+          // (scrollTop/scrollHeight hClient); `listBottom` / `footerTop` /
+          // `winH` place the List's visible bottom edge.
+          var page = "", listBottom = -1, footerTop = -1, winH = -1;
+          if (info.how === "scoped-self" && sc) {
+            try {
+              var up = sc.parentElement;
+              while (up && !__bramIsScrollable(up)) up = up.parentElement;
+              if (up) {
+                page = String(up.className || "").split(/\s+/)[0].slice(0, 24)
+                  + " " + Math.round(up.scrollTop) + "/" + Math.round(up.scrollHeight)
+                  + " h" + Math.round(up.clientHeight);
+              }
+              listBottom = Math.round(sc.getBoundingClientRect().bottom);
+              var ft = document.querySelector('[data-testid="app-footer"]');
+              if (ft) footerTop = Math.round(ft.getBoundingClientRect().top);
+              winH = window.innerHeight || -1;
+            } catch (e6) { /* ignore */ }
+          }
           var route = "";
           try { route = String(location.hash || ""); } catch (e4) { /* ignore */ }
 
@@ -11917,6 +12074,10 @@ window.__bramFollowVerify = function (cause, agentId, total) {
             divergent: (pixelAtEnd !== null && pixelAtEnd !== indexAtEnd),
             scroller: info.how,
             el: elDesc,
+            page: page,
+            listBottom: listBottom,
+            footerTop: footerTop,
+            winH: winH,
             lastRowRendered: probe.lastRowRendered,
             lastRowGap: probe.lastRowGap,
             maxRenderedIndex: probe.maxRenderedIndex,

@@ -863,7 +863,9 @@
       <Page url="/history"><History /></Page>
     </Pages>
   </Theme>
-  <Footer>
+  <!-- testId: #427 measures the Transcript Worklist split down to this
+       footer's top (helpers.js bramSubscribeTranscriptSplitHeight). -->
+  <Footer testId="app-footer">
     <Theme fontSize-TextArea="$fontSize-lg" fontSize-placeholder-TextArea="$fontSize-lg">
     <VStack width="100%" gap="$space-1">
       <!-- issue-278: the Worklist gate, docked. The gate row could not be

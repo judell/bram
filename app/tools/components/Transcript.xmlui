@@ -1,6 +1,10 @@
 <Component name="Transcript"
-  var.fullscreenImage="{null}">
-  <!-- Bounded List as the sole scroller. The List gets height="*" inside a
+  var.fullscreenImage="{null}"
+  var.worklistOpen="{window.__bramRestoreTranscriptWorklistOpen()}">
+  <!-- (#427: the List now sits at height="100%" inside the measured
+       VSplitter below, which bounds it; the history that follows still
+       explains why a bounded List is required.)
+       Bounded List as the sole scroller. The List gets height="*" inside a
        height="100%" parent, so it fills the remaining viewport and scrolls
        within its OWN virtua container (footer stays docked, page does not
        grow) -- the star-fill-through-Page pattern proven by Workspace's
@@ -199,6 +203,11 @@
           showCount="{findText.trim().length >= 2}"
           onNeedleChange="(v) => findText = v"
           onStep="(d) => findCursor = window.__bramFindCursorStep(findPlan ? findPlan.total : 0, findCursor, d)" />
+        <!-- #427: the Worklist and its gate buttons in a pane below the
+             transcript (the VSplitter around the List). -->
+        <Button label="{worklistOpen ? 'Hide worklist' : 'Show worklist'}"
+          size="sm" variant="outlined"
+          onClick="worklistOpen = window.__bramToggleTranscriptWorklistOpen(worklistOpen)" />
       </HStack>
     </StickySection>
     <Text
@@ -218,10 +227,33 @@
       when="{events.length === 0}"
       color="$textColor-secondary"
       value="No transcript yet." />
+    <!-- #427: the Worklist on demand in a pane below the transcript, with a
+         draggable divider (https://www.xmlui.org/docs/howto/create-a-resizable-split-view).
+         With the pane's `when` false the splitter shows no bar and the List
+         fills it (https://www.xmlui.org/docs/reference/components/Splitter).
+         This tab's page scrolls (load-bearing; app-wide
+         scrollWholePage=false was rejected on evidence in 410d069), so
+         nothing above bounds a "*" height (it collapsed the HSplitter
+         attempt to 0). The height is MEASURED -- splitter top to footer top,
+         re-measured on resize events (helpers.js
+         bramSubscribeTranscriptSplitHeight) -- because a guessed
+         calc(100vh - 300px) overflowed the page by 134px and hid the last
+         lines under the message box. The List scrolls itself inside it.
+         Tried and dropped first: an HSplitter (the collapse above), a
+         right-hand Drawer (covered the transcript; a width slider to
+         uncover it was clumsy) and a ModalDialog (cannot be moved or
+         resized). -->
+    <PushSource id="splitHeight" initial="{0}"
+      subscribe="{window.bramSubscribeTranscriptSplitHeight()}" />
+    <VSplitter testId="transcript-split"
+      height="{window.__bramTranscriptSplitHeightCss(splitHeight.value)}"
+      initialPrimarySize="{window.__bramRestoreSplitterSize('transcript-worklist', '55%')}"
+      minPrimarySize="15%" maxPrimarySize="-120px"
+      onResize="(px) => window.__bramTranscriptSplitResized(px, splitHeight.value, worklistOpen, transcriptList, $props.agentId)">
     <List
       id="transcriptList"
       testId="transcript-list"
-      height="*"
+      height="100%"
       data="{(findPlan &amp;&amp; findPlan.rows) || events}"
       idKey="{findPlan ? '__findKey' : 'id'}"
       onScroll="(ev) => atBottom = window.__bramFollowClassify(atBottom, ev.atEnd, $props.agentId)"
@@ -412,6 +444,29 @@
         </VStack>
       </VStack>
     </List>
+      <!-- The real Worklist plus its gate buttons, which Main.xmlui mounts in
+           the Footer only on the Worklist routes. Both are self-contained;
+           the Worklist page is unmounted on this tab, so this is the one live
+           instance, and ticks ride the shared window.__bramW2Selection
+           (Worklist.xmlui) to and from the Worklist tab. -->
+      <VStack when="{worklistOpen}" height="100%" overflowY="auto" paddingTop="$space-2">
+        <Worklist />
+        <WorklistGateBar />
+      </VStack>
+    </VSplitter>
+    <!-- Opening the pane shrinks the transcript; land it on the newest
+         turn, the message most likely to name the rows to act on. Same
+         follow-then-retry jump as the agent-chip switch below. Jumping
+         here alone landed ~285px short (demo trace, 2026-10-07): the pane
+         appears after the jump and shrinks the List. The VSplitter's
+         onResize re-runs the jump when that shrink lands (and on divider
+         drags); the helper yields if the user has scrolled up. Event
+         driven, no timed wait. onResize passes total=null: `events` read 0
+         in that handler's scope, so the helper falls back to its own
+         window.__bramLastTranscriptEvents. -->
+    <ChangeListener
+      listenTo="{worklistOpen}"
+      onDidChange="() => { if (worklistOpen) { atBottom = window.__bramFollowTransition(true, 'worklist-open', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'worklist-open', $props.agentId, events.length); } }" />
     <!-- Explicit follow-bottom (replaces scrollAnchor="bottom" and its
          content-wrapper re-stick ResizeObserver, xmlui #3599). onScroll keeps
          atBottom in sync (fires only on user scrolls; programmatic scrolls are

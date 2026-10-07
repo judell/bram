@@ -3770,6 +3770,20 @@ window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTo
       "removes it from the board; the history entry keeps the commit."
     );
   }
+  // strip-proposed-says-files-changed: the not-yet-started row whose files
+  // have changed explains itself, since nothing on the board credits them.
+  if (item && !window.__bramWorklist2Begun(item, claim)) {
+    var moved = window.__bramUnbegunMovedFiles(item);
+    if (moved) {
+      return (
+        moved + " of its files " + (moved === 1 ? "has" : "have") +
+        " changed on disk, but nothing on the board started this row, so " +
+        "those changes aren't credited to it yet.\n\n" +
+        "**Start & commit** lands them under this item. **Drop** removes " +
+        "the row and leaves the changes on disk, belonging to no item."
+      );
+    }
+  }
   var split = window.__bramItemChangedSplit(item, items, claim);
   // For a committable row, the terse label dropped the on-disk total, the
   // shared paths, the plan denominator and the last-change time; the tooltip
@@ -4603,10 +4617,19 @@ window.__bramClaimantCell = function (item, rowId) {
 // the cell reads as it always did. Extracted from an inline markup
 // expression per the single-call handler rule.
 window.__bramFileChangesCell = function (rec, rowBegun) {
-  if (!rowBegun || !rec || rec.status === "unchanged") return "";
+  if (!rec || rec.status === "unchanged") return "";
   var suffix =
     rec.status === "new" ? " (new)" : rec.status === "deleted" ? " (deleted)" : "";
   var total = "+" + rec.added + " −" + rec.removed;
+  // strip-proposed-says-files-changed: a not-yet-started row's strip now says
+  // "its files have changed", so its table must not show a blank Changes cell
+  // beside that claim (Jon, 2026-10-07). Show the disk change, marked as not
+  // yet credited to the item, since nothing on the board started it.
+  if (!rowBegun) {
+    return (rec.added || 0) > 0 || (rec.removed || 0) > 0
+      ? total + suffix + " · not credited"
+      : "";
+  }
   var hasTake = typeof rec.takeAdded === "number";
   if (hasTake && (rec.takeAdded !== rec.added || rec.takeRemoved !== rec.removed)) {
     return "+" + rec.takeAdded + " −" + rec.takeRemoved + " of " + total + suffix;
@@ -4885,11 +4908,18 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   // "No changes yet", so the visible line distinguished nothing while the
   // tooltip carried the whole distinction one hover away.
   if (!begun) {
-    window.__bramWorklistStripAnomaly(item, claim, cs);
     // Just the state. The "· Start to green-light" tail instructed the user to
     // press a button that is already sitting in the footer, labelled -- the
     // strip's job is to name where the item IS, not to narrate the next click.
-    return withCloses("Proposed");
+    // strip-proposed-says-files-changed: but a bare "Proposed" hid real work
+    // after a "just do it" edit (2026-10-07: demo-notes-file read "Proposed"
+    // with its one file written). Say both: the lifecycle, and that its files
+    // moved. This retired the __bramWorklistStripAnomaly tripwire (removed),
+    // whose `no-changes-yet-with-changed-files` line flagged exactly this
+    // label hiding real changes.
+    return withCloses(
+      window.__bramUnbegunMovedFiles(item) ? "Proposed · its files have changed" : "Proposed",
+    );
   }
   // issue-406: its work was committed outside the Worklist (a plain git
   // commit in chat or a terminal). The host sets `landed` only for a begun
@@ -4954,69 +4984,17 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   return withCloses("With the agent · nothing to do");
 };
 
-// strip-vs-diff-disagreement-instrument. A row was observed printing
-// "No changes yet" directly above a rendered diff of its own edits
-// (2026-08-21 ~07:12Z, on 0.5.0), correcting itself at the next refetch about
-// a minute later. The two halves have different sources of truth, which is why
-// they CAN disagree: `diff` / `changedFiles` derive from disk state (997017a),
-// while this strip is gated on `__bramWorklist2Begun` — a status/authorization
-// fact. Three inputs could each have produced it (a payload predating the
-// approval, an authorization consumed earlier than assumed, or
-// `changeSummary.changed === 0` beside a non-empty `changedFiles`), and the
-// existing trace records none of them: `/__worklist` route lines carry only
-// method, status, body size and duration.
-//
-// So this records the CONTRADICTION with the fields that discriminate, rather
-// than guessing which of the three to fix. Same conclusion #259 reached after
-// 420 observations that could not self-classify: a better instrument, not more
-// soak.
-//
-// This is a TRIPWIRE, not a soak observer. It fires only when the row is
-// actively lying, so its steady state is zero lines — and a tripwire's zero is
-// indistinguishable from a dead instrument's zero in a grep. Its provenance
-// check is a deliberate fire, never a wait. Deduped per item per contradicting
-// signature so a re-render storm cannot bury the first occurrence.
-var __bramStripAnomalySeen = {};
-window.__bramWorklistStripAnomaly = function (item, claim, cs) {
-  try {
-    if (!item) return;
-    var files = item.changedFiles || [];
-    var moved = 0;
-    for (var i = 0; i < files.length; i++) {
-      var f = files[i];
-      if (!f) continue;
-      if ((f.added || 0) > 0 || (f.removed || 0) > 0) moved++;
-    }
-    // No moved files means "No changes yet" is simply true.
-    if (!moved) return;
-    var sig =
-      String(item.id) +
-      "|" +
-      String(item.status || "") +
-      "|" +
-      String(item.activeAuthorization || "") +
-      "|" +
-      String((cs && cs.changed) || 0) +
-      "|" +
-      moved;
-    if (__bramStripAnomalySeen[sig]) return;
-    __bramStripAnomalySeen[sig] = true;
-    window.__bramIframeTrace("worklist-strip", {
-      op: "anomaly",
-      reason: "no-changes-yet-with-changed-files",
-      item: item.id,
-      status: item.status || "",
-      claimed: !!window.__bramItemInflightKind(claim, item.id, "", "", 0),
-      auth: item.activeAuthorization || "",
-      auth_age_ms: item.authorizationAgeMs == null ? -1 : item.authorizationAgeMs,
-      cs_changed: (cs && cs.changed) || 0,
-      cs_total: (cs && cs.total) || 0,
-      files_moved: moved,
-      files_total: files.length,
-    });
-  } catch (e) {
-    /* an instrument must never break the surface it watches */
+// strip-proposed-says-files-changed: how many of an item's changed files have
+// lines added or removed -- the test the strip uses to say a not-yet-started
+// row's files have changed.
+window.__bramUnbegunMovedFiles = function (item) {
+  var files = (item && item.changedFiles) || [];
+  var moved = 0;
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    if (f && ((f.added || 0) > 0 || (f.removed || 0) > 0)) moved++;
   }
+  return moved;
 };
 // worklist2-checkbox-during-action: the row checkbox stays ticked and
 // disabled while a live claim covers the item — the tick is part of the

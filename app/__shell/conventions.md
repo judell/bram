@@ -288,7 +288,10 @@ An addressee line above the message box always shows where Enter will
 send ("To: <item> (feedback)" or "To: Claude (chat)"). With items
 selected, its **Send as chat instead** control sends that one message as
 general chat without clearing the selection; changing the selection
-switches it back to feedback.
+switches it back to feedback. After **Start** (or **Resume**) the started
+items stay selected, so the user's follow-up messages about that work
+arrive as `iterate:` feedback on them; every other gate verb clears the
+selection.
 
 **The gate verbs.** The gate row is pure lifecycle: **Start / Start &
 commit / Commit / Drop**, each acting on the ticked items (hover names

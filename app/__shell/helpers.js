@@ -2914,7 +2914,18 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
     }
   }
   var r = window.__bramPrepareBatchWorklistActionSubmission(opts);
-  window.__bramW2SetSelection([]);
+  // start-keeps-started-items-selected: after Start (and Resume, the same
+  // kind) the started items stay selected, so the user's follow-up messages
+  // address them as feedback by default instead of going out as chat, whose
+  // edits belong to no item. Only the started ids stay; anything else that
+  // was ticked is released, so the addressee line names exactly what is being
+  // worked on. Every other kind clears: Start & commit, Commit and Drop rows
+  // leave the board.
+  var keep = (kind === "start") ? ids : [];
+  window.__bramW2SetSelection(keep);
+  window.__bramIframeTrace("click", {
+    target: "gatebar-" + kind, op: "selection-after", keptSelection: keep,
+  });
   window.__bramClearComposer();
   window.__bramWorklistActApply(r);
   window.__bramGateGoTranscript();

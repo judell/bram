@@ -2,7 +2,7 @@
 
 ## What is it?
 
-Bram is a desktop app that embeds Claude Code and/or Codex. It makes agentic software development legible, orderly, accountable, and collaborative. 
+Agentic software development at human scale: legible, orderly, accountable, and collaborative. 
 
 ## Why the name?
 

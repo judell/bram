@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bram</title>
-<meta name="description" content="Bram is a desktop app that embeds Claude Code and/or Codex. It makes agentic software development legible, orderly, accountable, and collaborative.">
+<meta name="description" content="Agentic software development at human scale: legible, orderly, accountable, and collaborative.">
 <style>
   :root {
     --bg: #fbfaf7;
@@ -67,15 +67,19 @@
     border: 1px solid var(--rule); border-radius: 10px; background: var(--card);
   }
   .caption { color: var(--muted); font-size: 0.92rem; margin-top: 8px; text-align: center; }
-  ul.links { list-style: none; padding: 0; margin: 0; }
-  ul.links li { padding: 6px 0; }
-  ul.links .src { color: var(--muted); font-size: 0.88rem; margin-left: 6px; white-space: nowrap; }</style>
+  table.links { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.links col.date { width: 7.5rem; }
+  table.links col.src { width: 7.5rem; }
+  table.links td { padding: 6px 12px 6px 0; vertical-align: top; }
+  table.links td.date { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+  table.links td.src { white-space: nowrap; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 560px) { table.links col.src { width: 0; } table.links td.src { padding: 0; font-size: 0; } }</style>
 </head>
 <body>
 <main>
 
   <h1>Bram <span class="tagline">(Bram runs agents mindfully)</span></h1>
-  <p class="lede">A desktop app that embeds Claude Code and/or Codex. It makes agentic software development legible, orderly, accountable, and collaborative. <a class="btn" href="https://github.com/judell/bram/releases/latest">Download</a></p>
+  <p class="lede">Agentic software development at human scale: legible, orderly, accountable, and collaborative. <a class="btn" href="https://github.com/judell/bram/releases/latest">Download</a></p>
 
   <h2>Demo</h2>
   <video controls preload="metadata" playsinline
@@ -86,26 +90,32 @@
   <p class="caption">A six-minute tour of Bram tackling and completing a GitHub issue.</p>
 
   <h3 class="first">Blog</h3>
-  <ul class="links">
-    <li><a href="https://blog.jonudell.net/2026/06/02/how-to-make-best-use-of-git-and-github-for-ai-assisted-software-development/">How to make best use of git and GitHub for AI-assisted software development</a></li>
-    <li><a href="https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/">Vibe coding as a team sport</a></li>
-    <li><a href="https://blog.jonudell.net/2026/06/28/doctor-it-hurts-when-agents-create-unreviewable-prs-dont-do-that/">“Doctor, it hurts when agents create unreviewable PRs.” “Don’t do that.”</a></li>
-    <li><a href="https://blog.jonudell.net/2026/07/01/what-is-the-terminal/">“What is the terminal?”</a></li>
-    <li><a href="https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/">Don’t infer behavior from code, observe it in logs</a></li>
-    <li><a href="https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/">Talking to Claude Code and Codex</a></li>
-    <li><a href="https://blog.jonudell.net/2026/07/12/small-models-can-solve-big-problems/">Small models can solve big problems</a></li>
-    <li><a href="https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/">Agents that narrate their work are the best team players</a></li>
-    <li><a href="https://blog.jonudell.net/2026/08/01/make-agent-memory-searchable/">Make agent memory searchable</a></li>
-  </ul>
+  <table class="links">
+    <colgroup><col class="date"><col class="src"><col></colgroup>
+    <tbody>
+      <tr><td class="date">2026-08-01</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/08/01/make-agent-memory-searchable/">Make agent memory searchable</a></td></tr>
+      <tr><td class="date">2026-07-23</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/">Agents that narrate their work are the best team players</a></td></tr>
+      <tr><td class="date">2026-07-16</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/">Talking to Claude Code and Codex</a></td></tr>
+      <tr><td class="date">2026-07-12</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/12/small-models-can-solve-big-problems/">Small models can solve big problems</a></td></tr>
+      <tr><td class="date">2026-07-08</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/">Don’t infer behavior from code, observe it in logs</a></td></tr>
+      <tr><td class="date">2026-07-01</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/01/what-is-the-terminal/">“What is the terminal?”</a></td></tr>
+      <tr><td class="date">2026-06-28</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/06/28/doctor-it-hurts-when-agents-create-unreviewable-prs-dont-do-that/">“Doctor, it hurts when agents create unreviewable PRs.” “Don’t do that.”</a></td></tr>
+      <tr><td class="date">2026-06-17</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/">Vibe coding as a team sport</a></td></tr>
+      <tr><td class="date">2026-06-02</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/06/02/how-to-make-best-use-of-git-and-github-for-ai-assisted-software-development/">How to make best use of git and GitHub for AI-assisted software development</a></td></tr>
+    </tbody>
+  </table>
 
   <h3>Elsewhere</h3>
-  <ul class="links">
-    <li><a href="https://www.infoworld.com/article/4224587/the-agent-coordination-protocol-hiding-in-plain-sight-github-issues.html">The agent coordination protocol hiding in plain sight: GitHub issues</a><span class="src">InfoWorld</span></li>
-    <li><a href="https://www.infoworld.com/article/4211198/when-an-ai-agent-goes-off-the-rails-file-a-bug-to-fix-the-documentation-then-test-the-fix.html">When an AI agent goes off the rails, file a bug to fix the documentation – then test the fix</a><span class="src">InfoWorld</span></li>
-    <li><a href="https://www.downes.ca/post/79474">What is the terminal?</a><span class="src">downes.ca</span></li>
-    <li><a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a><span class="src">waltzweb</span></li>
-    <li><a href="https://arxiv.org/abs/2607.25975">Who is scientific code for? Maintaining human-readable landmarks in agent-written code</a><span class="src">arXiv</span></li>
-  </ul>
+  <table class="links">
+    <colgroup><col class="date"><col class="src"><col></colgroup>
+    <tbody>
+      <tr><td class="date">2026-09-22</td><td class="src">InfoWorld</td><td><a href="https://www.infoworld.com/article/4224587/the-agent-coordination-protocol-hiding-in-plain-sight-github-issues.html">The agent coordination protocol hiding in plain sight: GitHub issues</a></td></tr>
+      <tr><td class="date">2026-08-26</td><td class="src">InfoWorld</td><td><a href="https://www.infoworld.com/article/4211198/when-an-ai-agent-goes-off-the-rails-file-a-bug-to-fix-the-documentation-then-test-the-fix.html">When an AI agent goes off the rails, file a bug to fix the documentation – then test the fix</a></td></tr>
+      <tr><td class="date">2026-07-28</td><td class="src">arXiv</td><td><a href="https://arxiv.org/abs/2607.25975">Who is scientific code for? Maintaining human-readable landmarks in agent-written code</a></td></tr>
+      <tr><td class="date">2026-07-02</td><td class="src">downes.ca</td><td><a href="https://www.downes.ca/post/79474">What is the terminal?</a></td></tr>
+      <tr><td class="date">2026-07-02</td><td class="src">waltzweb</td><td><a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a></td></tr>
+    </tbody>
+  </table>
 
 </main>
 </body>

@@ -16675,3 +16675,111 @@ window.__bramSuggestTrace = function (op, suggested, name, text, sugName, sugTex
 window.bramSubscribeTauriEvent("session-suggest", false)(function (snap) {
   window.__bramSessionSuggestIngest(snap && snap.payload);
 });
+
+// code-block-copy-and-dblclick-select: XMLUI's Markdown has no copy
+// affordance for code blocks and exposes no hook to add one
+// (https://www.xmlui.org/docs/reference/components/Markdown), and
+// double-clicking inside a block selected far more than the block. Both are
+// handled by delegated listeners on the document, so nothing is injected into
+// React-managed DOM (virtualized rows recycle; an injected button would be
+// wiped or duplicated).
+//   - One floating Copy button, positioned over whichever <pre> the pointer
+//     is on, copies that block's text through __bramCopyText (#414).
+//   - A double-click inside a <pre> selects exactly that block. The browser's
+//     own selection is traced first (op=dblclick-native), so the cause of the
+//     whole-pane selection is on record even though this overrides it.
+// Candidate for upstream XMLUI once it proves itself.
+window.__bramInstallCodeBlockTools = function () {
+  if (window.__bramCodeBlockToolsInstalled) return;
+  window.__bramCodeBlockToolsInstalled = true;
+  var btn = null;
+  var current = null;
+  var preOf = function (node) {
+    var el = node && (node.nodeType === 1 ? node : node.parentElement);
+    return el && el.closest ? el.closest("pre") : null;
+  };
+  // The "Copied" label resets when the button next hides or moves to another
+  // block: event-driven, no timer.
+  var hide = function () {
+    if (btn) { btn.style.display = "none"; btn.textContent = "Copy"; }
+    current = null;
+  };
+  var ensureBtn = function () {
+    if (btn) return btn;
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Copy";
+    btn.setAttribute("data-testid", "code-block-copy");
+    btn.style.cssText = [
+      "position:fixed", "z-index:1000", "display:none",
+      "font-size:12px", "line-height:1", "padding:4px 8px", "cursor:pointer",
+      "border-radius:4px",
+      "border:1px solid var(--xmlui-borderColor, #c8ccd2)",
+      "background:var(--xmlui-backgroundColor-primary, #fff)",
+      "color:var(--xmlui-textColor-primary, #222)",
+      "opacity:0.9",
+    ].join(";");
+    btn.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!current) return;
+      var text = String(current.innerText || "").replace(/\n$/, "");
+      window.__bramCopyText(text, function (msg) {
+        var ok = String(msg).indexOf("Copied") === 0;
+        window.__bramIframeTrace("code-block", { op: "copy", bytes: text.length, ok: ok });
+        btn.textContent = ok ? "Copied" : "Copy failed";
+      });
+    });
+    btn.addEventListener("mouseleave", function (e) {
+      if (!preOf(e.relatedTarget)) hide();
+    });
+    document.body.appendChild(btn);
+    return btn;
+  };
+  var place = function (pre) {
+    var b = ensureBtn();
+    var r = pre.getBoundingClientRect();
+    if (r.width < 40 || r.height < 16) return hide();
+    if (pre !== current) b.textContent = "Copy";
+    current = pre;
+    b.style.display = "block";
+    var w = b.offsetWidth || 48;
+    b.style.top = Math.max(0, Math.round(r.top + 4)) + "px";
+    b.style.left = Math.max(0, Math.round(r.right - w - 4)) + "px";
+  };
+  document.addEventListener("mouseover", function (e) {
+    if (btn && e.target === btn) return;
+    var pre = preOf(e.target);
+    if (pre) { if (pre !== current) place(pre); }
+    else if (current) hide();
+  }, true);
+  // A scroll moves the block out from under a fixed button: hide until the
+  // pointer moves over a block again.
+  document.addEventListener("scroll", function () { if (current) hide(); }, true);
+  document.addEventListener("dblclick", function (e) {
+    var pre = preOf(e.target);
+    if (!pre) return;
+    var sel = window.getSelection && window.getSelection();
+    if (!sel) return;
+    var describe = function (node) {
+      var el = node && (node.nodeType === 1 ? node : node.parentElement);
+      if (!el) return "";
+      var cls = String(el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className || "");
+      return (el.tagName || "?").toLowerCase() + (cls ? "." + cls.split(/\s+/)[0].slice(0, 24) : "");
+    };
+    var nativeText = String(sel.toString() || "");
+    window.__bramIframeTrace("code-block", {
+      op: "dblclick-native", bytes: nativeText.length,
+      inBlock: !!(preOf(sel.anchorNode) === pre && preOf(sel.focusNode) === pre),
+      anchor: describe(sel.anchorNode), focus: describe(sel.focusNode),
+      blockBytes: String(pre.innerText || "").length,
+    });
+    var range = document.createRange();
+    range.selectNodeContents(pre.querySelector("code") || pre);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    window.__bramIframeTrace("code-block", { op: "dblclick-select", bytes: String(sel.toString() || "").length });
+  }, true);
+};
+window.__bramInstallCodeBlockTools();

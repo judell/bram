@@ -14709,6 +14709,12 @@ window.__bramApplySendRestore = function (snapshot, box, toastApi) {
   if (p && p.reason === "shell-foreground" && typeof toastApi === "function") {
     toastApi("No agent is running in the terminal, so your message wasn't sent. It's back in the message box.");
   }
+  // pane-send-refuses-into-trust-prompt: an Enter would have answered the
+  // prompt (its default trusts the folder), so the send came back.
+  if (p && p.reason === "prompt-on-screen" && typeof toastApi === "function") {
+    var who = p.provider === "codex" ? "Codex" : (p.provider === "claude" ? "Claude" : "The agent");
+    toastApi(who + " is waiting on a trust prompt in the terminal, so your message wasn't sent. Answer the prompt there, then send again. Your message is back in the message box.");
+  }
 };
 
 // Stable identity key for the Transcript's pending-menu row: present /

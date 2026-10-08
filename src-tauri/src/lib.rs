@@ -18214,6 +18214,18 @@ fn drain_pty_intents<R: tauri::Runtime>(
     let launch_pending = agent_launch_pending();
     let mut launch_held: usize = 0;
     let mut shell_restores: Vec<(String, String)> = Vec::new();
+    // pane-send-refuses-into-trust-prompt: a CLI's trust prompt ending the
+    // screen answers an Enter with its default, "Trust and continue". A send
+    // pasted there grants the trust and is lost (tau-parsers 2026-10-08
+    // 21:45Z, Bram's own catch-up). The attention detector's footer-anchored
+    // shapes say when one is up; such sends go back to the message box, as
+    // for a bare shell. sendKeys and menuAnswer still pass: keys are how the
+    // user answers the prompt. slash-panel is left out: Esc closes it, and
+    // an Enter there grants nothing.
+    let prompt_shape =
+        terminal_attention_prompt_shape(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS))
+            .filter(|shape| matches!(*shape, "folder-trust" | "hooks-trust"));
+    let mut prompt_restores: Vec<(String, String)> = Vec::new();
 
     for line in content.lines() {
         if line.is_empty() {
@@ -18366,6 +18378,27 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 }
                 shell_restores.push((id, data.to_string()));
                 continue;
+            } else if let Some(shape) = prompt_shape {
+                let id = intent
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("intent")
+                    .to_string();
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "send-gate",
+                        &format!(
+                            "op=refuse-prompt shape={} id={} kind={} chars={}",
+                            shape,
+                            id,
+                            kind,
+                            data.chars().count()
+                        ),
+                    );
+                }
+                prompt_restores.push((id, data.to_string()));
+                continue;
             } else if launch_pending {
                 held += 1;
                 launch_held += 1;
@@ -18462,8 +18495,11 @@ fn drain_pty_intents<R: tauri::Runtime>(
     }
     // One emit for both kinds of hand-back: two rapid `send-restore` emits
     // coalesce in the iframe and drop all but the last text (#306).
-    if !boot_restores.is_empty() || !shell_restores.is_empty() {
-        let all = boot_restores.iter().chain(shell_restores.iter());
+    if !boot_restores.is_empty() || !shell_restores.is_empty() || !prompt_restores.is_empty() {
+        let all = boot_restores
+            .iter()
+            .chain(shell_restores.iter())
+            .chain(prompt_restores.iter());
         let ids = all
             .clone()
             .map(|(id, _)| id.as_str())
@@ -18475,14 +18511,23 @@ fn drain_pty_intents<R: tauri::Runtime>(
             .collect::<Vec<_>>()
             .join("\n\n");
         // `reason` lets the pane say why the text came back.
-        let reason = if shell_restores.is_empty() {
-            serde_json::Value::Null
-        } else {
+        let reason = if !shell_restores.is_empty() {
             serde_json::json!("shell-foreground")
+        } else if !prompt_restores.is_empty() {
+            serde_json::json!("prompt-on-screen")
+        } else {
+            serde_json::Value::Null
         };
         let _ = app.emit(
             "send-restore",
-            serde_json::json!({"id":ids,"text":text,"aborted":false,"reason":reason}),
+            serde_json::json!({
+                "id": ids,
+                "text": text,
+                "aborted": false,
+                "reason": reason,
+                "shape": prompt_shape,
+                "provider": current_provider_label,
+            }),
         );
         if !boot_restores.is_empty() {
             append_strand_forensics_line(
@@ -18503,6 +18548,16 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 &format!(
                     "op=send-refused-shell-foreground entries={}",
                     shell_restores.len()
+                ),
+            );
+        }
+        if !prompt_restores.is_empty() {
+            append_strand_forensics_line(
+                app,
+                &format!(
+                    "op=send-refused-prompt shape={} entries={}",
+                    prompt_shape.unwrap_or(""),
+                    prompt_restores.len()
                 ),
             );
         }

@@ -3718,6 +3718,19 @@ fn last_talk_session_sid_cell() -> &'static Mutex<std::collections::HashMap<Stri
 // live tail is empty (see the stash site's comment for the race this
 // repairs). Deliberately NOT fed by the menu-dismissal drain, whose
 // discarded content is an answered prompt that must not resurrect.
+// terminal-attention-folder-trust-prompts: which drain last emptied the tail,
+// and when, so an attention check that reads an empty tail names the cause.
+fn pty_tail_last_clear_cell() -> &'static Mutex<(&'static str, i64)> {
+    static CELL: OnceLock<Mutex<(&'static str, i64)>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(("none", 0)))
+}
+
+fn note_pty_tail_clear(site: &'static str) {
+    if let Ok(mut last) = pty_tail_last_clear_cell().lock() {
+        *last = (site, unix_now_ms());
+    }
+}
+
 fn pty_tail_drained_stash_cell() -> &'static Mutex<Vec<u8>> {
     static CELL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(Vec::new()))
@@ -5871,23 +5884,70 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     // Claude's permission menus also say "Esc to cancel", but they appear
     // inside an open turn, where the tracker never evaluates. Codex's /status
     // prints and returns to its composer, so it has no entry here.
-    const SLASH_PANEL_MARKERS: &[&str] = &["esc to cancel", "status config usage stats"];
-    // Whitespace collapsed: the grid lays out tabs and footers with cursor
-    // moves that strip to irregular runs of spaces and line breaks.
-    let lower = stripped_tail
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    if HOOKS_TRUST_MARKERS
-        .iter()
-        .any(|marker| lower.contains(marker))
-    {
+    // Footer-anchored (FOOTER_WINDOW): the panel's header ("Status Config
+    // Usage Stats") is at its top, so only the footer can be required at
+    // the end.
+    const SLASH_PANEL_MARKERS: &[&str] = &["esc to cancel"];
+    // terminal-attention-folder-trust-prompts: each CLI's first-run folder
+    // trust prompt. Pairs, both of which must be present, so an agent quoting
+    // one phrase in an idle reply can't fire it. Specimens: Claude Code and
+    // Codex 0.161.0 run under a PTY in a fresh `git init` folder, 2026-10-08
+    // (pinned whole in terminal_attention_tests); the settings variant's pair
+    // is #197's catalogue ("Yes, I trust these settings / No, exit Claude
+    // Code"), its live text only previewed in tau-accounting 19:03:12Z.
+    // Checked before slash-panel: Claude's trust prompt also says "Esc to
+    // cancel", and this is the truer name.
+    // Each also names its footer, which must END the tail (see
+    // FOOTER_WINDOW below).
+    const FOLDER_TRUST_PAIRS: &[(&str, &str, &str)] = &[
+        (
+            "is this a project you created or one you trust",
+            "yes, i trust this folder",
+            "esc to cancel",
+        ),
+        (
+            "yes, i trust these settings",
+            "no, exit claude code",
+            "esc to cancel",
+        ),
+        ("trust this folder?", "trust and continue", "esc back"),
+    ];
+    // A live prompt or panel ends the screen with its footer; an agent's
+    // reply that QUOTES these phrases is followed by the composer's own
+    // chrome. Found live 2026-10-08 19:37Z: an idle Claude reply quoting
+    // "Esc to cancel" fired slash-panel ("Claude has a panel open") with no
+    // panel open. So the footer must sit in the tail's last FOOTER_WINDOW
+    // squashed characters, and the other phrases may be anywhere.
+    const FOOTER_WINDOW: usize = 40;
+    // All whitespace removed, on both sides of the match. The CLIs lay out
+    // words with cursor-column moves (CSI n G), which strip_ansi drops
+    // without leaving a space, so the tail reads "Esctocancel" and
+    // "Thesewillapply"; a space-bearing marker could never match that.
+    let squash = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let tail = squash(stripped_tail);
+    let has = |marker: &str| tail.contains(&squash(marker));
+    let end: String = {
+        let n = tail.chars().count();
+        tail.chars().skip(n.saturating_sub(FOOTER_WINDOW)).collect()
+    };
+    let ends_with_footer = |marker: &str| end.contains(&squash(marker));
+    if HOOKS_TRUST_MARKERS.iter().any(|marker| has(marker)) {
         return Some("hooks-trust");
+    }
+    if FOLDER_TRUST_PAIRS
+        .iter()
+        .any(|(a, b, footer)| has(a) && has(b) && ends_with_footer(footer))
+    {
+        return Some("folder-trust");
     }
     if SLASH_PANEL_MARKERS
         .iter()
-        .any(|marker| lower.contains(marker))
+        .any(|marker| ends_with_footer(marker))
     {
         return Some("slash-panel");
     }
@@ -6009,6 +6069,28 @@ fn trace_terminal_attention_transition<R: tauri::Runtime>(
             "terminal-attention",
             &format!("op=clear reason={}", reason),
         ),
+        TerminalAttentionTransition::Candidate { preview } if preview.is_empty() => {
+            // terminal-attention-folder-trust-prompts: an empty tail can't
+            // match anything; say what was there and what last drained it.
+            let live_len = pty_tail_cell().lock().map(|t| t.len()).unwrap_or(0);
+            let stash_len = pty_tail_drained_stash_cell()
+                .lock()
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let (site, at) = pty_tail_last_clear_cell()
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(("none", 0));
+            let age = if at > 0 { unix_now_ms() - at } else { -1 };
+            append_bram_trace_line(
+                app,
+                "terminal-attention",
+                &format!(
+                    "op=candidate preview= live_len={} stash_len={} last_clear={} last_clear_age_ms={}",
+                    live_len, stash_len, site, age
+                ),
+            )
+        }
         TerminalAttentionTransition::Candidate { preview } => append_bram_trace_line(
             app,
             "terminal-attention",
@@ -6041,7 +6123,56 @@ fn emit_terminal_attention<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod terminal_attention_tests {
-    use super::terminal_attention_prompt_shape;
+    use super::{is_terminal_query_reply, terminal_attention_prompt_shape};
+
+    // terminal-attention-folder-trust-prompts: Claude Code's first-run
+    // folder trust prompt, captured under a PTY 2026-10-08 and stripped
+    // the way Bram strips it (cursor-column moves leave no space).
+    #[test]
+    fn folder_trust_claude_specimen_2026_10_08() {
+        const TAIL: &str = "Accessingworkspace: /tmp/trust-probe/empty-repo Quicksafetycheck:Isthisaprojectyoucreatedoroneyoutrust?(Likeyourowncode,awell-knownopensource project,orworkfromyourteam).Ifnot,takeamomenttoreviewwhat'sinthisfolderfirst. ClaudeCode'llbeabletoread,edit,andexecutefileshere. Securityguide \u{276f}No,exit Yes,Itrustthisfolder Entertoconfirm\u{b7}Esctocancel";
+        assert_eq!(terminal_attention_prompt_shape(TAIL), Some("folder-trust"));
+    }
+
+    // Codex 0.161.0's folder trust prompt, same capture.
+    #[test]
+    fn folder_trust_codex_specimen_2026_10_08() {
+        const TAIL: &str = "Folder access /tmp/trust-probe/empty-repo Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings can run code automatically, even without a model request. Continue only if you trust these files. Your trust decision will be saved. \u{203a} 1. Trust and continue 2. Back to Agent Command Center enter continue \u{b7} esc back";
+        assert_eq!(terminal_attention_prompt_shape(TAIL), Some("folder-trust"));
+    }
+
+    #[test]
+    fn folder_trust_needs_both_halves_of_a_pair() {
+        assert_eq!(
+            terminal_attention_prompt_shape("Codex asks: Trust this folder? I said yes."),
+            None
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape("Click Yes, I trust this folder in Claude."),
+            None
+        );
+    }
+
+    #[test]
+    fn markers_match_words_glued_by_cursor_moves() {
+        assert_eq!(
+            terminal_attention_prompt_shape("Entertoconfirm\u{b7}Esctocancel"),
+            Some("slash-panel")
+        );
+    }
+
+    #[test]
+    fn terminal_query_replies_are_not_user_input() {
+        assert!(is_terminal_query_reply("\x1b[?1;2c"));
+        assert!(is_terminal_query_reply("\x1b[>0;276;0c"));
+        assert!(is_terminal_query_reply("\x1b[12;40R"));
+        assert!(is_terminal_query_reply("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\"));
+        assert!(is_terminal_query_reply("\x1b]10;rgb:ffff/ffff/ffff\x07"));
+        assert!(!is_terminal_query_reply("c"));
+        assert!(!is_terminal_query_reply("1\r"));
+        assert!(!is_terminal_query_reply("\x1b[A"));
+        assert!(!is_terminal_query_reply("\x1b"));
+    }
 
     #[test]
     fn hooks_trust_markers_classify() {
@@ -6109,14 +6240,25 @@ mod terminal_attention_tests {
     fn slash_panel_claude_status_specimen_2026_10_04() {
         const TAIL: &str = "\u{276f} /status \u{2500}\u{2500}\u{2500}\u{2500}\n  Se tings   Status   Config   Usage   Stats\n\n  Version:          2.1.289\n  Session name:     Worklist item for concurrent messaging\n\n  Esc to cancel";
         assert_eq!(terminal_attention_prompt_shape(TAIL), Some("slash-panel"));
-        for line in ["Esc to cancel", "Status   Config   Usage   Stats"] {
-            assert!(TAIL.contains(line), "specimen no longer contains {line:?}");
-            assert_eq!(
-                terminal_attention_prompt_shape(line),
-                Some("slash-panel"),
-                "{line:?} should classify on its own"
-            );
-        }
+        assert!(TAIL.contains("Status   Config   Usage   Stats"));
+        assert_eq!(
+            terminal_attention_prompt_shape("Esc to cancel"),
+            Some("slash-panel")
+        );
+        // The header alone is not the footer (footer-anchored since
+        // terminal-attention-folder-trust-prompts).
+        assert_eq!(
+            terminal_attention_prompt_shape("Status   Config   Usage   Stats"),
+            None
+        );
+    }
+
+    // The live false positive, 2026-10-08 19:37Z: an idle agent reply that
+    // quotes a prompt's phrases, followed by the composer's chrome.
+    #[test]
+    fn quoted_prompt_phrases_mid_tail_do_not_classify() {
+        const TAIL: &str = "Claude's trust prompt also says \"Esc to cancel\". Codex 0.161.0: \"Trust this folder? ... 1. Trust and continue ...\" \u{273b} Baked for 9s \u{2500}\u{2500}\u{2500} General (Oct 8, 0.7.4) \u{2500} \u{276f} \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} \u{2190} for agents";
+        assert_eq!(terminal_attention_prompt_shape(TAIL), None);
     }
 
     #[test]
@@ -9773,6 +9915,7 @@ fn pty_agent_status_update<R: tauri::Runtime>(app: &AppHandle<R>) {
                     }
                 }
                 tail.clear();
+                note_pty_tail_clear("turn-start");
             }
         }
     }
@@ -12647,6 +12790,36 @@ fn codex_cancel_output_is_current(
         && (turn_started_ms <= 0 || last_escape_ms >= turn_started_ms)
 }
 
+// terminal-attention-folder-trust-prompts: a write that is the terminal
+// answering a query, not a person typing: DA1/DA2 (CSI ? … c, CSI > … c),
+// cursor position (CSI row ; col R), and OSC 10/11/12 color replies.
+fn is_terminal_query_reply(data: &str) -> bool {
+    if let Some(body) = data.strip_prefix("\x1b[") {
+        let params = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_digit() || c == ';' || c == '?' || c == '>')
+        };
+        if let Some(p) = body.strip_suffix('c') {
+            return p.starts_with('?') || p.starts_with('>') || (!p.is_empty() && params(p));
+        }
+        if let Some(p) = body.strip_suffix('R') {
+            return params(p) && p.contains(';');
+        }
+        return false;
+    }
+    if let Some(body) = data.strip_prefix("\x1b]") {
+        let body = body
+            .strip_suffix('\x07')
+            .or_else(|| body.strip_suffix("\x1b\\"));
+        return body.is_some_and(|b| {
+            (b.starts_with("10;") || b.starts_with("11;") || b.starts_with("12;"))
+                && b.contains("rgb:")
+        });
+    }
+    false
+}
+
 // Called from pty_write on user input. Records the dismissed menu's
 // tool name into PTY_MENU_SUPPRESSED so the detector won't immediately
 // re-fire when the next PTY chunk arrives (the dismissed text is still
@@ -12711,6 +12884,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
     if let Ok(mut tail) = pty_tail_cell().lock() {
         tail.clear();
     }
+    note_pty_tail_clear("menu-input");
     // Clear any grid-loss hold: user input is a definitive outcome.
     if let Ok(mut held) = pty_menu_held_cell().lock() {
         *held = None;
@@ -17726,7 +17900,14 @@ fn pty_write_internal<R: tauri::Runtime>(
         // the focus signal). Closes #94.
         let is_focus_track = data == "\x1b[O" || data == "\x1b[I";
         let is_control_escape = data == "\x1b" && !pty_escape_is_user_interrupt_source(caller_hint);
-        if !is_focus_track && !is_control_escape {
+        // terminal-attention-folder-trust-prompts: xterm.js answers the
+        // CLI's own terminal queries (device attributes, cursor position,
+        // colors) by writing replies into the PTY. Those aren't keystrokes,
+        // and pty_menu_clear drains the tail: Claude's trust dialog painted
+        // at 19:03:12.44Z in tau-accounting and the ESC[?1;2c reply 200 ms
+        // later wiped it, so the attention check read an empty tail.
+        let is_query_reply = is_terminal_query_reply(data);
+        if !is_focus_track && !is_control_escape && !is_query_reply {
             pty_menu_clear(app, data);
         } else if bram_trace_enabled() {
             let tool = pty_menu_cell()

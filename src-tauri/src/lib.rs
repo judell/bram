@@ -8955,6 +8955,7 @@ fn handle_permission_menu<R: tauri::Runtime>(
         .clone()
         .unwrap_or_else(|| resolution.to_string());
     let claim_at_ms = unix_now_ms();
+    let mut merged_into: Option<String> = None;
     let depth = {
         let Ok(mut q) = menu_hook_claims_cell().lock() else {
             return (
@@ -8963,19 +8964,56 @@ fn handle_permission_menu<R: tauri::Runtime>(
                 b"claim queue poisoned".to_vec(),
             );
         };
-        q.retain(|c| c.id_key != id_key);
-        q.push(HookMenuClaim {
-            id_key: id_key.clone(),
-            tool_use_id,
-            signature: claim_signature,
-            menu,
-            at_ms: claim_at_ms,
-            answered: false,
-            answered_label: None,
-            answered_at_ms: None,
-        });
-        q.len()
+        // hook-claim-merge-same-signature: one call can arrive twice —
+        // PreToolUse with its tool_use_id, then PermissionRequest without
+        // one that claim-id-resolution couldn't resolve (AskUserQuestion,
+        // 2026-10-08). Keyed differently, the pair sat at depth 2, which
+        // defeats claim_remained_sole and the grid join's identical-claim
+        // refusal, so the card showed only if the coalesce timer won the
+        // race. Fold the id-less claim into the id-bearing one instead.
+        let existing = match (&tool_use_id, &claim_signature) {
+            (None, Some(sig)) => q.iter().position(|c| {
+                !c.answered && c.tool_use_id.is_some() && c.signature.as_deref() == Some(sig)
+            }),
+            _ => None,
+        };
+        if let Some(pos) = existing {
+            q[pos].menu = menu;
+            merged_into = Some(q[pos].id_key.clone());
+            q.len()
+        } else {
+            q.retain(|c| c.id_key != id_key);
+            q.push(HookMenuClaim {
+                id_key: id_key.clone(),
+                tool_use_id,
+                signature: claim_signature,
+                menu,
+                at_ms: claim_at_ms,
+                answered: false,
+                answered_label: None,
+                answered_at_ms: None,
+            });
+            q.len()
+        }
     };
+    if let Some(existing_key) = merged_into {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "hook-menu",
+                &format!(
+                    "op=claim-queue-merge id_key={} via=signature depth={}",
+                    existing_key, depth
+                ),
+            );
+        }
+        // The id-bearing claim already scheduled its coalesce timer.
+        return (
+            200,
+            "application/json; charset=utf-8",
+            b"{\"ok\":true,\"applied\":true}".to_vec(),
+        );
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,

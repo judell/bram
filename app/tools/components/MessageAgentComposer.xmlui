@@ -80,48 +80,28 @@
         size="xs"
         onClick="toChat = false" />
     </HStack>
+    <!-- composer-addressee-hugs-box: the gap under the addressee line was
+         this row centering the box against a taller 6rem ▲/▼ column (found
+         by a plain-XMLUI bisect, 2026-10-08). Both side columns are now
+         tight stacks shorter than the box, so the row is the box's height
+         and centering them on it leaves no gap.
+         https://www.xmlui.org/docs/reference/components/HStack -->
     <HStack width="100%" gap="$space-2" verticalAlignment="center">
-      <Button
-        label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-        variant="ghost"
-        size="xs"
-        width="2.5rem"
-        tooltip="Voice message"
-        enabled="{!isWorklistVoiceProcessingTarget('message-agent') &amp;&amp; (!voiceRecording || worklistVoiceRecordingActive)}">
-        <event name="click">
-          setWorklistVoiceTarget('message-agent');
-          voiceRecording = toggleVoiceForCurrentTarget(voiceRecording);
-        </event>
-      </Button>
-      <!-- switch-to-transcript-on-action: quieter placeholder — it carries
-           the addressee signal now, and instruction-sized text read as
-           content. Theme var per
-           https://www.xmlui.org/docs/reference/components/TextArea#styling -->
-      <Theme fontSize-placeholder-TextArea="$fontSize-sm" width="*">
-        <TextArea
-          id="composerBox"
-          initialValue="{window.__bramRestoreWorklistDraft()}"
-          placeholder="{window.__bramComposerPlaceholder($props.route, w2Sel.value || [], toChat)}"
-          enterSubmits="true"
-          autoSize="true"
-          minRows="2"
-          maxRows="4"
-          width="*"
-          onDidChange="(value) => window.__bramMessageAgentInputChanged(value)">
-          <event name="gotFocus">
+      <!-- composer-addressee-hugs-box (Jon): mic with Esc under it, one
+           tight stack, centered on the box. -->
+      <VStack width="2.5rem" gap="$space-2" horizontalAlignment="center">
+        <Button
+          label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
+          variant="ghost"
+          size="xs"
+          width="2.5rem"
+          tooltip="Voice message"
+          enabled="{!isWorklistVoiceProcessingTarget('message-agent') &amp;&amp; (!voiceRecording || worklistVoiceRecordingActive)}">
+          <event name="click">
             setWorklistVoiceTarget('message-agent');
-            setFocusedFeedbackItemId('');
+            voiceRecording = toggleVoiceForCurrentTarget(voiceRecording);
           </event>
-          <event name="lostFocus">
-            window.__bramMessageAgentBlur();
-          </event>
-        </TextArea>
-      </Theme>
-      <!-- switch-to-transcript-on-action: was 8rem, sized for the retired
-           "skip worklist" label; Chat/Esc are short and stable, so
-           fit-content closes the dead gap before the ▲/▼ column (whose own
-           end-anchored spread is deliberate — position carries meaning). -->
-      <VStack width="fit-content" horizontalAlignment="start" itemWidth="fit-content" gap="$space-1">
+        </Button>
         <!-- composer-addressee-line: the Chat button retired; the addressee
              line above the box ("Send as chat instead") replaces it.
              switch-to-transcript-on-action: the Feedback button retired one
@@ -156,25 +136,35 @@
           </event>
         </Button>
       </VStack>
-      <!-- ▲ and ▼ ride opposite ends of the footer column so position
-           carries the meaning, instead of leaving it entirely to the two
-           glyphs. SpaceFiller is the sanctioned idiom for this
-           (https://docs.xmlui.org/howto/align-items-to-row-ends-with-spacefiller),
-           and it needs a container with a REAL height to grow into
-           (https://docs.xmlui.org/howto/push-a-footer-to-the-bottom).
-
-           height="100%" does not supply one here. The footer row is
-           <HStack verticalAlignment="center">, and Stack alignment takes
-           only start | center | end — there is no `stretch`, so no row
-           child ever matches the row height, and a percentage resolves
-           against a parent that never had one. The column collapsed to
-           its two buttons and SpaceFiller had nothing to absorb, which
-           read as "the change did not land" twice over.
-
-           So the height is explicit. The cost: it does not track the
-           composer, which grows from minRows=2 to maxRows=4, so past
-           that the arrows stay 6rem apart rather than spanning. Visible
-           stable separation beats a silent collapse.
+      <!-- switch-to-transcript-on-action: quieter placeholder — it carries
+           the addressee signal now, and instruction-sized text read as
+           content. Theme var per
+           https://www.xmlui.org/docs/reference/components/TextArea#styling -->
+      <Theme fontSize-placeholder-TextArea="$fontSize-sm" width="*">
+        <TextArea
+          id="composerBox"
+          initialValue="{window.__bramRestoreWorklistDraft()}"
+          placeholder="{window.__bramComposerPlaceholder($props.route, w2Sel.value || [], toChat)}"
+          enterSubmits="true"
+          autoSize="true"
+          minRows="3"
+          maxRows="5"
+          width="*"
+          onDidChange="(value) => window.__bramMessageAgentInputChanged(value)">
+          <event name="gotFocus">
+            setWorklistVoiceTarget('message-agent');
+            setFocusedFeedbackItemId('');
+          </event>
+          <event name="lostFocus">
+            window.__bramMessageAgentBlur();
+          </event>
+        </TextArea>
+      </Theme>
+      <!-- composer-addressee-hugs-box (Jon): ▲ and ▼ as one tight stack,
+           centered on the box like the mic/Esc stack on the left. They used
+           to ride opposite ends of a 6rem column (SpaceFiller, explicit
+           height); that column was taller than the box, and centering the box
+           against it opened the gap under the addressee line.
 
            The glyph size does NOT come from the `size` prop. Button's
            `size` selects padding only — the docs define
@@ -190,7 +180,7 @@
         <VStack
           when="{$pathname === '/transcript'}"
           width="2rem"
-          height="6rem"
+          gap="0"
           horizontalAlignment="center">
           <Button
             label="▲"
@@ -198,7 +188,6 @@
             size="xs"
             tooltip="Scroll transcript to top"
             onClick="window.__bramTranscriptScroll('top')" />
-          <SpaceFiller />
           <Button
             label="▼"
             variant="ghost"

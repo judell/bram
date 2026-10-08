@@ -1206,10 +1206,11 @@
            way. helpers.js and this markup hot-serve together from disk,
            so the parts helper is bound directly (the old
            rebuilt-helpers fallback predated the disk-serving proof). -->
-      <!-- switch-to-transcript-on-action: the bottom compound — new-below
-           chip FIRST (most salient) in a fixed-width slot so the rest of
-           the line never jitters as the chip appears, disappears, or its
-           count changes; then session info; indexing flush right.
+      <!-- The bottom compound: session info flush left, with the index
+           count joined to it by the same " · " separator; the new-below
+           chip at the right end, in a fixed-width slot so nothing jitters
+           as it appears, disappears or its count changes
+           (composer-addressee-hugs-box, Jon; the chip used to come first).
            SpaceFiller is the sanctioned ends-alignment idiom
            (xmlui.org/docs/howto/align-items-to-row-ends-with-spacefiller). -->
       <HStack
@@ -1217,6 +1218,26 @@
         width="100%"
         verticalAlignment="center"
         paddingHorizontal="$space-1">
+        <!-- One Markdown paragraph (composer-addressee-hugs-box, Jon): the
+             viewport name ("Main" or the subagent's description) in bold,
+             the index count joined by the same " · " separator, and a narrow
+             pane wraps it at word boundaries like a sentence. As separate
+             Text items under HStack wrapContent it broke per item. The
+             string, with session names escaped, comes from
+             __bramFooterStatusMarkdown; parts from __bramFooterSessionLineParts.
+             Sizing and spacing via Markdown's theme vars
+             (https://www.xmlui.org/docs/reference/components/Markdown#styling). -->
+        <Theme fontSize-Text-markdown="$fontSize-sm" textColor-Text="$textColor-secondary"
+               marginTop-Text-markdown="0" marginBottom-Text-markdown="0" width="*">
+          <Markdown
+            width="*"
+            interpolateBindings="false"
+            allowHtml="false"
+            content="{window.__bramFooterStatusMarkdown(window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value), footerIndexStatus.value)}" />
+        </Theme>
+        <!-- composer-addressee-hugs-box (Jon): the chip slot moved from the
+             line's start to its end, so the status sits flush left and does
+             not shift when the chip appears. -->
         <!-- Gentle pulse while the agent is done and this content is
              unlooked-at — the ActivitySparkline's animation idiom. The
              animation rides the wrapping HStack, the sparkline's proven
@@ -1237,39 +1258,6 @@
             tooltip="New transcript content — jump to the live edge"
             onClick="window.__bramUnseenJump(); navigate('/transcript')" />
         </HStack>
-        <!-- Three segments, bold viewport name in the middle — "Main" or
-             the subagent's description carries the tie to the chip strip,
-             so IT gets the weight, not the chrome around it (Jon,
-             2026-09-07: "I want Main and Reinstate debounce probe to be
-             bold in the bottom row"). Segmentation lives in
-             __bramFooterSessionLineParts; gap=0 so only the segments' own
-             spaces separate them. fontWeight is a Text styling prop:
-             https://docs.xmlui.org/components/Text -->
-        <HStack gap="0" verticalAlignment="center">
-          <Text
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            maxLines="1"
-            value="{window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value).pre}" />
-          <Text
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            fontWeight="$fontWeight-bold"
-            maxLines="1"
-            value="{window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value).bold}" />
-          <Text
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            maxLines="1"
-            value="{window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value).post}" />
-        </HStack>
-        <SpaceFiller />
-        <Text
-          when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          maxLines="1"
-          value="{window.__bramFooterIndexLabel(footerIndexStatus.value)}" />
       </HStack>
       <!-- Passive send-ledger note — in the sticky footer so it's always
            visible. Text comes from the host ledger's resolved outcomes;

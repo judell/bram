@@ -13984,6 +13984,22 @@ window.__bramFooterSessionLineParts = function (session, agentId, roster) {
     post: viewPost + " ·" + meta.slice(sp),
   };
 };
+// composer-addressee-hugs-box (Jon): the footer status as ONE Markdown
+// paragraph, so a narrow pane wraps it at word boundaries like a sentence.
+// As separate Text items under HStack wrapContent it broke per item
+// ("CLAUDE ·Main" alone, then the rest, then "· Indexed" on its own line).
+// Only the viewport name is bold; every join is the same " · ". Session and
+// agent names are data, so Markdown punctuation is escaped.
+window.__bramFooterStatusMarkdown = function (parts, indexStatus) {
+  var indexLabel = indexStatus ? window.__bramFooterIndexLabel(indexStatus) : "";
+  var esc = function (t) {
+    return String(t || "").replace(/([\\`*_{}\[\]()#+\-.!|<>~])/g, "\\$1");
+  };
+  var p = parts || {};
+  var line = esc(p.pre) + (p.bold ? "**" + esc(p.bold) + "**" : "") + esc(p.post);
+  if (indexLabel) line += (line ? " · " : "") + esc(indexLabel);
+  return line;
+};
 window.__bramFooterSessionLine = function (session, agentId, roster) {
   var p = window.__bramFooterSessionLineParts(session, agentId, roster);
   return p.pre + p.bold + p.post;

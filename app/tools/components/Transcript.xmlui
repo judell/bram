@@ -149,8 +149,13 @@
          NOT `onBeforeDispose`, which the item originally proposed: that hook
          is exposed only by container components (App, Page, Form, NestedApp,
          Container). This is a VStack, so moving the body there would silently
-         do nothing. -->
-    onMount="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); }); window.__bramTranscriptMount()"
+         do nothing.
+
+         new-below-chip-dead-before-transcript-mount: one call now. The two
+         closures stay here because they assign this component's xs vars
+         (atBottom) and reach transcriptList; __bramTranscriptOnMount
+         registers them and runs the mount work, with an enter trace. -->
+    onMount="window.__bramTranscriptOnMount(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); })"
     onUnmount="window.__bramTranscriptUnmount(atBottom, events.length, $props.agentId)"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"

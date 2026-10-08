@@ -11662,6 +11662,59 @@ window.__bramUnseenJump = function () {
   try { window.__bramUnseenJumpRoute = String(location.hash || ""); } catch (e) { /* ignore */ }
 };
 
+// new-below-chip-dead-before-transcript-mount: the chip's click as one call.
+// Returns the route for the markup's navigate(). On the Transcript route
+// before its onMount has run, __bramUnseenJump only re-arms a pending jump
+// and navigating to the current route is a no-op, so the click did nothing
+// (three dead clicks in the tau-hub trace, 2026-10-08). Retry the jump for
+// up to ~2 s: through the mount's own path if it lands, else by scrolling
+// the tagged list's scroller directly.
+window.__bramChipJumpPending = 0;
+window.__bramUnseenChipClick = function () {
+  var route = "";
+  try { route = String(location.hash || ""); } catch (e) { /* ignore */ }
+  var onTranscript = route.indexOf("/transcript") >= 0;
+  var mounted = !!window.__bramTranscriptMounted;
+  window.__bramIframeTrace("follow-state", {
+    op: "chip-click", route: route, mounted: mounted,
+    listRegistered: !!window.__bramTranscriptScrollActions,
+    unseen: window.__bramUnseenCount || 0,
+  });
+  window.__bramUnseenJump();
+  if (onTranscript && !mounted) {
+    window.__bramChipJumpPending = Date.now();
+    window.__bramIframeTrace("follow-state", { op: "chip-jump-pending", route: route });
+    __bramChipJumpRetry(window.__bramChipJumpPending, 0);
+  }
+  return "/transcript";
+};
+function __bramChipJumpRetry(armedAt, attempt) {
+  setTimeout(function () {
+    // Consumed by the mount (or a newer click re-armed it): nothing to do.
+    if (window.__bramChipJumpPending !== armedAt) return;
+    if (window.__bramTranscriptMounted) {
+      window.__bramChipJumpPending = 0;
+      window.__bramTranscriptScroll("bottom");
+      window.__bramIframeTrace("follow-state", { op: "chip-jump-retry", via: "mounted", attempt: attempt });
+      return;
+    }
+    var info = __bramTranscriptScrollerInfo();
+    if (info.el) {
+      window.__bramChipJumpPending = 0;
+      try { info.el.scrollTop = info.el.scrollHeight; } catch (e) { /* ignore */ }
+      window.__bramFollowTransition(true, "unseen-jump");
+      window.__bramIframeTrace("follow-state", { op: "chip-jump-retry", via: info.how, attempt: attempt });
+      return;
+    }
+    if (attempt >= 9) {
+      window.__bramChipJumpPending = 0;
+      window.__bramIframeTrace("follow-state", { op: "chip-jump-gave-up", how: info.how, attempt: attempt });
+      return;
+    }
+    __bramChipJumpRetry(armedAt, attempt + 1);
+  }, 200);
+}
+
 // transcript-scroll-gestures: the footer's transcript-only jump arrows live
 // in Main.xmlui and cannot reach the Transcript component's transcriptList id
 // directly, so the Transcript registers its scroll closures at mount. The
@@ -12222,6 +12275,23 @@ window.__bramTranscriptScroll = function (dir) {
     if (dir === "top" && a.top) a.top();
     else if (a.bottom) a.bottom();
   } catch (e) {}
+};
+
+// new-below-chip-dead-before-transcript-mount: the Transcript's onMount as
+// one call (developing-bram.md: attribute handlers stay a single call). The
+// two closures stay in markup because they assign the Transcript's xs vars;
+// everything else runs here, and the enter line times the mount against the
+// render (tau-hub 2026-10-08: onMount ran ~18 s after the Transcript drew).
+window.__bramTranscriptOnMount = function (goTop, goBottom) {
+  try {
+    window.__bramIframeTrace("follow-state", {
+      op: "transcript-onmount-enter",
+      pendingChipMs: window.__bramChipJumpPending ? Date.now() - window.__bramChipJumpPending : -1,
+    });
+  } catch (e) { /* ignore */ }
+  window.__bramChipJumpPending = 0;
+  window.__bramRegisterTranscriptScroll(goTop, goBottom);
+  window.__bramTranscriptMount();
 };
 
 window.__bramTranscriptMount = function () {

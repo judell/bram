@@ -1259,7 +1259,7 @@
             size="xs"
             variant="outlined"
             tooltip="New transcript content — jump to the live edge"
-            onClick="window.__bramUnseenJump(); navigate('/transcript')" />
+            onClick="navigate(window.__bramUnseenChipClick())" />
         </HStack>
       </HStack>
       <!-- Passive send-ledger note — in the sticky footer so it's always

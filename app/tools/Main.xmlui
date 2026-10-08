@@ -1050,18 +1050,21 @@
           width="*"
           fontSize="$fontSize-sm"
           value="{pairOffer.value &amp;&amp; pairOffer.value.message}" />
-        <Button
-          label="Keep these together"
-          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
-          variant="outlined"
-          size="xs"
-          onClick="window.__bramPairOfferKeep(pairOffer.value, toast)" />
+        <!-- new-session-switch-starts-fresh-partner: Start new leads; keeping
+             the old session is the less common intent (2026-10-08, a
+             fast Keep click paired a new session with last release's). -->
         <Button
           label="{pairOffer.value &amp;&amp; pairOffer.value.actionLabel}"
           tooltip="{pairOffer.value &amp;&amp; pairOffer.value.actionTooltip}"
           variant="outlined"
           size="xs"
           onClick="window.__bramPairOfferStart(pairOffer.value)" />
+        <Button
+          label="Keep these together"
+          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
+          variant="outlined"
+          size="xs"
+          onClick="window.__bramPairOfferKeep(pairOffer.value, toast)" />
         <Button
           label="Dismiss"
           variant="ghost"

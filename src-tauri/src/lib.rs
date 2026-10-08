@@ -19698,6 +19698,43 @@ fn switch_agent(
     } else {
         None
     };
+    // new-session-switch-starts-fresh-partner: leaving a session started with
+    // New session that has no partner yet, start the target fresh, named for
+    // that session, and pair the two once it is up. New session was the
+    // explicit act ("this is a new line of work"), so pairs stay explicit; any
+    // other unpaired switch still falls back and offers the choice. A pending
+    // named Codex session still wins: the user just asked for it.
+    // Only a session never paired or unpaired qualifies (an Unpair must
+    // survive the next switch), and only with "Pair new sessions across
+    // providers" on: this branch pairs, so it obeys the same setting.
+    let wants_fresh = leaving.as_ref().is_some_and(|(p, sid)| {
+        worklist_state_open(&app)
+            .and_then(|conn| {
+                worklist_state::session_wants_fresh_partner(&conn, session_provider_label(*p), sid)
+                    .ok()
+            })
+            .unwrap_or(false)
+    });
+    let fresh: Option<(String, Option<String>)> = if switch_starts_fresh_partner(
+        partner.is_some(),
+        provider_key == "codex" && pending.is_some(),
+        pair_offers_enabled(&app),
+        wants_fresh,
+    ) {
+        leaving
+            .as_ref()
+            .and_then(|(p, sid)| session_title_by_id(&app, *p, sid))
+            .map(|title| {
+                // Claude takes a pre-allocated id (#274); Codex's surfaces later.
+                let sid = (provider_key == "claude").then(|| uuid::Uuid::new_v4().to_string());
+                (fresh_partner_title(&title, target_provider), sid)
+            })
+    } else {
+        None
+    };
+    let fresh_command = fresh
+        .as_ref()
+        .map(|(title, sid)| new_session_launch_command(provider_key, title, sid.as_deref()));
     let (base_command, pending_disposition) = provider_switch_launch(
         provider_key,
         has_session,
@@ -19705,6 +19742,7 @@ fn switch_agent(
         pending.as_ref(),
         pending_target.as_deref(),
         partner.as_deref(),
+        fresh_command.as_deref(),
     );
     if !has_session && bram_trace_enabled() {
         append_bram_trace_line(
@@ -19749,6 +19787,8 @@ fn switch_agent(
                     .unwrap_or("unbound"),
                 if pending_disposition == "restart-pending" {
                     "none"
+                } else if pending_disposition == "fresh-for-new-session" {
+                    "fresh"
                 } else {
                     pending_target
                         .as_deref()
@@ -19768,9 +19808,34 @@ fn switch_agent(
         "partner" => partner.clone(),
         "pin" => pin.as_ref().map(|t| t.id.clone()),
         "latest" => live_session_id(&app, target_provider),
+        "fresh-for-new-session" => fresh.as_ref().and_then(|(_, sid)| sid.clone()),
         _ => None,
     };
     let pair_from = leaving.clone();
+    // new-session-switch-starts-fresh-partner: queue the fresh partner's name
+    // (applied when its session surfaces), and note the target's live session
+    // now so a Codex partner, whose id isn't known yet, pairs once it changes.
+    let fresh_baseline = if resume_reason == "fresh-for-new-session" {
+        let baseline = live_session_id(&app, target_provider);
+        if let Some((title, sid)) = fresh.as_ref() {
+            write_pending_session_title(&app, provider_key, title, sid.clone());
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "agent-switch",
+                    &format!(
+                        "op=fresh-partner provider={} from={} sid={}",
+                        provider_key,
+                        leaving.as_ref().map(|(_, id)| id.as_str()).unwrap_or(""),
+                        sid.as_deref().unwrap_or("unbound")
+                    ),
+                );
+            }
+        }
+        baseline
+    } else {
+        None
+    };
     // The boot hold is NOT armed here, deliberately (#305, reverting the arm
     // added by 597935b): its release condition is boot bytes, and Codex emits
     // none it accepts, so holding made every Codex switch swallow pane sends
@@ -19832,16 +19897,94 @@ fn switch_agent(
                         .filter(|_| offer)
                         .map(|id| (target_provider, id)),
                 );
+                // new-session-switch-starts-fresh-partner: pair the fresh
+                // partner with the session it was started for; a Codex one
+                // pairs once its id surfaces (PENDING_PAIR).
+                if resume_reason == "fresh-for-new-session" {
+                    if let Some(from) = pair_from.as_ref() {
+                        match target_sid.as_ref() {
+                            Some(id) => record_pair_for(
+                                app,
+                                from,
+                                &(target_provider, id.clone()),
+                                "switch-new-session-born",
+                            ),
+                            None => {
+                                let mut guard = match PENDING_PAIR.lock() {
+                                    Ok(g) => g,
+                                    Err(e) => e.into_inner(),
+                                };
+                                *guard = Some(PendingPair {
+                                    from: from.clone(),
+                                    to: target_provider,
+                                    baseline: fresh_baseline.clone(),
+                                    at_ms: unix_now_ms(),
+                                    source: "switch-new-session-born",
+                                });
+                            }
+                        }
+                    }
+                }
                 // provider-session-digest-for-codex: resuming a partner, write
                 // what it missed in the session being left, and offer the
-                // catch-up turn. Then mark the entered session.
-                let digest = if resume_reason == "partner" {
-                    pair_from
-                        .as_ref()
-                        .and_then(|(p, id)| write_session_digest(app, *p, id, true))
-                } else {
-                    None
+                // catch-up turn. Then mark the entered session. A fresh
+                // partner has missed everything, so it gets the latest turns.
+                let digest = match resume_reason {
+                    "partner" | "fresh-for-new-session" => {
+                        pair_from.as_ref().and_then(|(p, id)| {
+                            write_session_digest(app, *p, id, resume_reason == "partner")
+                        })
+                    }
+                    _ => None,
                 };
+                // A fresh Codex session has no file, name or pair until its
+                // first message, so the catch-up is sent rather than offered:
+                // the partner gets its context and surfaces at once, before
+                // the queued name (10 min) or pending pair (15 min) expire.
+                if resume_reason == "fresh-for-new-session" {
+                    if let (Some((fp, fid)), Some((path, turns))) =
+                        (pair_from.as_ref(), digest.as_ref())
+                    {
+                        let title = session_title_by_id(app, *fp, fid);
+                        let text = catch_up_turn_text(
+                            &catch_up_from_label(*fp, fid, title.as_deref()),
+                            *turns,
+                            path,
+                        );
+                        let state = app.state::<AppState>();
+                        let queued = queue_pty_intent_inner(
+                            app,
+                            serde_json::json!({
+                                "kind": "toTurn",
+                                "data": text,
+                                "source": "fresh-partner-catch-up",
+                            }),
+                            &state,
+                        );
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                app,
+                                "agent-switch",
+                                &format!(
+                                    "op=fresh-partner-catch-up provider={} turns={} result={}",
+                                    session_provider_label(target_provider),
+                                    turns,
+                                    match &queued {
+                                        Ok(()) => "queued".to_string(),
+                                        Err(e) => format!("error detail={}", e),
+                                    }
+                                ),
+                            );
+                        }
+                        if queued.is_ok() {
+                            emit_catch_up_offer(app, None, None, None);
+                            if let Some(id) = target_sid.as_deref() {
+                                mark_session_entered(app, target_provider, id);
+                            }
+                            return;
+                        }
+                    }
+                }
                 emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
                 if let Some(id) = target_sid.as_deref() {
                     mark_session_entered(app, target_provider, id);
@@ -20348,6 +20491,19 @@ fn write_session_digest<R: tauri::Runtime>(
 
 // The pane's "Catch <partner> up" notice. Replayable (a cross-provider switch
 // reloads the pane); any switch without a digest clears it.
+// "Claude session '<title>'", or the id's first 8 characters when untitled.
+fn catch_up_from_label(provider: SessionProvider, id: &str, title: Option<&str>) -> String {
+    let who = if provider == SessionProvider::Codex {
+        "Codex"
+    } else {
+        "Claude"
+    };
+    match title {
+        Some(t) => format!("{} session '{}'", who, t),
+        None => format!("{} session {}", who, id.chars().take(8).collect::<String>()),
+    }
+}
+
 fn emit_catch_up_offer<R: tauri::Runtime>(
     app: &AppHandle<R>,
     from: Option<&(SessionProvider, String)>,
@@ -20357,19 +20513,7 @@ fn emit_catch_up_offer<R: tauri::Runtime>(
     let payload = match (from, to, digest) {
         (Some((fp, fid)), Some(tp), Some((path, turns))) => {
             let title = session_title_by_id(app, *fp, fid);
-            let who = if *fp == SessionProvider::Codex {
-                "Codex"
-            } else {
-                "Claude"
-            };
-            let from = match title.as_deref() {
-                Some(t) => format!("{} session '{}'", who, t),
-                None => format!(
-                    "{} session {}",
-                    who,
-                    fid.chars().take(8).collect::<String>()
-                ),
-            };
+            let from = catch_up_from_label(*fp, fid, title.as_deref());
             serde_json::json!({
                 "active": true,
                 "fromProvider": session_provider_label(*fp),
@@ -20395,6 +20539,8 @@ struct PendingPair {
     to: SessionProvider,
     baseline: Option<String>,
     at_ms: i64,
+    // The pair-stamp source once it resolves.
+    source: &'static str,
 }
 
 static PENDING_PAIR: Mutex<Option<PendingPair>> = Mutex::new(None);
@@ -20422,9 +20568,41 @@ fn resolve_pending_pair<R: tauri::Runtime>(app: &AppHandle<R>, provider: Session
         return;
     }
     let from = pending.from.clone();
+    let source = pending.source;
     *guard = None;
     drop(guard);
-    record_pair_for(app, &from, &(provider, live), "switch-new-session");
+    record_pair_for(app, &from, &(provider, live), source);
+}
+
+// new-session-switch-starts-fresh-partner: whether a switch starts a fresh
+// partner. Not when the leaving session has a partner or a named Codex launch
+// is pending; not with "Pair new sessions across providers" off (this pairs);
+// and only for a session started with New session and never paired or
+// unpaired (worklist_state::session_wants_fresh_partner).
+fn switch_starts_fresh_partner(
+    has_partner: bool,
+    codex_pending: bool,
+    pairing_enabled: bool,
+    wants_fresh: bool,
+) -> bool {
+    !has_partner && !codex_pending && pairing_enabled && wants_fresh
+}
+
+// new-session-switch-starts-fresh-partner: the name of a fresh partner is the
+// session it goes with, tagged with the provider it runs on. A title already
+// tagged with the other provider swaps the tag rather than stacking a second.
+fn fresh_partner_title(from_title: &str, to: SessionProvider) -> String {
+    let base = from_title.trim();
+    let base = base
+        .strip_suffix(" (Claude)")
+        .or_else(|| base.strip_suffix(" (Codex)"))
+        .unwrap_or(base);
+    let tag = if to == SessionProvider::Codex {
+        "Codex"
+    } else {
+        "Claude"
+    };
+    format!("{} ({})", base, tag)
 }
 
 fn provider_switch_launch(
@@ -20434,6 +20612,7 @@ fn provider_switch_launch(
     pending: Option<&PendingSessionTitle>,
     pending_target: Option<&str>,
     partner_id: Option<&str>,
+    fresh_partner: Option<&str>,
 ) -> (String, &'static str) {
     if provider == "codex" {
         if let Some(rec) = pending.filter(|rec| rec.provider == "codex") {
@@ -20454,6 +20633,12 @@ fn provider_switch_launch(
     // (above) still wins: the user just asked for it.
     if let Some(id) = partner_id {
         return (agent_resume_command(provider, id).unwrap(), "none");
+    }
+    // new-session-switch-starts-fresh-partner: leaving a session started with
+    // New session and not yet paired, start its partner fresh (the caller
+    // built the named launch) instead of resuming the pin or most recent.
+    if let Some(command) = fresh_partner {
+        return (command.to_string(), "fresh-for-new-session");
     }
     if provider == "codex" {
         if let Some(id) = pinned_id {
@@ -21195,6 +21380,18 @@ fn apply_pending_session_title<R: tauri::Runtime>(
         match rename_result {
             Ok(_) => {
                 let _ = std::fs::remove_file(&path);
+                // new-session-switch-starts-fresh-partner: remember that this
+                // session began as a new line of work, so the first switch
+                // away from it starts a fresh partner (switch_agent).
+                if let Some(conn) = worklist_state_open(app) {
+                    let _ = worklist_state::record_session_born(
+                        &conn,
+                        want,
+                        new_sid,
+                        unix_now_ms(),
+                        "new-session",
+                    );
+                }
                 emit_replayable_signal(app, "sessions-list-changed");
                 if bram_trace_enabled() {
                     append_bram_trace_line(
@@ -21230,9 +21427,10 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        claim_pending_session_title, codex_session_is_visible, merge_pending_session_entry,
-        new_session_launch_command, pending_session_title_abandoned_by_resume,
-        pending_session_title_can_claim, provider_switch_launch, session_change_snapshot,
+        claim_pending_session_title, codex_session_is_visible, fresh_partner_title,
+        merge_pending_session_entry, new_session_launch_command,
+        pending_session_title_abandoned_by_resume, pending_session_title_can_claim,
+        provider_switch_launch, session_change_snapshot, switch_starts_fresh_partner,
         PendingSessionTitle, SessionEntry, SessionProvider,
     };
 
@@ -21282,7 +21480,7 @@ mod pending_session_title_tests {
         );
         // Switching away must not consume a different provider's request.
         assert_eq!(
-            provider_switch_launch("claude", true, None, Some(&rec), None, None),
+            provider_switch_launch("claude", true, None, Some(&rec), None, None, None),
             ("claude --continue".into(), "none")
         );
         assert!(!pending_session_title_abandoned_by_resume(
@@ -21293,7 +21491,7 @@ mod pending_session_title_tests {
         // Both a persisted old pin and the --last fallback used to defeat New.
         for pin in [Some("old-codex"), None] {
             assert_eq!(
-                provider_switch_launch("codex", true, pin, Some(&rec), None, None),
+                provider_switch_launch("codex", true, pin, Some(&rec), None, None, None),
                 ("codex".into(), "restart-pending")
             );
         }
@@ -21321,6 +21519,7 @@ mod pending_session_title_tests {
                 Some("old-codex"),
                 Some(&rec),
                 Some("fresh-codex"),
+                None,
                 None
             ),
             ("codex resume fresh-codex".into(), "resume-pending")
@@ -21405,16 +21604,16 @@ mod pending_session_title_tests {
             ("codex", "codex resume --last"),
         ] {
             assert_eq!(
-                provider_switch_launch(provider, true, None, None, None, None).0,
+                provider_switch_launch(provider, true, None, None, None, None, None).0,
                 expected
             );
             assert_eq!(
-                provider_switch_launch(provider, false, None, None, None, None).0,
+                provider_switch_launch(provider, false, None, None, None, None, None).0,
                 provider
             );
         }
         assert_eq!(
-            provider_switch_launch("codex", true, Some("pinned"), None, None, None).0,
+            provider_switch_launch("codex", true, Some("pinned"), None, None, None, None).0,
             "codex resume pinned"
         );
         let rec = PendingSessionTitle {
@@ -21435,7 +21634,16 @@ mod pending_session_title_tests {
             "reserved"
         ));
         assert_eq!(
-            provider_switch_launch("codex", true, Some("old-codex"), Some(&rec), None, None).0,
+            provider_switch_launch(
+                "codex",
+                true,
+                Some("old-codex"),
+                Some(&rec),
+                None,
+                None,
+                None
+            )
+            .0,
             "codex resume old-codex"
         );
     }
@@ -21446,11 +21654,20 @@ mod pending_session_title_tests {
     #[test]
     fn switch_resume_order_puts_the_partner_after_pending_and_before_pin() {
         assert_eq!(
-            provider_switch_launch("claude", true, None, None, None, Some("c-partner")).0,
+            provider_switch_launch("claude", true, None, None, None, Some("c-partner"), None).0,
             "claude --resume c-partner"
         );
         assert_eq!(
-            provider_switch_launch("codex", true, Some("pinned"), None, None, Some("x-partner")).0,
+            provider_switch_launch(
+                "codex",
+                true,
+                Some("pinned"),
+                None,
+                None,
+                Some("x-partner"),
+                None
+            )
+            .0,
             "codex resume x-partner"
         );
         let rec = pending_codex();
@@ -21461,9 +21678,63 @@ mod pending_session_title_tests {
                 Some("pinned"),
                 Some(&rec),
                 Some("named"),
-                Some("x-partner")
+                Some("x-partner"),
+                Some("codex")
             ),
             ("codex resume named".to_string(), "resume-pending")
+        );
+    }
+
+    // new-session-switch-starts-fresh-partner: a fresh partner for a session
+    // started with New session comes after a partner and before the pin.
+    #[test]
+    fn switch_starts_a_fresh_partner_after_partner_and_before_pin() {
+        assert_eq!(
+            provider_switch_launch(
+                "codex",
+                true,
+                Some("pinned"),
+                None,
+                None,
+                None,
+                Some("codex")
+            ),
+            ("codex".to_string(), "fresh-for-new-session")
+        );
+        assert_eq!(
+            provider_switch_launch(
+                "claude",
+                true,
+                None,
+                None,
+                None,
+                Some("c-partner"),
+                Some("claude --name 'x'")
+            ),
+            ("claude --resume c-partner".to_string(), "none")
+        );
+    }
+
+    #[test]
+    fn fresh_partner_needs_no_partner_no_pending_the_setting_and_a_new_session() {
+        assert!(switch_starts_fresh_partner(false, false, true, true));
+        assert!(!switch_starts_fresh_partner(true, false, true, true));
+        assert!(!switch_starts_fresh_partner(false, true, true, true));
+        // "Pair new sessions across providers" off.
+        assert!(!switch_starts_fresh_partner(false, false, false, true));
+        // Not started with New session, or paired / unpaired before.
+        assert!(!switch_starts_fresh_partner(false, false, true, false));
+    }
+
+    #[test]
+    fn fresh_partner_title_names_the_target_provider_once() {
+        assert_eq!(
+            fresh_partner_title("General (Oct 8, 0.7.4)", SessionProvider::Codex),
+            "General (Oct 8, 0.7.4) (Codex)"
+        );
+        assert_eq!(
+            fresh_partner_title("General (Oct 8, 0.7.4) (Codex)", SessionProvider::Claude),
+            "General (Oct 8, 0.7.4) (Claude)"
         );
     }
 
@@ -21704,6 +21975,7 @@ fn create_new_session(
                             to: new_provider,
                             baseline: pair_baseline.clone(),
                             at_ms: unix_now_ms(),
+                            source: "switch-new-session",
                         });
                     }
                 }

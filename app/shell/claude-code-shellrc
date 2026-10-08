@@ -26,10 +26,22 @@ __bram_preexec() {
   __bram_at_prompt=
   printf '\033]7779;bram;exec\007'
 }
+# A launcher may hand us its own PROMPT_COMMAND (bram_herdr.py does, to run
+# `herdr agent attach` before the first prompt). Assigning ours outright would
+# discard it, so keep it and run it once from __bram_prompt. Such a command
+# usually starts with `unset PROMPT_COMMAND`, which would also switch our
+# reporting off, so put ours back afterwards.
+__bram_inherited_pc="$PROMPT_COMMAND"
 __bram_prompt() {
   local s=$?
   printf '\033]7779;bram;prompt;%s\007' "$s"
   __bram_at_prompt=1
+  if [ -n "$__bram_inherited_pc" ]; then
+    local pc="$__bram_inherited_pc"
+    __bram_inherited_pc=
+    eval "$pc"
+    PROMPT_COMMAND=__bram_prompt
+  fi
 }
 PROMPT_COMMAND=__bram_prompt
 trap '__bram_preexec' DEBUG

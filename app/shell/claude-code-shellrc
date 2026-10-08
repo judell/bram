@@ -39,6 +39,11 @@ __bram_prompt() {
   if [ -n "$__bram_inherited_pc" ]; then
     local pc="$__bram_inherited_pc"
     __bram_inherited_pc=
+    # The DEBUG trap does not fire for commands run inside a function, so say
+    # a command started ourselves; otherwise the host keeps believing a bare
+    # shell is in the foreground and refuses to type (reason=shell-foreground).
+    __bram_at_prompt=
+    printf '\033]7779;bram;exec\007'
     eval "$pc"
     PROMPT_COMMAND=__bram_prompt
   fi

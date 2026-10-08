@@ -19926,14 +19926,28 @@ fn switch_agent(
     // Only a session never paired or unpaired qualifies (an Unpair must
     // survive the next switch), and only with "Pair new sessions across
     // providers" on: this branch pairs, so it obeys the same setting.
-    let wants_fresh = leaving.as_ref().is_some_and(|(p, sid)| {
-        worklist_state_open(&app)
-            .and_then(|conn| {
-                worklist_state::session_wants_fresh_partner(&conn, session_provider_label(*p), sid)
-                    .ok()
-            })
-            .unwrap_or(false)
+    // first-switch-to-unused-provider-starts-named-partner: the second
+    // reason. A target provider with no sessions in this repo launches fresh
+    // anyway, and with nothing else on that side the new session is the only
+    // partner the switch could mean (tau-accounting 2026-10-08 20:40Z: an
+    // unnamed, unpaired Codex session and no offer). Both reasons require the
+    // leaving session never to have been paired or unpaired.
+    let fresh_reason: Option<&'static str> = leaving.as_ref().and_then(|(p, sid)| {
+        let conn = worklist_state_open(&app)?;
+        let label = session_provider_label(*p);
+        if !worklist_state::session_never_paired(&conn, label, sid).ok()? {
+            return None;
+        }
+        fresh_partner_reason(
+            worklist_state::session_born_from_new_session(&conn, label, sid).unwrap_or(false),
+            has_session,
+        )
     });
+    let wants_fresh = fresh_reason.is_some();
+    let pair_source = match fresh_reason {
+        Some("first-session") => "switch-first-session",
+        _ => "switch-new-session-born",
+    };
     let fresh: Option<(String, Option<String>)> = if switch_starts_fresh_partner(
         partner.is_some(),
         provider_key == "codex" && pending.is_some(),
@@ -20034,17 +20048,54 @@ fn switch_agent(
     // new-session-switch-starts-fresh-partner: queue the fresh partner's name
     // (applied when its session surfaces), and note the target's live session
     // now so a Codex partner, whose id isn't known yet, pairs once it changes.
-    let fresh_baseline = if resume_reason == "fresh-for-new-session" {
+    // first-switch-to-unused-provider-starts-named-partner: a switch that
+    // starts the session a queued Codex name was waiting for pairs it too,
+    // when the session being left has never been paired or unpaired.
+    // tau-accounting 2026-10-08 20:54Z: this path named the Codex session
+    // but left it unpaired, so the trip back could not find its partner.
+    let pending_pairs = matches!(resume_reason, "restart-pending" | "resume-pending")
+        && partner.is_none()
+        && pair_offers_enabled(&app)
+        && leaving.as_ref().is_some_and(|(p, sid)| {
+            worklist_state_open(&app)
+                .and_then(|conn| {
+                    worklist_state::session_never_paired(&conn, session_provider_label(*p), sid)
+                        .ok()
+                })
+                .unwrap_or(false)
+        });
+    let pairs_on_launch = resume_reason == "fresh-for-new-session" || pending_pairs;
+    let pair_source = if pending_pairs {
+        "switch-pending-name"
+    } else {
+        pair_source
+    };
+    if pending_pairs && bram_trace_enabled() {
+        append_bram_trace_line(
+            &app,
+            "agent-switch",
+            &format!(
+                "op=pending-name-pairs provider={} from={} target={}",
+                provider_key,
+                leaving.as_ref().map(|(_, id)| id.as_str()).unwrap_or(""),
+                target_sid.as_deref().unwrap_or("unbound")
+            ),
+        );
+    }
+    let fresh_baseline = if pending_pairs {
+        live_session_id(&app, target_provider)
+    } else if resume_reason == "fresh-for-new-session" {
         let baseline = live_session_id(&app, target_provider);
         if let Some((title, sid)) = fresh.as_ref() {
-            write_pending_session_title(&app, provider_key, title, sid.clone());
+            write_pending_session_title(&app, provider_key, title, sid.clone(), "switch");
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     &app,
                     "agent-switch",
                     &format!(
-                        "op=fresh-partner provider={} from={} sid={}",
+                        "op=fresh-partner provider={} reason={} from={} sid={}",
                         provider_key,
+                        fresh_reason.unwrap_or(""),
                         leaving.as_ref().map(|(_, id)| id.as_str()).unwrap_or(""),
                         sid.as_deref().unwrap_or("unbound")
                     ),
@@ -20118,15 +20169,16 @@ fn switch_agent(
                 );
                 // new-session-switch-starts-fresh-partner: pair the fresh
                 // partner with the session it was started for; a Codex one
-                // pairs once its id surfaces (PENDING_PAIR).
-                if resume_reason == "fresh-for-new-session" {
+                // pairs once its id surfaces (PENDING_PAIR). Also a queued
+                // Codex name's session (pending_pairs).
+                if pairs_on_launch {
                     if let Some(from) = pair_from.as_ref() {
                         match target_sid.as_ref() {
                             Some(id) => record_pair_for(
                                 app,
                                 from,
                                 &(target_provider, id.clone()),
-                                "switch-new-session-born",
+                                pair_source,
                             ),
                             None => {
                                 let mut guard = match PENDING_PAIR.lock() {
@@ -20138,7 +20190,7 @@ fn switch_agent(
                                     to: target_provider,
                                     baseline: fresh_baseline.clone(),
                                     at_ms: unix_now_ms(),
-                                    source: "switch-new-session-born",
+                                    source: pair_source,
                                 });
                             }
                         }
@@ -20160,7 +20212,34 @@ fn switch_agent(
                 // first message, so the catch-up is sent rather than offered:
                 // the partner gets its context and surfaces at once, before
                 // the queued name (10 min) or pending pair (15 min) expire.
+                //
+                // Never into a prompt. tau-parsers 2026-10-08 21:45Z: Codex's
+                // first run there opened its folder-trust prompt, the catch-up
+                // was pasted into it, and its Enter accepted "Trust and
+                // continue" on the user's behalf; the text itself was lost.
+                // If the screen ends in a recognized prompt (the attention
+                // detector's footer-anchored shapes), hold the turn and offer
+                // it instead: the user answers the prompt, then clicks
+                // Catch … up.
+                let prompt_on_screen = terminal_attention_prompt_shape(&pty_tail_snippet(
+                    TERMINAL_ATTENTION_TAIL_CHARS,
+                ));
                 if resume_reason == "fresh-for-new-session" {
+                    if let Some(shape) = prompt_on_screen {
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                app,
+                                "agent-switch",
+                                &format!(
+                                    "op=fresh-partner-catch-up provider={} result=held reason=prompt-on-screen shape={}",
+                                    session_provider_label(target_provider),
+                                    shape
+                                ),
+                            );
+                        }
+                    }
+                }
+                if resume_reason == "fresh-for-new-session" && prompt_on_screen.is_none() {
                     if let (Some((fp, fid)), Some((path, turns))) =
                         (pair_from.as_ref(), digest.as_ref())
                     {
@@ -20807,6 +20886,23 @@ fn switch_starts_fresh_partner(
     !has_partner && !codex_pending && pairing_enabled && wants_fresh
 }
 
+// Why a switch starts a fresh partner, given a leaving session never paired
+// or unpaired: it was started with New session, or the target provider has
+// no sessions in this repo (first-switch-to-unused-provider-starts-named-
+// partner). None: resume as before.
+fn fresh_partner_reason(
+    born_from_new_session: bool,
+    target_has_session: bool,
+) -> Option<&'static str> {
+    if born_from_new_session {
+        Some("new-session")
+    } else if !target_has_session {
+        Some("first-session")
+    } else {
+        None
+    }
+}
+
 // new-session-switch-starts-fresh-partner: the name of a fresh partner is the
 // session it goes with, tagged with the provider it runs on. A title already
 // tagged with the other provider swaps the tag rather than stacking a second.
@@ -21362,6 +21458,14 @@ struct PendingSessionTitle {
     session_id: Option<String>,
     #[serde(default)]
     previous_session_id: Option<String>,
+    // first-switch-to-unused-provider-starts-named-partner: who queued the
+    // name. Only "new-session" (the New session dialog) marks the session
+    // as started with New session; a name a switch queued, or one with no
+    // origin (older files), does not. tau-accounting 2026-10-08 20:55Z: a
+    // queued name of unknown origin counted, and the switch back started a
+    // new Claude session instead of resuming the one being worked in.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 fn pending_session_title_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -21373,6 +21477,7 @@ fn write_pending_session_title<R: tauri::Runtime>(
     provider: &str,
     title: &str,
     session_id: Option<String>,
+    origin: &str,
 ) {
     let Some(path) = pending_session_title_file(app) else {
         return;
@@ -21384,10 +21489,17 @@ fn write_pending_session_title<R: tauri::Runtime>(
         session_id,
         previous_session_id: SessionProvider::from_str(provider)
             .and_then(|session_provider| live_session_id(app, session_provider)),
+        origin: Some(origin.to_string()),
     };
     if let Ok(bytes) = serde_json::to_vec(&rec) {
         let _ = std::fs::write(&path, bytes);
     }
+}
+
+// first-switch-to-unused-provider-starts-named-partner: only the New session
+// dialog's names mark a session as started with New session.
+fn pending_title_marks_new_session(origin: Option<&str>) -> bool {
+    origin == Some("new-session")
 }
 
 fn read_pending_session_title<R: tauri::Runtime>(
@@ -21601,8 +21713,11 @@ fn apply_pending_session_title<R: tauri::Runtime>(
                 let _ = std::fs::remove_file(&path);
                 // new-session-switch-starts-fresh-partner: remember that this
                 // session began as a new line of work, so the first switch
-                // away from it starts a fresh partner (switch_agent).
-                if let Some(conn) = worklist_state_open(app) {
+                // away from it starts a fresh partner (switch_agent). Only
+                // for a name the New session dialog queued.
+                if let Some(conn) = worklist_state_open(app)
+                    .filter(|_| pending_title_marks_new_session(rec.origin.as_deref()))
+                {
                     let _ = worklist_state::record_session_born(
                         &conn,
                         want,
@@ -21646,11 +21761,11 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        claim_pending_session_title, codex_session_is_visible, fresh_partner_title,
-        merge_pending_session_entry, new_session_launch_command,
+        claim_pending_session_title, codex_session_is_visible, fresh_partner_reason,
+        fresh_partner_title, merge_pending_session_entry, new_session_launch_command,
         pending_session_title_abandoned_by_resume, pending_session_title_can_claim,
-        provider_switch_launch, session_change_snapshot, switch_starts_fresh_partner,
-        PendingSessionTitle, SessionEntry, SessionProvider,
+        pending_title_marks_new_session, provider_switch_launch, session_change_snapshot,
+        switch_starts_fresh_partner, PendingSessionTitle, SessionEntry, SessionProvider,
     };
 
     #[test]
@@ -21661,6 +21776,7 @@ mod pending_session_title_tests {
             created_at_ms: 1,
             session_id: None,
             previous_session_id: Some("previous-codex-id".to_string()),
+            origin: None,
         };
 
         assert!(pending_session_title_abandoned_by_resume(
@@ -21687,6 +21803,7 @@ mod pending_session_title_tests {
             created_at_ms: 10_000,
             session_id: None,
             previous_session_id: Some("old-codex".into()),
+            origin: None,
         }
     }
 
@@ -21945,6 +22062,23 @@ mod pending_session_title_tests {
         assert!(!switch_starts_fresh_partner(false, false, true, false));
     }
 
+    // A name queued by a switch, or one with no origin (older files), does
+    // not mark its session as started with New session.
+    #[test]
+    fn only_the_new_session_dialog_marks_a_session_born() {
+        assert!(pending_title_marks_new_session(Some("new-session")));
+        assert!(!pending_title_marks_new_session(Some("switch")));
+        assert!(!pending_title_marks_new_session(None));
+    }
+
+    #[test]
+    fn fresh_partner_reason_new_session_first_then_first_session() {
+        assert_eq!(fresh_partner_reason(true, true), Some("new-session"));
+        assert_eq!(fresh_partner_reason(true, false), Some("new-session"));
+        assert_eq!(fresh_partner_reason(false, false), Some("first-session"));
+        assert_eq!(fresh_partner_reason(false, true), None);
+    }
+
     #[test]
     fn fresh_partner_title_names_the_target_provider_once() {
         assert_eq!(
@@ -21965,6 +22099,7 @@ mod pending_session_title_tests {
             created_at_ms: 1,
             session_id: Some("claimed-id".to_string()),
             previous_session_id: Some("claimed-id".to_string()),
+            origin: None,
         };
 
         assert!(!pending_session_title_abandoned_by_resume(
@@ -22105,7 +22240,13 @@ fn create_new_session(
     };
     // Queue the title so the new session is renamed to the exact name when its
     // session file surfaces. The title is metadata, never a user turn.
-    write_pending_session_title(&app, provider_key, &trimmed, session_id.clone());
+    write_pending_session_title(
+        &app,
+        provider_key,
+        &trimmed,
+        session_id.clone(),
+        "new-session",
+    );
     if bram_trace_enabled() {
         append_bram_trace_line(
             &app,

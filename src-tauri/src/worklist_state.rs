@@ -345,11 +345,11 @@ pub fn record_session_born(
     Ok(true)
 }
 
-/// Whether (`provider`, `sid`) qualifies for a fresh partner on a switch:
-/// started with New session and never in a pair row, so neither paired
-/// before nor unpaired (an Unpair must survive the next switch, `e311c09`).
-pub fn session_wants_fresh_partner(conn: &Connection, provider: &str, sid: &str) -> Result<bool> {
-    if !session_born_from_new_session(conn, provider, sid)? {
+/// Whether no pair row names (`provider`, `sid`): never paired, and so never
+/// unpaired either. first-switch-to-unused-provider-starts-named-partner
+/// gates its fresh partner on this alone.
+pub fn session_never_paired(conn: &Connection, provider: &str, sid: &str) -> Result<bool> {
+    if !session_id_is_plain(sid) || !matches!(provider, "claude" | "codex") {
         return Ok(false);
     }
     Ok(latest_pair_row_for(conn, provider, sid)?.is_none())
@@ -1753,6 +1753,12 @@ mod tests {
     #[test]
     fn fresh_partner_only_for_a_new_session_never_paired_or_unpaired() {
         let conn = open_in_memory().unwrap();
+        // What switch_agent requires for the new-session reason.
+        let session_wants_fresh_partner = |conn: &Connection, p: &str, sid: &str| {
+            Ok::<bool, rusqlite::Error>(
+                session_born_from_new_session(conn, p, sid)? && session_never_paired(conn, p, sid)?,
+            )
+        };
         // Not started with New session.
         assert!(!session_wants_fresh_partner(&conn, "claude", "c0").unwrap());
         // Started with New session, never paired.
@@ -1763,6 +1769,8 @@ mod tests {
         assert!(!session_wants_fresh_partner(&conn, "claude", "c1").unwrap());
         record_session_pair(&conn, "c1", "", 3, "test").unwrap();
         assert!(!session_wants_fresh_partner(&conn, "claude", "c1").unwrap());
+        assert!(session_never_paired(&conn, "claude", "c0").unwrap());
+        assert!(!session_never_paired(&conn, "claude", "c1").unwrap());
         // Unpaired from the other side leaves the earlier row naming it.
         record_session_born(&conn, "claude", "c2", 4, "test").unwrap();
         record_session_pair(&conn, "c2", "x2", 5, "test").unwrap();

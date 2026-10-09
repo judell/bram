@@ -43952,6 +43952,139 @@ fn mime_for(path: &std::path::Path) -> &'static str {
     }
 }
 
+// more-files-tree-view: flat Tree rows for a repo listing. Every directory
+// on a path gets its own row; directories come before files, each group
+// sorted case-insensitively by full path so siblings land in order. Ids are
+// repo-relative paths, which is what __bramOpenLocalLinkPreview takes.
+fn repo_tree_rows(paths: &[String]) -> Vec<serde_json::Value> {
+    let parent = |p: &str| p.rfind('/').map(|i| p[..i].to_string());
+    let name = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for p in paths {
+        if p.is_empty() {
+            continue;
+        }
+        let mut acc = String::new();
+        let segs: Vec<&str> = p.split('/').collect();
+        for seg in &segs[..segs.len() - 1] {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            dirs.insert(acc.clone());
+        }
+        files.insert(p.clone());
+    }
+    let mut dir_list: Vec<String> = dirs.into_iter().collect();
+    dir_list.sort_by_key(|d| d.to_lowercase());
+    let mut file_list: Vec<String> = files.into_iter().collect();
+    file_list.sort_by_key(|f| f.to_lowercase());
+    let mut rows = Vec::with_capacity(dir_list.len() + file_list.len());
+    for d in &dir_list {
+        rows.push(serde_json::json!({
+            "id": d, "name": name(d), "parentId": parent(d), "isDir": true,
+        }));
+    }
+    for f in &file_list {
+        rows.push(serde_json::json!({
+            "id": f, "name": name(f), "parentId": parent(f), "isDir": false,
+        }));
+    }
+    rows
+}
+
+const REPO_GREP_CAP: usize = 200;
+const REPO_GREP_PER_FILE: usize = 20;
+const REPO_GREP_WINDOW: usize = 60;
+
+// more-files-tree-view: parse `git grep -n -z` output ("path\0line\0text\n")
+// into at most `cap` hits, each line windowed around the first match so a
+// minified one-line bundle can't flood the response. Returns (hits, total).
+fn repo_grep_hits(out: &str, q: &str, cap: usize) -> (Vec<serde_json::Value>, usize) {
+    let needle = q.to_lowercase();
+    let mut hits = Vec::new();
+    let mut total = 0usize;
+    for rec in out.split('\n') {
+        let mut parts = rec.splitn(3, '\0');
+        let (Some(path), Some(line), Some(text)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let Ok(line) = line.parse::<u64>() else {
+            continue;
+        };
+        total += 1;
+        if hits.len() >= cap {
+            continue;
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let lower: String = text.to_lowercase();
+        // Char index of the match (lowercasing can change byte lengths).
+        let at = lower
+            .find(&needle)
+            .map(|b| lower[..b].chars().count())
+            .unwrap_or(0);
+        let from = at.saturating_sub(REPO_GREP_WINDOW);
+        let to = (at + needle.chars().count() + REPO_GREP_WINDOW).min(chars.len());
+        let mut snippet: String = chars[from..to]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if from > 0 {
+            snippet = format!("\u{2026}{}", snippet);
+        }
+        if to < chars.len() {
+            snippet.push('\u{2026}');
+        }
+        hits.push(serde_json::json!({ "path": path, "line": line, "text": snippet }));
+    }
+    (hits, total)
+}
+
+#[cfg(test)]
+mod repo_files_tests {
+    use super::{repo_grep_hits, repo_tree_rows};
+
+    #[test]
+    fn tree_rows_add_every_directory_and_put_directories_first() {
+        let rows = repo_tree_rows(&[
+            "src/b.rs".to_string(),
+            "README.md".to_string(),
+            "src/a/x.rs".to_string(),
+        ]);
+        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            vec!["src", "src/a", "README.md", "src/a/x.rs", "src/b.rs"]
+        );
+        assert_eq!(rows[1]["parentId"], "src");
+        assert!(rows[0]["parentId"].is_null());
+        assert_eq!(rows[3]["name"], "x.rs");
+        assert_eq!(rows[0]["isDir"], true);
+    }
+
+    #[test]
+    fn grep_hits_parse_window_and_cap() {
+        let long = format!("{}needle{}", "a".repeat(200), "b".repeat(200));
+        let out = format!(
+            "x.rs\u{0}3\u{0}let Needle = 1;\nv.js\u{0}1\u{0}{}\nbad line\n",
+            long
+        );
+        let (hits, total) = repo_grep_hits(&out, "needle", 200);
+        assert_eq!(total, 2);
+        assert_eq!(hits[0]["path"], "x.rs");
+        assert_eq!(hits[0]["line"], 3);
+        assert_eq!(hits[0]["text"], "let Needle = 1;");
+        let t = hits[1]["text"].as_str().unwrap();
+        assert!(t.starts_with('\u{2026}') && t.ends_with('\u{2026}') && t.contains("needle"));
+        assert!(t.chars().count() < 140);
+        let (capped, total) = repo_grep_hits(&out, "needle", 1);
+        assert_eq!((capped.len(), total), (1, 2));
+    }
+}
+
 fn local_file_preview_language(path: &std::path::Path) -> &'static str {
     match path
         .extension()
@@ -66678,6 +66811,79 @@ fn route_request<R: tauri::Runtime>(
         };
         let body = serde_json::to_vec(&result).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
+    }
+
+    // more-files-tree-view: the Files page's listing. Tracked plus untracked
+    // files that aren't ignored, as flat Tree rows (repo_tree_rows).
+    if path == "__repo/tree" {
+        let out = git_run(
+            app,
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+        );
+        let body = match out {
+            Ok(text) => {
+                let paths: Vec<String> = text
+                    .split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(|p| p.to_string())
+                    .collect();
+                serde_json::json!({ "rows": repo_tree_rows(&paths), "files": paths.len() })
+            }
+            Err(e) => serde_json::json!({ "rows": [], "error": "not-a-git-repo", "detail": e }),
+        };
+        return (
+            200,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&body).unwrap_or_default(),
+        );
+    }
+
+    // more-files-tree-view: content search for the Files page. A literal,
+    // case-insensitive `git grep` over tracked and untracked-not-ignored text
+    // files, at most REPO_GREP_PER_FILE hits per file and REPO_GREP_CAP rows,
+    // each line windowed around its match (vendored bundles are one-line).
+    if path == "__repo/grep" {
+        let mut q = String::new();
+        for pair in query.split('&') {
+            if let Some(enc) = pair.strip_prefix("q=") {
+                q = percent_decode(enc);
+            }
+        }
+        let q = q.trim().to_string();
+        let body = if q.is_empty() {
+            serde_json::json!({ "hits": [], "total": 0, "capped": false })
+        } else {
+            let per_file = format!("--max-count={}", REPO_GREP_PER_FILE);
+            let out = git_run_allow_exit(
+                app,
+                &[
+                    "grep",
+                    "-n",
+                    "-I",
+                    "-i",
+                    "-F",
+                    "-z",
+                    "--untracked",
+                    &per_file,
+                    "-e",
+                    &q,
+                ],
+            )
+            .unwrap_or_default();
+            let (hits, total) = repo_grep_hits(&out, &q, REPO_GREP_CAP);
+            serde_json::json!({ "hits": hits, "total": total, "capped": total > REPO_GREP_CAP })
+        };
+        return (
+            200,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&body).unwrap_or_default(),
+        );
     }
 
     if path == "__local-file-preview" {

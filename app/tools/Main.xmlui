@@ -649,6 +649,7 @@
          the pathname effect looking for .xmlui-navlink-active). -->
     <NavGroup label="More">
       <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
+      <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
       <NavLink label="Tips" to="/tips" tooltip="All the footer tips, including ones you dismissed" />
       <NavLink label="Context" to="/context" tooltip="What the agent reads: CLAUDE.md, memory, hooks and settings" />
       <NavLink label="Status" to="/status" tooltip="Bram&apos;s health: guards, session size, state checks" />
@@ -861,6 +862,7 @@
       <Page url="/issues"><Issues /></Page>
       <Page url="/commits"><Commits /></Page>
       <Page url="/history"><History /></Page>
+      <Page url="/files"><Files /></Page>
     </Pages>
   </Theme>
   <!-- testId: #427 measures the Transcript Worklist split down to this

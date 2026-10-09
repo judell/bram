@@ -9955,9 +9955,40 @@ window.__bramFormatLocalLinkPreview = function (preview) {
   if (!preview) return "";
   if (preview.error) return preview.error;
   var content = preview.content == null ? "" : String(preview.content);
-  if (preview.renderMode === "markdown") return content;
+  if (preview.renderMode === "markdown") return __bramStripMarkdownComments(content);
   return window.__bramFenceMarkdown(content, preview.language || "");
 };
+// more-files-tree-view: a Markdown file previews as prose, so it wraps
+// ("flow"); code keeps "scroll" for long lines. One "scroll" for both forced
+// every paragraph onto a single line (2026-10-09, AGENTS.md from Files).
+// https://www.xmlui.org/docs/reference/components/Markdown (overflowMode)
+window.__bramLocalLinkPreviewOverflow = function (preview) {
+  return preview && preview.renderMode === "markdown" ? "flow" : "scroll";
+};
+// With allowHtml="false" an HTML comment (Bram's <!-- bram:start --> markers)
+// renders as literal text. Drop comments outside fenced code; a comment shown
+// inside a code sample stays.
+function __bramStripMarkdownComments(text) {
+  var out = [], inFence = false, fence = "";
+  var lines = String(text).split("\n");
+  var buf = [];
+  var flush = function () {
+    if (buf.length) out.push(buf.join("\n").replace(/<!--[\s\S]*?-->/g, ""));
+    buf = [];
+  };
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(/^\s*(`{3,}|~{3,})/);
+    if (!inFence && m) { flush(); inFence = true; fence = m[1].charAt(0); out.push(lines[i]); continue; }
+    if (inFence) {
+      out.push(lines[i]);
+      if (m && m[1].charAt(0) === fence) inFence = false;
+      continue;
+    }
+    buf.push(lines[i]);
+  }
+  flush();
+  return out.join("\n");
+}
 window.__bramFenceMarkdown = function (body, lang) {
   body = body == null ? "" : String(body);
   var longest = 0, run = 0;
@@ -10013,7 +10044,7 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   // opens a "File unavailable" preview instead of the page (the /queue
   // launch bug, 2026-07-23).
   var routeMatch = raw.match(
-    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|sessions|tips|settings|status|context)(\/.*)?$/
+    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|files|sessions|tips|settings|status|context)(\/.*)?$/
   );
   if (routeMatch) {
     var rest = routeMatch[2] ? routeMatch[2].slice(1) : "";
@@ -16875,3 +16906,197 @@ window.__bramInstallCodeBlockTools = function () {
   }, true);
 };
 window.__bramInstallCodeBlockTools();
+
+// more-files-tree-view: the Files page (More > Files). Browse is one flat Tree
+// over /__repo/tree; search builds its own tree of only the branches that
+// hold a hit, the way ~/tau-extractor-sandbox's catalog does
+// (review-app.js catalogSearchTree), because a mounted Tree reads `data` at
+// init. Files open in the shared LocalLinkPreview modal.
+(function () {
+  var VIEW_BASE = "bram.filesView";
+  var lastRowsOut = [];
+  var lastSearchKey = null, lastSearchOut = { nodes: [], total: 0, capped: false };
+
+  var viewKey = function () { return window.__bramProjectScopedKey(VIEW_BASE); };
+  // Focus state (where you were), so sessionStorage, project-scoped.
+  // Memoized on the stored text: Files.xmlui seeds its vars from this, and
+  // a fresh object per call would re-derive them on every evaluation and
+  // undo the page's own assignments (2026-10-09: Search set `submitted`,
+  // which reverted, so no search ever fetched).
+  var lastViewRaw = {}, lastView = null;
+  window.__bramFilesView = function () {
+    var raw = null;
+    try {
+      var k0 = viewKey();
+      raw = k0 ? window.sessionStorage.getItem(k0) : null;
+    } catch (e) {}
+    if (lastView && raw === lastViewRaw) return lastView;
+    lastViewRaw = raw;
+    var v = { query: "", expanded: [] };
+    try {
+      if (raw) {
+        var p = JSON.parse(raw);
+        v.query = String((p && p.query) || "");
+        v.expanded = Array.isArray(p && p.expanded) ? p.expanded : [];
+      }
+    } catch (e) {}
+    lastView = v;
+    return v;
+  };
+  var save = function (query, expanded) {
+    try {
+      var k = viewKey();
+      if (k) window.sessionStorage.setItem(k, JSON.stringify({ query: query || "", expanded: expanded || [] }));
+    } catch (e) {}
+  };
+
+  // `file` carries the repo path: inside the Tree's itemTemplate `$item.path`
+  // is the Tree's own ancestor-id array (2026-10-09: a click previewed
+  // "demo,chat-edit-in-item-file-file.txt"), so rows can't use `path`.
+  var withIcon = function (r) {
+    return Object.assign({}, r, { icon: r.isDir ? "folder" : "doc-outline", file: r.file || r.id });
+  };
+  // The Tree must get the SAME array across renders or it rebuilds and draws
+  // nothing (2026-10-09: tree-data alternated 30 rows / 0 rows within one
+  // millisecond, treeitems 0, height 2px). The DataSource value arrives as a
+  // different object per evaluation, sometimes without `rows`, so memoize on
+  // the rows' content and keep the last good rows through a row-less payload.
+  var rowsKey = function (rows) {
+    if (!rows.length) return "0";
+    return rows.length + "\u0000" + rows[0].id + "\u0000" + rows[rows.length - 1].id +
+      "\u0000" + rows.map(function (r) { return r.id; }).join("\u0001").length;
+  };
+  var lastRowsKey = null, lastOddLogged = false;
+  // Some evaluations see the response as its unparsed JSON text (trace
+  // tree-data-odd type=string, 2026-10-09); parse it rather than drop it.
+  var asPayload = function (payload) {
+    if (typeof payload !== "string") return payload;
+    try { return JSON.parse(payload); } catch (e) { return null; }
+  };
+  window.__bramFilesTreeData = function (payload) {
+    payload = asPayload(payload);
+    var rows = payload && Array.isArray(payload.rows) ? payload.rows : null;
+    if (!rows) {
+      if (payload && !lastOddLogged) {
+        lastOddLogged = true;
+        try {
+          window.__bramIframeTrace("files", {
+            op: "tree-data-odd",
+            type: Array.isArray(payload) ? "array" : typeof payload,
+            keys: Object.keys(payload).slice(0, 8).join(","),
+            length: Array.isArray(payload) ? payload.length : -1,
+          });
+        } catch (e) {}
+      }
+      return lastRowsOut;
+    }
+    var key = rowsKey(rows);
+    if (key === lastRowsKey) return lastRowsOut;
+    lastRowsKey = key;
+    lastRowsOut = rows.map(withIcon);
+    try {
+      var handed = lastRowsOut.length;
+      window.__bramIframeTrace("files", { op: "tree-data", rows: handed });
+    } catch (e) {}
+    return lastRowsOut;
+  };
+
+  window.__bramFilesExpanded = function (openIds, id, open) {
+    var ids = Array.isArray(openIds) ? openIds : [];
+    var next = open
+      ? (ids.indexOf(id) >= 0 ? ids : ids.concat([id]))
+      : ids.filter(function (x) { return x !== id && x.indexOf(id + "/") !== 0; });
+    save(window.__bramFilesView().query, next);
+    return next;
+  };
+
+  window.__bramFilesSubmit = function (query, openIds) {
+    var q = String(query || "").trim();
+    save(q, openIds);
+    try { window.__bramIframeTrace("files", { op: "search", chars: q.length }); } catch (e) {}
+    return q;
+  };
+  // Emptying the box returns to browse.
+  window.__bramFilesAfterQueryEdit = function (query, submitted) {
+    if (String(query || "").trim()) return submitted;
+    save("", window.__bramFilesView().expanded);
+    return "";
+  };
+
+  window.__bramFilesOpen = function (item) {
+    if (!item || item.isDir) return;
+    var path = typeof item.file === "string" ? item.file : String(item.id || "");
+    try { window.__bramIframeTrace("files", { op: "open", path: path, line: item.line || null }); } catch (e) {}
+    window.__bramOpenLocalLinkPreview(item.line ? { path: path, line: item.line } : { path: path });
+  };
+
+  window.__bramFilesCaption = function (found) {
+    var n = (found && found.total) || 0;
+    if (!n) return "Nothing matched.";
+    return n + (n === 1 ? " match" : " matches") +
+      (found.capped ? ", showing the first 200 name matches and 200 lines" : "");
+  };
+
+  var NAME_CAP = 200;
+  window.__bramFilesSearchTree = function (query, rowsPayload, grepPayload) {
+    // Memoized on (query, payload objects), so re-renders hand the Tree the
+    // same array.
+    // Content-keyed for the same reason as __bramFilesTreeData: payloads
+    // arrive as a new object per evaluation.
+    rowsPayload = asPayload(rowsPayload);
+    grepPayload = asPayload(grepPayload);
+    var grepHits = (grepPayload && grepPayload.hits) || [];
+    var key = String(query || "") + "\u0000" +
+      rowsKey((rowsPayload && Array.isArray(rowsPayload.rows)) ? rowsPayload.rows : []) + "\u0000" +
+      grepHits.length + "\u0000" + ((grepPayload && grepPayload.total) || 0);
+    if (key === lastSearchKey) return lastSearchOut;
+    var q = String(query || "").trim().toLowerCase();
+    var rows = (rowsPayload && rowsPayload.rows) || [];
+    var byId = {};
+    rows.forEach(function (r) { byId[r.id] = r; });
+    var nodes = {}, order = [];
+    var ensure = function (id) {
+      if (nodes[id]) return nodes[id];
+      var src = byId[id] || { id: id, name: id.split("/").pop(), parentId: id.indexOf("/") >= 0 ? id.slice(0, id.lastIndexOf("/")) : null, isDir: false };
+      if (src.parentId) ensure(src.parentId);
+      // Children come from the search set, so no lazy load.
+      var n = Object.assign(withIcon(src), { loaded: true, dynamic: false });
+      nodes[id] = n; order.push(id);
+      return n;
+    };
+    var nameHits = 0;
+    if (q) {
+      rows.forEach(function (r) {
+        if (String(r.name).toLowerCase().indexOf(q) >= 0) {
+          nameHits++;
+          if (nameHits <= NAME_CAP) ensure(r.id).hit = true;
+        }
+      });
+    }
+    var lineRows = [];
+    var hits = (grepPayload && grepPayload.hits) || [];
+    hits.forEach(function (h, i) {
+      ensure(h.path);
+      lineRows.push({
+        id: h.path + "#L" + h.line + "#" + i,
+        name: "L" + h.line + ": " + h.text,
+        parentId: h.path,
+        file: h.path,
+        line: h.line,
+        isDir: false,
+        isLine: true,
+        hit: true,
+        loaded: true,
+        dynamic: false,
+      });
+    });
+    var out = order.map(function (id) { return nodes[id]; }).concat(lineRows);
+    lastSearchKey = key;
+    lastSearchOut = {
+      nodes: out,
+      total: nameHits + ((grepPayload && grepPayload.total) || 0),
+      capped: nameHits > NAME_CAP || !!(grepPayload && grepPayload.capped),
+    };
+    return lastSearchOut;
+  };
+})();

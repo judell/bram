@@ -1,0 +1,122 @@
+<Component
+  name="Files"
+  var.view="{window.__bramFilesView()}"
+  var.query="{view.query}"
+  var.submitted="{view.query}"
+  var.openIds="{view.expanded}">
+
+  <!-- more-files-tree-view: a navigable, searchable view of this repo.
+       Patterns from ~/tau-extractor-sandbox/Main.xmlui (catalog browser):
+       one Tree to browse, a second Tree for search results (a mounted Tree
+       reads `data` and defaultExpanded at init, so the two modes are two
+       instances under exclusive `when`), and Enter-to-search through a Form
+       because TextBox exposes no key events
+       (https://www.xmlui.org/docs/howto/submit-a-form-from-a-custom-button).
+       Tree reference: https://www.xmlui.org/docs/reference/components/Tree
+       A file opens in the shared LocalLinkPreview modal. -->
+  <DataSource id="repoTree" url="/__repo/tree" />
+  <DataSource
+    id="repoGrep"
+    when="{!!submitted}"
+    url="/__repo/grep"
+    queryParams="{{ q: submitted }}" />
+  <!-- Push, not polling: refetch the listing when git status changes. -->
+  <PushSource
+    id="gitStatusEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener
+    listenTo="{gitStatusEvt.value &amp;&amp; gitStatusEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, repoTree)" />
+  <ChangeListener
+    listenTo="{query}"
+    onDidChange="submitted = window.__bramFilesAfterQueryEdit(query, submitted)" />
+
+  <!-- The Tree is virtualized and draws inside a bounded box. The pane
+       scrolls as a whole (app-wide scrollWholePage=false was rejected in
+       410d069), so height="*" had no bounded parent
+       (https://www.xmlui.org/docs/howto/fill-remaining-vertical-space);
+       overflow="visible", and height="70vh" on the Tree itself, both drew 0
+       rows at 2px (trace files op=tree-dom, 2026-10-09). Same shape as the
+       Transcript's List: a bounded container, the list at height="100%". -->
+  <VStack padding="$space-4" gap="$space-3">
+    <Heading level="h2">Files</Heading>
+    <Text when="{repoTree.value &amp;&amp; repoTree.value.error}" variant="caption">
+      This folder isn't a git checkout, so there's no file list to show.
+    </Text>
+    <Form hideButtonRow="true" onSubmit="submitted = window.__bramFilesSubmit(query, openIds)">
+      <HStack gap="$space-2" verticalAlignment="center">
+        <TextBox
+          id="queryBox"
+          width="50%"
+          initialValue="{query}"
+          placeholder="Search file names and contents…"
+          onDidChange="(v) => query = v" />
+        <Button type="submit" label="Search" size="sm" />
+        <Button
+          type="button"
+          label="Clear"
+          size="sm"
+          variant="outlined"
+          when="{!!submitted}"
+          onClick="queryBox.setValue('')" />
+      </HStack>
+    </Form>
+    <Text
+      when="{!!submitted &amp;&amp; repoGrep.loaded &amp;&amp; !repoGrep.inProgress}"
+      variant="caption"
+      value="{window.__bramFilesCaption(window.__bramFilesSearchTree(submitted, repoTree.value, repoGrep.value))}" />
+    <Text when="{!!submitted &amp;&amp; repoGrep.inProgress}" variant="caption" value="Searching…" />
+
+    <!-- Browse. Mounted only once there are rows: a mounted Tree keeps the
+         data it was born with (the sandbox's finding), and mounting on
+         repoTree.loaded handed it [] first, then ignored the 30 rows
+         (trace tree-dom found:true, text:"", 2026-10-09). -->
+    <VStack when="{!submitted &amp;&amp; window.__bramFilesTreeData(repoTree.value).length &gt; 0}" height="70vh">
+      <Tree
+        id="filesTree"
+        testId="files-tree"
+        height="100%"
+        data="{window.__bramFilesTreeData(repoTree.value)}"
+        dataFormat="flat"
+        dataRefreshMode="preserve-state"
+        defaultExpanded="{openIds}"
+        itemClickExpands="true"
+        fixedItemSize="true"
+        scrollStyle="whenMouseOver"
+        onNodeDidExpand="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, true)"
+        onNodeDidCollapse="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, false)">
+        <property name="itemTemplate">
+          <HStack gap="$space-2" verticalAlignment="center" onClick="window.__bramFilesOpen($item)">
+            <Text variant="mono" fontSize="0.82rem" value="{$item.name}" />
+          </HStack>
+        </property>
+      </Tree>
+    </VStack>
+
+    <!-- Search results: their own instance, remounted per query (the
+         DataSource is in progress between queries), fully expanded, hits
+         highlighted. -->
+    <VStack when="{!!submitted &amp;&amp; repoGrep.loaded &amp;&amp; !repoGrep.inProgress &amp;&amp; window.__bramFilesSearchTree(submitted, repoTree.value, repoGrep.value).nodes.length &gt; 0}" height="70vh">
+      <Tree
+        id="filesHitTree"
+        height="100%"
+        data="{window.__bramFilesSearchTree(submitted, repoTree.value, repoGrep.value).nodes}"
+        dataFormat="flat"
+        defaultExpanded="all"
+        itemClickExpands="true"
+        fixedItemSize="true"
+        scrollStyle="whenMouseOver">
+        <property name="itemTemplate">
+          <HStack gap="$space-2" verticalAlignment="center" onClick="window.__bramFilesOpen($item)">
+            <Text
+              variant="mono"
+              fontSize="0.82rem"
+              highlightText="{$item.hit ? submitted : ''}"
+              value="{$item.name}" />
+          </HStack>
+        </property>
+      </Tree>
+    </VStack>
+  </VStack>
+</Component>

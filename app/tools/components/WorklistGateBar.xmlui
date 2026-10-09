@@ -349,7 +349,7 @@
       onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <Button
       label="Commit"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'commit', gateGit.value &amp;&amp; gateGit.value.branch)}"
+      tooltipMarkdown="{window.__bramGateCommitTooltip(gateSel.value, gateGit.value &amp;&amp; gateGit.value.branch, gateWorklist.value.items, gateClaim.value, gateTurnCtx.value)}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />

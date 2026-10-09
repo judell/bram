@@ -3945,6 +3945,60 @@ window.__bramSelectionAllNeedStart = function (items, sel, claim) {
 //
 // This predicate is also what the stage icon and the strip key on, so all
 // three surfaces agree by construction rather than by coincidence.
+// unowned-lines-postmortem-fixes: what a whole-file commit of `item` would
+// take that membership credits to no item. Only paths with no begun claimant
+// outside the selection, since an entangled path is interval-staged and takes
+// only the item's own hunks.
+window.__bramItemTakeableUnowned = function (item, items, claim, coSelected) {
+  var out = { added: 0, removed: 0, paths: [] };
+  var m = window.__bramBoardMembership();
+  if (!m || !item) return out;
+  var byId = {};
+  (items || []).forEach(function (o) { byId[o.id] = o; });
+  var co = coSelected || [];
+  var outsideBegun = function (other) {
+    if (other === item.id || co.indexOf(other) !== -1) return false;
+    var o = byId[other];
+    return !!(o && window.__bramWorklist2Begun(o, claim));
+  };
+  (item.changedFiles || []).forEach(function (f) {
+    var bp = f && m.byPath[f.path];
+    if (!bp) return;
+    if ((bp.owners || []).some(outsideBegun)) return;
+    var un = bp.unowned || {};
+    var a = Number(un.added) || 0, r = Number(un.removed) || 0;
+    if (a + r > 0) { out.added += a; out.removed += r; out.paths.push(f.path); }
+  });
+  return out;
+};
+
+// unowned-lines-postmortem-fixes: the Commit button's tooltip names the
+// failing check when it is withheld. With only the scope listed, a disabled
+// Commit left the user (and the agent) guessing (2026-10-09).
+window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
+  var chosen = sel || [];
+  if (!chosen.length) return "";
+  var blocker = window.__bramInflightBlocker(claim);
+  if (blocker) return "Unavailable while Bram is working on " + blocker + "; it unlocks when that turn ends.";
+  var addressed = window.__bramAddressedBlockMessage ? window.__bramAddressedBlockMessage(chosen, ctx) : "";
+  if (addressed) return addressed;
+  if (window.__bramSelectionAllCommittable(items, chosen, claim)) return "";
+  var missing = window.__bramSelectionJointMissing(items, chosen, claim) || [];
+  if (missing.length) return "Its change is joint with " + missing.join(", ") + "; select that too to commit them together.";
+  var list = items || [];
+  for (var i = 0; i < chosen.length; i++) {
+    var it = list.filter(function (x) { return x.id === chosen[i]; })[0];
+    if (!it) continue;
+    if (!window.__bramWorklist2Begun(it, claim)) return it.id + " hasn't been started; use Start first.";
+  }
+  return "Nothing on disk is this selection's to commit.";
+};
+window.__bramGateCommitTooltip = function (sel, branch, items, claim, ctx) {
+  var scope = window.__bramGateScopeTooltip(sel, "commit", branch) || "";
+  var why = window.__bramGateCommitWhyNot(items, sel, claim, ctx);
+  return why ? scope + (scope ? "\n\n" : "") + "**Why it's off:** " + why : scope;
+};
+
 window.__bramSelectionAllCommittable = function (items, sel, claim) {
   var chosen = sel || [];
   if (!chosen.length) return false;
@@ -3978,7 +4032,15 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     // names the item to commit first, so offering here is safe — the #336
     // withholding and the #337 selection-scoping both retire into this.
     var split = window.__bramItemChangedSplit(it, list, claim, chosen);
-    if (!split.exclusive.length && !split.shared.length) return false;
+    if (!split.exclusive.length && !split.shared.length) {
+      // unowned-lines-postmortem-fixes: lines no item wrote, on a file this
+      // item declares with no other begun claimant, are taken by the
+      // whole-file commit (host: membership_unowned_taken, unownedTaken).
+      // Withholding Commit for them left Drop as the only button
+      // (2026-10-09, files-tree-no-copy-button).
+      var take = window.__bramItemTakeableUnowned(it, list, claim, chosen);
+      if (!(take.added + take.removed)) return false;
+    }
     // "Changes of its own" on a shared path means lines of its own, not just a
     // changed path: a begun item with no work, sharing a file a neighbour
     // edited, was offered Commit while its strip read "Will commit +0 −0"
@@ -4856,6 +4918,12 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
           ? " · " + changedCount + " of " + (cs.total || 0)
           : "";
       var sharedFlag = split.shared.length ? " · shared" : "";
+      // unowned-lines-postmortem-fixes: say so when what Commit takes was
+      // written under no item (the strip used to read "Its changes are all
+      // in shared files", which was false).
+      if (!split.exclusive.length && !split.shared.length) {
+        sharedFlag = " · written under no item";
+      }
       // issue-273 postscript: the "(N unattributed)" flag was withdrawn the
       // evening it shipped — three renders, three different wrong numbers
       // (74,978 → 329 → 427), each a different accounting defect in the
@@ -5533,10 +5601,15 @@ window.__bramStartConsequence = function (items, sel, claim) {
     // path, so an item that wrote nothing read as committable here while the
     // button stayed dark ("Commit makes one commit…" beside a lone Drop).
     var ownOnly = !!window.__bramBoardMembership();
+    // unowned-lines-postmortem-fixes: unowned lines the whole-file commit
+    // takes count too, matching __bramSelectionAllCommittable (the note said
+    // "nothing to commit" beside a lit Commit, demo 2026-10-09).
+    var take = window.__bramItemTakeableUnowned(itb, list, claim);
     var hasAnyChange =
       (!ownOnly && itb.changeSummary && itb.changeSummary.changed > 0) ||
       split.exclusive.length > 0 ||
-      split.shared.length > 0;
+      split.shared.length > 0 ||
+      take.added + take.removed > 0;
     if (!hasAnyChange) empty.push(itb.id);
   }
   if (empty.length) {

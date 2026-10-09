@@ -810,6 +810,87 @@ fn node_dash_e_writes(command: &str) -> bool {
     false
 }
 
+/// unowned-lines-postmortem-fixes: a script fed to `python`/`node` on stdin
+/// through a heredoc (`python3 - <<'EOF'`, `python3 -I -`, `node - <<EOF`) is
+/// a script, so it gets the same body inspection as `python -c` / `node -e`.
+/// The general `open(write-mode)` scan runs on quote-MASKED text, so in a
+/// heredoc `open(p,'w')` became `open(p,   )` and a file-writing script
+/// classified `bash-read-only` (2026-10-09 06:09:03Z, an unauthorized edit of
+/// app/__shell/helpers.js). Only an interpreter line whose remaining words
+/// are all flags (or `-`) counts: `python3 tool.py <<EOF` feeds DATA, not a
+/// script. An unquoted heredoc expands `$`/backticks, so a body carrying
+/// either is read conservatively, as for `-c`.
+fn interpreter_heredoc_writes(command: &str) -> bool {
+    let lines: Vec<&str> = command.split('\n').collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        let Some(at) = line.find("<<") else { continue };
+        let Some(lang) = heredoc_interpreter(&line[..at]) else {
+            continue;
+        };
+        let rest = line[at + 2..].trim_start_matches('-').trim_start();
+        let quoted = rest.starts_with('\'') || rest.starts_with('"');
+        let tag: String = rest
+            .trim_start_matches(|c| c == '\'' || c == '"')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if tag.is_empty() {
+            return true;
+        }
+        let mut body = String::new();
+        while i < lines.len() && lines[i].trim() != tag {
+            body.push_str(lines[i]);
+            body.push('\n');
+            i += 1;
+        }
+        if !quoted && (body.contains('$') || body.contains('`')) {
+            return true;
+        }
+        let hints = if lang == "node" {
+            NODE_WRITE_HINTS
+        } else {
+            PY_WRITE_HINTS
+        };
+        if hints.iter().any(|h| body.contains(h)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The interpreter a heredoc line runs as a stdin script: "python" (any
+/// `python`, `python3`, `python3.12`) or "node", when every word after it
+/// before the `<<` is a flag or `-`. The interpreter may follow `;`, `&&`,
+/// `|` or `(` on the same line.
+fn heredoc_interpreter(prefix: &str) -> Option<&'static str> {
+    let segment = prefix
+        .rsplit(|c| c == ';' || c == '|' || c == '&' || c == '(')
+        .next()
+        .unwrap_or(prefix);
+    let mut words = segment.split_whitespace();
+    let first = words.next()?;
+    let base = first.rsplit('/').next().unwrap_or(first);
+    let lang = if base == "node" {
+        "node"
+    } else if base.starts_with("python")
+        && base["python".len()..]
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.')
+    {
+        "python"
+    } else {
+        return None;
+    };
+    if words.all(|w| w.starts_with('-')) {
+        Some(lang)
+    } else {
+        None
+    }
+}
+
 /// #299 (case 2): the Python guard treats the mere presence of `python -c` as
 /// a write. Here the inline script is read: if it can be extracted and carries
 /// no write indicator, the command is not a write via this pattern. When the
@@ -1045,6 +1126,9 @@ fn write_patterns_token(command: &str, skip: SkipPattern) -> Option<String> {
     // classification below that denied pure-expression one-liners.
     if node_dash_e_writes(command) {
         return Some("node -e".to_string());
+    }
+    if interpreter_heredoc_writes(command) {
+        return Some("interpreter heredoc".to_string());
     }
     let masked_owned = mask_quoted_spans(command);
     let scan: &str = masked_owned.as_deref().unwrap_or(command);
@@ -6459,6 +6543,47 @@ mod guard_policy_tests {
         assert!(shadow_worklist_decision("gemini-rs", &payload).is_none());
         assert!(shadow_worklist_decision("claude-rs", &payload).is_some());
         assert!(shadow_worklist_decision("codex-rs", &payload).is_some());
+    }
+
+    // unowned-lines-postmortem-fixes: a stdin script through a heredoc is
+    // inspected like `python -c` / `node -e`.
+    #[test]
+    fn interpreter_heredoc_writes_classify_as_writes() {
+        // The 2026-10-09 06:09:03Z command's shape: quote-masking hid 'w'.
+        let incident = "python3 - <<'EOF'\np='/x/helpers.js'\ns=open(p).read()\nopen(p,'w').write(s)\nEOF\nnode --check helpers.js";
+        assert!(interpreter_heredoc_writes(incident));
+        assert_eq!(
+            write_patterns_token(incident, SkipPattern::None).as_deref(),
+            Some("interpreter heredoc")
+        );
+        assert!(interpreter_heredoc_writes(
+            "python3 -I - <<'EOF'\nimport os\nos.replace('a','b')\nEOF"
+        ));
+        assert!(interpreter_heredoc_writes(
+            "cd x && python3.12 - <<EOF\nshutil.copy('a','b')\nEOF"
+        ));
+        assert!(interpreter_heredoc_writes(
+            "node - <<'JS'\nrequire('fs').writeFileSync('a','b')\nJS"
+        ));
+        // Unquoted tag: the shell expands the body, so `$` is conservative.
+        assert!(interpreter_heredoc_writes(
+            "python3 - <<EOF\nprint(\"$HOME\")\nEOF"
+        ));
+    }
+
+    #[test]
+    fn interpreter_heredoc_reads_stay_reads() {
+        let read = "python3 -I - <<'EOF'\nimport json,sys\nprint(len(sys.argv))\nEOF";
+        assert!(!interpreter_heredoc_writes(read));
+        assert_eq!(write_patterns_token(read, SkipPattern::None), None);
+        // A script FILE reading heredoc data is not a stdin script.
+        assert!(!interpreter_heredoc_writes(
+            "python3 tool.py <<'EOF'\nopen(x,'w')\nEOF"
+        ));
+        // Not an interpreter at all.
+        assert!(!interpreter_heredoc_writes("cat <<'EOF'\nopen(x,'w')\nEOF"));
+        assert_eq!(heredoc_interpreter("pythonista -"), None);
+        assert_eq!(heredoc_interpreter("/usr/bin/python3 -I -"), Some("python"));
     }
 
     #[test]

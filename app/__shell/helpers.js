@@ -16817,9 +16817,12 @@ window.__bramInstallCodeBlockTools = function () {
   window.__bramCodeBlockToolsInstalled = true;
   var btn = null;
   var current = null;
+  // Not inside a Tree: the Files page's rows are Text variant="mono", which
+  // renders a <pre>, and the button covered the file names (2026-10-09).
   var preOf = function (node) {
     var el = node && (node.nodeType === 1 ? node : node.parentElement);
-    return el && el.closest ? el.closest("pre") : null;
+    if (!el || !el.closest || el.closest('[role="tree"]')) return null;
+    return el.closest("pre");
   };
   // The "Copied" label resets when the button next hides or moves to another
   // block: event-driven, no timer.

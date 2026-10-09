@@ -2891,10 +2891,58 @@ fn trace_would_deny_unaddressed(project_root: &Path, provider: &str, tool: &str,
         // `auth=` is the decision input; `ctx=` stays for diagnosis so the two
         // suppression reasons remain distinguishable when reading a soak.
         &format!(
-            "target={} auth=none ctx={} reason=general-turn-item-edit",
-            rel, ctx
+            "target={} auth=none ctx={} reason={}",
+            rel,
+            ctx,
+            would_deny_reason(project_root, rel)
         ),
     );
+}
+
+// guard-coverage-requires-begun-item: split the soak by WHAT covered the
+// path. `general-turn-item-edit` is #368's class: a begun item (applied, or
+// `begunAtMs` stamped by the host at its first approval) covers it.
+// `proposed-only-coverage` is the narrower, harmful class: only items nobody
+// has started cover it (2026-10-09 06:09:03Z: app/__shell/helpers.js, named
+// only by the unstarted issue-425-retire-replay, edited in a chat turn).
+// Observe-only; the eventual rule keys on this reason.
+fn would_deny_reason(project_root: &Path, rel: &str) -> &'static str {
+    let begun = begun_item_ids(project_root);
+    let begun_cov = worklist_covered_files_filtered(project_root, Some(&begun));
+    if coverage_verdict(&begun_cov, rel).0 {
+        "general-turn-item-edit"
+    } else {
+        "proposed-only-coverage"
+    }
+}
+
+/// Items that have begun: `applied`, or `proposed` with the host-written
+/// `begunAtMs` (conventions: "the durable answer to 'has work on this item
+/// begun?'").
+fn begun_item_ids(project_root: &Path) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let Ok(text) = std::fs::read_to_string(project_root.join(WORKLIST_REL)) else {
+        return ids;
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+        return ids;
+    };
+    for it in doc
+        .get("items")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(o) = it.as_object() else { continue };
+        let applied = o.get("status").and_then(|v| v.as_str()) == Some("applied");
+        let begun = o.get("begunAtMs").and_then(|v| v.as_f64()).is_some();
+        if applied || begun {
+            if let Some(id) = o.get("id").and_then(|v| v.as_str()) {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+    ids
 }
 
 /// issue-387: refines a Bash branch's coarse "some begun item covers
@@ -5327,6 +5375,29 @@ mod guard_policy_tests {
         assert!(!text.is_empty(), "must not read as an empty worklist");
         assert!(text.contains("src/x.rs"), "content must survive: {text:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // guard-coverage-requires-begun-item
+    #[test]
+    fn would_deny_reason_separates_unstarted_proposals_from_begun_items() {
+        let root = scratch("would-deny-reason");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(
+            root.join(WORKLIST_REL),
+            serde_json::json!({ "items": [
+                { "id": "unstarted", "status": "proposed", "files": ["a.js"] },
+                { "id": "begun", "status": "proposed", "begunAtMs": 1, "files": ["b.js"] },
+                { "id": "done", "status": "applied", "files": ["c.js"] },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(would_deny_reason(&root, "a.js"), "proposed-only-coverage");
+        assert_eq!(would_deny_reason(&root, "b.js"), "general-turn-item-edit");
+        assert_eq!(would_deny_reason(&root, "c.js"), "general-turn-item-edit");
+        let ids = begun_item_ids(&root);
+        assert!(ids.contains("begun") && ids.contains("done") && !ids.contains("unstarted"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn scratch(name: &str) -> PathBuf {

@@ -17703,10 +17703,10 @@ fn pty_spawn(
             gate: !cfg!(windows),
             first_command: true,
             hook: Box::new(move |app, phase| {
+                // issue-429-digest-publish-watermark: autostart no longer
+                // marks the session it enters; digests advance their own
+                // watermark when written.
                 if phase == LaunchPhase::Confirmed {
-                    if let Some(id) = live_session_id(app, launch_provider) {
-                        mark_session_entered(app, launch_provider, &id);
-                    }
                     return;
                 }
                 if phase != LaunchPhase::Written {
@@ -20331,17 +20331,11 @@ fn switch_agent(
                         }
                         if queued.is_ok() {
                             emit_catch_up_offer(app, None, None, None);
-                            if let Some(id) = target_sid.as_deref() {
-                                mark_session_entered(app, target_provider, id);
-                            }
                             return;
                         }
                     }
                 }
                 emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
-                if let Some(id) = target_sid.as_deref() {
-                    mark_session_entered(app, target_provider, id);
-                }
                 return;
             }
             if phase != LaunchPhase::Written {
@@ -20657,14 +20651,22 @@ fn session_digest_rel_path(provider: SessionProvider, id: &str) -> String {
     )
 }
 
-fn session_digest_marks_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    session_digest_dir(app).map(|d| d.join(".marks.json"))
+// issue-429-digest-publish-watermark: per session, the turn total its last
+// written digest reached ("published to the partner through turn N"). It
+// advances only when a digest is written. The old `.marks.json` held ENTRY
+// marks, re-set on every switch, autostart and reload into a session, so the
+// session being worked in kept skipping its unpublished turns and went dark to
+// its partner (#429: mark 2162 against a last digest of 2157, `turns=0`). A
+// fresh file, because those entry marks already run ahead of what was
+// published; the old one is left alone, inert.
+fn session_digest_published_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    session_digest_dir(app).map(|d| d.join(".published.json"))
 }
 
-fn read_session_digest_marks<R: tauri::Runtime>(
+fn read_session_digest_published<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> serde_json::Map<String, serde_json::Value> {
-    session_digest_marks_path(app)
+    session_digest_published_path(app)
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| v.as_object().cloned())
@@ -20688,18 +20690,16 @@ fn session_turns<R: tauri::Runtime>(
 }
 
 // Record a session's turn total as it is entered.
-fn mark_session_entered<R: tauri::Runtime>(
+fn record_session_published<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: SessionProvider,
     id: &str,
+    total: usize,
 ) {
-    let Some((total, _)) = session_turns(app, provider, id) else {
+    let Some(path) = session_digest_published_path(app) else {
         return;
     };
-    let Some(path) = session_digest_marks_path(app) else {
-        return;
-    };
-    let mut marks = read_session_digest_marks(app);
+    let mut marks = read_session_digest_published(app);
     marks.insert(
         format!("{}-{}", session_provider_label(provider), id),
         serde_json::json!(total),
@@ -20708,6 +20708,44 @@ fn mark_session_entered<R: tauri::Runtime>(
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(&path, serde_json::Value::Object(marks).to_string());
+}
+
+// issue-429-digest-publish-watermark: how many of the latest turns a digest
+// covers. No watermark, or one AHEAD of the total (a rotated or compacted
+// session, or a different file behind the id): the latest window, never a
+// silent zero.
+fn digest_new_turns(total: usize, watermark: Option<usize>, window_len: usize) -> usize {
+    match watermark {
+        Some(m) if m <= total => total - m,
+        _ => window_len,
+    }
+}
+
+#[cfg(test)]
+mod session_digest_watermark_tests {
+    use super::digest_new_turns;
+
+    #[test]
+    fn new_turns_cover_none_behind_and_ahead() {
+        // No watermark: the latest window.
+        assert_eq!(digest_new_turns(2157, None, 40), 40);
+        // Behind: exactly the unpublished turns.
+        assert_eq!(digest_new_turns(2162, Some(2157), 40), 5);
+        // Ahead (rotated or compacted session): the window, not a silent 0.
+        assert_eq!(digest_new_turns(100, Some(2162), 40), 40);
+        // Caught up: nothing new, so nothing is written.
+        assert_eq!(digest_new_turns(2162, Some(2162), 40), 0);
+    }
+
+    // #429's sequence: published at 10, the session re-entered at 15
+    // (relaunch / reload), worked to 20, then left. Entry no longer moves
+    // the watermark, so the digest covers 10 -> 20, not 15 -> 20.
+    #[test]
+    fn re_entering_a_session_does_not_hide_its_unpublished_turns() {
+        let published = Some(10);
+        // (entry at 15 records nothing)
+        assert_eq!(digest_new_turns(20, published, 40), 10);
+    }
 }
 
 fn clip_chars(s: &str, n: usize) -> String {
@@ -20784,17 +20822,17 @@ fn write_session_digest<R: tauri::Runtime>(
 ) -> Option<(String, usize)> {
     let (total, window) = session_turns(app, provider, id)?;
     let mark = if since_mark {
-        read_session_digest_marks(app)
+        read_session_digest_published(app)
             .get(&format!("{}-{}", session_provider_label(provider), id))
             .and_then(|v| v.as_u64())
             .map(|m| m as usize)
     } else {
         None
     };
-    let new = match mark {
-        Some(m) => total.saturating_sub(m),
-        None => window.len(),
-    };
+    let from = mark
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let new = digest_new_turns(total, mark, window.len());
     let candidates = drop_catch_up_exchanges(&window[window.len() - new.min(window.len())..]);
     let take = candidates.len();
     if bram_trace_enabled() && take == 0 {
@@ -20802,9 +20840,11 @@ fn write_session_digest<R: tauri::Runtime>(
             app,
             "agent-switch",
             &format!(
-                "op=digest-written provider={} session={} turns=0",
+                "op=digest-written provider={} session={} turns=0 from={} total={}",
                 session_provider_label(provider),
-                id
+                id,
+                from,
+                total
             ),
         );
     }
@@ -20826,16 +20866,21 @@ fn write_session_digest<R: tauri::Runtime>(
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join(format!("{}-{}.md", session_provider_label(provider), id));
     std::fs::write(&file, body.as_bytes()).ok()?;
+    // Published through `total`: the next digest starts here, however many
+    // times the session is entered (switch, autostart, reload) before then.
+    record_session_published(app, provider, id, total);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
             "agent-switch",
             &format!(
-                "op=digest-written provider={} session={} turns={} bytes={}",
+                "op=digest-written provider={} session={} turns={} bytes={} from={} total={}",
                 session_provider_label(provider),
                 id,
                 take,
-                body.len()
+                body.len(),
+                from,
+                total
             ),
         );
     }
@@ -21387,9 +21432,6 @@ fn reload_agent_session(
         first_command: false,
         hook: Box::new(move |app, phase| {
             if phase == LaunchPhase::Confirmed {
-                if session_exists {
-                    mark_session_entered(app, session_provider, &session);
-                }
                 if let (Some(from), true) = (leaving.as_ref(), session_exists) {
                     record_pair_for(
                         app,

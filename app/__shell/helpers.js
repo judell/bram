@@ -3984,12 +3984,15 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
   if (addressed) return addressed;
   if (window.__bramSelectionAllCommittable(items, chosen, claim)) return "";
   var missing = window.__bramSelectionJointMissing(items, chosen, claim) || [];
-  if (missing.length) return "Its change is joint with " + missing.join(", ") + "; select that too to commit them together.";
+  if (missing.length) return "It commits only together with " + missing.join(", ") + "; tick both and commit once.";
   var list = items || [];
   for (var i = 0; i < chosen.length; i++) {
     var it = list.filter(function (x) { return x.id === chosen[i]; })[0];
     if (!it) continue;
     if (!window.__bramWorklist2Begun(it, claim)) return it.id + " hasn't been started; use Start first.";
+    if ((it.commitCheckFailedPaths || []).length) {
+      return it.id + "'s change doesn't apply to HEAD on its own (" + it.commitCheckFailedPaths.join(", ") + ").";
+    }
   }
   return "Nothing on disk is this selection's to commit.";
 };
@@ -4022,6 +4025,9 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     // items were both offered a button that would land one item's work
     // under the other's id. Begun-ness is trivially true for applied items.
     if (!window.__bramWorklist2Begun(it, claim)) return false;
+    // issue-430: the host's precheck says this item's patch does not apply to
+    // HEAD on its own, and names no begun item it depends on.
+    if ((it.commitCheckFailedPaths || []).length && !(it.commitDependsOn || []).length) return false;
     // issue-327: exclusivity is no longer required to OFFER Commit. The host
     // now interval-stages an entangled item's own hunks (scratch index, HEAD
     // parent, worktree untouched), so a shared path is committable — the
@@ -4824,6 +4830,12 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
     return base + " · " + (asClaim ? "closes " : "for ") + closesList;
   };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
+  // issue-430-dependent-commit-offer: a refused commit used to reach only the
+  // agent's HTTP response, and the row kept offering it ("bram does not tell
+  // me that!"). The host keeps the last refusal until HEAD moves.
+  if (!kind && item.lastCommitRefusal && item.lastCommitRefusal.reason) {
+    return withCloses("Last Commit was refused: " + item.lastCommitRefusal.reason);
+  }
   if (kind) {
     // Every label below asserts that work is HAPPENING, so they are gated
     // on an agent actually working. A live claim with no working agent
@@ -5282,7 +5294,10 @@ window.__bramSelectionJointMissing = function (items, sel, claim) {
   var missing = [];
   for (var s = 0; s < chosen.length; s++) {
     var it = byId[chosen[s]];
-    var jw = (it && it.jointWith) || [];
+    // issue-430: a patch that only applies on top of another begun item's
+    // uncommitted lines (host precheck, commitDependsOn) is refused alone,
+    // exactly like a joint run.
+    var jw = ((it && it.jointWith) || []).concat((it && it.commitDependsOn) || []);
     for (var j = 0; j < jw.length; j++) {
       var partner = byId[jw[j]];
       if (!partner) continue;

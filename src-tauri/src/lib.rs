@@ -49237,6 +49237,259 @@ fn claim_interval_diff<R: tauri::Runtime>(
 
 // issue-327 interval staging: commit the requested items' OWN hunks by
 // applying their interval patches to a scratch index seeded from HEAD and
+// issue-430-dependent-commit-offer: the combined interval patch for `ids`,
+// built the way the commit builds it, shared by `interval_stage_commit` and
+// `interval_commit_precheck` so the pane's offer and the gate cannot drift.
+// Each requested id's own hunks across its files. A per-path chunk ALREADY IN
+// HEAD (reverse-applies cleanly against the HEAD-seeded index) is skipped
+// rather than accumulated — issue-364's resume case: an item retained after a
+// partial commit still has its intervals on record, and re-deriving the
+// committed patch would fail the order-independence gate with a misleading
+// "defined relative to another item's work". With every chunk already applied,
+// the honest answer is the no-interval refusal.
+fn interval_build_patch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    item_files: &std::collections::HashMap<String, Vec<String>>,
+    git_idx: &dyn Fn(&[&str]) -> Result<String, String>,
+    pfile: &std::path::Path,
+) -> (String, Vec<String>) {
+    let pfile_chk = pfile.to_string_lossy().to_string();
+    let mut patch = String::new();
+    let mut committed: Vec<String> = Vec::new();
+    for id in ids {
+        for path in item_files.get(id).cloned().unwrap_or_default() {
+            let d = claim_interval_diff(app, id, &path);
+            let Some(p) = d.get("patch").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if p.trim().is_empty() {
+                continue;
+            }
+            // issue-430 (problem 4): a chunk that CREATES the file cannot be
+            // already in HEAD unless HEAD has the path. #430's trace logged
+            // `interval-already-applied` for an untracked new file, #419's
+            // signature for a declared new file left out of a commit.
+            let creates = patch_creates_file(p);
+            let in_head =
+                !creates || git_idx(&["cat-file", "-e", &format!("HEAD:{}", path)]).is_ok();
+            if in_head
+                && std::fs::write(pfile, p).is_ok()
+                && git_idx(&["apply", "--cached", "--check", "--reverse", &pfile_chk]).is_ok()
+            {
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!(
+                        "op=interval-already-applied path={} creates={} sections={}",
+                        path,
+                        creates,
+                        p.matches("diff --git ").count()
+                    ),
+                );
+                continue;
+            }
+            patch.push_str(p);
+            if !committed.contains(&path) {
+                committed.push(path);
+            }
+        }
+    }
+    (patch, committed)
+}
+
+fn patch_creates_file(patch: &str) -> bool {
+    patch
+        .lines()
+        .any(|l| l.starts_with("new file mode") || l == "--- /dev/null")
+}
+
+fn interval_dependent_refusal(git_err: &str) -> String {
+    format!(
+        "commit refused: the requested item's interval patch does not apply to HEAD — its \
+         change is defined relative to another begun item's work not in this request. Commit \
+         that item first, or approve both together. (git apply: {})",
+        git_err
+    )
+}
+
+// The paths `git apply --check` names as failing: "error: patch failed:
+// <path>:<line>" and "error: <path>: patch does not apply".
+fn git_apply_failed_paths(err: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in err.split(['\n', '|']) {
+        let l = line.trim();
+        let path = if let Some(rest) = l.strip_prefix("error: patch failed: ") {
+            rest.rsplit_once(':').map(|(p, _)| p.to_string())
+        } else if let Some(rest) = l.strip_prefix("error: ") {
+            rest.strip_suffix(": patch does not apply")
+                .map(String::from)
+        } else {
+            None
+        };
+        if let Some(p) = path {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod issue_430_tests {
+    use super::{git_apply_failed_paths, patch_creates_file};
+
+    #[test]
+    fn failed_paths_parse_the_issue_430_error() {
+        // The git half of #430's refusal, verbatim.
+        let e = "error: patch failed: Main.xmlui:62\nerror: Main.xmlui: patch does not apply\nerror: patch failed: Globals.xs:380\nerror: Globals.xs: patch does not apply\nerror: patch failed: layout.json:7\nerror: layout.json: patch does not apply";
+        assert_eq!(
+            git_apply_failed_paths(e),
+            vec!["Main.xmlui", "Globals.xs", "layout.json"]
+        );
+        assert!(git_apply_failed_paths("fatal: something else").is_empty());
+        assert_eq!(
+            git_apply_failed_paths("error: patch failed: dir/a b.txt:3"),
+            vec!["dir/a b.txt"]
+        );
+    }
+
+    #[test]
+    fn creation_chunks_are_recognized() {
+        let create = "diff --git a/s.sh b/s.sh\nnew file mode 100755\nindex 0000000..23d2ecc\n--- /dev/null\n+++ b/s.sh\n@@ -0,0 +1 @@\n+x\n";
+        assert!(patch_creates_file(create));
+        let modify = "diff --git a/s.sh b/s.sh\n--- a/s.sh\n+++ b/s.sh\n@@ -1 +1 @@\n-x\n+y\n";
+        assert!(!patch_creates_file(modify));
+    }
+}
+
+// issue-430-dependent-commit-offer: precheck results keyed by (HEAD, take,
+// interval paths), so the Worklist's frequent recompute runs git only when
+// something moved.
+fn commit_precheck_cached<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    declared: &[String],
+    key: &str,
+) -> Result<(), Vec<String>> {
+    static CACHE: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, (String, Result<(), Vec<String>>)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
+    if let Ok(g) = cache.lock() {
+        if let Some((k, r)) = g.get(id) {
+            if k == key {
+                return r.clone();
+            }
+        }
+    }
+    let mut files: std::collections::HashMap<String, Vec<String>> = Default::default();
+    files.insert(id.to_string(), declared.to_vec());
+    let r = interval_commit_precheck(app, &[id.to_string()], &files);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!(
+                "op=commit-precheck item={} result={}",
+                id,
+                match &r {
+                    Ok(()) => "applies".to_string(),
+                    Err(p) => format!("dependent paths={}", p.join(",")),
+                }
+            ),
+        );
+    }
+    if let Ok(mut g) = cache.lock() {
+        g.insert(id.to_string(), (key.to_string(), r.clone()));
+    }
+    r
+}
+
+// issue-430: the last commit refusal per item, shown on its row until HEAD
+// moves (a commit landed, so the board is different). In memory: a relaunch
+// starts clean.
+fn last_commit_refusal_cell(
+) -> &'static Mutex<std::collections::HashMap<String, (i64, String, String)>> {
+    static C: std::sync::OnceLock<Mutex<std::collections::HashMap<String, (i64, String, String)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(Default::default()))
+}
+
+fn record_last_commit_refusal(ids: &[String], head: &str, reason: &str) {
+    if let Ok(mut g) = last_commit_refusal_cell().lock() {
+        for id in ids {
+            g.insert(
+                id.clone(),
+                (unix_now_ms(), reason.to_string(), head.to_string()),
+            );
+        }
+    }
+}
+
+fn last_commit_refusal_for(id: &str, head: &str) -> Option<(i64, String)> {
+    let mut g = last_commit_refusal_cell().lock().ok()?;
+    match g.get(id) {
+        Some((at, reason, h)) if h == head => Some((*at, reason.clone())),
+        Some(_) => {
+            g.remove(id);
+            None
+        }
+        None => None,
+    }
+}
+
+// issue-430-dependent-commit-offer: the gate's own order-independence check,
+// run ahead of the click on a scratch index (worktree and real index never
+// touched). Ok(()) when committing `ids` alone would apply; Err(failing paths)
+// when the patch is defined relative to work not in the request. A request
+// with nothing to stage is Ok here; the gate's no-interval refusal covers it.
+fn interval_commit_precheck<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    item_files: &std::collections::HashMap<String, Vec<String>>,
+) -> Result<(), Vec<String>> {
+    let Some(root) = project_root(Some(app)) else {
+        return Ok(());
+    };
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let idx = std::env::temp_dir().join(format!(
+        "bram-precheck-index-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let pfile = idx.with_extension("patch");
+    let git_idx = |args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .env("GIT_INDEX_FILE", &idx)
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let result = (|| {
+        if git_idx(&["read-tree", "HEAD"]).is_err() {
+            return Ok(());
+        }
+        let (patch, _) = interval_build_patch(app, ids, item_files, &git_idx, &pfile);
+        if patch.trim().is_empty() || std::fs::write(&pfile, &patch).is_err() {
+            return Ok(());
+        }
+        match git_idx(&["apply", "--cached", "--check", &pfile.to_string_lossy()]) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(git_apply_failed_paths(&e)),
+        }
+    })();
+    let _ = std::fs::remove_file(&idx);
+    let _ = std::fs::remove_file(&pfile);
+    result
+}
+
 // committing that tree — the worktree and the real index are NEVER touched.
 // This is what makes committing one entangled item safe while another begun
 // item's uncommitted work remains in shared files: whole-file staging takes
@@ -49284,42 +49537,7 @@ fn interval_stage_commit<R: tauri::Runtime>(
         cleanup();
         return Err(format!("scratch index seed failed: {}", e));
     }
-    let pfile_chk = pfile.to_string_lossy().to_string();
-    // Combined interval patch: each requested id's own hunks across its files.
-    // A per-path chunk ALREADY IN HEAD (reverse-applies cleanly against the
-    // HEAD-seeded index) is skipped rather than accumulated — issue-364's
-    // resume case: an item retained after a partial commit still has its
-    // intervals on record, and re-deriving the committed patch would fail the
-    // order-independence gate below with a misleading "defined relative to
-    // another item's work". With every chunk already applied, the honest
-    // answer is the no-interval refusal (nothing interval-attributed remains
-    // to stage).
-    let mut patch = String::new();
-    let mut committed: Vec<String> = Vec::new();
-    for id in ids {
-        for path in item_files.get(id).cloned().unwrap_or_default() {
-            let d = claim_interval_diff(app, id, &path);
-            if let Some(p) = d.get("patch").and_then(|v| v.as_str()) {
-                if !p.trim().is_empty() {
-                    if std::fs::write(&pfile, p).is_ok()
-                        && git_idx(&["apply", "--cached", "--check", "--reverse", &pfile_chk])
-                            .is_ok()
-                    {
-                        append_bram_trace_line(
-                            app,
-                            "worklist-commit",
-                            &format!("op=interval-already-applied path={}", path),
-                        );
-                        continue;
-                    }
-                    patch.push_str(p);
-                    if !committed.contains(&path) {
-                        committed.push(path);
-                    }
-                }
-            }
-        }
-    }
+    let (patch, committed) = interval_build_patch(app, ids, item_files, &git_idx, &pfile);
     if patch.trim().is_empty() {
         cleanup();
         return Err("no-interval".to_string());
@@ -49334,12 +49552,7 @@ fn interval_stage_commit<R: tauri::Runtime>(
     // which would commit `<<<<<<<` under an item's id.
     if let Err(e) = git_idx(&["apply", "--cached", "--check", &pfile_s]) {
         cleanup();
-        return Err(format!(
-            "commit refused: the requested item's interval patch does not apply to HEAD — its \
-             change is defined relative to another begun item's work not in this request. Commit \
-             that item first, or approve both together. (git apply: {})",
-            e
-        ));
+        return Err(interval_dependent_refusal(&e));
     }
     if let Err(e) = git_idx(&["apply", "--cached", &pfile_s]) {
         cleanup();
@@ -68620,6 +68833,10 @@ fn route_request<R: tauri::Runtime>(
             // Display tolerates a stale partition; with none, fall back to the
             // replay's owners, per path, as before.
             let wc_partition = membership_partition(app).map(|(p, _)| p);
+            // issue-430: the HEAD the precheck cache and refusal records key on.
+            let wc_head = git_run(app, &["rev-parse", "HEAD"])
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
                 // Begun the way the gate counts it (handle_worklist_commit's
                 // begun_outside): `applied` OR a host-stamped begunAtMs. Keying
@@ -68728,7 +68945,61 @@ fn route_request<R: tauri::Runtime>(
                         );
                         append_bram_trace_line(app, "claim-interval", &line);
                     }
+                    // issue-430-dependent-commit-offer: an entangled item is
+                    // interval-staged, and the gate refuses a patch that does
+                    // not apply to HEAD on its own. Run that same check now
+                    // (cached on HEAD + the take) so the pane can withhold the
+                    // single-item Commit and name what it depends on.
+                    let precheck: Option<Result<(), Vec<String>>> = if item_entangled == Some(true)
+                    {
+                        let key =
+                            format!("{}|{}|{}|{}", wc_head, wc.0, wc.1, interval_paths.join(","));
+                        Some(commit_precheck_cached(app, &id, &declared, &key))
+                    } else {
+                        None
+                    };
+                    let depends_on: Option<(Vec<String>, Vec<String>)> = match &precheck {
+                        Some(Err(failing)) => {
+                            let owners: Vec<String> = wc_partition
+                                .as_ref()
+                                .map(|p| {
+                                    let outside: std::collections::HashSet<String> =
+                                        begun.iter().filter(|b| **b != id).cloned().collect();
+                                    let mut o: Vec<String> = Vec::new();
+                                    for (path, owner) in membership_entangling_owners(
+                                        p,
+                                        &declared,
+                                        &[id.clone()],
+                                        &outside,
+                                    ) {
+                                        if (failing.is_empty() || failing.contains(&path))
+                                            && !o.contains(&owner)
+                                        {
+                                            o.push(owner);
+                                        }
+                                    }
+                                    o
+                                })
+                                .unwrap_or_default();
+                            Some((owners, failing.clone()))
+                        }
+                        _ => None,
+                    };
+                    let refusal = last_commit_refusal_for(&id, &wc_head);
                     if let Some(obj) = item.as_object_mut() {
+                        if let Some((owners, failing)) = &depends_on {
+                            obj.insert("commitDependsOn".to_string(), serde_json::json!(owners));
+                            obj.insert(
+                                "commitCheckFailedPaths".to_string(),
+                                serde_json::json!(failing),
+                            );
+                        }
+                        if let Some((at_ms, reason)) = &refusal {
+                            obj.insert(
+                                "lastCommitRefusal".to_string(),
+                                serde_json::json!({ "atMs": at_ms, "reason": reason }),
+                            );
+                        }
                         obj.insert(
                             "willCommit".to_string(),
                             serde_json::json!({ "added": wc.0, "removed": wc.1 }),
@@ -72353,7 +72624,17 @@ fn warn_missing_helper_coverage<R: tauri::Runtime>(app: &AppHandle<R>, committed
     }
 }
 
-fn release_claim_on_commit_refusal<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String]) {
+fn release_claim_on_commit_refusal<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    reason: &str,
+) {
+    // issue-430: the refusal used to reach only the agent's HTTP response.
+    // Record it for the rows (shown until HEAD moves).
+    let head = git_run(app, &["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    record_last_commit_refusal(ids, &head, reason);
     let _ = shrink_inflight_claim_sentinel(app, ids);
     append_bram_trace_line(
         app,
@@ -72914,7 +73195,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 .unwrap_or(false);
             if unformatted {
                 append_bram_trace_line(app, "worklist-commit", "op=refuse-unformatted-rust");
-                release_claim_on_commit_refusal(app, &ids);
+                release_claim_on_commit_refusal(app, &ids, "Rust is not formatted; run cargo fmt");
                 return worklist_json_error(
                     409,
                     "commit refused: Rust is not formatted. Run `cargo fmt` in src-tauri and retry."
@@ -72958,7 +73239,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         match gate_worktree_snapshot(app, &snap_files) {
             Ok(s) => s,
             Err(e) => {
-                release_claim_on_commit_refusal(app, &ids);
+                release_claim_on_commit_refusal(app, &ids, "the worktree snapshot failed");
                 return worklist_json_error(500, format!("worktree snapshot failed: {}", e));
             }
         }
@@ -72985,7 +73266,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             "worklist-commit",
             &format!("op=refuse-membership-unavailable ids={}", ids.join(",")),
         );
-        release_claim_on_commit_refusal(app, &ids);
+        release_claim_on_commit_refusal(
+            app,
+            &ids,
+            "Bram couldn't tell which lines belong to which item",
+        );
         return worklist_json_error(
             409,
             "commit refused: Bram couldn't work out which lines belong to which item right \
@@ -73051,7 +73336,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                                 member_ids.join(",")
                             ),
                         );
-                        release_claim_on_commit_refusal(app, &ids);
+                        release_claim_on_commit_refusal(
+                            app,
+                            &ids,
+                            "it's part of a joint change; commit it together with its partner",
+                        );
                         // avoid-futile-joint-commit: "separate the hunks by hand
                         // and retry" used to close this message, and it is
                         // unsatisfiable — attribution here is keyed on the
@@ -73144,7 +73433,18 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 committed_paths = cp;
             }
             Err(e) if e == "no-interval" => {
-                release_claim_on_commit_refusal(app, &ids);
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "worklist-commit",
+                        &format!("op=refuse-no-interval ids={}", ids.join(",")),
+                    );
+                }
+                release_claim_on_commit_refusal(
+                    app,
+                    &ids,
+                    "nothing of its own to stage on its shared files",
+                );
                 return worklist_json_error(
                     409,
                     "commit refused: this item's changes are entirely shared with another begun \
@@ -73154,7 +73454,25 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 );
             }
             Err(e) => {
-                release_claim_on_commit_refusal(app, &ids);
+                // issue-430: this refusal was untraced; the trace ended at the
+                // staging lines.
+                let failing = git_apply_failed_paths(&e);
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "worklist-commit",
+                        &format!(
+                            "op=refuse-interval-dependent ids={} paths={}",
+                            ids.join(","),
+                            failing.join(",")
+                        ),
+                    );
+                }
+                release_claim_on_commit_refusal(
+                    app,
+                    &ids,
+                    "its change depends on another item's uncommitted lines; commit them together",
+                );
                 return worklist_json_error(409, e);
             }
         }
@@ -73271,7 +73589,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                     "op=refuse-empty-commit stage=whole-file",
                 );
             }
-            release_claim_on_commit_refusal(app, &ids);
+            release_claim_on_commit_refusal(app, &ids, "no changes to commit");
             return worklist_json_error(
                 409,
                 "commit refused: this item's declared files carry no changes to commit \
@@ -73302,7 +73620,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                     drift.iter().take(5).cloned().collect::<Vec<_>>().join(",")
                 ),
             );
-            release_claim_on_commit_refusal(app, &ids);
+            release_claim_on_commit_refusal(
+                app,
+                &ids,
+                "files changed while the commit was being prepared",
+            );
             return worklist_json_error(
                 409,
                 format!(
@@ -73434,7 +73756,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         if bram_trace_enabled() {
             append_bram_trace_line(app, "worklist-commit", "op=refuse-empty-commit");
         }
-        release_claim_on_commit_refusal(app, &ids);
+        release_claim_on_commit_refusal(app, &ids, "no changes to commit");
         return worklist_json_error(
             409,
             "commit refused: the commit would create no new revision — this item's declared \

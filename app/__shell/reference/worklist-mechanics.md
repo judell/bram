@@ -32,7 +32,11 @@ are honored. The user-facing contract is identical for both agents.
   entire turn text including the prefix. The PreToolUse hook allows the
   edits via the existing `fresh_bypass()` path.
 - Both opt-out matchers (guard-side and host-side) read the item-
-  feedback drafts as well as inline text.
+  feedback drafts as well as inline text. Claude's guard also reads the
+  outbound-turn file a "Read and follow this Bram turn: @resources/
+  outbound-turns/<id>-turn.json" frame names, where a multi-line, long
+  or image-carrying message's words live (#431); the host-side matcher
+  sees the raw text before framing.
 
 ## Feedback payload details
 

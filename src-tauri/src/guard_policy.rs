@@ -3239,6 +3239,42 @@ fn iterate_feedback_text(project_root: &Path, last_msg: &str) -> String {
     out.join("\n")
 }
 
+/// issue-431-opt-out-in-outbound-turn: a turn Bram delivers through an
+/// outbound-turn file reaches the transcript only as its frame,
+/// `Read and follow this Bram turn: @resources/outbound-turns/<id>-turn.json
+/// …`, so the user's words, "just do it" included, live in the file's `text`.
+/// Since 9b40e82 (2026-10-02, #416) every message with a line break takes
+/// that route; before it, short ones went inline and the phrase was visible.
+/// Same indirection as `iterate_feedback_text`, same name hygiene.
+fn outbound_turn_text(project_root: &Path, last_msg: &str) -> String {
+    const MARK: &str = "@resources/outbound-turns/";
+    let Some(at) = last_msg.find(MARK) else {
+        return String::new();
+    };
+    let name: String = last_msg[at + MARK.len()..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    if !name.ends_with("-turn.json")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return String::new();
+    }
+    let path = project_root
+        .join("resources")
+        .join("outbound-turns")
+        .join(&name);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return String::new();
+    };
+    serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
 /// Last-chance authorization shared by every write surface (judell/bram#263).
 /// Returns the last user message on a match so authority mode can compute
 /// the audit-breadcrumb turn key; the shadow makes no network call, so for
@@ -3251,6 +3287,13 @@ fn opt_out_clears(project_root: &Path, payload: &Value) -> Option<String> {
     }
     let draft = iterate_feedback_text(project_root, &last_msg);
     if !draft.is_empty() && has_opt_out(&draft) {
+        return Some(last_msg);
+    }
+    // issue-431: the turn's words may live in its outbound-turn file. The
+    // audit turn key stays the frame (`last_msg`), so the one-turn scope
+    // and the host's dedupe are unchanged.
+    let wrapped = outbound_turn_text(project_root, &last_msg);
+    if !wrapped.is_empty() && has_opt_out(&wrapped) {
         return Some(last_msg);
     }
     None
@@ -5375,6 +5418,57 @@ mod guard_policy_tests {
         assert!(!text.is_empty(), "must not read as an empty worklist");
         assert!(text.contains("src/x.rs"), "content must survive: {text:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // issue-431-opt-out-in-outbound-turn
+    #[test]
+    fn opt_out_in_an_outbound_turn_file_counts() {
+        let root = scratch("opt-out-outbound");
+        let turns = root.join("resources").join("outbound-turns");
+        std::fs::create_dir_all(&turns).unwrap();
+        let write_turn = |id: &str, text: &str| {
+            std::fs::write(
+                turns.join(format!("{}.json", id)),
+                serde_json::json!({ "schema": 1, "id": id, "kind": "message", "mode": "", "text": text })
+                    .to_string(),
+            )
+            .unwrap();
+        };
+        let transcript = root.join("t.jsonl");
+        let payload_for = |frame: &str| {
+            std::fs::write(
+                &transcript,
+                serde_json::json!({ "type": "user", "message": { "content": frame } }).to_string(),
+            )
+            .unwrap();
+            serde_json::json!({ "transcript_path": transcript.to_string_lossy() })
+        };
+        // #431's message, verbatim.
+        write_turn(
+            "1791677856169-turn",
+            "number the arrows so we see a record of the sequence\n\n7 and 8 should collapse into one step.\n\njust do it.",
+        );
+        let frame = "Read and follow this Bram turn: @resources/outbound-turns/1791677856169-turn.json (end of Bram turn)";
+        assert_eq!(
+            opt_out_clears(&root, &payload_for(frame)).as_deref(),
+            Some(frame)
+        );
+        // A wrapped message without the phrase does not opt out.
+        write_turn("2-turn", "number the arrows\n\nthanks");
+        assert!(opt_out_clears(
+            &root,
+            &payload_for("Read and follow this Bram turn: @resources/outbound-turns/2-turn.json (end of Bram turn)")
+        )
+        .is_none());
+        // A frame that tries to leave the directory is ignored.
+        assert_eq!(
+            outbound_turn_text(
+                &root,
+                "Read and follow this Bram turn: @resources/outbound-turns/../x-turn.json"
+            ),
+            ""
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // guard-coverage-requires-begun-item

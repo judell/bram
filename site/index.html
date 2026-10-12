@@ -69,12 +69,12 @@
   .caption { color: var(--muted); font-size: 0.92rem; margin-top: 8px; text-align: center; }
   table.links { width: 100%; border-collapse: collapse; table-layout: fixed; }
   table.links col.date { width: 7.5rem; }
-  table.links col.src { width: 7.5rem; }
+  /* One width for every table, sized for the longest screencast title, so
+     the link column lines up across Screencasts, Blog and Elsewhere. */
+  table.links col.src { width: 10.5rem; }
   table.links td { padding: 6px 12px 6px 0; vertical-align: top; }
   table.links td.date { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
   table.links td.src { white-space: nowrap; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
-  /* Screencast titles are short phrases, wider than the Blog/Elsewhere sources. */
-  table.links.casts col.src { width: 10.5rem; }
   @media (max-width: 560px) { table.links col.src { width: 0; } table.links td.src { padding: 0; font-size: 0; } }</style>
 </head>
 <body>
@@ -92,7 +92,7 @@
   <p class="caption">A six-minute tour of Bram tackling and completing a GitHub issue.</p>
 
   <h3 class="first">Screencasts</h3>
-  <table class="links casts">
+  <table class="links">
     <colgroup><col class="date"><col class="src"><col></colgroup>
     <tbody>
       <tr><td class="date">2026-10-12</td><td class="src">Claude and Codex</td><td><a href="https://jonudell.info/video/claude-and-codex.mp4">Bram uses Codex to review Claude’s work</a></td></tr>

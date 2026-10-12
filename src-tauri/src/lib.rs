@@ -63457,6 +63457,21 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
     );
 
     if violations.is_empty() {
+        // issue-433: this watcher pass writes the changelog next; tell it
+        // which removals the drop auth names. Not `dropped_via_auth`, which
+        // skips applied items -- #433's own shape on the direct-edit path.
+        if auth.as_ref().map(|a| a.kind.as_str()) == Some("drop") {
+            let current_ids: HashSet<String> =
+                current_items.iter().filter_map(worklist_item_id).collect();
+            let removed: Vec<String> = prior_items
+                .iter()
+                .filter_map(worklist_item_id)
+                .filter(|id| !current_ids.contains(id) && auth_ids.contains(id))
+                .collect();
+            if !removed.is_empty() {
+                record_dropped_prunes(&removed);
+            }
+        }
         if !dropped_via_auth.is_empty() {
             // Agent-path-symmetry fix: when an agent (Codex) edits
             // worklist.json directly to prune a drop-authorized item
@@ -63546,6 +63561,46 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
 // rename_from was retired in 67eff19, and unauthorized prunes are already
 // blocked by maybe_enforce_worklist_policy before they can reach the watcher,
 // so every removal flows through either the approved or drop channel.
+// Which history section a removed item belongs to: "cleared", "dropped",
+// "committed", or None (skip). Pure, so the order is unit-testable. In order:
+//   1. Cleared as landed (issue-406) → cleared, whatever its status.
+//   2. Dropped → dropped, whatever its status. Two signals: the prune route
+//      recorded it as a drop (`route_dropped`, which no later click can
+//      erase), or the auth record on disk is a drop naming the id.
+//      issue-433: this used to come after rule 3, so an applied item dropped
+//      with nothing to commit was filed as committed and linked to HEAD.
+//      A committed item can't be misread here: its prune removes it from
+//      the board, so no later drop click can name it.
+//   3. Prior status "applied" → committed (022802d). A commit-prune whose
+//      single-slot auth record was overwritten before the watcher ran would
+//      otherwise fall into no bucket and read as "change".
+//   4. An approved authorization naming the id → committed (a proposed item
+//      removed by approved auth without first becoming applied).
+//   5. Otherwise skip; the policy hook reverts any other removal.
+fn changelog_removal_bucket(
+    prior_status: &str,
+    id: &str,
+    landed: bool,
+    route_dropped: bool,
+    auth_kind: Option<&str>,
+    auth_ids: &[String],
+) -> Option<&'static str> {
+    if landed {
+        return Some("cleared");
+    }
+    let named = auth_ids.iter().any(|i| i == id);
+    if route_dropped || (named && auth_kind == Some("drop")) {
+        return Some("dropped");
+    }
+    if prior_status == "applied" {
+        return Some("committed");
+    }
+    if named && auth_kind == Some("approved") {
+        return Some("committed");
+    }
+    None
+}
+
 fn generate_worklist_changelog<R: tauri::Runtime>(
     app: &AppHandle<R>,
     prior: &serde_json::Value,
@@ -63609,6 +63664,17 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
             .collect(),
         Err(_) => HashMap::new(),
     };
+    // issue-433: drops recorded by the prune routes, taken for the ids this
+    // transition removed. Unlike the auth record, no later click can erase them.
+    let route_dropped: HashSet<String> = match dropped_prunes_cell().lock() {
+        Ok(mut set) => prior_items
+            .iter()
+            .filter_map(|i| worklist_item_id(i))
+            .filter(|id| !current_by_id.contains_key(id))
+            .filter(|id| set.remove(id))
+            .collect(),
+        Err(_) => HashSet::new(),
+    };
     if !landed_shas.is_empty() {
         append_bram_trace_line(
             app,
@@ -63624,40 +63690,31 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
         if current_by_id.contains_key(&id) {
             continue;
         }
-        // Removal classification, in order:
-        //   1. Prior status == "applied" → committed unconditionally. Matches
-        //      the maybe_enforce_worklist_policy hook, which lets applied-status
-        //      items prune freely (commit-then-prune is legitimate, no fresh
-        //      auth required). Without this branch, a commit-prune whose auth
-        //      record was overwritten between approve and prune (any subsequent
-        //      drop:/approved: payload replaces the single-slot record) falls
-        //      out of both buckets and the history UI shows "change".
-        //   2. auth.kind == "drop" and id in auth.ids → dropped (user pruned
-        //      a still-proposed item via the drop authorization channel).
-        //   3. auth.kind == "approved" and id in auth.ids → committed (unusual:
-        //      a proposed item was removed via approved auth without first
-        //      transitioning to applied — included for completeness).
-        //   4. else → skip silently; the policy hook would have reverted any
-        //      other case before the watcher saw it.
-        let prior_status = worklist_item_status(item).to_string();
-        // issue-406: rows cleared as landed, whatever their status, linked
-        // below to their own landing commit.
-        if landed_shas.contains_key(&id) {
-            cleared.push(item);
-            continue;
-        }
-        if prior_status == "applied" {
-            committed.push(item);
-            continue;
-        }
-        if let Some(rec) = auth.as_ref() {
-            if rec.ids.iter().any(|i| i == &id) {
-                match rec.kind.as_str() {
-                    "drop" => dropped.push(item),
-                    "approved" => committed.push(item),
-                    _ => {}
+        let prior_status = worklist_item_status(item);
+        let bucket = changelog_removal_bucket(
+            prior_status,
+            &id,
+            landed_shas.contains_key(&id),
+            route_dropped.contains(&id),
+            auth.as_ref().map(|r| r.kind.as_str()),
+            auth.as_ref().map(|r| r.ids.as_slice()).unwrap_or(&[]),
+        );
+        match bucket {
+            Some("cleared") => cleared.push(item),
+            Some("dropped") => {
+                // issue-433: an applied item dropped with nothing to commit.
+                // Before the reorder this read as "1 committed" + HEAD's link.
+                if prior_status == "applied" {
+                    append_bram_trace_line(
+                        app,
+                        "worklist-history",
+                        &format!("op=changelog-drop-of-applied id={}", id),
+                    );
                 }
+                dropped.push(item);
             }
+            Some("committed") => committed.push(item),
+            _ => {}
         }
     }
 
@@ -71973,6 +72030,23 @@ fn landed_clears_cell() -> &'static Mutex<HashMap<String, String>> {
     LANDED_CLEARS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// issue-433: ids pruned under a drop authorization, recorded by the route at
+// the moment it prunes and consumed by the history changelog. The changelog
+// used to learn "this was a drop" only from the single-slot auth record on
+// disk, which the next click overwrites; a click landing between a Drop and
+// the watcher's changelog could re-file the drop as committed.
+static DROPPED_PRUNES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn dropped_prunes_cell() -> &'static Mutex<HashSet<String>> {
+    DROPPED_PRUNES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn record_dropped_prunes(ids: &[String]) {
+    if let Ok(mut set) = dropped_prunes_cell().lock() {
+        set.extend(ids.iter().cloned());
+    }
+}
+
 // Items already traced as landed this process (op=landed-detected fires once).
 static LANDED_SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -72446,6 +72520,12 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     }
     let new_text = serde_json::to_string_pretty(&wl).unwrap_or_default();
     let on_disk = format!("{}\n", new_text);
+    // issue-433: record the drop before the write lands, so the watcher's
+    // changelog sees it whatever happens to the auth record meanwhile. Covers
+    // the pane's host-direct Drop, which delegates here.
+    if op == "prune" && auth_kind == "drop" && !affected.is_empty() {
+        record_dropped_prunes(&affected);
+    }
     // Claim this write BEFORE it lands so the worklist watcher recognizes
     // it as self-originated: handle_worklist_change short-circuits when
     // prior_str == current_str, so it never reaches maybe_enforce_worklist_policy.
@@ -74076,8 +74156,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
 #[cfg(test)]
 mod worklist_authorization_tests {
     use super::{
-        apply_worklist_mutation, build_worklist_authorization_record, classify_worklist_removals,
-        draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
+        apply_worklist_mutation, build_worklist_authorization_record, changelog_removal_bucket,
+        classify_worklist_removals, draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
@@ -74856,6 +74936,57 @@ mod worklist_authorization_tests {
         assert_eq!(pruned, ids(&["a"]));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].get("id").and_then(|v| v.as_str()), Some("b"));
+    }
+
+    // issue-433: a drop authorization naming the id wins over prior status.
+    #[test]
+    fn changelog_removal_bucket_drop_of_applied_reads_dropped() {
+        let ids = vec!["a".to_string()];
+        // #433's shape: applied, dropped with nothing to commit.
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", false, false, Some("drop"), &ids),
+            Some("dropped")
+        );
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", false, false, Some("approved"), &ids),
+            Some("committed")
+        );
+        // 022802d: a commit-prune whose auth was overwritten or is absent.
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", false, false, None, &[]),
+            Some("committed")
+        );
+        let other = vec!["b".to_string()];
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", false, false, Some("drop"), &other),
+            Some("committed")
+        );
+        assert_eq!(
+            changelog_removal_bucket("proposed", "a", false, false, Some("drop"), &ids),
+            Some("dropped")
+        );
+        assert_eq!(
+            changelog_removal_bucket("proposed", "a", false, false, None, &[]),
+            None
+        );
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", true, false, Some("drop"), &ids),
+            Some("cleared")
+        );
+        // Codex's review: a later approval overwrote the drop auth before
+        // the changelog ran. The route's record still says dropped.
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", false, true, Some("approved"), &other),
+            Some("dropped")
+        );
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", false, true, None, &[]),
+            Some("dropped")
+        );
+        assert_eq!(
+            changelog_removal_bucket("applied", "a", true, true, None, &[]),
+            Some("cleared")
+        );
     }
 
     #[test]

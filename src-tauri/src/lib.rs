@@ -60286,7 +60286,30 @@ fn spawn_forge_awaiting_refresher(app: AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(3));
         let mut last_sig = String::new();
         loop {
-            let fresh = forge_awaiting_items_fetch(&app);
+            // needs-you-dismissals-survive-forge-outage: a failed fetch used
+            // to return an empty list, indistinguishable from "nothing
+            // awaiting you", and overwrite the cache with it. Every
+            // notification row vanished for a cycle, and the local sweep
+            // took those issues over under ids their dismissals did not
+            // match (2026-10-12: three dismissed issues resurfaced). Keep the
+            // last good result instead; a genuine empty result still lands.
+            let fresh = match forge_awaiting_items_fetch(&app) {
+                Ok(f) => f,
+                Err(stage) => {
+                    let kept = FORGE_AWAITING_CACHE
+                        .lock()
+                        .ok()
+                        .and_then(|c| c.as_ref().map(|(_, v)| v.len()))
+                        .unwrap_or(0);
+                    append_bram_trace_line(
+                        &app,
+                        "needs-you",
+                        &format!("op=forge-error stage={} kept={}", stage, kept),
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(90));
+                    continue;
+                }
+            };
             let mut keys: Vec<String> = fresh
                 .iter()
                 .map(|(_, v)| {
@@ -60975,15 +60998,15 @@ fn trace_cross_machine_agent_move<R: tauri::Runtime>(
 
 fn forge_awaiting_items_fetch<R: tauri::Runtime>(
     app: &AppHandle<R>,
-) -> Vec<(NeedsYouLane, serde_json::Value)> {
+) -> Result<Vec<(NeedsYouLane, serde_json::Value)>, &'static str> {
     let mut out: Vec<(NeedsYouLane, serde_json::Value)> = Vec::new();
     let root = match project_root(Some(app)) {
         Some(r) if project_forge(app) == Forge::GitHub => r,
-        _ => return out,
+        _ => return Ok(out),
     };
     let repo = match repo_owner_name(app) {
         Some(r) if !r.is_empty() => r,
-        _ => return out,
+        _ => return Ok(out),
     };
     let me = needs_you_forge_login(app);
     // all=true: the unread flag is the wrong signal — a notification Jon
@@ -60999,15 +61022,13 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
     ) {
         Ok(s) => s,
         Err(_) => {
-            append_bram_trace_line(app, "needs-you", "op=forge-error stage=fetch");
-            return out;
+            return Err("fetch");
         }
     };
     let threads: Vec<serde_json::Value> = match serde_json::from_slice(&stdout) {
         Ok(v) => v,
         Err(_) => {
-            append_bram_trace_line(app, "needs-you", "op=forge-error stage=parse");
-            return out;
+            return Err("parse");
         }
     };
     // GitHub returns threads newest-first; the cap bounds the per-thread
@@ -61198,7 +61219,7 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
             out.len()
         ),
     );
-    out
+    Ok(out)
 }
 
 // inbox-dismiss-forge-items: dismiss-until-new-activity for forge items.
@@ -61280,6 +61301,166 @@ fn needs_you_dismissed_pairs<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<(Stri
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// needs-you-dismissals-survive-forge-outage: the issue a forge row is about,
+// whichever source produced it. Notification rows are
+// `forge-https://api.github.com/repos/<o>/<r>/issues/<n>` (or `/pulls/<n>`);
+// sweep rows are `forge-issue-<n>`. None for anything else.
+fn needs_you_issue_key(id: &str) -> Option<String> {
+    let num_ok = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    if let Some(n) = id.strip_prefix("forge-issue-") {
+        return num_ok(n).then(|| format!("issue:{}", n));
+    }
+    if !id.starts_with("forge-") {
+        return None;
+    }
+    let mut parts = id.rsplit('/');
+    let n = parts.next()?;
+    let kind = parts.next()?;
+    if !num_ok(n) {
+        return None;
+    }
+    match kind {
+        "issues" => Some(format!("issue:{}", n)),
+        "pulls" => Some(format!("pr:{}", n)),
+        _ => None,
+    }
+}
+
+// Is this row hidden by a dismissal? The exact (id, marker) pair as before,
+// OR a dismissal of the same issue (either id form) recorded at or after the
+// row's latest activity. The second rule is what keeps a dismissal working
+// when the other source takes over the row: on 2026-10-12 a failed
+// notifications fetch handed three dismissed issues to the local sweep,
+// whose ids and markers matched none of the notification-keyed dismissals.
+// Activity after the dismissal still brings the row back (#338).
+fn needs_you_dismissal_matches(
+    id: &str,
+    marker: &str,
+    activity_at: &str,
+    dismissed: &[(String, String, i64)],
+) -> bool {
+    if dismissed.iter().any(|(i, m, _)| i == id && m == marker) {
+        return true;
+    }
+    let (Some(key), Some(activity_ms)) =
+        (needs_you_issue_key(id), parse_iso_to_epoch_ms(activity_at))
+    else {
+        return false;
+    };
+    dismissed.iter().any(|(i, _, at)| {
+        *at >= activity_ms && needs_you_issue_key(i).as_deref() == Some(key.as_str())
+    })
+}
+
+#[cfg(test)]
+mod needs_you_dismissal_match_tests {
+    use super::{needs_you_dismissal_matches, needs_you_issue_key, parse_iso_to_epoch_ms};
+
+    const NOTIF_401: &str = "forge-https://api.github.com/repos/judell/bram/issues/401";
+    const NOTIF_MARKER: &str =
+        "https://api.github.com/repos/judell/bram/issues/comments/5824489141";
+
+    fn ms(iso: &str) -> i64 {
+        parse_iso_to_epoch_ms(iso).unwrap()
+    }
+
+    #[test]
+    fn issue_key_reads_both_id_forms() {
+        assert_eq!(
+            needs_you_issue_key("forge-issue-401").as_deref(),
+            Some("issue:401")
+        );
+        assert_eq!(needs_you_issue_key(NOTIF_401).as_deref(), Some("issue:401"));
+        assert_eq!(
+            needs_you_issue_key("forge-https://api.github.com/repos/judell/bram/pulls/394")
+                .as_deref(),
+            Some("pr:394")
+        );
+        assert_eq!(needs_you_issue_key("issue-425-docs"), None);
+        assert_eq!(needs_you_issue_key("forge-issue-"), None);
+    }
+
+    // The 2026-10-12 field case: #401 dismissed as a notification row on
+    // 2026-09-30, then served by the local sweep under its own id and a
+    // timestamp marker during a failed notifications fetch.
+    #[test]
+    fn notification_dismissal_hides_the_sweep_row_for_the_same_issue() {
+        let dismissed = vec![(
+            NOTIF_401.to_string(),
+            NOTIF_MARKER.to_string(),
+            ms("2026-09-30T22:52:21Z"),
+        )];
+        assert!(needs_you_dismissal_matches(
+            "forge-issue-401",
+            "2026-09-25T00:19:17Z",
+            "2026-09-25T00:19:17Z",
+            &dismissed
+        ));
+    }
+
+    #[test]
+    fn sweep_dismissal_hides_the_notification_row_for_the_same_issue() {
+        let dismissed = vec![(
+            "forge-issue-401".to_string(),
+            "2026-09-25T00:19:17Z".to_string(),
+            ms("2026-09-30T22:52:21Z"),
+        )];
+        assert!(needs_you_dismissal_matches(
+            NOTIF_401,
+            NOTIF_MARKER,
+            "2026-09-25T00:19:17Z",
+            &dismissed
+        ));
+    }
+
+    #[test]
+    fn activity_after_the_dismissal_brings_the_row_back() {
+        let dismissed = vec![(
+            NOTIF_401.to_string(),
+            NOTIF_MARKER.to_string(),
+            ms("2026-09-30T22:52:21Z"),
+        )];
+        assert!(!needs_you_dismissal_matches(
+            "forge-issue-401",
+            "2026-10-12T19:00:00Z",
+            "2026-10-12T19:00:00Z",
+            &dismissed
+        ));
+    }
+
+    #[test]
+    fn a_pr_dismissal_does_not_hide_the_issue_with_the_same_number() {
+        let dismissed = vec![(
+            "forge-https://api.github.com/repos/judell/bram/pulls/401".to_string(),
+            "m".to_string(),
+            ms("2026-10-12T00:00:00Z"),
+        )];
+        assert!(!needs_you_dismissal_matches(
+            "forge-issue-401",
+            "2026-09-25T00:19:17Z",
+            "2026-09-25T00:19:17Z",
+            &dismissed
+        ));
+    }
+
+    #[test]
+    fn exact_pair_still_hides_without_a_timestamp() {
+        let dismissed = vec![("worklist-x".to_string(), "m1".to_string(), 0)];
+        assert!(needs_you_dismissal_matches(
+            "worklist-x",
+            "m1",
+            "",
+            &dismissed
+        ));
+        assert!(!needs_you_dismissal_matches(
+            "worklist-x",
+            "m2",
+            "",
+            &dismissed
+        ));
+    }
 }
 
 fn write_needs_you_dismissed<R: tauri::Runtime>(
@@ -61684,7 +61865,12 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
                 .get("activityMarker")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if dismissed.iter().any(|(i, m, _)| i == id && m == marker) {
+            let activity_at = entry
+                .1
+                .get("activityAt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if needs_you_dismissal_matches(id, marker, activity_at, &dismissed) {
                 filtered += 1;
                 continue;
             }

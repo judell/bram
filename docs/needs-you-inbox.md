@@ -119,6 +119,17 @@ forge-agnostic the way issues already are.
 > emitted activity marker), the `all=true` clear-on-reply-only refinement, the
 > exact-comment link-out, and GitLab todos are their own follow-ups.
 
+> **Landed (needs-you-dismissals-survive-forge-outage):** a Dismiss hides the
+> *issue*, not just the row one source produced. Notification rows and sweep
+> rows name the same issue differently (`forge-https://…/issues/<n>` with a
+> comment-URL marker, `forge-issue-<n>` with a timestamp marker), so a
+> dismissal now also matches any row for the same issue (or PR) whose
+> `activityAt` is no later than the dismissal. New activity still brings it
+> back. A failed notifications fetch also keeps the last good rows instead of
+> emptying them. Field case 2026-10-12: a fetch error handed #405, #401 and
+> #399, all dismissed in September, to the sweep, and they reappeared for about
+> ten minutes.
+
 > **Landed (needs-you-rows-name-who-replied):** the notification row's detail
 > names the replier, classified by the signature convention from the same
 > latest-comment fetch the verification already makes — a signed opener reads

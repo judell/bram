@@ -698,7 +698,10 @@ claim windows with a chat-turn edit to the same file in between, so the
 item's lines and the unowned chat lines sit side by side), and
 `committed-outside` (judell/bram#406: one row whose work landed through a
 plain `git commit`, and one begun-then-reverted row that must not read as
-landed). For example, a focused board is:
+landed), and `joint-owner-committed` (judell/bram#432: two items approved in
+one click whose owner of the shared file has since committed and left the
+board, a partner with no changes, and a later, separately approved item on
+the shared file whose commit must not be refused). For example, a focused board is:
 
 ```sh
 scripts/demo-instance.sh new ordering \

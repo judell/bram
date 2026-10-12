@@ -61,6 +61,7 @@ STARTERS = (
     "committed-outside",
     "new-file-left-out",
     "chat-edit-in-item-file",
+    "joint-owner-committed",
 )
 
 # The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
@@ -143,6 +144,14 @@ def _chat_edit_file(stage: int) -> str:
     return "".join(f"{line}\n" for line in lines)
 
 
+def _joint_owner_shared(prefix: str, owner_edit: bool, later_edit: bool = False) -> str:
+    lines = ["shared: base\n", "middle\n" * 6]
+    lines.append(f"{prefix}-owner: committed step URL\n" if owner_edit else "owner: base\n")
+    lines.append("middle\n" * 6)
+    lines.append(f"{prefix}-later: token terms\n" if later_edit else "later: base\n")
+    return "".join(lines)
+
+
 def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
     if starter == "multi-file":
         return _multi_file_seeds(prefix)
@@ -158,6 +167,13 @@ def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
         ]
     if starter == "chat-edit-in-item-file":
         return [(f"demo/{prefix}-file.txt", _chat_edit_file(0))]
+    if starter == "joint-owner-committed":
+        # HEAD already holds the owner's edit: it "committed" before the board
+        # was captured, so the joint window below replays base -> edited.
+        return [
+            (f"demo/{prefix}-shared.txt", _joint_owner_shared(prefix, owner_edit=True)),
+            (f"demo/{prefix}-vendor.txt", "vendor: runtime 1.0\n"),
+        ]
     return [starter_seed(starter, prefix)]
 
 
@@ -662,6 +678,41 @@ class StarterBuilder:
         self.file(path, _chat_edit_file(2))
         self.boundary([author])
         self.file(path, _chat_edit_file(3))
+        self.boundary([])
+
+    def starter_joint_owner_committed(self, prefix: str) -> None:
+        # judell/bram#432. `owner` and `partner` were approved in one click
+        # (one joint claim interval). Their files don't overlap: owner edited
+        # the shared file, partner the vendor file. Owner has since committed
+        # and been pruned (its edit is in HEAD; it is not on the board), and
+        # partner's edit was reverted (no changes, still begun). A later,
+        # separately approved item edits the shared file. Committing `later`
+        # must succeed: the replay re-resolved the joint interval to partner
+        # once owner left the board and refused it (op=refuse-joint-interval
+        # ids=[partner]).
+        shared = f"demo/{prefix}-shared.txt"
+        vendor = f"demo/{prefix}-vendor.txt"
+        owner, partner, later = f"{prefix}-owner", f"{prefix}-partner", f"{prefix}-later"
+        self.item(
+            partner,
+            vendor,
+            "Approved in one click with the (since committed) owner; its own edit was reverted.",
+            "Has no changes; should not block anything. Drop it.",
+        )
+        self.item(
+            later,
+            shared,
+            "Approved separately, after the owner committed the shared file.",
+            "Should commit: it was never approved together with the partner.",
+        )
+        self.file(shared, _joint_owner_shared(prefix, owner_edit=False))
+        self.boundary([owner, partner])
+        self.file(shared, _joint_owner_shared(prefix, owner_edit=True))
+        self.file(vendor, "vendor: runtime 2.0\n")
+        self.file(vendor, "vendor: runtime 1.0\n")
+        self.boundary([])
+        self.boundary([later])
+        self.file(shared, _joint_owner_shared(prefix, owner_edit=True, later_edit=True))
         self.boundary([])
 
     def starter_committed_outside(self, prefix: str) -> None:

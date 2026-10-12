@@ -69031,6 +69031,13 @@ fn route_request<R: tauri::Runtime>(
             // Runs over every item with declared files, not only begun ones:
             // a joint run only ever exists on a path a begun item's capture
             // touched, so an unbegun item's files simply never match.
+            // issue-432: from membership, the model the gate's refusal now
+            // reads, so pane and gate agree; the replay only when there is no
+            // partition at all, as the will-commit display does.
+            let joint_owners_by_path = wc_partition
+                .as_ref()
+                .map(membership_joint_owners)
+                .unwrap_or(joint_owners_by_path);
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
                 for item in items.iter_mut() {
                     let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
@@ -72805,6 +72812,73 @@ fn membership_entangling_owners(
     out
 }
 
+// issue-432: the same-click joint refusal (#356), decided by membership — the
+// model the gate already routes by — instead of the replay's joint runs. A
+// membership joint entry is a `per_item` key with more than one member and
+// nonzero lines; members are begun items that declare the path, and lines
+// already committed are not in the diff, so a joint whose owner committed
+// (#432) or a partner with no changes there has nothing to charge. Refuse
+// only when the entry holds a REQUESTED id and an outside begun id: a joint
+// entry with no requested member is someone else's, and interval staging
+// already leaves it alone. Returns the entry's members (sorted).
+fn membership_joint_refusal(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+    path: &str,
+    requested_ids: &[String],
+    begun_outside: &std::collections::HashSet<String>,
+) -> Option<Vec<String>> {
+    let m = partition.get(path)?;
+    m.per_item.iter().find_map(|(members, (a, r))| {
+        let joint = members.len() > 1 && a + r > 0;
+        let has_requested = members.iter().any(|x| requested_ids.contains(x));
+        let has_outside = members.iter().any(|x| begun_outside.contains(x));
+        (joint && has_requested && has_outside).then(|| members.clone())
+    })
+}
+
+// issue-432: membership's joint owners per path, in the shape
+// `joint_owners_from_runs` returns, so the board's `jointWith` and the
+// gate's refusal reason from one model.
+fn membership_joint_owners(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut out: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        Default::default();
+    for (path, m) in partition {
+        for (members, (a, r)) in &m.per_item {
+            if members.len() > 1 && a + r > 0 {
+                out.entry(path.clone())
+                    .or_default()
+                    .extend(members.iter().cloned());
+            }
+        }
+    }
+    out
+}
+
+// issue-432: when the joint set was approved, for the refusal message — the
+// latest claim interval whose ids are exactly these members.
+fn joint_click_at_ms(project_root: &Path, members: &[String]) -> Option<i64> {
+    let text = std::fs::read_to_string(project_root.join(CLAIM_INTERVALS_REL)).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let mut want: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
+    want.sort();
+    doc.get("intervals")?
+        .as_array()?
+        .iter()
+        .filter(|iv| {
+            let mut ids: Vec<&str> = iv
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default();
+            ids.sort();
+            ids == want
+        })
+        .filter_map(|iv| iv.get("atMs").and_then(|v| v.as_i64()))
+        .max()
+}
+
 // issue-425-gate-routes-by-membership: lines a whole-file commit takes that
 // membership credits to NO item (chat-turn edits, edits between windows, a
 // neighbour's lines on a path it does not declare). Disclosed, not refused
@@ -73294,91 +73368,98 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     {
         let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
         for path in &files {
-            let Some(runs) = runs_by_path.get(path) else {
-                continue;
-            };
-            for run in runs {
-                // issue-356: a JOINT run carries `itemIds`, not `itemId`, so
-                // this scan used to skip it silently — which is exactly how a
-                // same-click plural approval (one claim, one capture
-                // boundary, joint runs on the shared declared path) let a
-                // single-id commit stage the file wholesale and absorb the
-                // neighbour's hunks under the requested item's message.
-                // Interval staging cannot split a joint run (there is no
-                // per-item interval to stage from), so the honest answer is
-                // the 409: commit the joint items together — safe, every
-                // line accounted for — or separate the hunks by hand.
-                if let Some(members) = run.get("itemIds").and_then(|v| v.as_array()) {
-                    let member_ids: Vec<String> = members
-                        .iter()
-                        .filter_map(|m| m.as_str().map(String::from))
-                        .collect();
-                    let outside_begun = member_ids.iter().any(|owner| {
-                        !requested.contains(owner.as_str())
-                            && items.iter().any(|it| {
-                                it.get("id").and_then(|v| v.as_str()) == Some(owner.as_str())
-                                    && (it.get("status").and_then(|v| v.as_str())
-                                        == Some("applied")
-                                        || it
-                                            .get("begunAtMs")
-                                            .and_then(|v| v.as_i64())
-                                            .unwrap_or(0)
-                                            > 0)
-                            })
+            // issue-356: same-click plural approvals share one capture
+            // boundary, so their lines on a shared path are JOINT and interval
+            // staging cannot split them; the honest answer is the 409.
+            // issue-432: decided by membership (the model the gate routes by
+            // below), not the replay's joint runs — the replay re-resolved a
+            // joint interval from whoever declared the path NOW, so once its
+            // owner committed and was pruned it charged the other partner
+            // (with no changes, not declaring the path) and refused an item
+            // that was never in the click.
+            if let Some(members) = membership_joint_refusal(&partition, path, &ids, &begun_outside)
+            {
+                let partners: Vec<String> = members
+                    .iter()
+                    .filter(|m| !requested.contains(m.as_str()))
+                    .cloned()
+                    .collect();
+                let when = project_root(Some(app))
+                    .and_then(|root| joint_click_at_ms(&root, &members))
+                    .map(|at| {
+                        let mins = (unix_now_ms() - at).max(0) / 60_000;
+                        if mins < 1 {
+                            "just now".to_string()
+                        } else if mins < 120 {
+                            format!("{} min ago", mins)
+                        } else {
+                            format!("{} h ago", mins / 60)
+                        }
                     });
-                    if outside_begun {
-                        append_bram_trace_line(
-                            app,
-                            "worklist-commit",
-                            &format!(
-                                "op=refuse-joint-interval path={} ids=[{}]",
-                                path,
-                                member_ids.join(",")
-                            ),
-                        );
-                        release_claim_on_commit_refusal(
-                            app,
-                            &ids,
-                            "it's part of a joint change; commit it together with its partner",
-                        );
-                        // avoid-futile-joint-commit: "separate the hunks by hand
-                        // and retry" used to close this message, and it is
-                        // unsatisfiable — attribution here is keyed on the
-                        // RECORDED interval, not the instantaneous diff, so no
-                        // amount of hand-editing the working tree produces a
-                        // per-item interval to stage from (field-tested
-                        // 2026-09-07: refused three times regardless). Name the
-                        // joint ids and the only two honest outs: commit them
-                        // together now, or approve in separate clicks next time
-                        // — before any of them begins — so each gets its own
-                        // capture boundary.
-                        return worklist_json_error(
-                            409,
-                            format!(
-                                "commit refused: {} carries work jointly attributed to [{}] \
-                                 (these items were approved together in one click, so they \
-                                 share a single capture boundary and their edits to this path \
-                                 cannot be split per item after the fact). Commit those items \
-                                 together — every line is accounted for. Per-item commits on a \
-                                 shared path require approving each item in a SEPARATE click, \
-                                 before any of them begins. Or, for separate commits NOW: park \
-                                 one item's changes (save its patch, reverse-apply it), Drop \
-                                 that item, commit this one, then restore the patch and \
-                                 re-propose it — a dropped partner no longer blocks, and \
-                                 staging follows current content. Editing the worktree WITHOUT \
-                                 the Drop does not clear this refusal: the joint attribution is \
-                                 recorded, not derived from the diff.",
-                                path,
-                                member_ids.join(", ")
-                            ),
-                        );
-                    }
-                    continue;
-                }
-                // issue-425-gate-routes-by-membership: a single-owner replay
-                // run no longer routes anything — membership decides below.
-                // (The replay named an outside item with no lines of its own
-                // 21 of 21 times in #419's adjudication.)
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!(
+                        "op=refuse-joint-interval path={} ids=[{}] source=membership",
+                        path,
+                        members.join(",")
+                    ),
+                );
+                release_claim_on_commit_refusal(
+                    app,
+                    &ids,
+                    &format!(
+                        "it shares a joint change with {}; commit them together, or Drop {}",
+                        partners.join(" and "),
+                        if partners.len() == 1 { "it" } else { "them" }
+                    ),
+                );
+                // avoid-futile-joint-commit: name the joint ids and the honest
+                // outs. "Separate the hunks by hand" stays out: no hand edit
+                // produces a per-item interval to stage from.
+                return worklist_json_error(
+                    409,
+                    format!(
+                        "commit refused: {} carries work jointly attributed to [{}], which \
+                         were approved together in one click{} and so share a single capture \
+                         boundary; their edits to this path cannot be split per item after \
+                         the fact. Commit [{}] together — every line is accounted for. Or Drop \
+                         [{}] (park its changes first if you want them back: save its patch, \
+                         reverse-apply it, and re-propose it after this commit) — a dropped \
+                         partner no longer blocks. Per-item commits on a shared path require \
+                         approving each item in a SEPARATE click, before any of them begins.",
+                        path,
+                        members.join(", "),
+                        when.map(|w| format!(" ({})", w)).unwrap_or_default(),
+                        members.join(", "),
+                        partners.join(", ")
+                    ),
+                );
+            }
+            // issue-432 soak: the replay's verdict, kept only as a trace so a
+            // true joint that membership misses stays visible until the
+            // replay retires (issue-425-retire-replay).
+            let replay_only: Vec<String> = runs_by_path
+                .get(path)
+                .into_iter()
+                .flatten()
+                .filter_map(|run| run.get("itemIds").and_then(|v| v.as_array()))
+                .flat_map(|members| members.iter().filter_map(|m| m.as_str()))
+                .filter(|m| !requested.contains(m) && begun_outside.contains(*m))
+                .map(String::from)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if !replay_only.is_empty() {
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!(
+                        "op=joint-refusal-replay-only path={} replay=[{}]",
+                        path,
+                        replay_only.join(",")
+                    ),
+                );
             }
         }
     }
@@ -79637,7 +79718,8 @@ mod claim_interval_prune_tests {
 mod claim_attribution_tests {
     use super::{
         apply_attr_hunks, attr_replay_line_offset, attr_runs, item_joint_with,
-        joint_owners_from_runs, parse_attr_diff,
+        joint_owners_from_runs, membership_joint_owners, membership_joint_refusal, parse_attr_diff,
+        MembershipPathBuckets,
     };
 
     // attribution-run-line-offset-in-views: the tripwire's arithmetic. The
@@ -79818,6 +79900,86 @@ mod claim_attribution_tests {
     // both depend on: a path with an itemIds run ties its members together,
     // a path with a plain itemId run ties nobody, and an item's jointWith
     // never mentions a path it doesn't itself declare.
+    // issue-432: the same-click joint refusal reads membership. Builds a
+    // one-path partition from (members, lines) entries.
+    fn joint_partition(
+        entries: &[(&[&str], (usize, usize))],
+    ) -> std::collections::BTreeMap<String, MembershipPathBuckets> {
+        let mut m = MembershipPathBuckets::default();
+        for (members, counts) in entries {
+            let key: Vec<String> = members.iter().map(|s| s.to_string()).collect();
+            m.owners.extend(key.iter().cloned());
+            m.per_item.insert(key, *counts);
+        }
+        let mut p = std::collections::BTreeMap::new();
+        p.insert("Globals.xs".to_string(), m);
+        p
+    }
+
+    fn set(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn strs(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn joint_refusal_ignores_a_replay_only_partner_issue_432() {
+        // #432: membership credits Globals.xs to spec-token-terms alone; the
+        // replay's stale one-member joint [revendor] has no counterpart here.
+        let p = joint_partition(&[(&["spec-token-terms"], (5, 1))]);
+        assert_eq!(
+            membership_joint_refusal(
+                &p,
+                "Globals.xs",
+                &strs(&["spec-token-terms"]),
+                &set(&["revendor-xmlui-runtime"]),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn joint_refusal_fires_for_a_requested_member_with_a_begun_partner() {
+        // criterion 6 / #356: committing one member of a same-click joint alone.
+        let p = joint_partition(&[(&["a", "b"], (3, 0))]);
+        assert_eq!(
+            membership_joint_refusal(&p, "Globals.xs", &strs(&["a"]), &set(&["b"])),
+            Some(strs(&["a", "b"]))
+        );
+        // Committing the whole joint set together is fine.
+        assert_eq!(
+            membership_joint_refusal(&p, "Globals.xs", &strs(&["a", "b"]), &set(&[])),
+            None
+        );
+    }
+
+    #[test]
+    fn joint_refusal_skips_a_joint_the_request_is_not_in() {
+        let p = joint_partition(&[(&["b", "c"], (3, 0)), (&["a"], (2, 0))]);
+        assert_eq!(
+            membership_joint_refusal(&p, "Globals.xs", &strs(&["a"]), &set(&["b", "c"])),
+            None
+        );
+    }
+
+    #[test]
+    fn joint_refusal_and_joint_with_skip_an_empty_joint_entry() {
+        let p = joint_partition(&[(&["a", "b"], (0, 0))]);
+        assert_eq!(
+            membership_joint_refusal(&p, "Globals.xs", &strs(&["a"]), &set(&["b"])),
+            None
+        );
+        assert!(membership_joint_owners(&p).is_empty());
+        let p = joint_partition(&[(&["a", "b"], (1, 0))]);
+        let owners = membership_joint_owners(&p);
+        assert_eq!(
+            item_joint_with("a", &strs(&["Globals.xs"]), &owners),
+            vec!["b"]
+        );
+    }
+
     #[test]
     fn joint_with_reflects_only_declared_shared_paths() {
         let mut runs_by_path: std::collections::HashMap<String, Vec<serde_json::Value>> =

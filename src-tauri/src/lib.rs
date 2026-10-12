@@ -72987,19 +72987,47 @@ fn membership_unowned_taken(
 // issue-425-gate-routes-by-membership (Codex review: "one state for
 // classification and staging"): the worktree content of every changed path
 // under the request's files, captured BEFORE membership classifies them.
-// Whole-file staging then checks the index against it, so an edit landing
-// between classification and `git add` is refused, never silently absorbed
-// into a commit membership did not see. Values are blob ids, "-" for a
-// deleted path.
+// Whole-file staging then re-checks it, so an edit landing between
+// classification and `git add` is refused, never silently absorbed into a
+// commit membership did not see. Values are RAW blob ids
+// (`hash-object --no-filters`), "-" for a deleted path.
+//
+// issue-434: this used to be `hash-object` with filters, a prediction of the
+// blob `git add` would stage, compared against the index. The prediction is
+// wrong for a file whose index blob already has CRLF: under core.autocrlf
+// `git add` skips conversion for it and stages the raw bytes, while
+// `hash-object` (no index to consult) predicts the converted blob. Every
+// commit of such a file was refused as drift. Raw bytes answer only "did the
+// file change?"; whether the index matches the file is asked of git itself
+// (gate_index_mismatch), which applies its own conversion rules.
 fn gate_worktree_snapshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
+    files: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    gate_raw_snapshot_in(&root, files)
+}
+
+fn gate_git(root: &std::path::Path, args: &[String]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn gate_raw_snapshot_in(
+    root: &std::path::Path,
     files: &[String],
 ) -> Result<std::collections::BTreeMap<String, String>, String> {
     let mut out = std::collections::BTreeMap::new();
     if files.is_empty() {
         return Ok(out);
     }
-    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let mut paths: std::collections::BTreeSet<String> = Default::default();
     let mut diff = vec![
         "diff".to_string(),
@@ -73009,7 +73037,7 @@ fn gate_worktree_snapshot<R: tauri::Runtime>(
         "--".to_string(),
     ];
     diff.extend(files.iter().cloned());
-    for l in git_run_owned(app, &diff)?.lines() {
+    for l in gate_git(root, &diff)?.lines() {
         if !l.trim().is_empty() {
             paths.insert(l.trim().to_string());
         }
@@ -73021,39 +73049,90 @@ fn gate_worktree_snapshot<R: tauri::Runtime>(
         "--".to_string(),
     ];
     others.extend(files.iter().cloned());
-    for l in git_run_owned(app, &others)?.lines() {
+    for l in gate_git(root, &others)?.lines() {
         if !l.trim().is_empty() {
             paths.insert(l.trim().to_string());
         }
     }
     for p in paths {
-        let blob = if root.join(&p).exists() {
-            git_run(app, &["hash-object", "--", &p])?.trim().to_string()
-        } else {
-            "-".to_string()
-        };
+        let blob = gate_raw_blob_in(root, &p)?;
         out.insert(p, blob);
     }
     Ok(out)
 }
 
-// The index side of the same comparison: the staged blob id of each path,
-// "-" when the index does not carry it (a staged deletion).
-fn gate_index_blobs<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    paths: &[String],
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let mut out = std::collections::BTreeMap::new();
-    for p in paths {
-        let line = git_run(app, &["ls-files", "-s", "--", p])?;
-        let blob = line
-            .split_whitespace()
-            .nth(1)
-            .map(str::to_string)
-            .unwrap_or_else(|| "-".to_string());
-        out.insert(p.clone(), blob);
+// The raw blob id of one path's worktree bytes, "-" when it is absent.
+fn gate_raw_blob_in(root: &std::path::Path, p: &str) -> Result<String, String> {
+    if !root.join(p).exists() {
+        return Ok("-".to_string());
     }
-    Ok(out)
+    let args = vec![
+        "hash-object".to_string(),
+        "--no-filters".to_string(),
+        "--".to_string(),
+        p.to_string(),
+    ];
+    Ok(gate_git(root, &args)?.trim().to_string())
+}
+
+// issue-434: staged paths whose index entry does not match the worktree file
+// by git's own rules (index vs worktree, conversion applied as `git add`
+// applies it). Empty after a clean whole-file stage, CRLF index blobs
+// included.
+fn gate_index_mismatch_in(
+    root: &std::path::Path,
+    staged: &[String],
+) -> Result<Vec<String>, String> {
+    if staged.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec![
+        "diff".to_string(),
+        "--name-only".to_string(),
+        "--no-renames".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(staged.iter().cloned());
+    Ok(gate_git(root, &args)?
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+// The whole-file drift check, after staging. Returns (reason, paths) for the
+// first test that fails, or None:
+//   path-set       -- the staged paths are not the snapshot's paths;
+//   changed        -- a path's raw bytes differ from the snapshot (an edit
+//                     landed after classification);
+//   index-mismatch -- git says the index does not match the file.
+fn gate_drift_after_staging(
+    root: &std::path::Path,
+    snapshot: &std::collections::BTreeMap<String, String>,
+    staged: &[String],
+) -> Result<Option<(&'static str, Vec<String>)>, String> {
+    let staged_set: std::collections::BTreeMap<String, String> = staged
+        .iter()
+        .map(|p| (p.clone(), snapshot.get(p).cloned().unwrap_or_default()))
+        .collect();
+    let path_set = gate_state_drift(snapshot, &staged_set);
+    if !path_set.is_empty() {
+        return Ok(Some(("path-set", path_set)));
+    }
+    let mut now = std::collections::BTreeMap::new();
+    for p in staged {
+        now.insert(p.clone(), gate_raw_blob_in(root, p)?);
+    }
+    let changed = gate_state_drift(snapshot, &now);
+    if !changed.is_empty() {
+        return Ok(Some(("changed", changed)));
+    }
+    let mismatch = gate_index_mismatch_in(root, staged)?;
+    if !mismatch.is_empty() {
+        return Ok(Some(("index-mismatch", mismatch)));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -73159,6 +73238,100 @@ mod gate_routes_by_membership_tests {
         let deleted: BTreeMap<String, String> = [("a".into(), "-".into())].into_iter().collect();
         let del_staged = deleted.clone();
         assert!(gate_state_drift(&deleted, &del_staged).is_empty());
+    }
+}
+
+// issue-434: the whole-file drift check against real git, CRLF included.
+#[cfg(test)]
+mod gate_crlf_drift_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+    }
+
+    // A repo holding crlf.js stored WITH CRLF and lf.js stored LF, committed
+    // under autocrlf=false, then switched to autocrlf=true and both edited
+    // with CRLF content: Andrew's #434 checkout.
+    fn crlf_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-434-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
+        std::fs::write(root.join("crlf.js"), "a\r\nb\r\n").unwrap();
+        std::fs::write(root.join("lf.js"), "a\nb\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "base"]);
+        git(&root, &["config", "core.autocrlf", "true"]);
+        std::fs::write(root.join("crlf.js"), "a\r\nb\r\nc\r\n").unwrap();
+        std::fs::write(root.join("lf.js"), "a\r\nb\r\nc\r\n").unwrap();
+        root
+    }
+
+    fn files() -> Vec<String> {
+        vec!["crlf.js".to_string(), "lf.js".to_string()]
+    }
+
+    #[test]
+    fn crlf_index_blob_is_not_drift() {
+        let root = crlf_repo("clean");
+        let snap = gate_raw_snapshot_in(&root, &files()).unwrap();
+        assert_eq!(snap.len(), 2);
+        git(&root, &["add", "--", "crlf.js", "lf.js"]);
+        let drift = gate_drift_after_staging(&root, &snap, &files()).unwrap();
+        assert_eq!(
+            drift, None,
+            "#434: a CRLF index blob must not read as drift"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn edit_after_snapshot_is_drift() {
+        let root = crlf_repo("edit");
+        let snap = gate_raw_snapshot_in(&root, &files()).unwrap();
+        std::fs::write(root.join("crlf.js"), "a\r\nb\r\nc\r\nd\r\n").unwrap();
+        git(&root, &["add", "--", "crlf.js", "lf.js"]);
+        let drift = gate_drift_after_staging(&root, &snap, &files()).unwrap();
+        assert_eq!(drift, Some(("changed", vec!["crlf.js".to_string()])));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn edit_after_staging_is_drift() {
+        let root = crlf_repo("late");
+        let snap = gate_raw_snapshot_in(&root, &files()).unwrap();
+        git(&root, &["add", "--", "crlf.js", "lf.js"]);
+        std::fs::write(root.join("lf.js"), "late\r\n").unwrap();
+        let drift = gate_drift_after_staging(&root, &snap, &files()).unwrap();
+        assert_eq!(drift, Some(("changed", vec!["lf.js".to_string()])));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staged_path_set_must_match_snapshot() {
+        let root = crlf_repo("set");
+        let snap = gate_raw_snapshot_in(&root, &files()).unwrap();
+        git(&root, &["add", "--", "crlf.js"]);
+        let drift = gate_drift_after_staging(&root, &snap, &["crlf.js".to_string()]).unwrap();
+        assert_eq!(drift, Some(("path-set", vec!["lf.js".to_string()])));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -73764,12 +73937,16 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         // (taken before membership classified the paths) saw; otherwise an
         // edit landed in between and the commit would carry lines no
         // classification covered. Unstage and refuse — a retry re-snapshots.
-        let staged_blobs = match gate_index_blobs(app, &staged_after) {
-            Ok(b) => b,
+        // issue-434: decided from raw bytes plus git's own index-vs-file
+        // check, not a predicted staged blob (wrong for CRLF index blobs).
+        let Some(root) = project_root(Some(app)) else {
+            return worklist_json_error(500, "no project root");
+        };
+        let drift_check = match gate_drift_after_staging(&root, &worktree_snapshot, &staged_after) {
+            Ok(d) => d,
             Err(e) => return worklist_json_error(500, e),
         };
-        let drift = gate_state_drift(&worktree_snapshot, &staged_blobs);
-        if !drift.is_empty() {
+        if let Some((reason, drift)) = drift_check {
             let mut unstage = vec!["reset".to_string(), "-q".to_string(), "--".to_string()];
             unstage.extend(staged_after.iter().cloned());
             let _ = git_run_owned(app, &unstage);
@@ -73777,7 +73954,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 app,
                 "worklist-commit",
                 &format!(
-                    "op=refuse-state-drift paths={}",
+                    "op=refuse-state-drift reason={} paths={}",
+                    reason,
                     drift.iter().take(5).cloned().collect::<Vec<_>>().join(",")
                 ),
             );

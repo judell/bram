@@ -73,6 +73,8 @@
   table.links td { padding: 6px 12px 6px 0; vertical-align: top; }
   table.links td.date { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
   table.links td.src { white-space: nowrap; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  /* Screencast titles are short phrases, wider than the Blog/Elsewhere sources. */
+  table.links.casts col.src { width: 10.5rem; }
   @media (max-width: 560px) { table.links col.src { width: 0; } table.links td.src { padding: 0; font-size: 0; } }</style>
 </head>
 <body>
@@ -89,7 +91,16 @@
   </video>
   <p class="caption">A six-minute tour of Bram tackling and completing a GitHub issue.</p>
 
-  <h3 class="first">Blog</h3>
+  <h3 class="first">Screencasts</h3>
+  <table class="links casts">
+    <colgroup><col class="date"><col class="src"><col></colgroup>
+    <tbody>
+      <tr><td class="date">2026-10-12</td><td class="src">Claude and Codex</td><td><a href="https://jonudell.info/video/claude-and-codex.mp4">Bram uses Codex to review Claude’s work</a></td></tr>
+      <tr><td class="date">2026-10-05</td><td class="src">Original Bram demo</td><td><a href="https://jonudell.info/video/bram-demo-01.mp4">Bram picks up and resolves a GitHub issue</a></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Blog</h3>
   <table class="links">
     <colgroup><col class="date"><col class="src"><col></colgroup>
     <tbody>

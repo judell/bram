@@ -13339,13 +13339,47 @@ window.__bramIssueBlockRows = function (issue, _pendingTick) {
   var comments = (issue && issue.comments) || [];
   for (var i = 0; i < comments.length; i++) {
     var c = comments[i] || {};
-    rows.push({ id: "comment:" + i, kind: "comment", body: c.body || "", author: c.author });
+    rows.push({
+      id: "comment:" + i, kind: "comment", body: c.body || "", author: c.author,
+      createdAt: c.createdAt || "",
+    });
   }
   // issue-comment-optimistic-and-reindexed: pending comments after the real
   // ones. `_pendingTick` is unused here; IssueDetail passes it so the binding
   // re-evaluates when a pending comment is added, posted or dropped.
   return rows.concat(__bramPendingCommentRows(issue));
 };
+// issue-detail-comment-timestamps: a comment's header line, "author · about 4
+// hours ago". The age is worded like XMLUI's getDateUntilNow (date-fns
+// distance style), which the body's "opened … ago" line uses, so the two read
+// alike. A pending comment has no createdAt yet and keeps its "posting…" form.
+window.__bramIssueCommentHeader = function (row) {
+  var r = row || {};
+  var who = (r.author && (r.author.login || r.author.name)) || "unknown";
+  if (r.pending === "posting") return who + " · posting…";
+  var ago = __bramDistanceAgo(r.createdAt);
+  return ago ? who + " · " + ago : who;
+};
+// The exact time, for the header's tooltip; "" when there is none.
+window.__bramIssueCommentWhen = function (row) {
+  var t = Date.parse((row && row.createdAt) || "");
+  return isNaN(t) ? "" : new Date(t).toLocaleString();
+};
+function __bramDistanceAgo(iso) {
+  var t = Date.parse(iso || "");
+  if (isNaN(t)) return "";
+  var mins = Math.round((Date.now() - t) / 60000);
+  if (mins < 1) return "less than a minute ago";
+  if (mins < 45) return mins === 1 ? "1 minute ago" : mins + " minutes ago";
+  var hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs === 1 ? "about 1 hour ago" : "about " + hrs + " hours ago";
+  var days = Math.round(hrs / 24);
+  if (days < 30) return days === 1 ? "1 day ago" : days + " days ago";
+  var months = Math.round(days / 30);
+  if (months < 12) return months === 1 ? "about 1 month ago" : "about " + months + " months ago";
+  var years = Math.round(days / 365);
+  return years <= 1 ? "about 1 year ago" : "about " + years + " years ago";
+}
 // Marked surface (counted == highlighted): the body text for both kinds.
 window.__bramIssueMarkedText = function (row) {
   return (row && row.body) || "";

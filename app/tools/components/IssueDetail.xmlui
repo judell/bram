@@ -49,8 +49,11 @@
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
         <VStack when="{$item.kind === 'comment'}" gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
+          <!-- issue-detail-comment-timestamps: author · age, exact time on
+               hover (tooltip behavior: https://www.xmlui.org/docs/behaviors#tooltip). -->
           <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-            value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ($item.pending === 'posting' ? ' · posting…' : '')}" />
+            value="{window.__bramIssueCommentHeader($item)}"
+            tooltip="{window.__bramIssueCommentWhen($item)}" />
           <Markdown interpolateBindings="false" allowHtml="false" content="{$item.body}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />

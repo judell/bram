@@ -3995,6 +3995,18 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
       return it.id + "'s change doesn't apply to HEAD on its own (" + it.commitCheckFailedPaths.join(", ") + ").";
     }
   }
+  // issue-438: nothing git can see, but a declared file is on disk behind an
+  // ignore rule. Name it and the two ways out. The remedy is its own
+  // paragraph, as in the row tooltip above (~3838): XMLUI's Tooltip has no
+  // width cap, so one long line ran off the pane's edge and hid the second
+  // way out.
+  for (var j = 0; j < chosen.length; j++) {
+    var ig = list.filter(function (x) { return x.id === chosen[j]; })[0];
+    var phrase = window.__bramIgnoredDeclaredPhrase(window.__bramIgnoredDeclaredPaths(ig));
+    if (phrase) {
+      return phrase + ".\n\nTo commit it, add a `!` exception to .gitignore, or force-stage it (`git add -f`).";
+    }
+  }
   return "Nothing on disk is this selection's to commit.";
 };
 window.__bramGateCommitTooltip = function (sel, branch, items, claim, ctx) {
@@ -4805,7 +4817,24 @@ window.__bramClaimantCell = function (item, rowId) {
 // context ("+170 −1 of +404 −18"). On exclusive paths take == total and
 // the cell reads as it always did. Extracted from an inline markup
 // expression per the single-call handler rule.
+// issue-438: an item's declared files that exist on disk but that git ignores
+// (the host's `changedFiles` status "ignored"). Without this the row read
+// "nothing to do" and a withheld Commit said "nothing on disk", true for git
+// and baffling for a user looking at the file they just made.
+window.__bramIgnoredDeclaredPaths = function (item) {
+  return ((item && item.changedFiles) || [])
+    .filter(function (f) { return f && f.status === "ignored"; })
+    .map(function (f) { return f.path; });
+};
+window.__bramIgnoredDeclaredPhrase = function (paths) {
+  if (!paths || !paths.length) return "";
+  var more = paths.length > 1 ? " and " + (paths.length - 1) + " more" : "";
+  return paths[0] + more + " exist" + (paths.length > 1 ? "" : "s") + ", but .gitignore hides " +
+    (paths.length > 1 ? "them" : "it") + " from git";
+};
+
 window.__bramFileChangesCell = function (rec, rowBegun) {
+  if (rec && rec.status === "ignored") return "hidden by .gitignore";
   if (!rec || rec.status === "unchanged") return "";
   var suffix =
     rec.status === "new" ? " (new)" : rec.status === "deleted" ? " (deleted)" : "";
@@ -5166,6 +5195,12 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
         window.__bramLandedCoverage(item.landed) +
         ". Bram can't tell whether the work is finished; if it is, Clear it",
     );
+  }
+  // issue-438: the agent made a declared file, but git can't see it. Say so
+  // before either nothing-on-disk ending, which would misstate it.
+  var ignoredPhrase = window.__bramIgnoredDeclaredPhrase(window.__bramIgnoredDeclaredPaths(item));
+  if (ignoredPhrase && !((item.changeSummary || {}).changed > 0)) {
+    return withCloses("With the agent · " + ignoredPhrase);
   }
   // Nothing on disk yet, and begun -- the two states the icon now separates.
   // Earlier this returned "" (brief, because begun-ness was transient), then

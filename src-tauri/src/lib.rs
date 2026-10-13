@@ -71249,6 +71249,10 @@ struct WorklistChangeIndex {
     // uncapped. The baseline membership numbers removed lines against, and
     // what the precheck cache key hashes.
     head_diff_by_path: std::collections::HashMap<String, String>,
+    // issue-438: declared files that exist on disk but that git ignores, so
+    // git status never reports them and they would otherwise read as
+    // "unchanged" ("With the agent · nothing to do", with no hint why).
+    ignored_paths: std::collections::HashSet<String>,
     spawns: usize,
 }
 
@@ -71267,6 +71271,7 @@ mod precheck_content_hash_tests {
             hunks_by_path: HashMap::new(),
             diff_by_path: HashMap::new(),
             head_diff_by_path: head,
+            ignored_paths: std::collections::HashSet::new(),
             spawns: 0,
         }
     }
@@ -71308,6 +71313,7 @@ fn worklist_change_index<R: tauri::Runtime>(
         hunks_by_path: std::collections::HashMap::new(),
         diff_by_path: std::collections::HashMap::new(),
         head_diff_by_path: std::collections::HashMap::new(),
+        ignored_paths: std::collections::HashSet::new(),
         spawns: 0,
     };
     if all_paths.is_empty() {
@@ -71380,7 +71386,60 @@ fn worklist_change_index<R: tauri::Runtime>(
     for (path, body) in split_diff_by_file(&unstaged) {
         idx.diff_by_path.insert(path.to_string(), body);
     }
+
+    // issue-438: a declared file git status never mentioned but that exists
+    // on disk is either tracked-and-unchanged or ignored. One check-ignore
+    // over just those tells them apart; it runs only when such a file exists.
+    let candidates: Vec<String> = all_paths
+        .iter()
+        .filter(|p| !idx.status_by_path.contains_key(p.as_str()))
+        .filter(|p| idx.root.join(p.as_str()).is_file())
+        .cloned()
+        .collect();
+    if !candidates.is_empty() {
+        idx.ignored_paths = worklist_ignored_declared(&idx.root, &candidates);
+        idx.spawns += 1;
+    }
     Some(idx)
+}
+
+// issue-438: which of `candidates` git ignores. Without `--no-index`, a
+// tracked file is reported as not ignored even when a rule matches it, which
+// is the point: only a file git cannot see is hidden. Fails open to empty
+// (this only adds a hint to the board).
+fn worklist_ignored_declared(
+    root: &std::path::Path,
+    candidates: &[String],
+) -> std::collections::HashSet<String> {
+    use std::io::Write;
+    let mut child = match std::process::Command::new("git")
+        .current_dir(root)
+        .args(["check-ignore", "-z", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return Default::default(),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut input: Vec<u8> = Vec::new();
+        for p in candidates {
+            input.extend_from_slice(p.as_bytes());
+            input.push(0);
+        }
+        let _ = stdin.write_all(&input);
+    }
+    // Exit 1 means "none ignored"; anything else with output is still read.
+    let Ok(out) = child.wait_with_output() else {
+        return Default::default();
+    };
+    out.stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
 }
 
 // issue-374: a declared entry naming a DIRECTORY never matches an exact key,
@@ -71455,11 +71514,16 @@ fn worklist_change_activity_for(
     let (mut add_sum, mut rem_sum, mut changed_n) = (0i64, 0i64, 0usize);
     let mut last_ms: i64 = 0;
     for p in file_paths {
-        let status = idx
-            .status_by_path
-            .get(p.as_str())
-            .copied()
-            .unwrap_or("unchanged");
+        let status = idx.status_by_path.get(p.as_str()).copied().unwrap_or(
+            // issue-438: on disk but hidden from git. Still nothing to
+            // commit, so it counts like "unchanged" below; only the status
+            // and label say why.
+            if idx.ignored_paths.contains(p.as_str()) {
+                "ignored"
+            } else {
+                "unchanged"
+            },
+        );
         let (mut a, r) = idx.counts.get(p.as_str()).copied().unwrap_or((0, 0));
         if status == "new" && a == 0 {
             // Untracked: numstat cannot see it — the whole file counts as
@@ -71470,7 +71534,7 @@ fn worklist_change_activity_for(
             }
             hunks += 1;
         }
-        if status != "unchanged" {
+        if status != "unchanged" && status != "ignored" {
             changed_n += 1;
             add_sum += a;
             rem_sum += r;
@@ -71484,6 +71548,8 @@ fn worklist_change_activity_for(
         }
         let label = if status == "unchanged" {
             p.clone()
+        } else if status == "ignored" {
+            format!("{}  (ignored by .gitignore)", p)
         } else {
             let marker = match status {
                 "new" => " (new)",
@@ -79498,6 +79564,7 @@ mod worklist_change_projection_tests {
             hunks_by_path,
             diff_by_path: HashMap::new(),
             head_diff_by_path: HashMap::new(),
+            ignored_paths: std::collections::HashSet::new(),
             spawns: 0,
         }
     }
@@ -79560,6 +79627,73 @@ mod worklist_change_projection_tests {
             rows[0].get("status").and_then(|v| v.as_str()),
             Some("unchanged")
         );
+    }
+
+    // issue-438: a declared file on disk that git ignores reads "ignored",
+    // says why, and still counts as nothing to commit.
+    #[test]
+    fn an_ignored_declared_file_says_so_and_counts_as_unchanged() {
+        let mut i = idx(&[("edited.rs", "modified", 2, 1, 1)]);
+        i.ignored_paths.insert("NOTICES.md".to_string());
+        let files = vec!["NOTICES.md".to_string(), "edited.rs".to_string()];
+        let (rows, sum) = worklist_change_activity_for(&i, &files).unwrap();
+        assert_eq!(field(&sum, "changed"), 1, "only edited.rs changed");
+        assert_eq!(field(&sum, "added"), 2);
+        assert_eq!(field(&sum, "total"), 2);
+        let notices = &rows[0];
+        assert_eq!(
+            notices.get("status").and_then(|v| v.as_str()),
+            Some("ignored")
+        );
+        assert_eq!(
+            notices.get("label").and_then(|v| v.as_str()),
+            Some("NOTICES.md  (ignored by .gitignore)")
+        );
+        // Alone, it leaves the item with nothing to commit.
+        let (_, alone) = worklist_change_activity_for(&i, &["NOTICES.md".to_string()]).unwrap();
+        assert_eq!(field(&alone, "changed"), 0);
+        assert_eq!(
+            alone.get("diskLabel").and_then(|v| v.as_str()),
+            Some("no changes yet")
+        );
+    }
+
+    // issue-438: check-ignore reports only what git cannot see.
+    #[test]
+    fn ignored_declared_names_only_untracked_ignored_files() {
+        let root = super::membership_port_support::scratch_repo("i438");
+        std::fs::write(root.join(".gitignore"), "/*.md\n").unwrap();
+        std::fs::write(root.join("TRACKED.md"), "t\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success())
+        };
+        git(&["add", ".gitignore"]);
+        git(&["add", "-f", "TRACKED.md"]);
+        git(&["commit", "-q", "-m", "head"]);
+        std::fs::write(root.join("NOTICES.md"), "n\n").unwrap();
+        std::fs::write(root.join("plain.rs"), "p\n").unwrap();
+        let got = super::worklist_ignored_declared(
+            &root,
+            &[
+                "NOTICES.md".to_string(),
+                "TRACKED.md".to_string(),
+                "plain.rs".to_string(),
+                "missing.md".to_string(),
+            ],
+        );
+        // missing.md matches the rule, but the board only asks about files
+        // that exist; check-ignore itself would name it.
+        assert!(got.contains("NOTICES.md"), "{:?}", got);
+        assert!(
+            !got.contains("TRACKED.md"),
+            "tracked files are visible to git"
+        );
+        assert!(!got.contains("plain.rs"));
     }
 
     #[test]

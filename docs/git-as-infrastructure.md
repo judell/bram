@@ -130,7 +130,8 @@ the open interval, whose far end is still changing. A plain `git diff
 file, so the present end is captured the same way a boundary is: a temporary
 index seeded from `HEAD`, a path-scoped `add -A`, and `write-tree`.
 
-**How ownership is computed (membership, the line rule).** The boundary trees,
+**How ownership is computed (membership, the line rule).** In brief, see
+[`attribution-model.md`](attribution-model.md#the-line-rule-in-brief). The boundary trees,
 in record order and followed by that present-state tree, form a linear
 history. Membership diffs each pair of successive trees, `-U0` and scoped to
 begun items' declared paths. It keeps a per-path line history, and credits

@@ -49299,191 +49299,22 @@ mod residual_disclosure_tests {
 // untracked files ≈ 315,000 phantom diff lines, `ms=10230`; membership's
 // universe never contains that bulk).
 //
-// Owner assignment: per candidate (live begun item × declared path), the
-// candidate patch is the item's claim-interval evidence (`claim_interval_diff`
-// for single-owner intervals; `membership_joint_patches` for multi-id claims,
-// declaration-disambiguated per path exactly as `resolve_interval_path_owner`
-// does). Membership is decided by whether that evidence accounts for CURRENT
-// content: `git apply --cached --check --reverse` against a scratch capture
-// of the present state — a temp GIT_INDEX_FILE seeded `read-tree HEAD` plus a
-// pathspec-scoped `add -A` (the `capture_claim_tree` machinery bounded to
-// declared paths, so untracked declared files are probe-visible without
-// hashing the tree at large). Evidence that reverse-applies against HEAD
-// itself is already committed — out of the universe, no membership (the
-// `op=interval-already-applied` insight applied before counting, not after).
-// A candidate hunk whose new-side block occurs at multiple placements in the
-// current file is AMBIGUOUS — §4's identical-context duplicate rule, the
-// fourth first-class state; the occurrence count is used ONLY to declare
-// ambiguity, never to assign an owner (the lib.rs positional-not-content
-// discipline, see the warning above `parse_attr_diff`). Everything in the
-// universe accounted to no candidate is UNOWNED — by subtraction, not by
-// error term. Conservation (§6 criterion 1): per path,
+// Owner assignment (the line rule, `membership_line_credit`): the claim store
+// is a linear history of boundary trees, and each line that differs from HEAD
+// is credited to the step that last wrote it (a removed HEAD line, to the step
+// that last removed it). A step's holders — the ids of the record before it,
+// resolved per path exactly as `resolve_interval_path_owner` does — take its
+// lines, so a holder that wrote nothing earns nothing. Credit is positional:
+// a line's origin is the step that wrote that position, never a content
+// match, so there is no placement ambiguity (the lib.rs positional-not-content
+// discipline, see the warning above `parse_attr_diff`; `ambiguous` stays
+// (0, 0)). Everything in the universe credited to no holder is UNOWNED — by
+// subtraction, not by error term. Conservation (§6 criterion 1): per path,
 // single + joint + ambiguous + unowned must sum to the path's `git diff
 // HEAD` counts; a breach traces `op=membership-conservation-broken` — a
 // TRIPWIRE whose provenance check is the deliberate-violation unit test
 // `conservation_breach_reports_deliberate_violation`, per the
 // soak-vs-tripwire rule in docs/developing-bram.md.
-
-// The reverse-application footprint of a candidate patch, mapped to new-side
-// line numbers by walking each hunk's BODY — the `diff_residual_lines`
-// body-walk generalized to multi-file patches and to counting removed lines.
-// `removed` is evidence-BASELINE-relative, not HEAD-relative: it counts what
-// the candidate's own patch text removes, which is only the same thing as a
-// HEAD-relative deletion when the candidate's baseline (its `base_tree`,
-// membership-attributes-deletions below) coincides with HEAD. The caller
-// decides that by the blob-equality rule; this struct only measures.
-// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
-// the frozen staging path doesn't need it (staging builds its patch from
-// `claim_interval_diff`). It stays only because the acceptance fixtures for
-// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
-// means rewriting those fixtures against the line rule (a follow-up item).
-#[allow(dead_code)]
-struct MembershipFootprint {
-    added_lines: Vec<usize>,
-    removed: usize,
-}
-
-// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
-// the frozen staging path doesn't need it (staging builds its patch from
-// `claim_interval_diff`). It stays only because the acceptance fixtures for
-// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
-// means rewriting those fixtures against the line rule (a follow-up item).
-#[allow(dead_code)]
-fn membership_patch_footprint(patch: &str) -> MembershipFootprint {
-    let mut added_lines: Vec<usize> = Vec::new();
-    let mut removed = 0usize;
-    let mut new_line = 0usize;
-    let mut in_hunk = false;
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("@@ ") {
-            in_hunk = true;
-            new_line = rest
-                .split_whitespace()
-                .find(|t| t.starts_with('+'))
-                .map(|t| {
-                    let spec = &t[1..];
-                    spec.split_once(',')
-                        .map(|(s, _)| s)
-                        .unwrap_or(spec)
-                        .parse()
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            continue;
-        }
-        if line.starts_with("diff ") || line.starts_with("index ") {
-            in_hunk = false;
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added_lines.push(new_line);
-            new_line += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        } else if !line.starts_with('\\') {
-            // Context line; "\ No newline at end of file" advances nothing.
-            new_line += 1;
-        }
-    }
-    MembershipFootprint {
-        added_lines,
-        removed,
-    }
-}
-
-// Each hunk's NEW-SIDE text block — context plus added lines, prefixes
-// stripped — the unit of the ambiguity probe: a block occurring at more than
-// one placement in the current file means reverse-apply could have anchored
-// the hunk at either (identical context), so the region's membership is
-// declared ambiguous rather than resolved by coin flip (§4, the never-guess
-// principle). Hunks with no changed line are skipped: pure context anchors
-// nothing.
-// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
-// the frozen staging path doesn't need it (staging builds its patch from
-// `claim_interval_diff`). It stays only because the acceptance fixtures for
-// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
-// means rewriting those fixtures against the line rule (a follow-up item).
-#[allow(dead_code)]
-fn membership_hunk_new_blocks(patch: &str) -> Vec<Vec<String>> {
-    let mut blocks: Vec<Vec<String>> = Vec::new();
-    let mut cur: Option<(Vec<String>, bool)> = None;
-    let close = |cur: &mut Option<(Vec<String>, bool)>, blocks: &mut Vec<Vec<String>>| {
-        if let Some((lines, changed)) = cur.take() {
-            if changed && !lines.is_empty() {
-                blocks.push(lines);
-            }
-        }
-    };
-    for line in patch.lines() {
-        if line.starts_with("@@ ") {
-            close(&mut cur, &mut blocks);
-            cur = Some((Vec::new(), false));
-            continue;
-        }
-        if line.starts_with("diff ") || line.starts_with("index ") {
-            close(&mut cur, &mut blocks);
-            continue;
-        }
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if let Some((lines, changed)) = cur.as_mut() {
-            if let Some(rest) = line.strip_prefix('+') {
-                lines.push(rest.to_string());
-                *changed = true;
-            } else if line.starts_with('-') {
-                // A deletion contributes no new-side line but marks the hunk
-                // as carrying a change, so a pure-deletion hunk's CONTEXT
-                // still gets its placement checked.
-                *changed = true;
-            } else if let Some(rest) = line.strip_prefix(' ') {
-                lines.push(rest.to_string());
-            } else if line.is_empty() {
-                // An empty context line can arrive with its leading space
-                // trimmed by transport; it is still a new-side line.
-                lines.push(String::new());
-            }
-        }
-    }
-    close(&mut cur, &mut blocks);
-    blocks
-}
-
-// Non-overlapping occurrences of `block` as consecutive lines of `content`.
-// > 1 is the ambiguity signal.
-// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
-// the frozen staging path doesn't need it (staging builds its patch from
-// `claim_interval_diff`). It stays only because the acceptance fixtures for
-// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
-// means rewriting those fixtures against the line rule (a follow-up item).
-#[allow(dead_code)]
-fn membership_block_occurrences(content: &str, block: &[String]) -> usize {
-    if block.is_empty() {
-        return 0;
-    }
-    let lines: Vec<&str> = content.lines().collect();
-    let mut n = 0usize;
-    let mut i = 0usize;
-    while i + block.len() <= lines.len() {
-        if block
-            .iter()
-            .zip(&lines[i..i + block.len()])
-            .all(|(b, l)| b == l)
-        {
-            n += 1;
-            i += block.len();
-        } else {
-            i += 1;
-        }
-    }
-    n
-}
 
 // Unowned by SUBTRACTION — the conservation law's defining move (§4: "not by
 // error term"). Returns the unowned bucket plus whether the subtraction had
@@ -49612,290 +49443,6 @@ fn membership_conservation_breach(
     } else {
         Some((universe.0 + universe.1, got.0 + got.1))
     }
-}
-
-// Joint candidate patches for one path: the multi-id claims' intervals whose
-// per-path declaration resolves to a JOINT set (several declarers — exactly
-// `resolve_interval_path_owner`'s rule), filtered to live begun members and
-// grouped by the surviving member set. The single-declarer case never reaches
-// here: it resolves to Single and rides `claim_interval_diff`'s scope for
-// that id. Ghosts fall out for free — a ghost is not on the board, so it is
-// never begun.
-// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
-// the frozen staging path doesn't need it (staging builds its patch from
-// `claim_interval_diff`). It stays only because the acceptance fixtures for
-// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
-// means rewriting those fixtures against the line rule (a follow-up item).
-#[allow(dead_code)]
-fn membership_joint_patches(
-    root: &Path,
-    path: &str,
-    declared: &std::collections::HashMap<String, Vec<String>>,
-    begun: &std::collections::HashSet<String>,
-    spawns: &std::cell::Cell<usize>,
-) -> Vec<(Vec<String>, String, Vec<String>)> {
-    let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
-        return Vec::new();
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    // fix-patch-composition-for-repeated-paths: carry each joint group's
-    // per-interval sections alongside its concatenated patch, in record
-    // order — the same additive shape as `claim_interval_diff`'s `sections`.
-    let mut grouped: std::collections::BTreeMap<Vec<String>, (String, Vec<String>)> =
-        Default::default();
-    for (i, rec) in arr.iter().enumerate() {
-        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let ids: Vec<String> = rec
-            .get("ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let IntervalPathOwner::Joint(set) = resolve_interval_path_owner(&ids, path, declared)
-        else {
-            continue;
-        };
-        let mut members: Vec<String> = set.into_iter().filter(|m| begun.contains(m)).collect();
-        if members.len() < 2 {
-            continue;
-        }
-        members.sort();
-        let next = arr
-            .get(i + 1)
-            .and_then(|r| r.get("ref"))
-            .and_then(|v| v.as_str());
-        let mut args: Vec<&str> = vec!["diff", a];
-        if let Some(b) = next {
-            args.push(b);
-        }
-        args.push("--");
-        args.push(path);
-        spawns.set(spawns.get() + 1);
-        if let Ok(o) = std::process::Command::new("git")
-            .current_dir(root)
-            .args(&args)
-            .output()
-        {
-            let s = String::from_utf8_lossy(&o.stdout);
-            if !s.trim().is_empty() {
-                let entry = grouped.entry(members).or_default();
-                entry.0.push_str(&s);
-                entry.1.push(s.into_owned());
-            }
-        }
-    }
-    grouped
-        .into_iter()
-        .map(|(members, (patch, sections))| (members, patch, sections))
-        .collect()
-}
-
-// A candidate's own reverse-applied BASELINE: present content (`idx_now`)
-// with this candidate's own patch reversed out of it, written as a tree and
-// returned by oid. This is "what existed before this candidate's recorded
-// work" — the shared primitive behind two things that both need exactly
-// that tree: #367's net-effect normalization below (diffs base_tree →
-// now_tree) and the deletion-attribution rule
-// (membership-attributes-deletions, docs/attribution-model.md §4) that
-// compares base_tree's blob for a path against HEAD's. Fail-open: `None` on
-// any git failure — observe-only code must never block a serve.
-//
-// fix-patch-composition-for-repeated-paths: `sections` are the candidate's
-// per-interval diffs FOR THIS PATH, in record order (oldest first — the
-// order `claim_interval_diff` / `membership_joint_patches` matched them in,
-// never re-derived from splitting concatenated text on `diff --git`). A
-// single `git apply --cached --reverse` over a concatenation of several
-// sections for the SAME path does not compose: it reverses only the LAST
-// section and silently drops the earlier ones, exit code 0
-// (docs/attribution-model.md §4, case 5). So each section is reverse-applied
-// on its own, newest-interval-first (i.e. walking `sections` backward), each
-// one against the tree the PRIOR reversal produced — which is what "undo
-// this candidate's work" actually means. A candidate that touched the path
-// in exactly one interval takes the same single-`git apply` path as before.
-// Any section that fails to apply aborts the WHOLE derivation and returns
-// `None` — a partially-reversed base is a wrong answer that looks like a
-// right one, which is this defect's entire character, so there is no
-// partial-success return here.
-fn membership_candidate_base(
-    root: &Path,
-    idx_now: &Path,
-    sections: &[String],
-    spawns: &std::cell::Cell<usize>,
-) -> Option<String> {
-    if sections.is_empty() {
-        return None;
-    }
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tag = format!(
-        "{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let idx_tmp = std::env::temp_dir().join(format!("bram-membership-base-{}", tag));
-    let pfile = std::env::temp_dir().join(format!("bram-membership-base-{}.patch", tag));
-    let cleanup = || {
-        let _ = std::fs::remove_file(&idx_tmp);
-        let _ = std::fs::remove_file(&pfile);
-    };
-    if std::fs::copy(idx_now, &idx_tmp).is_err() {
-        cleanup();
-        return None;
-    }
-    let git = |idx: Option<&Path>, args: &[&str]| -> Option<std::process::Output> {
-        spawns.set(spawns.get() + 1);
-        let mut cmd = std::process::Command::new("git");
-        cmd.current_dir(root).args(args);
-        if let Some(idx) = idx {
-            cmd.env("GIT_INDEX_FILE", idx);
-        }
-        cmd.output().ok()
-    };
-    let pfile_s = pfile.to_string_lossy().to_string();
-    for section in sections.iter().rev() {
-        if std::fs::write(&pfile, section).is_err() {
-            cleanup();
-            return None;
-        }
-        // The intermediate state is asserted after every reversal, not just
-        // at the end: `git apply`'s own exit status IS that assertion — a
-        // section that applies without effect, or to the wrong place, fails
-        // this check rather than being indistinguishable from success the
-        // way the old single-shot concatenated form was.
-        let applied = git(
-            Some(&idx_tmp),
-            &["apply", "--cached", "--reverse", &pfile_s],
-        )
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-        if !applied {
-            cleanup();
-            return None;
-        }
-    }
-    let base_tree = git(Some(&idx_tmp), &["write-tree"]).and_then(|o| {
-        o.status
-            .success()
-            .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    });
-    cleanup();
-    base_tree.filter(|t| !t.is_empty())
-}
-
-// One path's diff between two trees, as text — the shared plumbing behind
-// `membership_net_patch`'s re-diff and nothing else; split out so a caller
-// that already holds a `base_tree` (the probe loop, which needs it for the
-// blob-equality test regardless) does not reverse-apply the candidate a
-// second time to get the same tree `membership_net_patch` would recompute.
-fn membership_diff_tree_path(
-    root: &Path,
-    tree_a: &str,
-    tree_b: &str,
-    path: &str,
-    spawns: &std::cell::Cell<usize>,
-) -> Option<String> {
-    spawns.set(spawns.get() + 1);
-    let out = std::process::Command::new("git")
-        .current_dir(root)
-        .args(["diff", tree_a, tree_b, "--", path])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).into_owned();
-    if s.trim().is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}
-
-// Net-normalization for a concatenated multi-interval candidate (#367). An
-// item whose evidence spans several of its own intervals counts a re-edited
-// line once per interval that touched it — interval 1 adds it, interval 2's
-// modification adds it again — while the HEAD-relative universe counts it
-// once, so `single` exceeds the universe and the conservation tripwire
-// fires (its third catch, 2026-09-08: got−expected equalled the re-touched
-// lines in every field episode, exactly 2x when every line was re-edited).
-// The net form reverse-applies the evidence OUT of the present state (the
-// membership probe has already proven it reverse-applies) and re-diffs the
-// present against that base, so each surviving line counts once. Fail-open:
-// None falls back to the raw concatenated patch — observe-only code must
-// never block a serve, and an over-count is exactly what the tripwire
-// exists to report. Single-diff candidates never come here. Callers that
-// already have a `base_tree` in hand (the probe loop) should call
-// `membership_diff_tree_path` directly instead — this function exists for
-// callers that want the net patch alone, computed end to end. No production
-// caller needs that end-to-end form today (the probe loop always already
-// has `base_tree` for the deletion-attribution test), so this is currently
-// exercised only by its own test — kept, not deleted, as the one-call
-// convenience the next caller of the net form will otherwise have to
-// reinvent.
-#[allow(dead_code)]
-fn membership_net_patch(
-    root: &Path,
-    idx_now: &Path,
-    now_tree: &str,
-    sections: &[String],
-    path: &str,
-    spawns: &std::cell::Cell<usize>,
-) -> Option<String> {
-    if now_tree.is_empty() {
-        return None;
-    }
-    let base_tree = membership_candidate_base(root, idx_now, sections, spawns)?;
-    membership_diff_tree_path(root, &base_tree, now_tree, path, spawns)
-}
-
-// membership-attributes-deletions (docs/attribution-model.md §4, the
-// deletion matrix): whether a candidate's baseline coincides with HEAD for
-// this path — the discriminator the whole rule rests on. `base_tree`
-// (`membership_candidate_base`) is "present content minus this candidate's
-// own work"; when that equals HEAD's content for the path, this candidate
-// is the sole contributor between HEAD and now, and its removed lines ARE
-// HEAD-relative deletions. When it differs, this candidate sat on top of
-// other work (still-live or already-superseded), and its removed count
-// describes a line that never existed relative to HEAD — the dependency
-// fixture's original double-booking fire. `git diff --quiet` reports "no
-// difference" (success) whether the path is absent from both trees or
-// present and identical in both, which is exactly the equality this needs
-// — no special-casing for a path HEAD never had (a candidate that created
-// the path from nothing). Fail-open: any git failure reads as "not
-// HEAD-relative", the same conservative direction as every other
-// degradation here.
-// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
-// the frozen staging path doesn't need it (staging builds its patch from
-// `claim_interval_diff`). It stays only because the acceptance fixtures for
-// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
-// means rewriting those fixtures against the line rule (a follow-up item).
-#[allow(dead_code)]
-fn membership_blob_matches_head(
-    root: &Path,
-    tree: &str,
-    path: &str,
-    spawns: &std::cell::Cell<usize>,
-) -> bool {
-    if tree.is_empty() {
-        return false;
-    }
-    spawns.set(spawns.get() + 1);
-    std::process::Command::new("git")
-        .current_dir(root)
-        .args(["diff", "--quiet", "--no-renames", tree, "HEAD", "--", path])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 // One path's membership partition while the engine accumulates. Counts are
@@ -51201,104 +50748,268 @@ fn membership_report<R: tauri::Runtime>(
     }
 }
 
+// Real-git scaffolding shared by the tests that drive the line rule through
+// the claim-store chain (`membership_step_chain` -> `membership_line_credit`),
+// the way the engine does. Hoisted when the engine, acceptance and
+// deletion-matrix modules all needed it (each had carried its own copy of
+// the whole-patch scaffolding this replaced).
 #[cfg(test)]
-mod membership_engine_tests {
-    use super::{
-        membership_block_occurrences, membership_conservation_breach, membership_hunk_new_blocks,
-        membership_patch_footprint, membership_unowned,
-    };
+mod membership_port_support {
+    use super::{membership_line_credit, membership_step_chain, MembershipLineCredit};
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
-    #[test]
-    fn concatenated_reedit_patch_counts_net_once() {
-        // #367's deliberate violation: create-then-re-edit evidence across
-        // two intervals sums to 10 added lines while the file holds 5; the
-        // net form counts each surviving line once. Real git, temp repo.
-        use std::process::Command;
+    pub(super) fn scratch_repo(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "bram-net-test-{}-{}",
+            "bram-port-{}-{}-{}",
+            tag,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let git = |args: &[&str], idx: Option<&std::path::Path>| -> std::process::Output {
-            let mut cmd = Command::new("git");
-            cmd.current_dir(&root).args(args);
-            if let Some(idx) = idx {
-                cmd.env("GIT_INDEX_FILE", idx);
-            }
-            cmd.output().unwrap()
+        for args in [
+            vec!["init", "-q", "-b", "main", "."],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(&root)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        root
+    }
+
+    pub(super) fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(i) = idx {
+            cmd.env("GIT_INDEX_FILE", i);
+        }
+        cmd.output().unwrap()
+    }
+
+    pub(super) fn commit_all(root: &Path, msg: &str) {
+        assert!(git(root, None, &["add", "-A"]).status.success());
+        assert!(git(root, None, &["commit", "-q", "-m", msg])
+            .status
+            .success());
+    }
+
+    // A boundary tree, captured the way the claim store does: HEAD plus
+    // `add -A` in a scratch index OUTSIDE the repo, written as a tree.
+    pub(super) fn snap(root: &Path) -> String {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let idx = std::env::temp_dir().join(format!(
+            "bram-port-idx-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&idx);
+        assert!(git(root, Some(&idx), &["read-tree", "HEAD"])
+            .status
+            .success());
+        assert!(git(root, Some(&idx), &["add", "-A"]).status.success());
+        let out = git(root, Some(&idx), &["write-tree"]);
+        assert!(out.status.success(), "write-tree failed: {:?}", out);
+        let _ = std::fs::remove_file(&idx);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // (added, removed) between two revs/trees for one path.
+    pub(super) fn numstat_between(root: &Path, a: &str, b: &str, path: &str) -> (usize, usize) {
+        let out = git(root, None, &["diff", "--numstat", a, b, "--", path]);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut it = text.split_whitespace();
+        (
+            it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+            it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+        )
+    }
+
+    // The universe: `git diff --numstat HEAD <now>` for one path.
+    pub(super) fn numstat(root: &Path, now: &str, path: &str) -> (usize, usize) {
+        numstat_between(root, "HEAD", now, path)
+    }
+
+    // Runs the line rule over a claim-store chain. `records` is oldest-first
+    // `(ids, boundary tree)`: `ids` is a comma-joined id list (a same-click
+    // joint claim), and "" is a `cleared` record. Returns the per-path credit
+    // and the holders of each step, as `membership_step_chain` resolves them.
+    pub(super) fn chain_credit(
+        root: &Path,
+        records: &[(&str, &str)],
+        now: &str,
+        paths: &[&str],
+    ) -> (BTreeMap<String, MembershipLineCredit>, Vec<Vec<String>>) {
+        let recs: Vec<serde_json::Value> = records
+            .iter()
+            .enumerate()
+            .map(|(i, (ids, tree))| {
+                let ids: Vec<&str> = ids.split(',').filter(|s| !s.is_empty()).collect();
+                serde_json::json!({
+                    "atMs": i + 1,
+                    "ids": ids,
+                    "kind": if ids.is_empty() { "cleared" } else { "approved" },
+                    "ref": format!("r{}", i + 1),
+                    "tree": tree,
+                })
+            })
+            .collect();
+        let json = serde_json::json!({ "intervals": recs }).to_string();
+        let (steps, holders) = membership_step_chain(&json, now);
+        assert!(!steps.is_empty(), "the chain has steps");
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        let spawns = std::cell::Cell::new(0usize);
+        let map = membership_line_credit(root, &steps, &paths, &spawns).expect("git succeeds");
+        assert!(spawns.get() > 0, "the line rule's git spawns are counted");
+        (map, holders)
+    }
+
+    // What the engine's bucket routing does with one path's credit, minus the
+    // declared-file filter: a step's lines go to its holders, one holder is
+    // `single`, several are `joint`, and a step nobody held credits no one
+    // (its lines are unowned by subtraction).
+    pub(super) struct Routed {
+        pub single: (usize, usize),
+        pub joint: (usize, usize),
+        pub per_item: BTreeMap<Vec<String>, (usize, usize)>,
+        pub step_members: BTreeMap<usize, Vec<String>>,
+    }
+
+    pub(super) fn route(credit: &MembershipLineCredit, holders: &[Vec<String>]) -> Routed {
+        let mut r = Routed {
+            single: (0, 0),
+            joint: (0, 0),
+            per_item: BTreeMap::new(),
+            step_members: BTreeMap::new(),
         };
-        assert!(git(&["init", "-q"], None).status.success());
+        for (step, &(added, removed)) in &credit.by_step {
+            if added == 0 && removed == 0 {
+                continue;
+            }
+            let mut members: Vec<String> = holders.get(*step).cloned().unwrap_or_default();
+            members.sort();
+            members.dedup();
+            if members.is_empty() {
+                continue;
+            }
+            let bucket = if members.len() > 1 {
+                &mut r.joint
+            } else {
+                &mut r.single
+            };
+            bucket.0 += added;
+            bucket.1 += removed;
+            let e = r.per_item.entry(members.clone()).or_insert((0, 0));
+            e.0 += added;
+            e.1 += removed;
+            r.step_members.insert(*step, members);
+        }
+        r
+    }
+
+    // Everything the buckets attribute, summed.
+    pub(super) fn attributed(r: &Routed) -> (usize, usize) {
+        (r.single.0 + r.joint.0, r.single.1 + r.joint.1)
+    }
+}
+
+#[cfg(test)]
+mod membership_engine_tests {
+    use super::membership_port_support::{
+        attributed, chain_credit, commit_all, numstat, numstat_between, route, scratch_repo, snap,
+    };
+    use super::{membership_conservation_breach, membership_line_credit, membership_unowned};
+
+    #[test]
+    fn concatenated_reedit_patch_counts_net_once() {
+        // #367's deliberate violation, restated for the line rule: an item
+        // creates a file in one window and re-edits every line in a second
+        // window of its own. Summing each window's diff gives 10 added lines
+        // while the file holds 5; the line rule credits each surviving line
+        // once, to the window that last wrote it. Real git, temp repo.
+        let root = scratch_repo("net");
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        commit_all(&root, "head");
+        let b0 = snap(&root);
         let first: String = (1..=5).map(|n| format!("line {n}: first\n")).collect();
         let second: String = (1..=5).map(|n| format!("line {n}: second\n")).collect();
-        let idx1 = root.join("idx1");
-        let idx2 = root.join("idx2");
         std::fs::write(root.join("f.txt"), &first).unwrap();
-        assert!(git(&["add", "f.txt"], Some(&idx1)).status.success());
-        let t1 = String::from_utf8_lossy(&git(&["write-tree"], Some(&idx1)).stdout)
-            .trim()
-            .to_string();
+        let b1 = snap(&root);
         std::fs::write(root.join("f.txt"), &second).unwrap();
-        assert!(git(&["add", "f.txt"], Some(&idx2)).status.success());
-        let t2 = String::from_utf8_lossy(&git(&["write-tree"], Some(&idx2)).stdout)
-            .trim()
-            .to_string();
-        const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-        let d1 =
-            String::from_utf8_lossy(&git(&["diff", EMPTY_TREE, &t1], None).stdout).into_owned();
-        let d2 = String::from_utf8_lossy(&git(&["diff", &t1, &t2], None).stdout).into_owned();
-        let concat = format!("{d1}{d2}");
+        let now = snap(&root);
+
         assert_eq!(
-            super::membership_patch_footprint(&concat).added_lines.len(),
+            numstat_between(&root, &b0, &b1, "f.txt").0
+                + numstat_between(&root, &b1, &now, "f.txt").0,
             10,
-            "the raw concatenated evidence double-counts re-edited lines"
+            "the raw per-window evidence double-counts re-edited lines"
         );
-        let spawns = std::cell::Cell::new(0usize);
-        let sections = vec![d1.clone(), d2.clone()];
-        let net = super::membership_net_patch(&root, &idx2, &t2, &sections, "f.txt", &spawns)
-            .expect("net normalization should succeed");
-        assert_eq!(super::membership_patch_footprint(&net).added_lines.len(), 5);
-        assert!(spawns.get() > 0, "net normalization spawns are counted");
+        let universe = numstat(&root, &now, "f.txt");
+        assert_eq!(universe, (5, 0));
+
+        let (map, holders) = chain_credit(&root, &[("a", &b0), ("a", &b1)], &now, &["f.txt"]);
+        let credit = &map["f.txt"];
+        assert_eq!(
+            credit.by_step.get(&1),
+            None,
+            "window 1's lines were all overwritten"
+        );
+        assert_eq!(credit.by_step.get(&2), Some(&(5, 0)));
+        assert_eq!(credit.unexplained, (0, 0));
+        let routed = route(credit, &holders);
+        assert_eq!(routed.single, (5, 0), "the item is credited each line once");
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
+        assert!(!clamped);
+        assert_eq!(unowned, (0, 0));
+        assert_eq!(
+            membership_conservation_breach(universe, routed.single, (0, 0), (0, 0), unowned),
+            None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn footprint_maps_plus_lines_to_new_side_numbers() {
-        let patch =
-            "@@ -1,3 +1,4 @@\n a\n+new-two\n b\n c\n@@ -10,2 +11,3 @@\n j\n+new-twelve\n k\n";
-        let fp = membership_patch_footprint(patch);
-        assert_eq!(fp.added_lines, vec![2, 12]);
-        assert_eq!(fp.removed, 0);
-    }
+    fn credit_maps_added_lines_to_present_positions_per_file() {
+        // The line rule's analogue of the old footprint parser's contract:
+        // added lines are placed at their PRESENT 1-based positions, removals
+        // are numbered by their HEAD line, and each file is tracked on its own
+        // (a second file's lines never shift or inherit the first's).
+        let root = scratch_repo("perfile");
+        std::fs::write(root.join("x.txt"), "a\nold\nb\n").unwrap();
+        std::fs::write(root.join("y.txt"), "p\nq\nr\ns\nt\n").unwrap();
+        commit_all(&root, "head");
+        let b0 = snap(&root);
+        std::fs::write(root.join("x.txt"), "a\nnew\nb\n").unwrap();
+        std::fs::write(root.join("y.txt"), "p\nq\nadded\nr\ns\nt\n").unwrap();
+        let now = snap(&root);
 
-    #[test]
-    fn footprint_counts_removed_and_resets_per_file() {
-        let patch = "diff --git a/x b/x\nindex 111..222 100644\n--- a/x\n+++ b/x\n\
-                     @@ -1,2 +1,2 @@\n a\n-old\n+new\n\
-                     diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -5,1 +5,2 @@\n ctx\n+added\n";
-        let fp = membership_patch_footprint(patch);
-        assert_eq!(fp.added_lines, vec![2, 6]);
-        assert_eq!(fp.removed, 1);
-    }
-
-    #[test]
-    fn hunk_new_blocks_capture_context_and_added_lines() {
-        let patch = "@@ -1,3 +1,4 @@\n a\n+x\n b\n@@ -9,2 +10,2 @@\n c\n c\n";
-        let blocks = membership_hunk_new_blocks(patch);
-        // The second hunk carries no change and anchors nothing.
-        assert_eq!(blocks, vec![vec!["a", "x", "b"]]);
-    }
-
-    #[test]
-    fn duplicate_block_placements_are_counted() {
-        let content = "a\nx\nb\nq\na\nx\nb\n";
-        let block = vec!["a".to_string(), "x".to_string(), "b".to_string()];
-        assert_eq!(membership_block_occurrences(content, &block), 2);
-        let unique = vec!["q".to_string()];
-        assert_eq!(membership_block_occurrences(content, &unique), 1);
+        let steps = vec![(b0, 0usize), (now, 1usize)];
+        let spawns = std::cell::Cell::new(0usize);
+        let map = membership_line_credit(
+            &root,
+            &steps,
+            &["x.txt".to_string(), "y.txt".to_string()],
+            &spawns,
+        )
+        .expect("git succeeds");
+        let x = &map["x.txt"];
+        assert_eq!(x.added_lines, vec![(2, 1)]);
+        assert_eq!(x.removed_lines, vec![(2, 1)]);
+        assert_eq!(x.by_step.get(&1), Some(&(1, 1)));
+        let y = &map["y.txt"];
+        assert_eq!(y.added_lines, vec![(3, 1)]);
+        assert!(y.removed_lines.is_empty());
+        assert_eq!(y.by_step.get(&1), Some(&(1, 0)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -51951,10 +51662,10 @@ diff --git a/bin.dat b/bin.dat\nindex {b2}..{b3} 100644\nBinary files a/bin.dat 
 
         // Deletion after a prior rewrite: HEAD [old], step A old->middle,
         // step B middle->new. The removal of `old` is tallied to step A and
-        // the added `new` to step B. This deliberately differs from
-        // `matrix_2_deletion_after_prior_rewrite_lands_unowned`, which tests
-        // the superseded helpers where that removal falls to unowned: the
-        // history knows who removed the HEAD line.
+        // the added `new` to step B: the history knows who removed the HEAD
+        // line. Same shape as
+        // `matrix_2_deletion_after_prior_rewrite_goes_to_the_step_that_removed_it`,
+        // which asserts it through the claim-store chain.
         let root = scratch_repo("g3");
         std::fs::write(root.join("f.txt"), "keep\nold\ntail\n").unwrap();
         commit_all(&root, "head");
@@ -52120,183 +51831,99 @@ diff --git a/bin.dat b/bin.dat\nindex {b2}..{b3} 100644\nBinary files a/bin.dat 
 
 #[cfg(test)]
 mod membership_acceptance_fixture_tests {
-    use super::{
-        item_joint_with, membership_blob_matches_head, membership_candidate_base,
-        membership_conservation_breach, membership_joint_owners, membership_net_patch,
-        membership_patch_footprint, membership_unowned, resolve_interval_path_owner,
-        untracked_declared_paths, IntervalPathOwner,
+    use super::membership_port_support::{
+        attributed, chain_credit, commit_all, git, numstat, route, scratch_repo, snap,
     };
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use super::{
+        item_joint_with, membership_conservation_breach, membership_joint_owners, membership_runs,
+        membership_unowned, resolve_interval_path_owner, untracked_declared_paths,
+        IntervalPathOwner,
+    };
 
-    // Same real-git scaffolding the deletion matrix uses. Duplicated rather
-    // than shared because the two modules are peers and neither owns the
-    // other's fixtures; if a third module needs them, hoist then.
-    fn scratch_repo(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "bram-acceptance-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        for args in [
-            vec!["init", "-q", "-b", "main", "."],
-            vec!["config", "user.email", "t@t"],
-            vec!["config", "user.name", "t"],
-        ] {
-            assert!(Command::new("git")
-                .current_dir(&root)
-                .args(&args)
-                .status()
-                .unwrap()
-                .success());
-        }
-        root
-    }
-
-    fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
-        let mut cmd = Command::new("git");
-        cmd.current_dir(root).args(args);
-        if let Some(i) = idx {
-            cmd.env("GIT_INDEX_FILE", i);
-        }
-        cmd.output().unwrap()
-    }
-
-    fn commit_all(root: &Path, msg: &str) {
-        assert!(git(root, None, &["add", "-A"]).status.success());
-        assert!(git(root, None, &["commit", "-q", "-m", msg])
-            .status
-            .success());
-    }
-
-    fn rev_parse(root: &Path, rev: &str) -> String {
-        String::from_utf8_lossy(&git(root, None, &["rev-parse", rev]).stdout)
-            .trim()
-            .to_string()
-    }
-
-    fn scratch_index(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "bram-acceptance-idx-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&p);
-        p
-    }
-
-    fn seed_now_index(root: &Path, idx: &Path) {
-        assert!(git(root, Some(idx), &["read-tree", "HEAD"])
-            .status
-            .success());
-        assert!(git(root, Some(idx), &["add", "-A"]).status.success());
-    }
-
-    fn write_tree(root: &Path, idx: &Path) -> String {
-        String::from_utf8_lossy(&git(root, Some(idx), &["write-tree"]).stdout)
-            .trim()
-            .to_string()
-    }
-
-    fn diff(root: &Path, a: &str, b: &str, path: &str) -> String {
-        String::from_utf8_lossy(&git(root, None, &["diff", a, b, "--", path]).stdout).into_owned()
-    }
+    // The criteria below are driven through the line rule: a claim-store chain
+    // of boundary trees (`chain_credit`), the credit each step earns, and the
+    // buckets that credit routes to (`route`). Each fixture builds real git
+    // state, so a regression in the rule shows up as a wrong count, not a
+    // wrong mock.
 
     #[test]
     fn criterion_2_declaring_a_path_earns_no_membership_without_evidence() {
-        // #327's `dummy-a` shape, built for real: an item DECLARES a path and
-        // writes nothing, while a neighbour does all the work on it.
+        // #327's `dummy-a` shape, built for real: an item holds a window and
+        // writes nothing, while a neighbour does all the work on the path.
         //
         // The criterion (attribution-model.md §6) is that dummy-a reads 0/0.
-        // This fixture proves the ENGINE half of it, and passing today is the
-        // honest result rather than a weak one: membership already refuses to
-        // credit a declarer with no evidence. What is unmet is the CONSUMER
-        // half -- the strip, tooltip and willCommit still source from the
-        // declared-path proxy, which is what #273 reported. That half cannot
-        // be reached from Rust; it flips with migration step 3 and is guarded
-        // by rendered verification there.
+        // This fixture proves the ENGINE half of it, and passing is the
+        // honest result rather than a weak one: the line rule credits a line
+        // only to the step that wrote it, so a holder with no writes earns no
+        // credit at all. What is unmet at the engine level is nothing; the
+        // CONSUMER half -- the strip, tooltip and willCommit sourcing from the
+        // declared-path proxy -- is what #273 reported, and cannot be reached
+        // from Rust. It is guarded by rendered verification.
         //
         // So this test's job is to stop the engine from ever regressing INTO
-        // the behaviour the pane still has. It fails the moment a declarer
-        // without evidence is credited.
+        // the behaviour the pane once had. It fails the moment a holder
+        // without writes is credited.
         let root = scratch_repo("c2");
         let body_57: String = (0..57).map(|n| format!("old-{n}\n")).collect();
         std::fs::write(root.join("shared.txt"), &body_57).unwrap();
         std::fs::write(root.join("untouched.txt"), "stable\n").unwrap();
         commit_all(&root, "head: 57 lines");
-        let head = rev_parse(&root, "HEAD");
+        let b0 = snap(&root);
 
-        // The neighbour rewrites shared.txt: -57 +104. dummy-a writes nothing,
-        // anywhere, while declaring BOTH files.
+        // dummy-a's window opens and closes with nothing written anywhere;
+        // the neighbour's window then rewrites shared.txt: -57 +104.
         let body_104: String = (0..104).map(|n| format!("new-{n}\n")).collect();
         std::fs::write(root.join("shared.txt"), &body_104).unwrap();
+        let now = snap(&root);
 
-        let idx_now = scratch_index("c2-now");
-        seed_now_index(&root, &idx_now);
-        let now_tree = write_tree(&root, &idx_now);
-
-        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "shared.txt"));
-        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        let universe = numstat(&root, &now, "shared.txt");
         assert_eq!(universe, (104, 57), "sanity: the #327 shape, +104 -57");
 
-        let spawns = std::cell::Cell::new(0usize);
-        let mut per_item: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
-
-        // The neighbour's evidence is its interval diff. Run the real probe.
-        let neighbour_patch = diff(&root, &head, &now_tree, "shared.txt");
-        let base = membership_candidate_base(
+        let (map, holders) = chain_credit(
             &root,
-            &idx_now,
-            std::slice::from_ref(&neighbour_patch),
-            &spawns,
-        )
-        .expect("the neighbour's evidence must reverse-apply from present content");
-        let head_relative = membership_blob_matches_head(&root, &base, "shared.txt", &spawns);
-        assert!(
-            head_relative,
-            "sole contributor: its base is HEAD, so both axes are HEAD-relative"
+            &[("dummy-a", &b0), ("neighbour", &b0)],
+            &now,
+            &["shared.txt", "untouched.txt"],
         );
-        let fp = membership_patch_footprint(&neighbour_patch);
-        per_item.insert(
-            "neighbour".to_string(),
-            (
-                fp.added_lines.len(),
-                if head_relative { fp.removed } else { 0 },
-            ),
-        );
-
-        // dummy-a: declares shared.txt AND untouched.txt, holds no interval, so
-        // it contributes no candidate patch and the probe loop never runs for
-        // it. Declaration alone reaches the engine nowhere.
-        let dummy_a_declared = ["shared.txt", "untouched.txt"];
-        assert_eq!(dummy_a_declared.len(), 2, "declares two files");
-
         assert_eq!(
-            per_item.get("dummy-a"),
+            holders[1],
+            vec!["dummy-a".to_string()],
+            "dummy-a really held a window"
+        );
+        assert_eq!(holders[2], vec!["neighbour".to_string()]);
+        let shared = &map["shared.txt"];
+        assert_eq!(
+            shared.by_step.get(&1),
             None,
-            "THE CRITERION: an item that declared the path and wrote nothing \
+            "dummy-a's window wrote nothing"
+        );
+        assert!(map["untouched.txt"].by_step.is_empty());
+
+        let mut per_item: std::collections::BTreeMap<Vec<String>, (usize, usize)> =
+            Default::default();
+        for credit in map.values() {
+            per_item.extend(route(credit, &holders).per_item);
+        }
+        assert_eq!(
+            per_item.get(&vec!["dummy-a".to_string()]),
+            None,
+            "THE CRITERION: an item that held a window and wrote nothing \
              carries no membership entry -- not a zeroed one, none at all"
         );
         assert_eq!(
-            per_item.get("neighbour"),
+            per_item.get(&vec!["neighbour".to_string()]),
             Some(&(104usize, 57usize)),
             "and the work is credited to whoever actually did it"
         );
 
         // Conservation still holds: everything in the universe is accounted
         // for by the neighbour, nothing is unowned, nothing is invented.
-        let attributed = *per_item.get("neighbour").unwrap();
-        let (unowned, clamped) = membership_unowned(universe, attributed);
+        let routed = route(shared, &holders);
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
         assert!(!clamped, "no over-attribution");
         assert_eq!(unowned, (0, 0), "nothing orphaned");
         assert_eq!(
-            membership_conservation_breach(universe, attributed, (0, 0), (0, 0), unowned),
+            membership_conservation_breach(universe, routed.single, (0, 0), (0, 0), unowned),
             None,
             "the partition sums to the universe"
         );
@@ -52306,29 +51933,52 @@ mod membership_acceptance_fixture_tests {
 
     #[test]
     fn criterion_3_orphan_lines_are_explicit_unowned_residue() {
-        // bcb2a7e shape: a neighbour's claim-era work exists, but the
-        // requested item has no owned contribution.  The membership model
-        // must expose the orphan lines instead of letting whole-file staging
-        // absorb them silently.
+        // bcb2a7e shape: a neighbour's claim-era work exists, but lines
+        // landed in the shared file after its claim was cleared, so no
+        // requested item owns them. The membership model must expose the
+        // orphan lines instead of letting whole-file staging absorb them
+        // silently.
         let root = scratch_repo("c3");
         std::fs::write(root.join("shared.txt"), "base\n").unwrap();
         commit_all(&root, "head: base");
-        let head = rev_parse(&root, "HEAD");
+        let b0 = snap(&root);
+        // The neighbour's claim window writes its own file.
+        std::fs::write(root.join("neighbour.txt"), "n1\n").unwrap();
+        let b1 = snap(&root);
+        // The claim is cleared; then orphan lines land in shared.txt.
         std::fs::write(root.join("shared.txt"), "base\norphan-1\norphan-2\n").unwrap();
-        let idx_now = scratch_index("c3-now");
-        seed_now_index(&root, &idx_now);
-        let now = write_tree(&root, &idx_now);
-        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now, "shared.txt"));
-        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        let now = snap(&root);
+
+        let universe = numstat(&root, &now, "shared.txt");
         assert_eq!(universe, (2, 0));
-        let attributed = (0usize, 0usize);
-        let (unowned, clamped) = membership_unowned(universe, attributed);
+        let (map, holders) = chain_credit(
+            &root,
+            &[("neighbour", &b0), ("", &b1)],
+            &now,
+            &["shared.txt", "neighbour.txt"],
+        );
+        assert_eq!(
+            map["neighbour.txt"].by_step.get(&1),
+            Some(&(1, 0)),
+            "the neighbour's claim-era work is real and credited"
+        );
+        let shared = &map["shared.txt"];
+        // The line rule SEES the lines (step 2 wrote them) ...
+        assert_eq!(shared.by_step.get(&2), Some(&(2, 0)));
+        assert_eq!(shared.unexplained, (0, 0));
+        // ... but nobody held step 2, so no one owns them and they have no run.
+        let routed = route(shared, &holders);
+        assert!(routed.per_item.is_empty());
+        assert!(membership_runs(&shared.added_lines, &routed.step_members).is_empty());
+        let owned = attributed(&routed);
+        assert_eq!(owned, (0, 0));
+        let (unowned, clamped) = membership_unowned(universe, owned);
         assert_eq!(unowned, (2, 0));
         assert!(!clamped);
         // A balanced partition is still diagnostically healthy; the gate's
         // refusal/disclosure is the later consumer criterion.
         assert_eq!(
-            membership_conservation_breach(universe, attributed, (0, 0), (0, 0), unowned),
+            membership_conservation_breach(universe, owned, (0, 0), (0, 0), unowned),
             None
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -52346,32 +51996,46 @@ mod membership_acceptance_fixture_tests {
         )
         .unwrap();
         commit_all(&root, "head: large file");
-        let head = rev_parse(&root, "HEAD");
-        let idx_unchanged = scratch_index("c4-unchanged");
-        seed_now_index(&root, &idx_unchanged);
-        let unchanged_tree = write_tree(&root, &idx_unchanged);
-        let large_unchanged =
-            membership_patch_footprint(&diff(&root, &head, &unchanged_tree, "large.txt"));
+
+        // Shape 1, unchanged: the boundary and the present state are HEAD.
+        let unchanged_tree = snap(&root);
+        let (map, _) = chain_credit(
+            &root,
+            &[("a", &unchanged_tree)],
+            &unchanged_tree,
+            &["large.txt"],
+        );
+        let large_unchanged = &map["large.txt"];
+        assert_eq!(numstat(&root, &unchanged_tree, "large.txt"), (0, 0));
+        assert!(large_unchanged.by_step.is_empty());
+        assert!(large_unchanged.added_lines.is_empty());
+
+        // Shape 2, after a commit: the work was inside a claim window, then
+        // landed. The boundary predates the commit; the present state is the
+        // new HEAD, so nothing differs from HEAD any more.
         std::fs::write(root.join("large.txt"), "committed\n").unwrap();
+        let pre_commit = snap(&root);
         commit_all(&root, "post-commit");
-        let post_head = rev_parse(&root, "HEAD");
-        let idx_post = scratch_index("c4-post");
-        seed_now_index(&root, &idx_post);
-        let post_tree = write_tree(&root, &idx_post);
-        let post_commit =
-            membership_patch_footprint(&diff(&root, &post_head, &post_tree, "large.txt"));
+        let post_tree = snap(&root);
+        let (map, _) = chain_credit(&root, &[("a", &pre_commit)], &post_tree, &["large.txt"]);
+        let post_commit = &map["large.txt"];
+        assert_eq!(numstat(&root, &post_tree, "large.txt"), (0, 0));
+        assert!(post_commit.by_step.is_empty());
+        assert!(post_commit.added_lines.is_empty());
+
+        // Shape 3, entirely unowned: an item held a window (writing nothing),
+        // its claim was cleared, and then a line lands.
         std::fs::write(root.join("large.txt"), "committed\nunowned\n").unwrap();
-        let idx_unowned = scratch_index("c4-unowned");
-        seed_now_index(&root, &idx_unowned);
-        let unowned_tree = write_tree(&root, &idx_unowned);
-        let unowned_fp =
-            membership_patch_footprint(&diff(&root, &post_head, &unowned_tree, "large.txt"));
-        let unowned_only =
-            membership_unowned((unowned_fp.added_lines.len(), unowned_fp.removed), (0, 0));
-        assert_eq!(large_unchanged.added_lines.len(), 0);
-        assert_eq!(large_unchanged.removed, 0);
-        assert_eq!(post_commit.added_lines.len(), 0);
-        assert_eq!(post_commit.removed, 0);
+        let unowned_tree = snap(&root);
+        let universe = numstat(&root, &unowned_tree, "large.txt");
+        let (map, holders) = chain_credit(
+            &root,
+            &[("a", &post_tree), ("", &post_tree)],
+            &unowned_tree,
+            &["large.txt"],
+        );
+        let routed = route(&map["large.txt"], &holders);
+        let unowned_only = membership_unowned(universe, attributed(&routed));
         assert_eq!(unowned_only, ((1, 0), false));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -52413,49 +52077,39 @@ mod membership_acceptance_fixture_tests {
 
     #[test]
     fn criterion_5_entangled_staging_fixture_preserves_line_exactness() {
-        // #336's two-item entangled shape: each isolated patch remains the
-        // exact line-level contribution, and residual metadata is retained.
+        // #336's two-item entangled shape: item a appends two lines, item b
+        // appends one after it, in the same file. Each item's credit is its
+        // exact line-level contribution -- positions included -- and the
+        // buckets conserve against the HEAD diff.
         let root = scratch_repo("c5");
         std::fs::write(root.join("shared.txt"), "base\n").unwrap();
         commit_all(&root, "head: base");
-        let head = rev_parse(&root, "HEAD");
+        let b0 = snap(&root);
         std::fs::write(root.join("shared.txt"), "base\na1\na2\n").unwrap();
-        let idx_a = scratch_index("c5-a");
-        seed_now_index(&root, &idx_a);
-        let tree_a = write_tree(&root, &idx_a);
-        let d_a = diff(&root, &head, &tree_a, "shared.txt");
+        let tree_a = snap(&root);
         std::fs::write(root.join("shared.txt"), "base\na1\na2\nb1\n").unwrap();
-        let idx_now = scratch_index("c5-now");
-        seed_now_index(&root, &idx_now);
-        let tree_now = write_tree(&root, &idx_now);
-        let d_b = diff(&root, &tree_a, &tree_now, "shared.txt");
-        let spawns = std::cell::Cell::new(0usize);
-        let isolated_a = membership_patch_footprint(&d_a);
-        let isolated_b = membership_patch_footprint(
-            &membership_net_patch(
-                &root,
-                &idx_now,
-                &tree_now,
-                std::slice::from_ref(&d_b),
-                "shared.txt",
-                &spawns,
-            )
-            .unwrap(),
-        );
-        assert_eq!(isolated_a.added_lines.len(), 2);
-        assert_eq!(isolated_b.added_lines.len(), 1);
-        assert_eq!(isolated_b.removed, 0);
+        let now = snap(&root);
+        let universe = numstat(&root, &now, "shared.txt");
+        assert_eq!(universe, (3, 0));
+
+        let (map, holders) =
+            chain_credit(&root, &[("a", &b0), ("b", &tree_a)], &now, &["shared.txt"]);
+        let credit = &map["shared.txt"];
+        let routed = route(credit, &holders);
+        assert_eq!(routed.per_item.get(&vec!["a".to_string()]), Some(&(2, 0)));
+        assert_eq!(routed.per_item.get(&vec!["b".to_string()]), Some(&(1, 0)));
+        assert_eq!(routed.per_item.len(), 2, "no other owner appears");
+        assert_eq!(routed.joint, (0, 0), "entangled in one file, not joint");
+        assert_eq!(credit.added_lines, vec![(2, 1), (3, 1), (4, 2)]);
         assert_eq!(
-            membership_conservation_breach(
-                (3, 0),
-                (
-                    isolated_a.added_lines.len() + isolated_b.added_lines.len(),
-                    isolated_b.removed
-                ),
-                (0, 0),
-                (0, 0),
-                (0, 0),
-            ),
+            membership_runs(&credit.added_lines, &routed.step_members),
+            vec![(2, 3, vec!["a".to_string()]), (4, 4, vec!["b".to_string()])]
+        );
+        assert!(credit.removed_lines.is_empty(), "no removals to retain");
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
+        assert!(!clamped);
+        assert_eq!(
+            membership_conservation_breach(universe, routed.single, (0, 0), (0, 0), unowned),
             None
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -52494,206 +52148,53 @@ mod membership_acceptance_fixture_tests {
 
 // membership-attributes-deletions: the deletion matrix from the item's
 // worklist draft (docs/attribution-model.md §4, "Review response: the
-// deletion matrix"), driven against real git in temp repos -- the same
-// method as `membership_engine_tests::concatenated_reedit_patch_counts_net_once`,
-// generalized to a small shared harness since every case needs the same
-// idx_now / idx_head / HEAD scaffolding. Each test reproduces the probe
-// loop's own gate (`git apply --cached --check --reverse`) before measuring,
-// so a fixture that failed the gate would be caught, not silently measured
-// anyway.
+// deletion matrix"), driven against real git in temp repos and ported to the
+// line rule (issue-425-retire-replay). The whole-patch model needed a
+// discriminator (does the candidate's baseline equal HEAD?) to decide whether
+// a removed line was a HEAD-relative deletion. The line rule has no such
+// question: every removed HEAD line is credited to the step that last removed
+// it (`removed_by`), and a line a step added and a later step deleted never
+// reaches HEAD's diff at all. Each case below keeps the matrix's repo shape
+// and asserts who owns what, and that the partition still conserves.
 #[cfg(test)]
 mod membership_deletion_matrix_tests {
-    use super::{
-        membership_blob_matches_head, membership_candidate_base, membership_diff_tree_path,
-        membership_patch_footprint, membership_unowned, MembershipPathBuckets,
+    use super::membership_port_support::{
+        attributed, chain_credit, commit_all, numstat, numstat_between, route, scratch_repo, snap,
     };
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use super::{membership_unowned, MembershipPathBuckets};
 
-    fn scratch_repo(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "bram-deletion-matrix-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(git(&root, None, &["init", "-q"]).status.success());
-        assert!(git(&root, None, &["config", "user.email", "t@example.com"])
-            .status
-            .success());
-        assert!(git(&root, None, &["config", "user.name", "Test"])
-            .status
-            .success());
-        root
-    }
-
-    fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
-        let mut cmd = Command::new("git");
-        cmd.current_dir(root).args(args);
-        if let Some(idx) = idx {
-            cmd.env("GIT_INDEX_FILE", idx);
-        }
-        cmd.output().unwrap()
-    }
-
-    fn commit_all(root: &Path, msg: &str) {
-        assert!(git(root, None, &["add", "-A"]).status.success());
-        assert!(git(root, None, &["commit", "-q", "-m", msg])
-            .status
-            .success());
-    }
-
-    fn rev_parse(root: &Path, rev: &str) -> String {
-        let out = git(root, None, &["rev-parse", rev]);
-        assert!(out.status.success());
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-
-    // Every scratch GIT_INDEX_FILE this harness uses lives OUTSIDE the repo
-    // (std::env::temp_dir(), like the production code's idx_head/idx_now),
-    // never under `root` -- an index file written inside the working tree
-    // would itself show up as untracked content the next `add -A` sees,
-    // silently polluting whatever tree that index writes.
-    fn scratch_index(tag: &str) -> PathBuf {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "bram-deletion-matrix-idx-{}-{}-{}",
-            tag,
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ))
-    }
-
-    // Present-state scratch index: HEAD plus a full `add -A` -- the same
-    // shape the probe loop's `idx_now` is, generalized so each fixture can
-    // build it after arranging whatever working-tree content it wants.
-    fn seed_now_index(root: &Path, idx: &Path) {
-        assert!(git(root, Some(idx), &["read-tree", "HEAD"])
-            .status
-            .success());
-        assert!(git(root, Some(idx), &["add", "-A"]).status.success());
-    }
-
-    fn write_tree(root: &Path, idx: &Path) -> String {
-        let out = git(root, Some(idx), &["write-tree"]);
-        assert!(out.status.success(), "write-tree failed: {:?}", out);
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-
-    // Writes `content` as a blob directly into a scratch index at `path`,
-    // without touching the working tree -- how these fixtures construct an
-    // intermediate tree (e.g. case 2's "middle") that never existed as a
-    // real commit or a real working-tree state.
-    fn set_index_blob(root: &Path, idx: &Path, path: &str, content: &str) {
-        use std::io::Write;
-        let mut child = Command::new("git")
-            .current_dir(root)
-            .args(["hash-object", "-w", "--stdin"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(content.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "hash-object failed: {:?}", out);
-        let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let out2 = git(
-            root,
-            Some(idx),
-            &[
-                "update-index",
-                "--add",
-                "--cacheinfo",
-                "100644",
-                &blob,
-                path,
-            ],
-        );
-        assert!(out2.status.success(), "update-index failed: {:?}", out2);
-    }
-
-    fn diff(root: &Path, a: &str, b: &str, path: &str) -> String {
-        let out = git(root, None, &["diff", a, b, "--", path]);
-        assert!(out.status.success(), "diff failed: {:?}", out);
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    }
-
-    // The probe loop's own gate, reproduced here so each fixture drives the
-    // exact check the production code runs: does `patch` reverse-apply
-    // cleanly against `idx`? (`membership_partition_engine`'s local
-    // `probe` closure, same two args, same command.)
-    fn probe(root: &Path, idx: &Path, patch: &str, tag: &str) -> bool {
-        let pfile = std::env::temp_dir().join(format!("bram-deletion-matrix-probe-{}", tag));
-        std::fs::write(&pfile, patch).unwrap();
-        let pfile_s = pfile.to_string_lossy().to_string();
-        let ok = git(
-            root,
-            Some(idx),
-            &["apply", "--cached", "--check", "--reverse", &pfile_s],
-        )
-        .status
-        .success();
-        let _ = std::fs::remove_file(&pfile);
-        ok
-    }
-
-    // Matrix #1 — pure deletion: HEAD [a,b,c], X deletes b. X is the sole
-    // contributor, so its base_tree (present minus X's own work) IS HEAD's
-    // tree for the path; the blob-equality rule therefore lets X's removed
-    // line count. Expected: X owns (0,1); unowned (0,0).
+    // Matrix #1 — pure deletion: HEAD [a,b,c], X deletes b. X is the only
+    // step that touched the file, so the removed HEAD line is X's.
+    // Expected: X owns (0,1); unowned (0,0).
     #[test]
     fn matrix_1_pure_deletion_owns_the_removed_line() {
         let root = scratch_repo("case1");
         std::fs::write(root.join("f.txt"), "a\nb\nc\n").unwrap();
         commit_all(&root, "head: a b c");
-        let head = rev_parse(&root, "HEAD");
+        let b0 = snap(&root);
 
-        // X's interval: HEAD -> present, with b deleted.
+        // X's window: b deleted.
         std::fs::write(root.join("f.txt"), "a\nc\n").unwrap();
-        let idx_now = scratch_index("case1-now");
-        seed_now_index(&root, &idx_now);
-        let now_tree = write_tree(&root, &idx_now);
-        let idx_head = scratch_index("case1-head");
-        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
-            .status
-            .success());
-
-        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
-        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        let now = snap(&root);
+        let universe = numstat(&root, &now, "f.txt");
         assert_eq!(universe, (0, 1), "sanity: HEAD..now is a pure deletion");
 
-        let patch_x = diff(&root, &head, &now_tree, "f.txt");
-        assert!(
-            !probe(&root, &idx_head, &patch_x, "case1"),
-            "not already in HEAD"
+        let (map, holders) = chain_credit(&root, &[("X", &b0)], &now, &["f.txt"]);
+        let credit = &map["f.txt"];
+        assert_eq!(credit.unexplained, (0, 0));
+        assert_eq!(
+            credit.removed_lines,
+            vec![(2, 1)],
+            "HEAD line 2 went at step 1"
         );
-        assert!(
-            probe(&root, &idx_now, &patch_x, "case1"),
-            "X's evidence must account for present content"
+        let routed = route(credit, &holders);
+        assert_eq!(
+            routed.per_item.get(&vec!["X".to_string()]),
+            Some(&(0, 1)),
+            "X owns the pure deletion"
         );
 
-        let spawns = std::cell::Cell::new(0usize);
-        let base =
-            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_x), &spawns)
-                .expect("reverse-apply should produce a base tree");
-        assert!(
-            membership_blob_matches_head(&root, &base, "f.txt", &spawns),
-            "X is the sole contributor: base_tree must equal HEAD for f.txt"
-        );
-        let fp = membership_patch_footprint(&patch_x);
-        let counts = (fp.added_lines.len(), fp.removed);
-        assert_eq!(counts, (0, 1), "X owns the pure deletion");
-
-        let (unowned, clamped) = membership_unowned(universe, counts);
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
         assert!(!clamped);
         assert_eq!(unowned, (0, 0), "nothing left unowned");
 
@@ -52701,171 +52202,92 @@ mod membership_deletion_matrix_tests {
     }
 
     // Matrix #2 — deletion after a prior rewrite: HEAD [old]; A rewrites
-    // old->middle; B rewrites middle->new (still open). A's evidence is
-    // superseded (its patch does not reverse-apply against present
-    // content) and contributes nothing. B's evidence DOES account for
-    // present content, but B's own baseline (middle) is not HEAD's blob
-    // (old) -- B sat on top of A's now-superseded work -- so B's removed
-    // line is NOT HEAD-relative and does not count. Expected: B owns
-    // (1,0); the "-old" deletion is UNOWNED (0,1); universe (1,1). This is
-    // the case the review's counter-example named, and the case the
-    // blob-equality rule exists to get right.
+    // old->middle; B rewrites middle->new (still open). Under the old
+    // whole-patch model A's evidence was superseded and B's baseline was not
+    // HEAD, so the "-old" deletion landed UNOWNED. The line rule knows who
+    // removed the HEAD line: A did (its window is the one that took `old`
+    // out), and B owns the `new` line it wrote; `middle` never reaches the
+    // HEAD diff. That is the one deliberate difference from the old matrix,
+    // and the stronger answer: nothing is orphaned, nothing is double-booked
+    // (universe (1,1) = A (0,1) + B (1,0)).
     #[test]
-    fn matrix_2_deletion_after_prior_rewrite_lands_unowned() {
+    fn matrix_2_deletion_after_prior_rewrite_goes_to_the_step_that_removed_it() {
         let root = scratch_repo("case2");
         std::fs::write(root.join("f.txt"), "old\n").unwrap();
         commit_all(&root, "head: old");
-        let head = rev_parse(&root, "HEAD");
-
-        // "middle" never exists as a commit or a working-tree state -- it
-        // is A's boundary, a pure scratch tree, exactly like a real claim
-        // boundary capture.
-        let idx_mid = scratch_index("case2-mid");
-        assert!(git(&root, Some(&idx_mid), &["read-tree", "HEAD"])
-            .status
-            .success());
-        set_index_blob(&root, &idx_mid, "f.txt", "middle\n");
-        let middle = write_tree(&root, &idx_mid);
-
-        // Present state: B's open interval has taken it to "new".
+        let b0 = snap(&root);
+        // A's window: old -> middle.
+        std::fs::write(root.join("f.txt"), "middle\n").unwrap();
+        let middle = snap(&root);
+        // B's still-open window: middle -> new.
         std::fs::write(root.join("f.txt"), "new\n").unwrap();
-        let idx_now = scratch_index("case2-now");
-        seed_now_index(&root, &idx_now);
-        let now_tree = write_tree(&root, &idx_now);
-        let idx_head = scratch_index("case2-head");
-        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
-            .status
-            .success());
-
-        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
-        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        let now = snap(&root);
+        let universe = numstat(&root, &now, "f.txt");
         assert_eq!(universe, (1, 1), "sanity: HEAD..now is one add, one remove");
-
-        // A's own patch: HEAD(old) -> middle, exactly what claim_interval_diff
-        // derives for a single-owner interval bounded by [A_start=HEAD,
-        // A_end=B_start].
-        let patch_a = diff(&root, &head, &middle, "f.txt");
-        // B's own patch: middle -> present, B's still-open interval.
-        let patch_b = diff(&root, &middle, &now_tree, "f.txt");
-        assert!(!patch_a.trim().is_empty());
-        assert!(!patch_b.trim().is_empty());
-
-        // A is superseded: its evidence no longer accounts for present
-        // content (present is "new"; A's patch's new-side is "middle").
-        assert!(
-            !probe(&root, &idx_now, &patch_a, "case2a"),
-            "A's patch must fail the present-state probe: superseded, contributes nothing"
-        );
-
-        // B's evidence accounts for present content.
-        assert!(
-            !probe(&root, &idx_head, &patch_b, "case2b"),
-            "not already in HEAD"
-        );
-        assert!(
-            probe(&root, &idx_now, &patch_b, "case2b"),
-            "B's evidence must account for present content"
-        );
-
-        let spawns = std::cell::Cell::new(0usize);
-        let base_b =
-            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_b), &spawns)
-                .expect("B's reverse-apply should produce a base tree");
-        let head_relative = membership_blob_matches_head(&root, &base_b, "f.txt", &spawns);
-        assert!(
-            !head_relative,
-            "B's baseline is middle, not HEAD's old -- must NOT be HEAD-relative"
-        );
-
-        let fp_b = membership_patch_footprint(&patch_b);
         assert_eq!(
-            fp_b.added_lines.len(),
-            1,
-            "B's raw patch adds one line (new)"
+            numstat_between(&root, &b0, &middle, "f.txt"),
+            (1, 1),
+            "A's own window rewrote old -> middle"
+        );
+
+        let (map, holders) = chain_credit(&root, &[("A", &b0), ("B", &middle)], &now, &["f.txt"]);
+        let credit = &map["f.txt"];
+        assert_eq!(credit.unexplained, (0, 0));
+        let routed = route(credit, &holders);
+        assert_eq!(
+            routed.per_item.get(&vec!["A".to_string()]),
+            Some(&(0, 1)),
+            "A removed the HEAD line; its own `middle` never survives"
         );
         assert_eq!(
-            fp_b.removed, 1,
-            "B's raw patch removes one line (middle), baseline-relative"
+            routed.per_item.get(&vec!["B".to_string()]),
+            Some(&(1, 0)),
+            "B owns the addition only"
         );
 
-        // The production rule: additions always count; removed counts only
-        // when head_relative.
-        let counts_b = (
-            fp_b.added_lines.len(),
-            if head_relative { fp_b.removed } else { 0 },
-        );
-        assert_eq!(
-            counts_b,
-            (1, 0),
-            "B owns the addition only -- the matrix's exact answer"
-        );
-
-        let (unowned, clamped) = membership_unowned(universe, counts_b);
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
         assert!(!clamped);
-        assert_eq!(
-            unowned,
-            (0, 1),
-            "the -old deletion is UNOWNED: no surviving evidence accounts for removing it"
-        );
+        assert_eq!(unowned, (0, 0), "no deletion is orphaned");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     // Matrix #3 — shared deletion: a same-click claim covering X and Y
-    // removes b. Mechanically identical to case 1 (same probe, same
-    // base_tree, same blob-equality test) -- membership_joint_patches
-    // derives a joint candidate's patch the same way a single-owner
-    // interval's is derived, over the joint boundary refs. Only the
-    // member SET differs, which routes the SAME counts into the `joint`
-    // bucket instead of `single` -- no special case. Expected: joint
-    // (0,1).
+    // removes b. Mechanically identical to case 1 (same history, same
+    // removal credit); only the holder SET differs, which routes the SAME
+    // counts into the `joint` bucket instead of `single` -- no special
+    // case. Expected: joint (0,1).
     #[test]
     fn matrix_3_shared_deletion_is_joint_no_special_case() {
         let root = scratch_repo("case3");
         std::fs::write(root.join("f.txt"), "a\nb\nc\n").unwrap();
         commit_all(&root, "head: a b c");
-        let head = rev_parse(&root, "HEAD");
+        let b0 = snap(&root);
 
         std::fs::write(root.join("f.txt"), "a\nc\n").unwrap();
-        let idx_now = scratch_index("case3-now");
-        seed_now_index(&root, &idx_now);
-        let now_tree = write_tree(&root, &idx_now);
-        let idx_head = scratch_index("case3-head");
-        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
-            .status
-            .success());
+        let now = snap(&root);
+        let universe = numstat(&root, &now, "f.txt");
+        assert_eq!(universe, (0, 1));
 
-        let patch_joint = diff(&root, &head, &now_tree, "f.txt");
-        assert!(!probe(&root, &idx_head, &patch_joint, "case3"));
-        assert!(probe(&root, &idx_now, &patch_joint, "case3"));
+        let (map, holders) = chain_credit(&root, &[("X,Y", &b0)], &now, &["f.txt"]);
+        assert_eq!(holders[1], vec!["X".to_string(), "Y".to_string()]);
+        let routed = route(&map["f.txt"], &holders);
 
-        let spawns = std::cell::Cell::new(0usize);
-        let base =
-            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_joint), &spawns)
-                .expect("reverse-apply should produce a base tree");
-        assert!(membership_blob_matches_head(&root, &base, "f.txt", &spawns));
-        let fp = membership_patch_footprint(&patch_joint);
-        let counts = (fp.added_lines.len(), fp.removed);
-        assert_eq!(counts, (0, 1));
-
-        // Bucket routing, mirroring the probe loop's own selection: a
-        // multi-member candidate lands in `joint`, not `single`, and the
-        // deletion rule applies identically either way.
-        let members = vec!["X".to_string(), "Y".to_string()];
+        // Bucket routing, as the engine does it: a multi-member holder set
+        // lands in `joint`, not `single`, and the deletion rule applies
+        // identically either way.
         let mut buckets = MembershipPathBuckets::default();
-        let bucket = if members.len() > 1 {
-            &mut buckets.joint
-        } else {
-            &mut buckets.single
-        };
-        bucket.0 += counts.0;
-        bucket.1 += counts.1;
+        buckets.single = routed.single;
+        buckets.joint = routed.joint;
         assert_eq!(buckets.joint, (0, 1), "joint owns the shared deletion");
         assert_eq!(
             buckets.single,
             (0, 0),
             "single stays empty -- no special case"
         );
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
+        assert!(!clamped);
+        assert_eq!(unowned, (0, 0));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -52877,38 +52299,22 @@ mod membership_deletion_matrix_tests {
         let root = scratch_repo("case4");
         std::fs::write(root.join("f.txt"), "a\n").unwrap();
         commit_all(&root, "head: a");
-        let head = rev_parse(&root, "HEAD");
+        let b0 = snap(&root);
 
         std::fs::write(root.join("f.txt"), "a-prime\n").unwrap();
-        let idx_now = scratch_index("case4-now");
-        seed_now_index(&root, &idx_now);
-        let now_tree = write_tree(&root, &idx_now);
-        let idx_head = scratch_index("case4-head");
-        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
-            .status
-            .success());
-
-        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
-        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        let now = snap(&root);
+        let universe = numstat(&root, &now, "f.txt");
         assert_eq!(universe, (1, 1));
 
-        let patch_x = diff(&root, &head, &now_tree, "f.txt");
-        assert!(!probe(&root, &idx_head, &patch_x, "case4"));
-        assert!(probe(&root, &idx_now, &patch_x, "case4"));
-
-        let spawns = std::cell::Cell::new(0usize);
-        let base =
-            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_x), &spawns)
-                .expect("reverse-apply should produce a base tree");
-        assert!(
-            membership_blob_matches_head(&root, &base, "f.txt", &spawns),
-            "X is the sole contributor: base_tree must equal HEAD"
+        let (map, holders) = chain_credit(&root, &[("X", &b0)], &now, &["f.txt"]);
+        let routed = route(&map["f.txt"], &holders);
+        assert_eq!(
+            routed.per_item.get(&vec!["X".to_string()]),
+            Some(&(1, 1)),
+            "X owns both the addition and the removal"
         );
-        let fp = membership_patch_footprint(&patch_x);
-        let counts = (fp.added_lines.len(), fp.removed);
-        assert_eq!(counts, (1, 1), "X owns both the addition and the removal");
 
-        let (unowned, clamped) = membership_unowned(universe, counts);
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
         assert!(!clamped);
         assert_eq!(unowned, (0, 0));
 
@@ -52916,153 +52322,64 @@ mod membership_deletion_matrix_tests {
     }
 
     // Matrix #5 — multi-interval re-edit with deletion: X creates [p,q] in
-    // one interval, then deletes q in a later interval of its OWN.
+    // one window, then deletes q in a later window of its OWN.
     //
-    // *** FIXED (fix-patch-composition-for-repeated-paths). *** This case
-    // used to falsify the matrix: `git apply --cached --reverse` on a patch
-    // carrying TWO "diff --git a/f.txt b/f.txt" sections for the SAME path
-    // does not compose them when reverse-applied as one concatenation -- it
-    // reverses only the LAST section and silently drops the earlier one,
-    // exit code 0. Proven directly with plain git (no Bram code involved):
-    // concatenating `git diff HEAD t1 -- f.txt` (new-file, +p+q) with
-    // `git diff t1 t2 -- f.txt` (-q) and reverse-applying the concatenation
-    // against an index holding t2 landed at t1 (f.txt = "p\nq\n"), NOT at
-    // HEAD (no f.txt at all) -- so `membership_candidate_base`'s `base_tree`
-    // for a multi-interval candidate came out "present state minus only its
-    // LAST interval's section," not "present state minus ALL of its
-    // evidence."
-    //
-    // The fix: `membership_candidate_base` no longer takes one concatenated
-    // patch. It takes the candidate's per-interval SECTIONS, in the record
-    // order they were matched (never re-derived from splitting concatenated
-    // text on "diff --git"), and reverse-applies them one at a time,
-    // newest-interval-first -- each reversal against the tree the PRIOR
-    // reversal produced, which is what "undo this candidate's work" actually
-    // means. Here that is `[d2, d1]`: reversing d2 (t1->t2, i.e. "-q")
-    // restores "p\nq\n"; reversing d1 (HEAD->t1, i.e. "+p+q") on top of that
-    // restores HEAD (no f.txt). `base_tree` now lands at HEAD, so
-    // `membership_blob_matches_head` reports true, X reads as the path's
-    // sole contributor (which it truly is), and the net patch (`base_tree`
-    // -> `now_tree`) is the honest "+p" -- X's own, unambiguous line. Any
-    // section that fails to apply aborts the whole derivation and returns
-    // `None` rather than a partially-reversed base (see
-    // `membership_candidate_base`'s doc comment).
+    // The whole-patch model needed a fix here
+    // (fix-patch-composition-for-repeated-paths): `git apply --reverse` on
+    // two sections for the same path reversed only the last one, so the
+    // candidate's baseline came out wrong. The line rule has no composition
+    // step to get wrong. X's second window removes a line that is not in
+    // HEAD (X added it), so it is credited to no one and never appears in
+    // the HEAD diff; the surviving `p` is credited to the window that wrote
+    // it. Naively summing each window's own diff would claim (2,1).
+    // Expected: X owns (1,0); unowned (0,0).
     #[test]
     fn matrix_5_multi_interval_create_then_delete_counts_net_once() {
         let root = scratch_repo("case5");
-        // HEAD has no f.txt at all -- X creates it fresh, in its first
-        // interval.
+        // HEAD has no f.txt at all -- X creates it fresh, in its first window.
         std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
         commit_all(&root, "head: no f.txt");
-        let head = rev_parse(&root, "HEAD");
+        let b0 = snap(&root);
 
-        // Interval 1: HEAD -> [p,q].
-        let idx1 = scratch_index("case5-1");
-        assert!(git(&root, Some(&idx1), &["read-tree", "HEAD"])
-            .status
-            .success());
-        set_index_blob(&root, &idx1, "f.txt", "p\nq\n");
-        let t1 = write_tree(&root, &idx1);
-        let d1 = diff(&root, &head, &t1, "f.txt");
-
-        // Interval 2 (X's own, still open): [p,q] -> [p].
-        let idx2 = scratch_index("case5-2");
-        assert!(git(&root, Some(&idx2), &["read-tree", "HEAD"])
-            .status
-            .success());
-        set_index_blob(&root, &idx2, "f.txt", "p\n");
-        let t2 = write_tree(&root, &idx2);
-        let d2 = diff(&root, &t1, &t2, "f.txt");
-
-        let concat = format!("{d1}{d2}");
-        let sections = vec![d1.clone(), d2.clone()];
-        assert!(
-            concat.matches("diff --git").count() > 1,
-            "concatenated evidence spans two intervals"
-        );
-        assert_eq!(
-            membership_patch_footprint(&concat).added_lines.len(),
-            2,
-            "the raw concatenated evidence double-counts p and q"
-        );
-
-        // Present state matches t2.
+        // Window 1: HEAD -> [p,q].
+        std::fs::write(root.join("f.txt"), "p\nq\n").unwrap();
+        let b1 = snap(&root);
+        // Window 2 (X's own, still open): [p,q] -> [p].
         std::fs::write(root.join("f.txt"), "p\n").unwrap();
-        let idx_now = scratch_index("case5-now");
-        seed_now_index(&root, &idx_now);
-        let now_tree = write_tree(&root, &idx_now);
-        assert_eq!(now_tree, t2, "sanity: idx_now's write-tree matches t2");
-        let idx_head = scratch_index("case5-head");
-        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
-            .status
-            .success());
+        let now = snap(&root);
 
-        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
-        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        let w1 = numstat_between(&root, &b0, &b1, "f.txt");
+        let w2 = numstat_between(&root, &b1, &now, "f.txt");
+        assert_eq!(
+            (w1.0 + w2.0, w1.1 + w2.1),
+            (2, 1),
+            "the raw per-window evidence double-counts p and q"
+        );
+        let universe = numstat(&root, &now, "f.txt");
         assert_eq!(
             universe,
             (1, 0),
             "HEAD..now is a plain one-line add of p -- X's true, unambiguous net effect"
         );
 
-        assert!(
-            !probe(&root, &idx_head, &concat, "case5"),
-            "not already in HEAD"
-        );
-        assert!(
-            probe(&root, &idx_now, &concat, "case5"),
-            "X's full concatenated evidence must account for present content"
-        );
-
-        // HEAD's own tree oid (`head` above is the commit, not the tree) --
-        // what `base_tree` must equal once both sections are reversed.
-        let head_tree = rev_parse(&root, "HEAD^{tree}");
-
-        let spawns = std::cell::Cell::new(0usize);
-        let base = membership_candidate_base(&root, &idx_now, &sections, &spawns)
-            .expect("reverse-applying each section in turn should succeed");
-        eprintln!(
-            "case5 base_tree={base} t1(old-wrong-base)={t1} head_tree(expected-base)={head_tree}"
-        );
-        // THE FIX, measured directly: reversing d2 then d1 (newest-interval-
-        // first) lands base_tree at HEAD's tree, not at t1 (the old
-        // single-shot concatenated form's wrong answer).
+        let (map, holders) = chain_credit(&root, &[("X", &b0), ("X", &b1)], &now, &["f.txt"]);
+        let credit = &map["f.txt"];
+        assert_eq!(credit.unexplained, (0, 0));
+        assert_eq!(credit.by_step.get(&1), Some(&(1, 0)));
+        assert_eq!(credit.by_step.len(), 1);
+        let routed = route(credit, &holders);
         assert_eq!(
-            base, head_tree,
-            "fixed: base_tree lands at HEAD's tree -- both sections reversed, not just the last one"
+            routed.per_item.get(&vec!["X".to_string()]),
+            Some(&(1, 0)),
+            "X owns its own net addition, the matrix's expected answer"
         );
 
-        let head_relative = membership_blob_matches_head(&root, &base, "f.txt", &spawns);
-        eprintln!("case5 head_relative={head_relative} (expected true)");
-        assert!(
-            head_relative,
-            "fixed: base_tree's f.txt now equals HEAD's f.txt (both have none) -- \
-             X is correctly recognized as the path's sole contributor"
-        );
-
-        let net = membership_diff_tree_path(&root, &base, &now_tree, "f.txt", &spawns)
-            .expect("net-normalized patch (HEAD -> now_tree, X's true net effect)");
-        let fp = membership_patch_footprint(&net);
-        // The production rule: additions always count; removals only when
-        // head_relative.
-        let counts = (
-            fp.added_lines.len(),
-            if head_relative { fp.removed } else { 0 },
-        );
-        eprintln!("case5 counts={counts:?} matrix_expected=(1, 0)");
-        assert_eq!(
-            counts,
-            (1, 0),
-            "fixed: X owns its own net addition, the matrix's expected answer"
-        );
-
-        let (unowned, clamped) = membership_unowned(universe, counts);
+        let (unowned, clamped) = membership_unowned(universe, attributed(&routed));
         assert!(!clamped);
-        eprintln!("case5 unowned={unowned:?} -- expected (0, 0), nothing left over");
         assert_eq!(
             unowned,
             (0, 0),
-            "fixed: X's own addition is credited to X, nothing lands unowned"
+            "X's own addition is credited to X, nothing lands unowned"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -79958,16 +79275,6 @@ mod claim_attribution_tests {
         item_joint_with, membership_joint_owners, membership_joint_refusal, MembershipPathBuckets,
     };
 
-    fn owners(n: usize) -> Vec<Option<String>> {
-        vec![None; n]
-    }
-    fn ids(o: &[Option<String>]) -> String {
-        o.iter()
-            .map(|x| x.as_deref().unwrap_or("."))
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
     // joint-interval-files-disambiguation: per-(interval, path) resolution.
     #[test]
     fn joint_interval_resolves_by_sole_declarer_and_stays_joint_otherwise() {
@@ -80164,7 +79471,7 @@ mod search_not_ready_tests {
 // on a serve, while every path an item could own diffs exactly as before.
 #[cfg(test)]
 mod attribution_pathspec_tests {
-    use super::{attribution_pathspec, declared_covers};
+    use super::attribution_pathspec;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -80245,10 +79552,6 @@ mod attribution_pathspec_tests {
             vec!["docs/y.md".to_string(), "src/z.rs".to_string()],
         );
         d
-    }
-
-    fn covered(d: &HashMap<String, Vec<String>>, path: &str) -> bool {
-        d.values().flatten().any(|f| declared_covers(f, path))
     }
 
     // Raymond's shape (#395): a big non-ignored untracked tree lands in the

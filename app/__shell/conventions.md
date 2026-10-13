@@ -144,13 +144,10 @@ actionable again.
 
 - **A row reads "Committed outside the Worklist", you committed an item's work yourself, or the user asks you to clear such rows** → read `.claude/bram-reference/worklist-mechanics.md` (§Rows committed outside the Worklist).
 
-**Drop removes the item, not the bytes — and orphaned changes are
-misattributed, not merely unattributed.** The pane reasons about
-changed files *through items* (the overlap index walks `item.files`,
-`changeSummary` is per item, exclusivity asks whether another begun
-item claims the path), so a changed file no item declares is credited
-to whichever begun item declares it, and is committable under that
-item's id. When dropping an item that has **begun**:
+**Drop removes the item, not the bytes — and orphaned lines land in
+someone else's commit.** Lines no item owns ride along with the next
+whole-file commit of a begun item declaring that file (disclosed as
+`unownedTaken`). When dropping an item that has **begun**:
 
 - Say what remains on disk before the drop completes, and propose one
   of: revert it, re-home it under another item's `files`, or leave it
@@ -159,8 +156,8 @@ item's id. When dropping an item that has **begun**:
   discarding; a stash costs nothing and keeps the work recoverable.
 
 This is also why you must not edit outside an authorized item:
-unauthorized edits don't merely skip the audit trail, they are credited
-to someone else.
+unauthorized edits don't merely skip the audit trail, they land in
+someone else's commit.
 
 ### Reminder items (placeholders you can drop)
 
@@ -391,15 +388,13 @@ records any ticked issue closes. **Closing is fully automatic — do
 nothing**: there is no close route to call and no close step to tell
 the user to run. Closes fire on the user's next **Push**.
 
-**Entangled** has one meaning: another begun item **owns lines** (not
-merely declares the path) in a file the commit would take. Bram decides
-ownership line by line from its claim snapshots. The pane offers Commit
-on any begun item with changes. When the request is entangled, the host
-stages only the requested items' own hunks; otherwise it takes the files
-whole, and reports any lines no item wrote as `unownedTaken`. Committing
-entangled items **together** is safe; committing **one of N** is the
-risky operation. For files two items keep editing, commit them together,
-or give real parallel work its own worktree.
+The pane offers Commit on any begun item with changes. **Entangled**
+means another begun item **owns lines** (not just declares the path)
+in a file the commit takes; a line belongs to the item whose work
+interval last wrote it, or to none. Entangled requests stage only their
+own hunks; others take files whole, reporting unowned lines as
+`unownedTaken`. Committing them **together** is safe; **one of N** is
+risky.
 
 **`worklist-commit` is single-shot per approval.** On a timeout, never
 re-POST: check `git log` first and treat what you find as the answer. A
@@ -653,11 +648,10 @@ you never meet them.
   verifies the combination and approves one commit.
 - **Warn when a new item would entangle a committable item.** Before
   proposing or applying an item, intersect its `files` with those of
-  begun items (`applied`, or `proposed` with `begunAtMs`). An overlap of
-  declared files isn't entanglement yet; it's the risk of it, since
-  editing those files will make both items own lines there. If non-empty,
-  say so first: "issue-X has changes ready to commit and touches the
-  same file(s) — recommend committing it first; otherwise this item's
+  begun items (`applied`, or `proposed` with `begunAtMs`); overlap is
+  the risk of entanglement. If non-empty, say so first: "issue-X has
+  changes ready to commit and touches the same file(s) — recommend
+  committing it first; otherwise this item's
   edits will mix into X's on-disk diff and need manual separation
   later." Don't auto-block.
 - **Suggest a branch when isolation helps** — broad, risky,

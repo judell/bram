@@ -9,6 +9,18 @@
 > the present tense because it was written while the replay ran. Ongoing
 > work on line ownership and commit accounting is tracked on #436.
 
+## The line rule, in brief
+
+Bram snapshots the project each time a Worklist item starts or stops being
+worked on. Every line that differs from `HEAD` is credited to whichever
+snapshot interval last wrote it (a removed line, to the interval that last
+removed it), and that interval's item owns it. Lines written while no item was
+active belong to no item.
+
+The mechanics are in
+[`git-as-infrastructure.md`](git-as-infrastructure.md#claim-intervals-attribution-as-boundary-trees);
+the history is under [Migration as taken](#migration-as-taken).
+
 Bram attributes uncommitted changes to worklist items so that commits land
 each item's work under its own id — the misattribution-prevention charter of
 issue #327. The mechanism that shipped is **replay-positional**: capture a

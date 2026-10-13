@@ -63,6 +63,7 @@ STARTERS = (
     "chat-edit-in-item-file",
     "joint-owner-committed",
     "entangled-with-unowned",
+    "membership-unanswerable",
 )
 
 # The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
@@ -179,6 +180,12 @@ def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
         ]
     if starter == "chat-edit-in-item-file":
         return [(f"demo/{prefix}-file.txt", _chat_edit_file(0))]
+    if starter == "membership-unanswerable":
+        # Its own folder, so the ignore rule below reaches no other starter.
+        return [
+            (f"demo/{prefix}/.gitignore", "/*.md\n"),
+            (f"demo/{prefix}/code.txt", "code: base\n"),
+        ]
     if starter == "joint-owner-committed":
         # HEAD already holds the owner's edit: it "committed" before the board
         # was captured, so the joint window below replays base -> edited.
@@ -691,6 +698,44 @@ class StarterBuilder:
         self.file(path, _chat_edit_file(2))
         self.boundary([author])
         self.file(path, _chat_edit_file(3))
+        self.boundary([])
+
+    def starter_membership_unanswerable(self, prefix: str) -> None:
+        # judell/bram#437: two ordinary board shapes that made the membership
+        # engine's scratch-index `add -A -- <declared entries>` fail, so every
+        # gate commit on the board was refused as "no membership answer"
+        # (`op=membership paths=0 spawns=7`). One begun item declares a file it
+        # has not created yet; another declares a new file that the folder's
+        # `/*.md` rule ignores, as CodeExam's THIRD-PARTY-NOTICES.md was.
+        # Expected since the fix: Commit on the planner goes through, and
+        # `op=membership` at the gate reads `fresh=true` with paths > 0. The
+        # notices item's own commit still meets the ignore rule at `git add`
+        # (#373's refuse-ignored-path) unless the file is force-staged; that is
+        # a separate, deliberate refusal. A scenario is stored as git trees,
+        # so the ignored NOTICES.md does not survive `use`/`reset`: until it
+        # is recreated by hand, the notices item is a second declared file
+        # not yet created, which breaks the old seed just as well.
+        code = f"demo/{prefix}/code.txt"
+        planned = f"demo/{prefix}/planned.txt"
+        notices = f"demo/{prefix}/NOTICES.md"
+        planner, noticer = f"{prefix}-planner", f"{prefix}-notices"
+        self.item(
+            planner,
+            [code, planned],
+            "code.txt reads base; planned.txt does not exist yet.",
+            "Change code.txt now; create planned.txt later.",
+        )
+        self.item(
+            noticer,
+            notices,
+            "There is no NOTICES.md.",
+            "Create NOTICES.md, which the folder's /*.md rule ignores.",
+        )
+        self.boundary([planner])
+        self.file(code, "code: changed by the planner\n")
+        self.boundary([])
+        self.boundary([noticer])
+        self.file(notices, "notices: a new file an ignore rule hides\n")
         self.boundary([])
 
     def starter_entangled_with_unowned(self, prefix: str) -> None:

@@ -743,7 +743,11 @@ board, a partner with no changes, and a later, separately approved item on
 the shared file whose commit must not be refused), and `entangled-with-unowned`
 (two begun owners of one file plus a third hunk written with no claim open:
 each row alone predicts only its own hunk, while committing both together
-takes the whole file; Codex's acceptance case for issue-425-retire-replay).
+takes the whole file; Codex's acceptance case for issue-425-retire-replay),
+and `membership-unanswerable` (judell/bram#437: one begun item declaring a
+file it hasn't created yet, another declaring a new file an ignore rule
+hides; both once failed every membership compute, so the gate refused all
+commits as "no membership answer").
 For example, a focused board is:
 
 ```sh

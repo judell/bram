@@ -50315,6 +50315,154 @@ fn membership_partition_engine<R: tauri::Runtime>(
     membership_partition_engine_keyed(app, allow_compute).map(|(p, f, _)| (p, f))
 }
 
+// The membership engine's universe: per changed path under `pathspecs`,
+// (added, removed) vs HEAD, tracked and untracked alike. Paths come back as
+// git reports them (core.quotePath=false), so they are literal file names
+// membership_seed_now_index can stage. Split out of the engine for issue-437,
+// so the declared-entries-to-seeded-tree path is testable without an app.
+fn membership_universe(
+    root: &Path,
+    pathspecs: &[String],
+    spawns: &std::cell::Cell<usize>,
+) -> std::collections::BTreeMap<String, (usize, usize)> {
+    let git = |args: &[&str]| -> Option<String> {
+        spawns.set(spawns.get() + 1);
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    // Universe, tracked half: one pathspec-scoped numstat — per concrete
+    // changed path, (added, removed) vs HEAD. Never the whole tree.
+    let mut universe: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    {
+        // core.quotePath=false, as membership_diff_u0 runs, so a non-ASCII
+        // path's universe key is the raw name the line-credit diff reports
+        // (and a literal name the scratch-index add below can stage).
+        let mut args: Vec<&str> = vec![
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "HEAD",
+            "--no-renames",
+            "--numstat",
+            "--",
+        ];
+        args.extend(pathspecs.iter().map(|s| s.as_str()));
+        for line in git(&args).unwrap_or_default().lines() {
+            let mut parts = line.splitn(3, '\t');
+            let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            // Binary files numstat as "-\t-"; they carry no line counts and
+            // contribute a (0, 0) universe entry — present, but lineless.
+            let path = p.trim().trim_matches('"').to_string();
+            if path.is_empty() {
+                continue;
+            }
+            universe.insert(
+                path,
+                (
+                    a.parse::<usize>().unwrap_or(0),
+                    r.parse::<usize>().unwrap_or(0),
+                ),
+            );
+        }
+    }
+    // Universe, untracked half: names only via scoped status (-uall so a
+    // wholly-untracked directory lists its files, not the directory); content
+    // is read solely to count a DECLARED untracked file's lines — the model's
+    // universe includes untracked non-ignored files as pure additions.
+    {
+        let mut args: Vec<&str> = vec![
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain",
+            "--no-renames",
+            "-uall",
+            "--",
+        ];
+        args.extend(pathspecs.iter().map(|s| s.as_str()));
+        for line in git(&args).unwrap_or_default().lines() {
+            let Some(rest) = line.strip_prefix("?? ") else {
+                continue;
+            };
+            let path = rest.trim().trim_matches('"').to_string();
+            if path.is_empty() {
+                continue;
+            }
+            let n = std::fs::read(root.join(&path))
+                .map(|b| String::from_utf8_lossy(&b).lines().count())
+                .unwrap_or(0);
+            // UNION with the numstat half, never first-wins: a path can be
+            // deleted-vs-HEAD on the tracked side AND present as untracked
+            // content at once (HEAD has it, the index dropped it, the
+            // worktree recreated it — the scenario machinery's reset-mixed
+            // shape, and any real flow that unstages a rewrite). Skipping
+            // the untracked count there missed the present line entirely:
+            // the second live conservation fire, universe=0,1 single=1,0.
+            let entry = universe.entry(path).or_insert((0, 0));
+            entry.0 += n;
+        }
+    }
+    universe
+}
+
+// issue-437: seed the membership engine's present-state index: HEAD, plus
+// exactly `paths` (the universe: git's own list of changed and untracked
+// files) staged as a literal list. Err carries git's stderr, for the
+// `reason=seed-failed` trace.
+//
+// Never the declared entries. `add -A -- <declared>` failed the whole compute
+// on two ordinary boards: a declared file not yet created ("pathspec did not
+// match", exit 128, nothing staged) and a declared new file an ignore rule
+// hides (exit 1, even when force-staged in the real index, because this index
+// starts from HEAD). Every gate commit on such a board was refused as "no
+// membership answer". capture_claim_tree lists before it adds for the same
+// reason. A deletion in the list stages as a removal, and `--force` is safe
+// because the list holds only file names, never a directory an ignored
+// subtree could ride in under.
+fn membership_seed_now_index(
+    root: &Path,
+    idx: &Path,
+    list_path: &Path,
+    paths: &[String],
+    spawns: &std::cell::Cell<usize>,
+) -> Result<(), String> {
+    let run = |args: &[&str]| -> Result<(), String> {
+        spawns.set(spawns.get() + 1);
+        match std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", idx)
+            .args(args)
+            .output()
+        {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    run(&["read-tree", "HEAD"])?;
+    let mut list: Vec<u8> = Vec::new();
+    for p in paths {
+        list.extend_from_slice(p.as_bytes());
+        list.push(0);
+    }
+    std::fs::write(list_path, &list).map_err(|e| e.to_string())?;
+    let list_arg = format!("--pathspec-from-file={}", list_path.display());
+    run(&[
+        "--literal-pathspecs",
+        "add",
+        "-A",
+        "--force",
+        &list_arg,
+        "--pathspec-file-nul",
+    ])
+}
+
 // issue-425-retire-replay (Codex review): the engine, also returning the
 // state key computed in THIS call, so a caller can stamp its answer with the
 // state that answer was evaluated against. A shared "last key" slot, read
@@ -50369,6 +50517,38 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
             membership_budget_check(app, "compute", ms, MEMBERSHIP_BUDGET_COMPUTE_MS);
         }
     };
+    // issue-437: a compute that gives up. Same line as trace_cost's no-answer
+    // shape (paths=0 cached=false fresh=false), plus WHY, so a `paths=0` line
+    // explains itself: four field refusals carried `paths=0 spawns=7` and
+    // nothing else, and the seventh spawn had to be inferred by counting.
+    let trace_fail = |app: &AppHandle<R>,
+                      spawns: usize,
+                      started: std::time::Instant,
+                      reason: &str,
+                      detail: Option<&str>| {
+        let detail = detail
+            .map(|d| d.lines().next().unwrap_or("").trim().replace('"', "'"))
+            .filter(|d| !d.is_empty())
+            .map(|d| format!(" detail=\"{}\"", d.chars().take(160).collect::<String>()))
+            .unwrap_or_default();
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            &format!(
+                "op=membership paths=0 ms={} spawns={} ambiguous=0 cached=false fresh=false reason={}{}",
+                started.elapsed().as_millis(),
+                spawns,
+                reason,
+                detail
+            ),
+        );
+        membership_budget_check(
+            app,
+            "compute",
+            started.elapsed().as_millis(),
+            MEMBERSHIP_BUDGET_COMPUTE_MS,
+        );
+    };
     let Some(root) = project_root(Some(app)) else {
         return None;
     };
@@ -50402,7 +50582,7 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
         }
     }
     if begun_files.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started, false, false);
+        trace_fail(app, spawns.get(), started, "no-begun", None);
         return None;
     }
     let begun_ids: std::collections::HashSet<String> =
@@ -50542,69 +50722,30 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
         .collect();
     pathspecs.sort();
     pathspecs.dedup();
-    // Universe, tracked half: one pathspec-scoped numstat — per concrete
-    // changed path, (added, removed) vs HEAD. Never the whole tree.
-    let mut universe: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
-    {
-        let mut args: Vec<&str> = vec!["diff", "HEAD", "--no-renames", "--numstat", "--"];
-        args.extend(pathspecs.iter().map(|s| s.as_str()));
-        for line in git(&args).unwrap_or_default().lines() {
-            let mut parts = line.splitn(3, '\t');
-            let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
-                continue;
-            };
-            // Binary files numstat as "-\t-"; they carry no line counts and
-            // contribute a (0, 0) universe entry — present, but lineless.
-            let path = p.trim().trim_matches('"').to_string();
-            if path.is_empty() {
-                continue;
-            }
-            universe.insert(
-                path,
-                (
-                    a.parse::<usize>().unwrap_or(0),
-                    r.parse::<usize>().unwrap_or(0),
-                ),
-            );
-        }
-    }
-    // Universe, untracked half: names only via scoped status (-uall so a
-    // wholly-untracked directory lists its files, not the directory); content
-    // is read solely to count a DECLARED untracked file's lines — the model's
-    // universe includes untracked non-ignored files as pure additions.
-    {
-        let mut args: Vec<&str> = vec!["status", "--porcelain", "--no-renames", "-uall", "--"];
-        args.extend(pathspecs.iter().map(|s| s.as_str()));
-        for line in git(&args).unwrap_or_default().lines() {
-            let Some(rest) = line.strip_prefix("?? ") else {
-                continue;
-            };
-            let path = rest.trim().trim_matches('"').to_string();
-            if path.is_empty() {
-                continue;
-            }
-            let n = std::fs::read(root.join(&path))
-                .map(|b| String::from_utf8_lossy(&b).lines().count())
-                .unwrap_or(0);
-            // UNION with the numstat half, never first-wins: a path can be
-            // deleted-vs-HEAD on the tracked side AND present as untracked
-            // content at once (HEAD has it, the index dropped it, the
-            // worktree recreated it — the scenario machinery's reset-mixed
-            // shape, and any real flow that unstages a rewrite). Skipping
-            // the untracked count there missed the present line entirely:
-            // the second live conservation fire, universe=0,1 single=1,0.
-            let entry = universe.entry(path).or_insert((0, 0));
-            entry.0 += n;
-        }
-    }
+    let universe = membership_universe(&root, &pathspecs, &spawns);
+    // issue-437: nothing under the begun items' declared paths differs from
+    // HEAD. That is an answer (nobody owns anything), not a missing one, so it
+    // is memoized and returned like any compute. As `None` it read as "no
+    // membership answer", and the gate refused a commit whose real obstacle
+    // was elsewhere: a declared file that git ignores (#373's refusal names
+    // it) or nothing to commit (`refuse-empty-commit` does). Seen on the
+    // issue-437 demo the moment the board's only begun item declared nothing
+    // but an ignored file.
     if universe.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started, false, false);
-        return None;
+        let empty: std::collections::BTreeMap<String, MembershipPathBuckets> = Default::default();
+        trace_cost(app, 0, spawns.get(), 0, started, false, true);
+        if let Ok(mut guard) = memo.lock() {
+            let old_current = guard.current.take();
+            guard.previous = old_current;
+            guard.current = Some((state_key.clone(), empty.clone()));
+        }
+        MEMBERSHIP_STORED_NEW.store(true, std::sync::atomic::Ordering::SeqCst);
+        return Some((empty, true, state_key));
     }
-    // Scratch state for the present-state tree. idx_now is HEAD plus a
-    // pathspec-scoped `add -A` — the present state of exactly the declared
-    // paths, untracked content included (why a plain HEAD index cannot
-    // serve: a created file has to exist in the tree the history ends at).
+    // Scratch state for the present-state tree. idx_now is HEAD plus the
+    // present state of exactly the universe's paths, untracked content
+    // included (why a plain HEAD index cannot serve: a created file has to
+    // exist in the tree the history ends at).
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tag = format!(
         "{}-{}",
@@ -50612,30 +50753,21 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let idx_now = std::env::temp_dir().join(format!("bram-membership-now-{}", tag));
+    let idx_list = std::env::temp_dir().join(format!("bram-membership-now-{}.list", tag));
     let cleanup = || {
         let _ = std::fs::remove_file(&idx_now);
+        let _ = std::fs::remove_file(&idx_list);
     };
-    let git_idx = |idx: &Path, args: &[&str]| -> bool {
-        spawns.set(spawns.get() + 1);
-        std::process::Command::new("git")
-            .current_dir(&root)
-            .env("GIT_INDEX_FILE", idx)
-            .args(args)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    let seeded = git_idx(&idx_now, &["read-tree", "HEAD"]) && {
-        let mut args: Vec<&str> = vec!["add", "-A", "--"];
-        args.extend(pathspecs.iter().map(|s| s.as_str()));
-        git_idx(&idx_now, &args)
-    };
-    if !seeded {
+    // issue-437: the universe's own paths, as a literal list, never the
+    // declared entries (see membership_seed_now_index).
+    let universe_list: Vec<String> = universe.keys().cloned().collect();
+    let seeded = membership_seed_now_index(&root, &idx_now, &idx_list, &universe_list, &spawns);
+    if let Err(stderr) = seeded {
         // Fail open, like capture_claim_tree: an observe-only engine must be
         // incapable of blocking a board serve. The cost line still lands so
         // the absence of partition traces is attributable.
         cleanup();
-        trace_cost(app, 0, spawns.get(), 0, started, false, false);
+        trace_fail(app, spawns.get(), started, "seed-failed", Some(&stderr));
         return None;
     }
     // Present-state tree of the declared paths: the last step of the line
@@ -50666,7 +50798,7 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
     if now_tree.is_empty() {
         // Fail open, like the seeding failure above.
         cleanup();
-        trace_cost(app, 0, spawns.get(), 0, started, false, false);
+        trace_fail(app, spawns.get(), started, "now-tree-empty", None);
         return None;
     }
     let intervals_raw = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)).unwrap_or_default();
@@ -50679,7 +50811,7 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
             Some(c) => c,
             None => {
                 cleanup();
-                trace_cost(app, 0, spawns.get(), 0, started, false, false);
+                trace_fail(app, spawns.get(), started, "line-credit-failed", None);
                 return None;
             }
         }
@@ -51068,6 +51200,127 @@ fn membership_report<R: tauri::Runtime>(
 // the way the engine does. Hoisted when the engine, acceptance and
 // deletion-matrix modules all needed it (each had carried its own copy of
 // the whole-patch scaffolding this replaced).
+// issue-437: the membership engine's present-state index, from declared
+// entries through the universe to the seeded tree, on the board shapes that
+// made every gate commit refuse as "no membership answer".
+#[cfg(test)]
+mod issue_437_seed_tests {
+    use super::membership_port_support::{commit_all, git, scratch_repo};
+    use super::{membership_seed_now_index, membership_universe};
+    use std::path::Path;
+
+    // Seed the way the engine does, then report what the scratch index holds
+    // relative to HEAD, as sorted "<status>\t<path>" lines.
+    fn seed(root: &Path, declared: &[&str]) -> Result<Vec<String>, String> {
+        let spawns = std::cell::Cell::new(0usize);
+        let pathspecs: Vec<String> = declared.iter().map(|s| s.to_string()).collect();
+        let universe = membership_universe(root, &pathspecs, &spawns);
+        let paths: Vec<String> = universe.keys().cloned().collect();
+        let idx = root.join("../").join(format!(
+            "{}-idx",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let list = idx.with_extension("list");
+        let _ = std::fs::remove_file(&idx);
+        membership_seed_now_index(root, &idx, &list, &paths, &spawns)?;
+        let out = git(
+            root,
+            Some(&idx),
+            &["diff", "--cached", "--name-status", "HEAD"],
+        );
+        let _ = std::fs::remove_file(&idx);
+        let _ = std::fs::remove_file(&list);
+        let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        lines.sort();
+        Ok(lines)
+    }
+
+    #[test]
+    fn a_declared_file_not_yet_created_does_not_fail_the_seed() {
+        let root = scratch_repo("i437-missing");
+        std::fs::write(root.join("edited.js"), "a\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::write(root.join("edited.js"), "a\nb\n").unwrap();
+        // The premise: the old seed's `add -A -- <declared>` is fatal here.
+        let idx = root.join("../i437-premise-idx");
+        let _ = std::fs::remove_file(&idx);
+        assert!(git(&root, Some(&idx), &["read-tree", "HEAD"])
+            .status
+            .success());
+        let old = git(
+            &root,
+            Some(&idx),
+            &["add", "-A", "--", "edited.js", "planned.js"],
+        );
+        assert!(
+            !old.status.success(),
+            "premise: a missing pathspec fails add -A"
+        );
+        let _ = std::fs::remove_file(&idx);
+        assert_eq!(
+            seed(&root, &["edited.js", "planned.js"]),
+            Ok(vec!["M\tedited.js".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_declared_ignored_new_file_does_not_fail_the_seed() {
+        let root = scratch_repo("i437-ignored");
+        std::fs::write(root.join(".gitignore"), "/*.md\n!README.md\n").unwrap();
+        std::fs::write(root.join("README.md"), "r\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::write(root.join("README.md"), "r\ns\n").unwrap();
+        std::fs::write(root.join("NOTICES.md"), "n\n").unwrap();
+        // Unstaged, an ignored file is outside the universe (git status hides
+        // it), so the seed leaves it out rather than failing on it.
+        assert_eq!(
+            seed(&root, &["README.md", "NOTICES.md"]),
+            Ok(vec!["M\tREADME.md".to_string()])
+        );
+        // Force-staged in the real index (Andrew's `git add -f`), it is in the
+        // universe, and the scratch index, which starts from HEAD, must still
+        // take it.
+        assert!(git(&root, None, &["add", "-f", "NOTICES.md"])
+            .status
+            .success());
+        assert_eq!(
+            seed(&root, &["README.md", "NOTICES.md"]),
+            Ok(vec![
+                "A\tNOTICES.md".to_string(),
+                "M\tREADME.md".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_deleted_tracked_file_stages_as_a_removal() {
+        let root = scratch_repo("i437-deleted");
+        std::fs::write(root.join("gone.js"), "x\n").unwrap();
+        std::fs::write(root.join("kept.js"), "k\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::remove_file(root.join("gone.js")).unwrap();
+        assert_eq!(
+            seed(&root, &["gone.js", "kept.js"]),
+            Ok(vec!["D\tgone.js".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_declared_directory_keeps_its_ignored_content_out() {
+        let root = scratch_repo("i437-dir");
+        std::fs::create_dir_all(root.join("app/node_modules/dep")).unwrap();
+        std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(root.join("app/main.js"), "m\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::write(root.join("app/node_modules/dep/index.js"), "d\n").unwrap();
+        std::fs::write(root.join("app/new.js"), "n\n").unwrap();
+        assert_eq!(seed(&root, &["app"]), Ok(vec!["A\tapp/new.js".to_string()]));
+    }
+}
+
 #[cfg(test)]
 mod membership_port_support {
     use super::{membership_line_credit, membership_step_chain, MembershipLineCredit};
@@ -73325,8 +73578,10 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         .collect();
     let Some(partition) = gate_membership_observe(app, &ids, &requested_files) else {
         // Refuse rather than fall back to the replay: the replay is the
-        // model that named 21 wrong neighbours (#419), and why membership
-        // occasionally has no answer is not yet established.
+        // model that named 21 wrong neighbours (#419). Why membership has no
+        // answer is on the engine's own `op=membership … reason=` line; the
+        // field case (#437) was a scratch-index add that failed on a declared
+        // file not yet created, deterministically, so retrying never helped.
         append_bram_trace_line(
             app,
             "worklist-commit",
@@ -73339,9 +73594,10 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         );
         return worklist_json_error(
             409,
-            "commit refused: Bram couldn't work out which lines belong to which item right \
-             now, so it can't tell whether this commit would take another item's work. \
-             Nothing was committed. Try the commit again in a moment."
+            "commit refused: Bram couldn't work out which lines belong to which item, so it \
+             can't tell whether this commit would take another item's work. Nothing was \
+             committed. If this repeats, retrying won't clear it: the trace line \
+             `op=membership … reason=` in resources/bram-traces/bram-trace.log says why."
                 .to_string(),
         );
     };

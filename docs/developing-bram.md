@@ -198,7 +198,7 @@ working instance's trace that day, starting before any pane edit.
 ([`f6369d9`](https://github.com/xmlui-org/xmlui/commit/f6369d98cc1917edc6acd13c2f970f300a1c9184))
 are marked `test.fail()`, so they turn red when a virtua release fixes the
 loop. When that lands and Bram's vendored XMLUI picks it up, delete this
-subsection and the matching row in `worklist-gate-walkthrough.md`.
+subsection and the pointer to it in `worklist-gate-walkthrough.md`.
 
 For the registered trace categories, subkinds, fields, and their diagnostic
 purpose, consult the on-demand
@@ -492,12 +492,19 @@ required is on judell/bram#322.
 
 The gate's selection matrix — which buttons light for which combination of
 items, entanglement, and lifecycle state — is exercised by the walkthrough
-in `docs/worklist-gate-walkthrough.md`: probe items doing trivial real work,
-phase-by-phase expectations, deliberate wedge attempts, and teardown trace
-greps. Born as the 0.5.3 release gate (three findings, all fixed in-run).
-Run it before a release or after touching the gate surfaces. Its graduation
-target is an automated test on transient instances, per the harness pattern
-below; the host-observable half could graduate first.
+in `docs/worklist-gate-walkthrough.md`: a demo-instance board built from
+starters, phase-by-phase expectations, deliberate wedge attempts, and
+teardown trace greps. Born as the 0.5.3 release gate (three findings, all
+fixed in-run).
+
+**Run it on demand, not before every release** — when a field report or a
+change to the gate surfaces calls for it, and only the phases that report
+points at. Field reports have been finding the gate's bugs (#432, #433,
+#434); the reasoning is in
+[`decisions/2026-10-13-gate-walkthrough-on-demand.md`](decisions/2026-10-13-gate-walkthrough-on-demand.md).
+Its graduation target is still an automated test on transient instances,
+per the harness pattern below; the host-observable half could graduate
+first.
 
 ## Developing and testing the startup dance
 

@@ -84,6 +84,8 @@
         itemClickExpands="true"
         fixedItemSize="true"
         scrollStyle="whenMouseOver"
+        spinnerDelay="{300}"
+        onLoadChildren="(node) => window.__bramFilesLoadDir(node)"
         onNodeDidExpand="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, true)"
         onNodeDidCollapse="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, false)">
         <property name="itemTemplate">

@@ -17276,6 +17276,34 @@ window.__bramInstallCodeBlockTools();
     return lastRowsOut;
   };
 
+  // files-tab-lists-bram-state-in-resources: a state folder's children,
+  // fetched when the Tree expands a `dynamic` row (onLoadChildren, which
+  // takes a Promise of child rows:
+  // https://www.xmlui.org/docs/howto/lazy-load-tree-children-on-expand).
+  // A failed fetch resolves to [] so the node stops spinning.
+  window.__bramFilesLoadDir = function (node) {
+    var dir = String((node && node.id) || "");
+    var started = Date.now();
+    return window.fetch("/__repo/tree/dir?path=" + encodeURIComponent(dir), { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (body) {
+        var rows = ((body && body.rows) || []).map(withIcon);
+        try {
+          window.__bramIframeTrace("files", { op: "load-dir", path: dir, rows: rows.length, ms: Date.now() - started });
+        } catch (e) {}
+        return rows;
+      })
+      .catch(function (e) {
+        try {
+          window.__bramIframeTrace("files", { op: "load-dir-error", path: dir, error: String((e && e.message) || e) });
+        } catch (e2) {}
+        return [];
+      });
+  };
+
   window.__bramFilesExpanded = function (openIds, id, open) {
     var ids = Array.isArray(openIds) ? openIds : [];
     var next = open
@@ -17285,8 +17313,17 @@ window.__bramInstallCodeBlockTools();
     return next;
   };
 
+  // files-tab-lists-bram-state-in-resources: the search is literal, so
+  // quotes typed around a phrase ("…", “…”, '…', or mismatched, as macOS
+  // smart quotes produce) were searched for as characters and nothing
+  // matched (2026-10-13: “mining a session" found nothing, unquoted found 5).
+  // A phrase is already a phrase here, so drop the surrounding quotes.
+  var stripQuotes = function (s) {
+    var m = /^["'“”‘’]+([\s\S]*?)["'“”‘’]+$/.exec(s);
+    return m && m[1].trim() ? m[1].trim() : s;
+  };
   window.__bramFilesSubmit = function (query, openIds) {
-    var q = String(query || "").trim();
+    var q = stripQuotes(String(query || "").trim());
     save(q, openIds);
     try { window.__bramIframeTrace("files", { op: "search", chars: q.length }); } catch (e) {}
     return q;

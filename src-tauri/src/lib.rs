@@ -44040,7 +44040,151 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 // on a path gets its own row; directories come before files, each group
 // sorted case-insensitively by full path so siblings land in order. Ids are
 // repo-relative paths, which is what __bramOpenLocalLinkPreview takes.
-fn repo_tree_rows(paths: &[String]) -> Vec<serde_json::Value> {
+// files-tab-lists-bram-state-in-resources: Bram's own state under
+// resources/ is gitignored, so `git ls-files --exclude-standard` never lists
+// it and the Files tab showed six tracked icons out of ~16,750 files. The
+// state the tab should show regardless: these files as ordinary rows, these
+// folders as dynamic rows whose contents load on expand
+// (/__repo/tree/dir), because listing them up front would add ~15,750 rows
+// (worklist-history alone is 11,560) to a 272-row tree.
+const BRAM_STATE_FILES: &[&str] = &["resources/worklist.json"];
+const BRAM_STATE_DIRS: &[&str] = &[
+    "resources/worklist-drafts",
+    "resources/worklist-history",
+    "resources/feedback-drafts",
+    "resources/feedback-history",
+    "resources/session-digests",
+    "resources/handoffs",
+    "resources/outbound-turns",
+    "resources/bram-traces",
+];
+// The state the content search also covers: everything but the traces
+// (1.4 GB of logs). History was first left out on a guess that it would be
+// slow; measured, the three history folders (~123 MB) grep in 0.21-0.27 s
+// warm, and the tab searches on Enter, not per keystroke. Jon's first
+// search, for an event name, matched only in worklist-history.
+//
+// Order is priority: results are capped (REPO_GREP_CAP), so the current
+// state comes before the histories. bram_state_grep_ordered sorts by it.
+const BRAM_STATE_GREP: &[&str] = &[
+    "resources/worklist.json",
+    "resources/worklist-drafts",
+    "resources/feedback-drafts",
+    "resources/session-digests",
+    "resources/handoffs",
+    "resources/worklist-history",
+    "resources/feedback-history",
+    "resources/outbound-turns",
+];
+// Each history entry is a .json and .md pair. The .json is a snapshot of the
+// whole board after the change, so a term in one long-lived item matches
+// every snapshot taken while it existed (on the demo board,
+// "talk-session-changed" hit 273 .json files and 119 .md). The .md records
+// what changed, which is what a search is looking for.
+const BRAM_STATE_GREP_EXCLUDE: &[&str] = &[":(exclude)resources/worklist-history/*.json"];
+
+// Reorder `git grep -n -z` output from the state search before the cap:
+// files grouped by the BRAM_STATE_GREP root they fall under (in that
+// order), and within a root, timestamp-named files (names starting with a
+// digit) newest first, others alphabetically. git grep lists by path, which
+// put the OLDEST history first, so a capped search showed only stale lines.
+fn bram_state_grep_ordered(out: &str) -> String {
+    let rank = |path: &str| {
+        BRAM_STATE_GREP
+            .iter()
+            .position(|r| path == *r || path.starts_with(&format!("{}/", r)))
+            .unwrap_or(BRAM_STATE_GREP.len())
+    };
+    // Records are "path\0line\0text\n", contiguous per file.
+    let mut files: Vec<(String, String)> = Vec::new();
+    for rec in out.split_inclusive('\n') {
+        let path = rec.split('\0').next().unwrap_or("").to_string();
+        match files.last_mut() {
+            Some((p, chunk)) if *p == path => chunk.push_str(rec),
+            _ => files.push((path, rec.to_string())),
+        }
+    }
+    files.sort_by(|(a, _), (b, _)| {
+        let base = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+        let (na, nb) = (base(a), base(b));
+        let digit = |n: &str| n.as_bytes().first().is_some_and(|c| c.is_ascii_digit());
+        rank(a).cmp(&rank(b)).then_with(|| {
+            if digit(&na) && digit(&nb) {
+                nb.cmp(&na)
+            } else {
+                a.to_lowercase().cmp(&b.to_lowercase())
+            }
+        })
+    });
+    files.into_iter().map(|(_, chunk)| chunk).collect()
+}
+
+// May /__repo/tree/dir list this path? Only a state folder or a folder
+// beneath one, with no `..`, `.` or empty segments.
+fn bram_state_dir_allowed(dir: &str) -> bool {
+    if dir
+        .split('/')
+        .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return false;
+    }
+    BRAM_STATE_DIRS
+        .iter()
+        .any(|d| dir == *d || dir.starts_with(&format!("{}/", d)))
+}
+
+// Rows for one state folder's immediate children: subfolders first (dynamic,
+// so they load on expand too), then files. Names that all start with a digit
+// are timestamps (worklist-history, outbound-turns, feedback-history), so
+// those list newest first; anything else is alphabetical.
+fn bram_state_dir_rows(dir: &str, subdirs: &[String], files: &[String]) -> Vec<serde_json::Value> {
+    let order = |names: &[String]| -> Vec<String> {
+        let mut v = names.to_vec();
+        if !v.is_empty()
+            && v.iter()
+                .all(|n| n.as_bytes().first().is_some_and(|b| b.is_ascii_digit()))
+        {
+            v.sort_by(|a, b| b.cmp(a));
+        } else {
+            v.sort_by_key(|n| n.to_lowercase());
+        }
+        v
+    };
+    let mut rows = Vec::with_capacity(subdirs.len() + files.len());
+    for d in order(subdirs) {
+        rows.push(serde_json::json!({
+            "id": format!("{}/{}", dir, d), "name": d, "parentId": dir,
+            "isDir": true, "dynamic": true,
+        }));
+    }
+    for f in order(files) {
+        rows.push(serde_json::json!({
+            "id": format!("{}/{}", dir, f), "name": f, "parentId": dir, "isDir": false,
+        }));
+    }
+    rows
+}
+
+// The state entries that exist under `root`: files to list as rows, and
+// folders to show collapsed.
+fn bram_state_present(root: &Path) -> (Vec<String>, Vec<String>) {
+    let files = BRAM_STATE_FILES
+        .iter()
+        .filter(|f| root.join(f).is_file())
+        .map(|f| f.to_string())
+        .collect();
+    let dirs = BRAM_STATE_DIRS
+        .iter()
+        .filter(|d| root.join(d).is_dir())
+        .map(|d| d.to_string())
+        .collect();
+    (files, dirs)
+}
+
+// `lazy` folders become rows marked `dynamic` (their ancestors are added as
+// usual) unless the listing already gives them children, in which case they
+// are ordinary folders.
+fn repo_tree_rows_with_lazy(paths: &[String], lazy: &[String]) -> Vec<serde_json::Value> {
     let parent = |p: &str| p.rfind('/').map(|i| p[..i].to_string());
     let name = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
     let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -44060,15 +44204,36 @@ fn repo_tree_rows(paths: &[String]) -> Vec<serde_json::Value> {
         }
         files.insert(p.clone());
     }
+    let mut dynamic: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for l in lazy {
+        if l.is_empty() {
+            continue;
+        }
+        if !dirs.contains(l) {
+            dynamic.insert(l.clone());
+        }
+        let mut acc = String::new();
+        for seg in l.split('/') {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            dirs.insert(acc.clone());
+        }
+    }
     let mut dir_list: Vec<String> = dirs.into_iter().collect();
     dir_list.sort_by_key(|d| d.to_lowercase());
     let mut file_list: Vec<String> = files.into_iter().collect();
     file_list.sort_by_key(|f| f.to_lowercase());
     let mut rows = Vec::with_capacity(dir_list.len() + file_list.len());
     for d in &dir_list {
-        rows.push(serde_json::json!({
+        let mut row = serde_json::json!({
             "id": d, "name": name(d), "parentId": parent(d), "isDir": true,
-        }));
+        });
+        if dynamic.contains(d) {
+            row["dynamic"] = serde_json::json!(true);
+        }
+        rows.push(row);
     }
     for f in &file_list {
         rows.push(serde_json::json!({
@@ -44129,15 +44294,123 @@ fn repo_grep_hits(out: &str, q: &str, cap: usize) -> (Vec<serde_json::Value>, us
 
 #[cfg(test)]
 mod repo_files_tests {
-    use super::{repo_grep_hits, repo_tree_rows};
+    use super::{
+        bram_state_dir_allowed, bram_state_dir_rows, bram_state_grep_ordered, repo_grep_hits,
+        repo_tree_rows_with_lazy,
+    };
+
+    // files-tab-lists-bram-state-in-resources
+    #[test]
+    fn lazy_state_folders_are_dynamic_rows_with_their_ancestors() {
+        let rows = repo_tree_rows_with_lazy(
+            &[
+                "resources/up.svg".to_string(),
+                "resources/worklist.json".to_string(),
+            ],
+            &["resources/worklist-history".to_string()],
+        );
+        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "resources",
+                "resources/worklist-history",
+                "resources/up.svg",
+                "resources/worklist.json"
+            ]
+        );
+        assert_eq!(rows[1]["dynamic"], true);
+        assert_eq!(rows[1]["parentId"], "resources");
+        assert!(rows[0].get("dynamic").is_none());
+        // A lazy folder the listing already fills is an ordinary folder.
+        let filled = repo_tree_rows_with_lazy(&["a/b/c.txt".to_string()], &["a/b".to_string()]);
+        assert!(filled.iter().all(|r| r.get("dynamic").is_none()));
+    }
+
+    #[test]
+    fn state_grep_puts_current_state_first_and_history_newest_first() {
+        let out = "resources/worklist-history/1700000000000.md\u{0}3\u{0}old\n\
+                   resources/worklist-history/1700000000000.md\u{0}9\u{0}old2\n\
+                   resources/worklist-history/1790000000000.md\u{0}1\u{0}new\n\
+                   resources/worklist-drafts/b.md\u{0}2\u{0}draft\n";
+        let ordered = bram_state_grep_ordered(out);
+        let paths: Vec<&str> = ordered
+            .lines()
+            .map(|l| l.split('\u{0}').next().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "resources/worklist-drafts/b.md",
+                "resources/worklist-history/1790000000000.md",
+                "resources/worklist-history/1700000000000.md",
+                "resources/worklist-history/1700000000000.md",
+            ]
+        );
+        // A file's lines stay together and in order.
+        assert!(ordered.ends_with(
+            "\u{0}3\u{0}old\nresources/worklist-history/1700000000000.md\u{0}9\u{0}old2\n"
+        ));
+    }
+
+    #[test]
+    fn state_dir_route_only_lists_state_folders() {
+        assert!(bram_state_dir_allowed("resources/worklist-history"));
+        assert!(bram_state_dir_allowed("resources/bram-traces/archive"));
+        assert!(!bram_state_dir_allowed("resources"));
+        assert!(!bram_state_dir_allowed("src-tauri"));
+        assert!(!bram_state_dir_allowed(
+            "resources/worklist-history/../../etc"
+        ));
+        assert!(!bram_state_dir_allowed("resources/worklist-historyX"));
+        assert!(!bram_state_dir_allowed("/resources/worklist-history"));
+    }
+
+    #[test]
+    fn state_dir_rows_list_timestamps_newest_first() {
+        let rows = bram_state_dir_rows(
+            "resources/worklist-history",
+            &["sub".to_string()],
+            &[
+                "1791757368337.md".to_string(),
+                "1791828392077.json".to_string(),
+                "1789000000000.md".to_string(),
+            ],
+        );
+        let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "sub",
+                "1791828392077.json",
+                "1791757368337.md",
+                "1789000000000.md"
+            ]
+        );
+        assert_eq!(rows[0]["dynamic"], true);
+        assert_eq!(
+            rows[1]["id"],
+            "resources/worklist-history/1791828392077.json"
+        );
+        let drafts = bram_state_dir_rows(
+            "resources/worklist-drafts",
+            &[],
+            &["b-item.md".to_string(), "A-item.md".to_string()],
+        );
+        let names: Vec<&str> = drafts.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["A-item.md", "b-item.md"]);
+    }
 
     #[test]
     fn tree_rows_add_every_directory_and_put_directories_first() {
-        let rows = repo_tree_rows(&[
-            "src/b.rs".to_string(),
-            "README.md".to_string(),
-            "src/a/x.rs".to_string(),
-        ]);
+        let rows = repo_tree_rows_with_lazy(
+            &[
+                "src/b.rs".to_string(),
+                "README.md".to_string(),
+                "src/a/x.rs".to_string(),
+            ],
+            &[],
+        );
         let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert_eq!(
             ids,
@@ -66359,7 +66632,7 @@ fn route_request<R: tauri::Runtime>(
     }
 
     // more-files-tree-view: the Files page's listing. Tracked plus untracked
-    // files that aren't ignored, as flat Tree rows (repo_tree_rows).
+    // files that aren't ignored, as flat Tree rows (repo_tree_rows_with_lazy, plus Bram's ignored state).
     if path == "__repo/tree" {
         let out = git_run(
             app,
@@ -66373,12 +66646,25 @@ fn route_request<R: tauri::Runtime>(
         );
         let body = match out {
             Ok(text) => {
-                let paths: Vec<String> = text
+                let mut paths: Vec<String> = text
                     .split('\0')
                     .filter(|p| !p.is_empty())
                     .map(|p| p.to_string())
                     .collect();
-                serde_json::json!({ "rows": repo_tree_rows(&paths), "files": paths.len() })
+                // files-tab-lists-bram-state-in-resources: Bram's ignored
+                // state, its files as rows and its folders collapsed.
+                let (state_files, state_dirs) = project_root(Some(app))
+                    .map(|root| bram_state_present(&root))
+                    .unwrap_or_default();
+                for f in state_files {
+                    if !paths.contains(&f) {
+                        paths.push(f);
+                    }
+                }
+                serde_json::json!({
+                    "rows": repo_tree_rows_with_lazy(&paths, &state_dirs),
+                    "files": paths.len(),
+                })
             }
             Err(e) => serde_json::json!({ "rows": [], "error": "not-a-git-repo", "detail": e }),
         };
@@ -66386,6 +66672,57 @@ fn route_request<R: tauri::Runtime>(
             200,
             "application/json; charset=utf-8",
             serde_json::to_vec(&body).unwrap_or_default(),
+        );
+    }
+
+    // files-tab-lists-bram-state-in-resources: one state folder's children,
+    // fetched when the Files tree expands it. Only Bram's state folders and
+    // folders beneath them; anything else is a 403, so this can't become a
+    // general directory browser.
+    if path == "__repo/tree/dir" {
+        let mut dir = String::new();
+        for pair in query.split('&') {
+            if let Some(enc) = pair.strip_prefix("path=") {
+                dir = percent_decode(enc);
+            }
+        }
+        let dir = dir.trim_end_matches('/').to_string();
+        if !bram_state_dir_allowed(&dir) {
+            return (
+                403,
+                "application/json; charset=utf-8",
+                br#"{"error":"not a Bram state folder"}"#.to_vec(),
+            );
+        }
+        let Some(root) = project_root(Some(app)) else {
+            return (
+                500,
+                "application/json; charset=utf-8",
+                br#"{"error":"no project root"}"#.to_vec(),
+            );
+        };
+        let mut subdirs: Vec<String> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root.join(&dir)) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => subdirs.push(name),
+                    Ok(t) if t.is_file() => files.push(name),
+                    _ => {}
+                }
+            }
+        }
+        let rows = bram_state_dir_rows(&dir, &subdirs, &files);
+        append_bram_trace_line(
+            app,
+            "files",
+            &format!("op=state-dir path={} rows={}", dir, rows.len()),
+        );
+        return (
+            200,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&serde_json::json!({ "rows": rows })).unwrap_or_default(),
         );
     }
 
@@ -66421,6 +66758,27 @@ fn route_request<R: tauri::Runtime>(
                 ],
             )
             .unwrap_or_default();
+            // files-tab-lists-bram-state-in-resources: the same search over
+            // the small, current state paths, which are ignored and so
+            // skipped above. Same output format, so the two concatenate.
+            let mut state_args: Vec<&str> = vec![
+                "grep",
+                "-n",
+                "-I",
+                "-i",
+                "-F",
+                "-z",
+                "--untracked",
+                "--no-exclude-standard",
+                &per_file,
+                "-e",
+                &q,
+                "--",
+            ];
+            state_args.extend(BRAM_STATE_GREP.iter().copied());
+            state_args.extend(BRAM_STATE_GREP_EXCLUDE.iter().copied());
+            let state_out = git_run_allow_exit(app, &state_args).unwrap_or_default();
+            let out = format!("{}{}", out, bram_state_grep_ordered(&state_out));
             let (hits, total) = repo_grep_hits(&out, &q, REPO_GREP_CAP);
             serde_json::json!({ "hits": hits, "total": total, "capped": total > REPO_GREP_CAP })
         };

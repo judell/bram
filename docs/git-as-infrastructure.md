@@ -55,7 +55,7 @@ index or working files while constructing the snapshot.
 |---|---|---|---|
 | Worklist change summaries | status, diffs, `HEAD`, real index | `resources/worklist.json` | `worklist_change_index` |
 | Ordinary Worklist commit | path-scoped `add -A`, staged-file checks, `commit` | authorization, audit, worklist history | `handle_worklist_commit` |
-| Claim attribution | temporary index, trees, `refs/bram/claims/*`, tree-to-tree diffs | `.claim-intervals.json` | `capture_claim_tree`, `claim_attribution_runs` |
+| Claim attribution | temporary index, trees, `refs/bram/claims/*`, tree-to-tree diffs | `.claim-intervals.json` | `capture_claim_tree`, `membership_line_credit`, `claim_interval_diff` |
 | Selective entangled commit | interval patches, `apply --check`, temporary index, `write-tree`, `commit-tree`, `update-ref` | claim ledger and Worklist declarations | `interval_stage_commit` |
 | Safety snapshot | temporary index, tree, `refs/bram/safety/*` | operator-chosen ref name | documented in `trace-vocabulary.md` |
 | Synthetic scenarios | trees, commits, `scenario/*` branches, detached checkout, mixed reset | scenario metadata committed in the branch | `scripts/demo_instance.py` |
@@ -124,13 +124,33 @@ is appended to `resources/.claim-intervals.json`. The record associates the
 boundary with the incoming claim ID set. Record order, not timestamp sorting,
 defines adjacency because two boundaries can share a millisecond.
 
-Each closed interval is a fixed tree-to-tree diff and can be cached. The newest
-record begins the open interval, whose far end is still changing. A plain
-`git diff <last-ref>` is useful for tracked state but cannot represent a newly
-untracked file; an exact open-interval snapshot requires the same temporary
-index capture used at a boundary. The live attribution path currently uses the
-plain diff for that final pair, so this is a known diagnostic boundary rather
-than an equivalence between a worktree diff and a tree-to-tree diff.
+Each closed interval is a fixed tree-to-tree diff. The newest record begins
+the open interval, whose far end is still changing. A plain `git diff
+<last-ref>` is useful for tracked state but cannot represent a newly untracked
+file, so the present end is captured the same way a boundary is: a temporary
+index seeded from `HEAD`, a path-scoped `add -A`, and `write-tree`.
+
+**How ownership is computed (membership, the line rule).** The boundary trees,
+in record order and followed by that present-state tree, form a linear
+history. Membership diffs each pair of successive trees, `-U0` and scoped to
+begun items' declared paths. It keeps a per-path line history, and credits
+each line of the current `git diff HEAD` to the step that last wrote it, and
+each removed `HEAD` line to the step that last removed it. A step's owners are
+the claim's ids, resolved per path (below), kept only if they are begun and
+declare the path. Lines no step explains are unowned. This is blame over
+Bram's own boundary snapshots since `HEAD`, not `git blame`: commits play no
+part. The result is memoized on a state key (HEAD, the full diff, untracked
+names and declared untracked files' size and mtime, the begun roster, and the
+claim record). It is computed off the request path, and its per-path counts
+must sum to the diff (the conservation tripwire). A positional replay of
+interval edit scripts did this job until `d785e69`;
+[`attribution-model.md`](attribution-model.md) records why it was replaced.
+
+**What interval staging still uses.** Committing one of several items that
+own lines in the same file (hunk-by-hunk staging, frozen since 2026-09-24)
+builds its patch from the item's own interval diffs (`claim_interval_diff`),
+applied to a scratch index from `HEAD`. Membership decides whether a commit
+goes that way. The intervals still supply the patch.
 
 Ownership has several intentionally honest edge cases:
 
@@ -381,8 +401,8 @@ live repository:
 | Include untracked, non-ignored files in snapshots | claims, safety, scenarios | file creation becomes unattributed or absent from a fixture | `capture_claim_tree`; `trace-vocabulary.md` § claim and safety refs |
 | Use a unique temporary index and clean it up | claims, selective commits, scenarios | concurrent captures collide or leak staging state | `capture_claim_tree`; `interval_stage_commit`; `temporary_index` |
 | Keep every durable snapshot reachable | claims, safety, scenarios | Git garbage collection removes a boundary still named in metadata | `record_claim_interval`; `prune_claim_intervals`; `capture_scenario` |
-| Treat ledger insertion order as claim order | claim attribution | same-millisecond boundaries are reordered and ownership shifts | `claim_intervals_partition`; `claim_attribution_runs` |
-| Compare closed intervals tree-to-tree | claim attribution | current worktree changes contaminate historical ownership | `claim_attribution_runs`; `trace-vocabulary.md` |
+| Treat ledger insertion order as claim order | claim attribution | same-millisecond boundaries are reordered and ownership shifts | `claim_intervals_partition`; `membership_step_chain` |
+| Compare closed intervals tree-to-tree | claim attribution | current worktree changes contaminate historical ownership | `membership_line_credit`; `claim_interval_diff`; `trace-vocabulary.md` |
 | Prove selective independence with `apply --check`, without `--3way` | entangled commit | dependent or conflict-marker content lands under the wrong item | `claim_interval_independence`; `interval_stage_commit` |
 | Refresh only committed real-index paths after moving `HEAD` | selective commit | phantom staged entries block or contaminate the next commit | `interval_stage_commit` |
 | Enforce hooks' important guarantees before `commit-tree` | selective commit | plumbing bypasses formatting or policy checks | `handle_worklist_commit`; `developing-bram.md` § formatting |
@@ -397,7 +417,7 @@ live repository:
 ## Source landmarks
 
 - [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs): `git_run`,
-  `worklist_change_index`, `handle_worklist_commit`, claim capture and replay,
+  `worklist_change_index`, `handle_worklist_commit`, claim capture and membership,
   interval staging, ref watching, default-branch resolution, and issue-close
   reconciliation.
 - [`src-tauri/src/guard_policy.rs`](../src-tauri/src/guard_policy.rs):

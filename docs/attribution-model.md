@@ -1,5 +1,14 @@
 # The attribution model: replay-positional vs. HEAD-diff membership
 
+> **Status (2026-10-13):** decided and done. HEAD-diff membership is Bram's
+> only ownership model. The replay-positional model this document argues
+> against was deleted in `d785e69` (#425 step 6). The order actually taken
+> is under [§6, Migration as taken](#migration-as-taken). Everything else
+> here is the drawing-board record from 2026-09-07 onward. It is kept as
+> written so the reasoning can be re-read, and it describes the replay in
+> the present tense because it was written while the replay ran. Ongoing
+> work on line ownership and commit accounting is tracked on #436.
+
 Bram attributes uncommitted changes to worklist items so that commits land
 each item's work under its own id — the misattribution-prevention charter of
 issue #327. The mechanism that shipped is **replay-positional**: capture a
@@ -725,7 +734,75 @@ fixture is not permission to revise the criterion to match the implementation.
    differ and the figures are not a like-for-like sample-count comparison —
    only the shape (p50 cheap, tail expensive) is the load-bearing fact.
 
+### Migration as taken
+
+The sketch below was the plan. The order changed twice: on 2026-09-24
+("finish problem 1, freeze problem 2",
+[decision](decisions/2026-09-24-freeze-same-tree-hunk-separation.md)), and
+on 2026-10-06, when the pane flipped before the gate. What actually landed:
+
+1. **The line rule** (`93830b1`, 2026-10-02). Membership stopped testing
+   whether an item's whole patch reverse-applies, because a chat-turn edit
+   to the item's own lines broke that test in 17 of 19 cases (§2.8). The
+   claim store's boundary trees form a linear history. Membership diffs
+   successive boundaries and credits each changed line of the current
+   `git diff HEAD` to the step that last wrote it, or last removed it.
+   That step's claim holders own the line. This works like blame over
+   Bram's own boundary snapshots, but it isn't `git blame`: it never looks
+   at commits, only at claim boundaries since HEAD.
+2. **The pane** (`7d19f27`, 2026-10-06). Strip, tooltip, Commit offer and
+   selection note read membership. This closed #273.
+3. **The gate, 4a** (`8c0d7d5`, 2026-10-06). The commit gate decides
+   whole-file versus interval staging by membership, request-wide, and
+   refuses (409) when membership has no answer instead of falling back.
+   `unownedTaken` discloses lines no item wrote that a whole-file commit
+   takes.
+4. **The joint refusal moved to membership** (`f225f1a`, #432,
+   2026-10-12). This is the one narrow exception to the 4b freeze. A stale
+   replay joint record was blocking unrelated commits and citing a partner
+   with no changes, and moving the refusal is what let the replay go.
+5. **Retirement, step 6** (`d785e69`, 2026-10-13). The replay engine,
+   its board fields (`attribution`, `attributionTotals`), its diagnostics
+   and its divergence traces are deleted. Membership exports per-line
+   `runs` / `removedRuns` for the pane's ownership views. The board
+   serves no take while membership has no partition; the pane shows
+   "Calculating ownership…". A cost budget was set first
+   ([decision](decisions/2026-10-12-membership-cost-budget.md)).
+
+**Frozen, not done:** 4b's remainder and step 5 (staging from the
+membership patch). Interval staging still builds its patch from the claim
+intervals (`claim_interval_diff`, with `GhostOwnerIndex`), unchanged. What
+would reopen them: field demand for parallel work in one tree that
+worktrees don't serve, backed by real commits.
+
+**Ownership versus the prediction.** Membership answers "who wrote this
+line". "Will commit" answers "what will this commit take", and that
+depends on how the gate stages:
+
+- On an item whose files no other begun item owns lines in, the whole files
+  are taken (unowned lines included).
+- On an entangled item, the take is the numstat of the item's interval
+  patch applied to a scratch index from HEAD. That's the same patch
+  interval staging commits, so a file created and later rewritten counts
+  once.
+
+The two can legitimately differ, for example where an item's interval
+patch carries lines a later edit superseded.
+
+**Per row versus per selection.** Each row's "Will commit" assumes that
+item commits alone. The gate routes a request as a whole, so a selection
+can route differently. Two owners of one file, committed together, leave
+no outside owner, so the gate takes the whole file, unowned lines
+included. With two or more items ticked, the gate bar shows
+`/__worklist/will-commit?ids=…`: the gate's routing run for that
+selection, keyed on the membership state key. The demo starter
+`entangled-with-unowned` reproduces the difference: two rows of +1 −1
+commit together as +3 −3.
+
 ### Migration sketch, per consuming surface
+
+*The original plan, kept as written. For what landed, see
+[Migration as taken](#migration-as-taken) above.*
 
 Sized so implementation items can be cut directly; ordering is the
 observe → display → gate → retire sequence.

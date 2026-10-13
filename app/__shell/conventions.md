@@ -391,10 +391,15 @@ records any ticked issue closes. **Closing is fully automatic — do
 nothing**: there is no close route to call and no close step to tell
 the user to run. Closes fire on the user's next **Push**.
 
-The pane offers Commit on any begun item with changes; when a path is
-shared with another begun item the host stages only the requested
-items' own hunks. Committing entangled items **together** is safe;
-committing **one of N** is the risky operation.
+**Entangled** has one meaning: another begun item **owns lines** (not
+merely declares the path) in a file the commit would take. Bram decides
+ownership line by line from its claim snapshots. The pane offers Commit
+on any begun item with changes. When the request is entangled, the host
+stages only the requested items' own hunks; otherwise it takes the files
+whole, and reports any lines no item wrote as `unownedTaken`. Committing
+entangled items **together** is safe; committing **one of N** is the
+risky operation. For files two items keep editing, commit them together,
+or give real parallel work its own worktree.
 
 **`worklist-commit` is single-shot per approval.** On a timeout, never
 re-POST: check `git log` first and treat what you find as the answer. A
@@ -648,7 +653,9 @@ you never meet them.
   verifies the combination and approves one commit.
 - **Warn when a new item would entangle a committable item.** Before
   proposing or applying an item, intersect its `files` with those of
-  begun items (`applied`, or `proposed` with `begunAtMs`). If non-empty,
+  begun items (`applied`, or `proposed` with `begunAtMs`). An overlap of
+  declared files isn't entanglement yet; it's the risk of it, since
+  editing those files will make both items own lines there. If non-empty,
   say so first: "issue-X has changes ready to commit and touches the
   same file(s) — recommend committing it first; otherwise this item's
   edits will mix into X's on-disk diff and need manual separation

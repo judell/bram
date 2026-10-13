@@ -53660,6 +53660,81 @@ fn claude_turn_is_done(content: &str, turn_user_ts_ms: Option<i64>) -> bool {
     decision.detected && !claude_jsonl_end_is_stale(deciding_ts_ms, turn_user_ts_ms)
 }
 
+// turn-end-ignores-previous-turns-end-record: is this Claude `end_turn` stale,
+// judged against the newest genuine user prompt in the SAME content? The
+// prompt time used to come only from `claude_turn_stats_cell`, which a 300 ms
+// poll refreshes. On 2026-10-12 a message queued behind a running turn was
+// dequeued 103 ms before the scan (prompt 23:34:58.854Z, scan 58.957Z); the
+// cell still held the previous prompt's time, the previous turn's genuine
+// `end_turn` (58.780Z) read as current, and the new turn's claim was cleared
+// mid-turn, so its edits landed owned by no item. Reading the prompt from the
+// content removes the race. The cached value stays as a fallback and as a
+// floor: the later of the two wins.
+fn claude_end_is_stale_in(content: &str, cached_user_ts_ms: Option<i64>) -> bool {
+    let from_content = compute_claude_turn_stats(content.as_bytes()).map(|s| s.user_ts_ms);
+    let user_ts = match (from_content, cached_user_ts_ms) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    !claude_turn_is_done(content, user_ts)
+}
+
+#[cfg(test)]
+mod claude_stale_end_tests {
+    use super::claude_end_is_stale_in;
+
+    // The 2026-10-12 23:34:58Z shape, records as they were written: the
+    // previous turn's genuine end, then a queued message dequeued as the new
+    // turn's prompt. The polled cell still held the previous prompt (23:33:19).
+    fn queued_turn_tail(with_new_end: bool) -> String {
+        let mut lines = vec![
+            r#"{"type":"user","timestamp":"2026-10-12T23:33:19.174Z","message":{"role":"user","content":"iterate: previous"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-12T23:34:56.128Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"thinking","thinking":""}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-12T23:34:58.780Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"system","timestamp":"2026-10-12T23:34:58.820Z"}"#,
+            r#"{"type":"user","timestamp":"2026-10-12T23:34:58.854Z","message":{"role":"user","content":"iterate: the queued message"}}"#,
+            r#"{"type":"attachment","timestamp":"2026-10-12T23:34:58.853Z"}"#,
+        ];
+        if with_new_end {
+            lines.push(r#"{"type":"assistant","timestamp":"2026-10-12T23:36:10.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"new turn done"}]}}"#);
+        }
+        lines.join("\n")
+    }
+
+    fn ms(iso: &str) -> Option<i64> {
+        super::parse_iso_to_ms(iso)
+    }
+
+    #[test]
+    fn a_dequeued_prompt_makes_the_previous_end_stale_even_with_a_lagging_cache() {
+        // The cache lags at the previous prompt: the bug. Content wins.
+        let lagging = ms("2026-10-12T23:33:19.174Z");
+        assert!(claude_end_is_stale_in(&queued_turn_tail(false), lagging));
+        // No cache at all: content alone decides.
+        assert!(claude_end_is_stale_in(&queued_turn_tail(false), None));
+    }
+
+    #[test]
+    fn the_new_turns_own_end_is_not_stale() {
+        let lagging = ms("2026-10-12T23:33:19.174Z");
+        assert!(!claude_end_is_stale_in(&queued_turn_tail(true), lagging));
+    }
+
+    #[test]
+    fn an_ordinary_finished_turn_is_not_stale() {
+        let tail = [
+            r#"{"type":"user","timestamp":"2026-10-12T23:00:00.000Z","message":{"role":"user","content":"do it"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-12T23:00:05.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+        ]
+        .join("\n");
+        assert!(!claude_end_is_stale_in(
+            &tail,
+            ms("2026-10-12T23:00:00.000Z")
+        ));
+        assert!(!claude_end_is_stale_in(&tail, None));
+    }
+}
+
 #[cfg(test)]
 mod notification_turn_boundary_tests {
     use super::{
@@ -54200,7 +54275,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // apart on which record freshness is measured against (#259).
     let claude_stale_end = provider == JsonlCompletionProvider::Claude
         && decision.detected
-        && !claude_turn_is_done(
+        && claude_end_is_stale_in(
             &content,
             claude_turn_stats_cell()
                 .lock()

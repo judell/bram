@@ -5919,6 +5919,18 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     // panel open. So the footer must sit in the tail's last FOOTER_WINDOW
     // squashed characters, and the other phrases may be anywhere.
     const FOOTER_WINDOW: usize = 40;
+    // fresh-partner-catch-up-holds-for-codex-update-prompt: Codex's update
+    // prompt, whose default (Enter) is "1. Update now". Both phrases plus the
+    // footer, so a reply quoting "Update available" can't fire it. Specimen:
+    // Codex's own snapshot (codex-rs/tui/src/snapshots/
+    // codex_tui__update_prompt__tests__update_prompt_modal.snap) and the
+    // live case 2026-10-13 03:32Z, where a catch-up's Enter ran
+    // `npm install -g @openai/codex` and exited Codex.
+    const CODEX_UPDATE: (&str, &str, &str) = (
+        "update available",
+        "update now",
+        "enter continue \u{b7} esc skip",
+    );
     // All whitespace removed, on both sides of the match. The CLIs lay out
     // words with cursor-column moves (CSI n G), which strip_ansi drops
     // without leaving a space, so the tail reads "Esctocancel" and
@@ -5944,6 +5956,10 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
         .any(|(a, b, footer)| has(a) && has(b) && ends_with_footer(footer))
     {
         return Some("folder-trust");
+    }
+    let (update_a, update_b, update_footer) = CODEX_UPDATE;
+    if has(update_a) && has(update_b) && ends_with_footer(update_footer) {
+        return Some("codex-update");
     }
     if SLASH_PANEL_MARKERS
         .iter()
@@ -6149,6 +6165,31 @@ mod terminal_attention_tests {
         );
         assert_eq!(
             terminal_attention_prompt_shape("Click Yes, I trust this folder in Claude."),
+            None
+        );
+    }
+
+    // fresh-partner-catch-up-holds-for-codex-update-prompt: Codex's update
+    // prompt from its own snapshot, with real versions (2026-10-13 03:32Z:
+    // 0.161.0 -> 0.162.1), stripped the way Bram strips it.
+    #[test]
+    fn codex_update_prompt_specimen() {
+        const TAIL: &str = "Update available \u{b7} 0.161.0 \u{2192} 0.162.1 Release notes: https://github.com/openai/codex/releases/latest \u{203a} 1. Update now (runs `npm install -g @openai/codex`) 2. Skip 3. Skip until next version enter continue \u{b7} esc skip";
+        assert_eq!(terminal_attention_prompt_shape(TAIL), Some("codex-update"));
+        // Glued by cursor moves, as the live tail reads.
+        let glued: String = TAIL.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(
+            terminal_attention_prompt_shape(&glued),
+            Some("codex-update")
+        );
+    }
+
+    #[test]
+    fn quoting_the_update_prompt_does_not_fire_it() {
+        assert_eq!(
+            terminal_attention_prompt_shape(
+                "Codex said Update available, and I chose Update now. Done."
+            ),
             None
         );
     }
@@ -18220,11 +18261,12 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // 21:45Z, Bram's own catch-up). The attention detector's footer-anchored
     // shapes say when one is up; such sends go back to the message box, as
     // for a bare shell. sendKeys and menuAnswer still pass: keys are how the
-    // user answers the prompt. slash-panel is left out: Esc closes it, and
-    // an Enter there grants nothing.
+    // user answers the prompt. codex-update joins them: its Enter runs
+    // "Update now" and exits Codex. slash-panel is left out: Esc closes it,
+    // and an Enter there grants nothing.
     let prompt_shape =
         terminal_attention_prompt_shape(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS))
-            .filter(|shape| matches!(*shape, "folder-trust" | "hooks-trust"));
+            .filter(|shape| matches!(*shape, "folder-trust" | "hooks-trust" | "codex-update"));
     let mut prompt_restores: Vec<(String, String)> = Vec::new();
 
     for line in content.lines() {

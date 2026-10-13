@@ -15,7 +15,12 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-const EVENTS_LOG_CAP_BYTES: u64 = 5 * 1024 * 1024;
+// issue-439: shared with the host, which rotates the file at this size
+// (`rotate_hook_events_log`, lib.rs). Here it is only the backstop for when no
+// Bram host is running to rotate.
+pub(crate) const EVENTS_LOG_CAP_BYTES: u64 = 5 * 1024 * 1024;
+// The line the guard writes once when it finds the log over the cap.
+pub(crate) const BREADCRUMBS_PAUSED_MARKER: &str = "breadcrumbs-paused";
 
 pub fn run_guard_mode(args: &[String]) -> i32 {
     let hook = args.first().map(String::as_str).unwrap_or("");
@@ -726,6 +731,10 @@ pub(crate) fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: 
     let path = dir.join("hook-events.log");
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > EVENTS_LOG_CAP_BYTES {
+            // issue-439: stopping silently left two weeks of guard decisions
+            // missing with nothing to say why. Say so once, then stop. The
+            // host rotates the file within a minute when Bram is running.
+            append_paused_marker_once(&path, provider, meta.len());
             return;
         }
     }
@@ -745,6 +754,37 @@ pub(crate) fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: 
     {
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+// issue-439: append the paused marker unless the file's tail already has it.
+// Reading the last 4 KB keeps this cheap on a 5 MB file, and once the marker
+// is the last line every later call finds it there.
+fn append_paused_marker_once(path: &Path, provider: &str, bytes: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let tail_len = bytes.min(4096);
+    let mut tail = Vec::new();
+    if f.seek(SeekFrom::End(-(tail_len as i64))).is_ok() {
+        let _ = (&f).take(tail_len).read_to_end(&mut tail);
+    }
+    if String::from_utf8_lossy(&tail).contains(BREADCRUMBS_PAUSED_MARKER) {
+        return;
+    }
+    let line = format!(
+        "{} {} {} - reason=cap bytes={} cap={} (no host rotated the log; later breadcrumbs are dropped)\n",
+        utc_iso_millis(),
+        provider,
+        BREADCRUMBS_PAUSED_MARKER,
+        bytes,
+        EVENTS_LOG_CAP_BYTES
+    );
+    let _ = f.write_all(line.as_bytes());
 }
 
 // ISO-8601 UTC with milliseconds, matching the Python breadcrumbs' shape,
@@ -1032,6 +1072,23 @@ mod guard_mode_tests {
             "log: {log}"
         );
         assert!(log.contains("post=skipped port=none"), "log: {log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // issue-439: over the cap, the guard says so once and then stays quiet.
+    #[test]
+    fn over_the_cap_writes_the_paused_marker_once() {
+        let root = scratch("crumb-cap");
+        let dir = root.join("resources/bram-traces");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("hook-events.log");
+        std::fs::write(&log, vec![b'x'; (EVENTS_LOG_CAP_BYTES + 10) as usize]).unwrap();
+        for _ in 0..3 {
+            append_breadcrumb(&root, "claude-rs", "PreToolUse", "Bash", "decided=allow");
+        }
+        let text = String::from_utf8_lossy(&std::fs::read(&log).unwrap()).into_owned();
+        assert_eq!(text.matches(BREADCRUMBS_PAUSED_MARKER).count(), 1);
+        assert!(!text.contains("decided=allow"), "breadcrumbs stay dropped");
         let _ = std::fs::remove_dir_all(&root);
     }
 

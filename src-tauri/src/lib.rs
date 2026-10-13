@@ -2341,6 +2341,142 @@ fn bram_trace_date_stamp_local() -> String {
     format!("{:04}-{:02}-{:02}", y, mo, d)
 }
 
+// issue-439: the guard's breadcrumb log (`hook-events.log`) used to stop for
+// good at its cap, because nothing rotated it (two weeks silent on one
+// machine). The host rotates it here: one process, on the ticker, so the
+// short-lived guard processes never race each other over a rename. Over the
+// cap, the file becomes `hook-events-YYYY-MM-DD[-n].log`; the next guard write
+// creates a fresh file, since guards open per write. The newest `keep`
+// archives survive. Returns (bytes rotated, archive path, archives pruned).
+fn rotate_hook_events_log(dir: &Path, stamp: &str, keep: usize) -> Option<(u64, PathBuf, usize)> {
+    let active = dir.join("hook-events.log");
+    let bytes = std::fs::metadata(&active).ok()?.len();
+    if bytes <= guard::EVENTS_LOG_CAP_BYTES {
+        return None;
+    }
+    let mut archive = None;
+    for n in 1..10_000 {
+        let name = if n == 1 {
+            format!("hook-events-{}.log", stamp)
+        } else {
+            format!("hook-events-{}-{}.log", stamp, n)
+        };
+        let candidate = dir.join(name);
+        if !candidate.exists() {
+            archive = Some(candidate);
+            break;
+        }
+    }
+    let archive = archive?;
+    std::fs::rename(&active, &archive).ok()?;
+    // Prune by modification time, newest first (names alone misorder "-10"
+    // before "-2").
+    let mut archives: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if !name.starts_with("hook-events-") || !name.ends_with(".log") {
+                        return None;
+                    }
+                    let modified = e.metadata().ok()?.modified().ok()?;
+                    Some((modified, e.path()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    archives.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut removed = 0;
+    for (_, p) in archives.into_iter().skip(keep) {
+        if p != archive && std::fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    Some((bytes, archive, removed))
+}
+
+const HOOK_EVENTS_ARCHIVES_KEPT: usize = 4;
+
+#[cfg(test)]
+mod hook_events_rotation_tests {
+    use super::{guard, rotate_hook_events_log};
+    use std::path::PathBuf;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "bram-hook-rot-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn over_cap(d: &PathBuf) {
+        std::fs::write(
+            d.join("hook-events.log"),
+            vec![b'x'; (guard::EVENTS_LOG_CAP_BYTES + 1) as usize],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn under_the_cap_is_left_alone() {
+        let d = dir("under");
+        std::fs::write(d.join("hook-events.log"), "one line\n").unwrap();
+        assert!(rotate_hook_events_log(&d, "2026-10-13", 4).is_none());
+        assert!(d.join("hook-events.log").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn over_the_cap_rotates_with_a_dated_then_numbered_name() {
+        let d = dir("names");
+        over_cap(&d);
+        let (bytes, to, _) = rotate_hook_events_log(&d, "2026-10-13", 4).unwrap();
+        assert_eq!(bytes, guard::EVENTS_LOG_CAP_BYTES + 1);
+        assert_eq!(to, d.join("hook-events-2026-10-13.log"));
+        assert!(
+            !d.join("hook-events.log").exists(),
+            "the next guard write starts fresh"
+        );
+        over_cap(&d);
+        let (_, to2, _) = rotate_hook_events_log(&d, "2026-10-13", 4).unwrap();
+        assert_eq!(to2, d.join("hook-events-2026-10-13-2.log"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_archives() {
+        let d = dir("prune");
+        // Five old archives, oldest first, with distinct mtimes.
+        let base = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for i in 0..5u64 {
+            let p = d.join(format!("hook-events-2026-10-0{}.log", i + 1));
+            std::fs::write(&p, "old\n").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(base + std::time::Duration::from_secs(i * 60))
+                .unwrap();
+        }
+        over_cap(&d);
+        let (_, to, removed) = rotate_hook_events_log(&d, "2026-10-13", 4).unwrap();
+        assert_eq!(removed, 2, "6 archives with the new one; keep 4");
+        assert!(to.exists(), "the archive just made survives");
+        assert!(!d.join("hook-events-2026-10-01.log").exists());
+        assert!(!d.join("hook-events-2026-10-02.log").exists());
+        assert!(d.join("hook-events-2026-10-05.log").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
 fn next_bram_trace_archive_path(active_path: &Path) -> Option<PathBuf> {
     let parent = active_path.parent()?;
     let stamp = bram_trace_date_stamp_local();
@@ -17074,6 +17210,35 @@ fn pty_spawn(
                         guard_link_last_ensure_ms = now;
                         let _ = guard::ensure_bram_guard_link();
                         record_own_guard_target(&app_for_throughput);
+                        // issue-439: rotate the guard's breadcrumb log at its
+                        // cap (first pass is at launch: last_ensure starts 0).
+                        if let Some(root) = project_root(Some(&app_for_throughput)) {
+                            let dir = root.join("resources").join("bram-traces");
+                            if let Some((bytes, to, removed)) = rotate_hook_events_log(
+                                &dir,
+                                &bram_trace_date_stamp_local(),
+                                HOOK_EVENTS_ARCHIVES_KEPT,
+                            ) {
+                                append_bram_trace_line(
+                                    &app_for_throughput,
+                                    "guard",
+                                    &format!(
+                                        "op=hook-events-rotated bytes={} to={}",
+                                        bytes,
+                                        to.file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_default()
+                                    ),
+                                );
+                                if removed > 0 {
+                                    append_bram_trace_line(
+                                        &app_for_throughput,
+                                        "guard",
+                                        &format!("op=hook-events-pruned removed={}", removed),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 // codex-trust-menu-arm-until-settled: commit an armed

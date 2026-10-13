@@ -153,6 +153,33 @@
       color="$textColor-secondary"
       value="{'Committable together with ' + window.__bramNameList(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)) + ' — select both.'}" />
   </HStack>
+  <!-- issue-425-retire-replay (Codex review): what Commit takes for two or
+       more ticked items. Each row's "Will commit" assumes that item commits
+       alone; together they can route differently (both owners of a file
+       ticked leaves no outside owner, so the gate takes the whole file,
+       unowned lines included). The host runs the gate's routing for the
+       selection. Freshness is push, not polling: the key in queryParams is
+       the selection plus the host's membership state key and its freshness,
+       which change with anything ownership derives from and when a pending
+       compute lands; the host emits worklist-changed when
+       a new partition is ready. A stale answer, or one for another state or
+       selection, is not shown.
+       https://www.xmlui.org/docs/reference/components/DataSource -->
+  <DataSource
+    id="gateTake"
+    when="{!!window.__bramSelectionPredictionKey(gateWorklist.value, gateSel.value)}"
+    url="/__worklist/will-commit"
+    queryParams="{{ ids: (gateSel.value || []).join(','), k: window.__bramSelectionPredictionKey(gateWorklist.value, gateSel.value) }}" />
+  <HStack
+    when="{!!window.__bramSelectionTakeLine(gateTake.value, gateSel.value, gateWorklist.value)}"
+    horizontalAlignment="center"
+    paddingHorizontal="$space-8"
+    paddingTop="$space-1">
+    <Text
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{window.__bramSelectionTakeLine(gateTake.value, gateSel.value, gateWorklist.value)}" />
+  </HStack>
   <!-- issue-328: close consent AT THE GATE. When the selection carries
        closesIssues, one real checkbox per issue renders here — where the
        decision happens — instead of only inside a row expansion nobody is

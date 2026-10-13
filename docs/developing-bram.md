@@ -168,6 +168,38 @@ grep `console-error|console-unhandledrejection` in
 Zero matches is the pass condition; any match is triaged before
 reading anything else from the trace.
 
+#### Known noise: the ResizeObserver loop
+
+One message is exempt:
+`ResizeObserver loop completed with undelivered notifications.` Exclude
+it from the grep (`| grep -v ResizeObserver`) and don't triage it.
+Everything else still counts.
+
+It is a known XMLUI-side warning that Bram can't fix. It comes from
+[virtua](https://github.com/inokawa/virtua), the virtualizer under XMLUI's
+`List`: its per-row item resizers measure in the same frame they observe.
+Virtualized scrolling alone produces it, with no Bram markup involved.
+The record:
+
+- #275 §A2 measured it at about 204 a day, all from virtualized `List`s,
+  and traced it to Bram's initial scaffold (`b4abf0f`).
+- [xmlui-org/xmlui#3830](https://github.com/xmlui-org/xmlui/issues/3830)
+  was closed as wontfix: a bare React + virtua fixture with no XMLUI code
+  reproduces it, on virtua 0.48.8 and 0.52.7 alike.
+- We have not filed it on virtua. Jon doesn't know their policy on
+  AI-assisted contributions and won't present this work as his own.
+
+This keeps coming back. It reappeared during the `issue-425-retire-replay`
+demo check on 2026-10-12: 20 lines in the demo's trace, and 142 in the
+working instance's trace that day, starting before any pane edit.
+
+**Removing this exemption.** XMLUI's
+`xmlui/tests/isolation/virtua-ro/` specs
+([`f6369d9`](https://github.com/xmlui-org/xmlui/commit/f6369d98cc1917edc6acd13c2f970f300a1c9184))
+are marked `test.fail()`, so they turn red when a virtua release fixes the
+loop. When that lands and Bram's vendored XMLUI picks it up, delete this
+subsection and the matching row in `worklist-gate-walkthrough.md`.
+
 For the registered trace categories, subkinds, fields, and their diagnostic
 purpose, consult the on-demand
 [trace vocabulary](trace-vocabulary.md) while reading the log.
@@ -701,7 +733,11 @@ plain `git commit`, and one begun-then-reverted row that must not read as
 landed), and `joint-owner-committed` (judell/bram#432: two items approved in
 one click whose owner of the shared file has since committed and left the
 board, a partner with no changes, and a later, separately approved item on
-the shared file whose commit must not be refused). For example, a focused board is:
+the shared file whose commit must not be refused), and `entangled-with-unowned`
+(two begun owners of one file plus a third hunk written with no claim open:
+each row alone predicts only its own hunk, while committing both together
+takes the whole file; Codex's acceptance case for issue-425-retire-replay).
+For example, a focused board is:
 
 ```sh
 scripts/demo-instance.sh new ordering \

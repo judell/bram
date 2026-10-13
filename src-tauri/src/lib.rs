@@ -48216,209 +48216,6 @@ fn claim_intervals_partition(
     (keep, retire)
 }
 
-// issue-327 attribution. Ownership of a changed line is decided by WHICH CLAIM
-// INTERVAL introduced it, replayed positionally through the boundary chain.
-//
-// Two properties make this affordable, both measured before building:
-//   * one whole-tree `git diff` per boundary pair covers every file at once, so
-//     cost is independent of how many paths the board touches (the #323 lesson,
-//     applied up front rather than after a regression);
-//   * a CLOSED interval compares two fixed trees, so its edit script is immutable
-//     and cacheable for the process lifetime. Only the open interval, last
-//     boundary to worktree, is recomputed per board build.
-//
-// Attribution is POSITIONAL, never by line content. A content-keyed lookup
-// silently misattributes duplicate lines -- blank lines and code fences get
-// credited to whichever claimant's patch first contained that text. It looks
-// right on sparse fixtures and produces confident nonsense on real files.
-#[derive(Clone, Debug, PartialEq)]
-struct AttrHunk {
-    old_start: usize,
-    lines: Vec<(char, ())>,
-}
-
-// One file's edit script from a single interval.
-fn parse_attr_diff(out: &str) -> std::collections::HashMap<String, Vec<AttrHunk>> {
-    let mut per_file: std::collections::HashMap<String, Vec<AttrHunk>> = Default::default();
-    let mut path: Option<String> = None;
-    let mut cur: Option<AttrHunk> = None;
-    for line in out.lines() {
-        // attribution-run-line-offset-in-views: take the path from the
-        // `diff --git a/X b/X` header, which is present for EVERY file —
-        // add, modify, delete, rename. The old code keyed on `+++ b/<path>`,
-        // but a DELETED file's target line is `+++ /dev/null`, so its path
-        // was never set and its `-` hunks were attributed to the
-        // alphabetically-preceding file. Live case 2026-09-05: two deleted
-        // files (.needs-you-dismissed.json -13, downloads.sh -16) bled a
-        // phantom -29 onto docs/trace-vocabulary.md, shifting every run and
-        // rendering the change as "no item". The b/ path is the target
-        // (the new name on a rename), which is what attribution wants.
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            if let (Some(p), Some(h)) = (path.take(), cur.take()) {
-                per_file.entry(p).or_default().push(h);
-            }
-            cur = None;
-            // The b/ target: present for add/modify/delete/rename, so it is
-            // set even when the later `+++` line is `/dev/null` (a deletion).
-            path = rest.split(" b/").nth(1).map(|s| s.to_string());
-            continue;
-        }
-        // `+++ b/<path>` still sets the path — it is the only header in the
-        // synthetic diffs the unit tests feed (no `diff --git` line), and in
-        // a real diff it merely re-confirms the diff --git target. A deletion
-        // is `+++ /dev/null`, which correctly does NOT match and so leaves the
-        // diff --git path in place.
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            if let (Some(p), Some(h)) = (path.take(), cur.take()) {
-                per_file.entry(p).or_default().push(h);
-            }
-            cur = None;
-            path = Some(rest.to_string());
-            continue;
-        }
-        if line.starts_with("+++ ") || line.starts_with("--- ") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("@@ -") {
-            if let (Some(p), Some(h)) = (path.clone(), cur.take()) {
-                per_file.entry(p).or_default().push(h);
-            }
-            let start: usize = rest
-                .split(|c| c == ',' || c == ' ')
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1);
-            cur = Some(AttrHunk {
-                old_start: start,
-                lines: Vec::new(),
-            });
-            continue;
-        }
-        if let Some(h) = cur.as_mut() {
-            match line.chars().next() {
-                Some(c @ ('+' | '-' | ' ')) => h.lines.push((c, ())),
-                // "\ No newline at end of file" and anything else advances nothing.
-                _ => {}
-            }
-        }
-    }
-    if let (Some(p), Some(h)) = (path, cur) {
-        per_file.entry(p).or_default().push(h);
-    }
-    per_file
-}
-
-// Apply one interval's hunks for one file to that file's ownership vector.
-// `delta` tracks how far earlier hunks in the same file have shifted positions,
-// because each hunk's `old_start` addresses the file as it was BEFORE this
-// interval, while `owners` is mutated in place as we go.
-fn apply_attr_hunks(owners: &mut Vec<Option<String>>, hunks: &[AttrHunk], owner: &str) {
-    let mut delta: isize = 0;
-    for h in hunks {
-        let mut i = (h.old_start as isize - 1 + delta).max(0) as usize;
-        for (c, _) in &h.lines {
-            match c {
-                ' ' => i = (i + 1).min(owners.len()),
-                '-' => {
-                    if i < owners.len() {
-                        owners.remove(i);
-                        delta -= 1;
-                    }
-                }
-                '+' => {
-                    let at = i.min(owners.len());
-                    owners.insert(at, Some(owner.to_string()));
-                    i = at + 1;
-                    delta += 1;
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-// The per-path replay core, pure and testable: given the base tree's line
-// count and the ordered (owner, hunks) steps that touch this path, produce the
-// ownership runs. Extracted from claim_attribution_runs so the chain-replay —
-// the part that failed to reproduce a 2026-09-03 field anomaly and that #327's
-// interval staging depends on for positional exactness — is unit-testable
-// without a git repo or an AppHandle. Verified against the adversarial shape:
-// an old base, an intervening committed resize applied by an earlier step, and
-// a sole claimant editing at a high line number, all land at the true
-// positions (see attribution_replay_survives_intervening_resize).
-// attribution-run-line-offset-in-views: the replay reconstructs a file's
-// length as base_n + the net +/- of every interval step; if that does not
-// equal the actual working-file length, the runs are line-shifted by the
-// difference and every view that maps a working-diff line to a run is wrong.
-// Returns Some(offset) — file_len minus reconstructed length, signed — when
-// they diverge; None when they agree (the healthy state). Pure so the
-// tripwire's arithmetic is verifiable without a repo.
-fn attr_replay_line_offset(base_n: usize, net: isize, file_len: usize) -> Option<isize> {
-    let replay_len = (base_n as isize + net).max(0);
-    let offset = file_len as isize - replay_len;
-    if offset != 0 {
-        Some(offset)
-    } else {
-        None
-    }
-}
-
-// Returns the runs plus the count of surviving lines inserted by an UNOWNED
-// step (the NUL-sentinel owner: cleared-boundary spans, work by nobody).
-// That count IS the path's unattributed residue — base lines are None from
-// birth and never counted, which is the accounting bug the first field run
-// of the residue feature exposed within the hour (74,978 "unattributed" ≈
-// the whole unchanged body of lib.rs; the old computation subtracted run
-// spans from the full replay length).
-fn attribution_runs_for_path(
-    base_n: usize,
-    path_steps: &[(Option<String>, Vec<AttrHunk>)],
-) -> Vec<serde_json::Value> {
-    let mut owners: Vec<Option<String>> = vec![None; base_n];
-    for (owner, hunks) in path_steps {
-        let who = owner.as_deref().unwrap_or("\u{0}");
-        apply_attr_hunks(&mut owners, hunks, who);
-    }
-    for o in owners.iter_mut() {
-        if o.as_deref() == Some("\u{0}") {
-            *o = None;
-        }
-    }
-    attr_runs(&owners)
-}
-
-// Collapse a per-line ownership vector into contiguous runs. Unowned lines are
-// a first-class state -- work predating the capture phase, or done with no claim
-// live -- and are reported as such rather than folded into a neighbour.
-fn attr_runs(owners: &[Option<String>]) -> Vec<serde_json::Value> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < owners.len() {
-        let who = owners[i].clone();
-        let start = i;
-        while i < owners.len() && owners[i] == who {
-            i += 1;
-        }
-        if let Some(id) = who {
-            // joint-interval-files-disambiguation: a joint owner rides the
-            // same Option<String> plumbing as a marker-prefixed member list
-            // and expands here into an itemIds run — a first-class shared
-            // state, distinct from both a single owner and unowned.
-            if let Some(rest) = id.strip_prefix(JOINT_RUN_SEP) {
-                let members: Vec<&str> = rest.split(JOINT_RUN_SEP).collect();
-                out.push(serde_json::json!({
-                    "startLine": start + 1, "endLine": i, "itemIds": members
-                }));
-            } else {
-                out.push(serde_json::json!({
-                    "startLine": start + 1, "endLine": i, "itemId": id
-                }));
-            }
-        }
-    }
-    out
-}
-
 // joint-interval-files-disambiguation: per-(interval, path) ownership for
 // multi-id claims. A one-click plural approval writes ONE claim covering all
 // its ids, so edits in that window land in a JOINT interval; ownership used
@@ -48432,7 +48229,6 @@ fn attr_runs(owners: &[Option<String>]) -> Vec<serde_json::Value> {
 // none → unowned as before. A joint set whose members ghost away is NOT
 // promoted to the survivor — that is the display-only inflation lie of
 // 2026-09-04 (see the ghost rules above).
-const JOINT_RUN_SEP: char = '\u{2}';
 
 enum IntervalPathOwner {
     Single(String),
@@ -48492,34 +48288,6 @@ fn declared_covers(declared: &str, path: &str) -> bool {
     path == d || path.starts_with(&format!("{}/", d))
 }
 
-// One trace line per (path, owner) resolution per process — the board build
-// runs this on every serve, and an unbounded emit would flood the log with
-// identical lines (the describe-rebroadcast lesson applied to tracing).
-fn trace_joint_interval_resolved<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    path: &str,
-    owner: &str,
-    candidates: usize,
-) {
-    static TRACED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-    let key = format!("{}\u{1}{}", path, owner);
-    let fresh = TRACED
-        .get_or_init(|| Mutex::new(Default::default()))
-        .lock()
-        .map(|mut s| s.insert(key))
-        .unwrap_or(false);
-    if fresh {
-        append_bram_trace_line(
-            app,
-            "claim-interval",
-            &format!(
-                "op=joint-interval-resolved path={} owner={} candidates={}",
-                path, owner, candidates
-            ),
-        );
-    }
-}
-
 fn resolve_interval_path_owner(
     ids: &[String],
     path: &str,
@@ -48545,34 +48313,6 @@ fn resolve_interval_path_owner(
         }
     }
 }
-
-// Drive the replay across the whole boundary chain and return per-path runs.
-//
-// Closed intervals are immutable (two fixed trees), so their parsed edit scripts
-// are cached for the process lifetime with no invalidation logic. Only the final
-// pair -- last boundary against the working tree -- is recomputed per call, which
-// is one `git diff` on top of the board build's existing four spawns.
-type AttributionResult = (
-    std::collections::HashMap<String, Vec<serde_json::Value>>,
-    // issue-327: per-item interval-patch shortstat (added, removed) — what
-    // committing that item actually takes, since interval staging commits the
-    // item's own patch. Differs from the surviving-owned run count under
-    // supersession, and carries the removed count the runs cannot.
-    std::collections::HashMap<String, (usize, usize)>,
-    // will-commit-matches-the-button: the same shortstat broken down per
-    // path (path → itemId → (added, removed)), so the will-commit
-    // computation can charge an item its interval take on entangled paths
-    // and the whole-file stat on exclusive ones — the way worklist-commit
-    // actually executes.
-    std::collections::HashMap<String, std::collections::HashMap<String, (usize, usize)>>,
-    // issue-273: per-path unowned residue — surviving lines the replay
-    // INSERTED under no owner (attribution_runs_for_path's second return;
-    // base lines are unowned-by-birth and are not residue). A
-    // non-zero entry means committing this path whole-file would silently
-    // fold in work nobody claimed; will-commit must take the item's own
-    // interval instead, even when no OTHER begun item contests the path.
-    std::collections::HashMap<String, usize>,
-);
 
 // iterate-edits-need-claim-boundaries / ghost-reassignment-inflates-totals:
 // an interval whose recorded owner has left the board (committed and pruned)
@@ -48642,8 +48382,10 @@ fn trace_ghost_reassignments<R: tauri::Runtime>(
     );
 }
 
-// issue-395-attribution-diffs-scoped-to-declared-paths: the replay's diffs
-// run under a pathspec of every item's declared files. A claim boundary
+// issue-395-attribution-diffs-scoped-to-declared-paths: the pathspec of every
+// item's declared files. Today it scopes the claim-boundary capture
+// (`capture_claim_tree`); it was first written for the claim-interval replay's
+// diffs (deleted by issue-425-retire-replay), whose cost story follows. A claim boundary
 // captures non-ignored untracked content (capture_claim_tree -- deliberate,
 // creation must be attributable), so an unscoped `git diff <tree>` reports
 // every snapshot-only path as a deletion: 28,265 virtualenv files, 198 MB of
@@ -48654,8 +48396,8 @@ fn trace_ghost_reassignments<R: tauri::Runtime>(
 //
 // Each declared entry contributes its literal path (a directory entry covers
 // its contents -- plain pathspecs prefix-match directories) plus the
-// worktree twins declared_covers also accepts (#309). Sorted and deduped so
-// the cache key below is independent of declaration order.
+// worktree twins declared_covers also accepts (#309). Sorted and deduped, so
+// the result is independent of declaration order.
 fn attribution_pathspec(declared: &std::collections::HashMap<String, Vec<String>>) -> Vec<String> {
     let mut set: std::collections::BTreeSet<String> = Default::default();
     for f in declared.values().flatten() {
@@ -48668,414 +48410,6 @@ fn attribution_pathspec(declared: &std::collections::HashMap<String, Vec<String>
         set.insert(format!(":(glob).claude/worktrees/*/{}/**", f));
     }
     set.into_iter().collect()
-}
-
-// `git diff <a> [<b>] -- <pathspec…>`. An empty pathspec means "diff
-// nothing", never "diff everything": callers skip the spawn instead.
-fn attr_diff_args(a: &str, b: Option<&str>, pathspec: &[String]) -> Vec<String> {
-    let mut args = vec!["diff".to_string(), a.to_string()];
-    if let Some(b) = b {
-        args.push(b.to_string());
-    }
-    if !pathspec.is_empty() {
-        args.push("--".to_string());
-        args.extend(pathspec.iter().cloned());
-    }
-    args
-}
-
-// A closed interval's diff is immutable per tree pair AND pathspec: a pair
-// cached under one declared set must not serve another, or a file added to
-// an item's `files` would never have its history attributed.
-fn attr_interval_cache_key(a: &str, b: &str, pathspec: &[String]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    pathspec.hash(&mut h);
-    format!("{}..{}#{:016x}", a, b, h.finish())
-}
-
-static CLAIM_ATTR_PATHSPEC: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionResult {
-    let mut empty: AttributionResult = Default::default();
-    let Some(root) = project_root(Some(app)) else {
-        return empty;
-    };
-    let sidecar = root.join(CLAIM_INTERVALS_REL);
-    let Ok(text) = std::fs::read_to_string(&sidecar) else {
-        return empty;
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return empty;
-    };
-    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
-        return empty;
-    };
-    if arr.is_empty() {
-        return empty;
-    }
-    let ghosts = ghost_owner_index(app);
-    let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
-    // Spawns are counted and traced, the way #323 counts the board build's own.
-    // A cache whose hit rate is asserted rather than measured is how a "cached"
-    // path quietly keeps paying full price.
-    let spawns = std::cell::Cell::new(0usize);
-    let git = |args: &[&str]| -> Option<String> {
-        spawns.set(spawns.get() + 1);
-        let out = std::process::Command::new("git")
-            .current_dir(&root)
-            .args(args)
-            .output()
-            .ok()?;
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    };
-    // attribution-run-line-offset-in-views: resolve a claim ref to its
-    // content-addressed OID. The interval and base caches are keyed by this,
-    // NOT by the ref NAME — a claim ref (refs/bram/claims/<at_ms>) is
-    // overwritten when an at_ms collides (the same duplicate-boundary hazard
-    // seen at 246 ms), so a name-keyed cache serves the FIRST tree's diff/
-    // count while the ref now points at another tree. That staleness was the
-    // #324/trace-vocabulary offset: cached base_n=136 while the ref's tree
-    // was 166, shifting every run by 30. OID keys make a reused name a fresh
-    // entry. Falls back to the ref name if rev-parse fails (an unresolved
-    // ref cannot be diffed anyway).
-    let oid = |r: &str| -> String {
-        git(&["rev-parse", &format!("{}^{{tree}}", r)])
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| r.to_string())
-    };
-    // attribution-stops-re-deriving-what-it-stored: the boundary's tree OID,
-    // taken from the record instead of re-derived by a subprocess.
-    //
-    // `record_claim_interval` already writes `tree` (from `capture_claim_tree`'s
-    // write-tree), and `update-ref <refname> <tree>` points the ref DIRECTLY at
-    // that tree object -- so `rev-parse <ref>^{tree}` was an identity returning
-    // a value sitting in the same JSON this loop is iterating. Two spawns per
-    // interval, on every board build, paid BEFORE the cache could be consulted
-    // and therefore on hits too. Measured: 2,000 intervals => 4,000 spawns =>
-    // ~21.8 s of attribution and a ~30 s board build, linear in interval count
-    // (judell/bram#369).
-    //
-    // Keying on the record's own tree is also STRONGER than the `^{tree}` peel
-    // it replaces, not a relaxation. That peel exists because a reused
-    // `refs/bram/claims/<at_ms>` name would otherwise serve a prior tree's
-    // cached diff (#324). The stored tree is the tree this boundary MEANT, so a
-    // later ref overwrite cannot alias it at all.
-    //
-    // The refs stay: they are the GC anchors keeping these trees reachable, and
-    // `record_claim_interval` refuses to record a boundary it could not ref for
-    // exactly that reason. Falls back to the old derivation for any record
-    // predating the `tree` field, so this is not a flag day.
-    let tree_of = |rec: &serde_json::Value| -> String {
-        rec.get("tree")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                rec.get("ref")
-                    .and_then(|v| v.as_str())
-                    .map(|r| oid(r))
-                    .unwrap_or_default()
-            })
-    };
-    static CACHE: OnceLock<
-        Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Vec<AttrHunk>>>>,
-    > = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
-
-    // (claimed id-set, per-file hunks) for each interval, oldest first. The
-    // id-set resolves to an owner PER PATH (joint-interval-files-
-    // disambiguation): a multi-id claim's path declared by exactly one of
-    // its ids attributes to that id; declared by several, the lines carry
-    // the joint set; declared by none, unowned — the pre-resolution rule.
-    let declared = worklist_declared_files(app);
-    let pathspec = attribution_pathspec(&declared);
-    CLAIM_ATTR_PATHSPEC.store(pathspec.len(), std::sync::atomic::Ordering::Relaxed);
-    if pathspec.is_empty() {
-        // Nothing declared, so nothing can own a line: no diffs to run.
-        CLAIM_ATTR_SPAWNS.store(0, std::sync::atomic::Ordering::Relaxed);
-        return empty;
-    }
-    let diff = |a: &str, b: Option<&str>| -> String {
-        let args = attr_diff_args(a, b, &pathspec);
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        git(&refs).unwrap_or_default()
-    };
-    let mut steps: Vec<(
-        Vec<String>,
-        std::collections::HashMap<String, Vec<AttrHunk>>,
-    )> = Vec::new();
-    for (i, rec) in arr.iter().enumerate() {
-        // A record with no ref names no reachable tree: skip it. (The ref is no
-        // longer used for the diff -- see tree_of above -- but its presence is
-        // still what makes the boundary meaningful.)
-        if rec.get("ref").and_then(|v| v.as_str()).is_none() {
-            continue;
-        }
-        let ids: Vec<String> = rec
-            .get("ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-        // `a` is still read above as the existence check (a record with no ref
-        // names no tree and is skipped); the DIFF now runs on tree OIDs, so the
-        // key and the diff move together. Keying on the tree while still
-        // diffing ref names would be the #324 bug in new dress.
-        let a_tree = tree_of(rec);
-        let next_tree = arr.get(i + 1).map(&tree_of);
-        let parsed = match next_tree {
-            Some(b_tree) => {
-                let key = attr_interval_cache_key(&a_tree, &b_tree, &pathspec);
-                if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
-                    hit
-                } else {
-                    let out = diff(&a_tree, Some(&b_tree));
-                    let parsed = parse_attr_diff(&out);
-                    if let Ok(mut c) = cache.lock() {
-                        c.insert(key, parsed.clone());
-                    }
-                    parsed
-                }
-            }
-            // The OPEN interval: never cached, it changes with every edit.
-            None => parse_attr_diff(&diff(&a_tree, None)),
-        };
-        steps.push((ids, parsed));
-    }
-    let base_tree = tree_of(&arr[0]);
-    let mut paths: std::collections::HashSet<String> = Default::default();
-    for (_, m) in &steps {
-        for k in m.keys() {
-            paths.insert(k.clone());
-        }
-    }
-    let mut out: std::collections::HashMap<String, Vec<serde_json::Value>> = Default::default();
-    // issue-273 postscript: reserved and deliberately never populated — the
-    // residue feature was withdrawn same-evening after three wrong renders;
-    // the tuple slot stays so the redesign (drawing-board item) can refill
-    // it without re-plumbing every consumer.
-    let unowned_by_path: std::collections::HashMap<String, usize> = Default::default();
-    static BASE: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
-    let base_cache = BASE.get_or_init(|| Mutex::new(Default::default()));
-    let base_oid = base_tree;
-    for path in paths {
-        // Key by the base tree's OID, not the ref name (attribution-run-line-
-        // offset-in-views): a reused ref name would otherwise serve a stale
-        // line count from a prior tree — the #324/trace-vocabulary offset.
-        let bkey = format!("{}:{}", base_oid, path);
-        let n = match base_cache.lock().ok().and_then(|c| c.get(&bkey).copied()) {
-            Some(hit) => Some(hit),
-            None => {
-                // fix-attribution-run-line-offset: distinguish a git FAILURE
-                // (base ref pruned mid-read, unreadable) from an honestly
-                // empty base (file created after the base — 0 is correct
-                // there). A failure previously fell through to n=0, which
-                // collapses every run toward line 1 and emits WRONG
-                // attribution; the honest fallback is to skip the path and
-                // report it unattributed. Only successful reads are cached.
-                match git(&["show", &bkey]) {
-                    Some(c) => {
-                        let v = if c.is_empty() { 0 } else { c.lines().count() };
-                        if let Ok(mut cache) = base_cache.lock() {
-                            cache.insert(bkey, v);
-                        }
-                        Some(v)
-                    }
-                    None => {
-                        append_bram_trace_line(
-                            app,
-                            "claim-interval",
-                            &format!("op=attr-base-unreadable path={}", path),
-                        );
-                        None
-                    }
-                }
-            }
-        };
-        let Some(n) = n else { continue };
-        // Collect this path's ordered (owner, hunks) steps and replay through
-        // the pure, unit-tested core. Ghost owners strip to unowned so the
-        // rendered runs never credit a departed item; a joint set drops its
-        // ghost members for display but never promotes to a lone survivor.
-        let path_steps: Vec<(Option<String>, Vec<AttrHunk>)> = steps
-            .iter()
-            .filter_map(|(ids, m)| {
-                m.get(&path).map(|h| {
-                    let eff = match resolve_interval_path_owner(ids, &path, &declared) {
-                        IntervalPathOwner::Single(id) => {
-                            if ids.len() > 1 {
-                                trace_joint_interval_resolved(app, &path, &id, ids.len());
-                            }
-                            let (eff, from) = ghosts.strip_ghost(Some(id));
-                            if let Some(f) = from {
-                                ghost_notes.insert(format!("{}→unowned", f));
-                            }
-                            eff
-                        }
-                        IntervalPathOwner::Joint(set) => {
-                            let live: Vec<String> = set
-                                .into_iter()
-                                .filter(|i| ghosts.live.contains(i))
-                                .collect();
-                            if live.is_empty() {
-                                None
-                            } else {
-                                Some(format!(
-                                    "{}{}",
-                                    JOINT_RUN_SEP,
-                                    live.join(&JOINT_RUN_SEP.to_string())
-                                ))
-                            }
-                        }
-                        IntervalPathOwner::Unowned => None,
-                    };
-                    (eff, h.clone())
-                })
-            })
-            .collect();
-        let runs = attribution_runs_for_path(n, &path_steps);
-        // attribution-run-line-offset-in-views (observe-only): the replay
-        // reconstructs the file from the OLDEST surviving boundary tree
-        // forward; if that reconstruction's length diverges from the actual
-        // working file, every run's line number is off by the difference, and
-        // the Ownership tab / Diff scope selector then map working-diff lines
-        // to the wrong run (or to none — the "no item" #324/trace-vocabulary
-        // case: run at 56, real diff at 86). Boundary retirement on commit is
-        // the suspected cause (a retired tree drops the interval that captured
-        // an intervening committed resize). This tripwire makes the offset
-        // loud: replay_len is base_n plus the net +/- of every step for this
-        // path; file_len is ground truth. A mismatch means the rendered
-        // attribution for this path is line-shifted. Zero is the healthy
-        // state; any line is a real offset to chase.
-        let net: isize = path_steps
-            .iter()
-            .flat_map(|(_, hunks)| hunks.iter())
-            .flat_map(|h| h.lines.iter())
-            .map(|(c, _)| match c {
-                '+' => 1,
-                '-' => -1,
-                _ => 0,
-            })
-            .sum();
-        if let Some(root) = project_root(Some(app)) {
-            if let Ok(content) = std::fs::read_to_string(root.join(&path)) {
-                let file_len = content.lines().count();
-                if let Some(offset) = attr_replay_line_offset(n, net, file_len) {
-                    let replay_len = (n as isize + net).max(0) as usize;
-                    if !runs.is_empty() {
-                        // Dump the inputs, not just the verdict — the 2026-09-05
-                        // hunt kept theorizing base_n/net from outside while the
-                        // process saw different values. base_oid + base_n + net +
-                        // steps make the next fire self-diagnosing.
-                        append_bram_trace_line(
-                            app,
-                            "claim-interval",
-                            &format!(
-                                "op=run-line-mismatch path={} base_oid={} base_n={} net={} steps={} replay_len={} file_len={} offset={}",
-                                path,
-                                &base_oid[..base_oid.len().min(12)],
-                                n,
-                                net,
-                                path_steps.len(),
-                                replay_len,
-                                file_len,
-                                offset
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-        if !runs.is_empty() {
-            out.insert(path, runs);
-        }
-    }
-    // issue-327: per-item interval-patch totals — the '+'/'-' counts across
-    // each single-owner interval's hunks. This is exactly what interval
-    // staging commits for the item, and it is what the strip's "will commit"
-    // figure should report on a contended path.
-    let mut totals: std::collections::HashMap<String, (usize, usize)> = Default::default();
-    let mut totals_by_path: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, (usize, usize)>,
-    > = Default::default();
-    for (ids, m) in &steps {
-        for (path, hunks) in m {
-            // Only a per-path SINGLE resolution contributes to an item's
-            // totals — joint sets are display-only, exactly like unowned,
-            // so no will-commit figure inflates on a shared claim.
-            let eff = match resolve_interval_path_owner(ids, path, &declared) {
-                IntervalPathOwner::Single(id) => {
-                    let (eff, from) = ghosts.strip_ghost(Some(id));
-                    if let Some(f) = from {
-                        ghost_notes.insert(format!("{}→unowned", f));
-                    }
-                    eff
-                }
-                _ => None,
-            };
-            let Some(id) = eff else { continue };
-            for h in hunks {
-                for (c, _) in &h.lines {
-                    let e = totals.entry(id.clone()).or_insert((0, 0));
-                    let p = totals_by_path
-                        .entry(path.clone())
-                        .or_default()
-                        .entry(id.clone())
-                        .or_insert((0, 0));
-                    match c {
-                        '+' => {
-                            e.0 += 1;
-                            p.0 += 1;
-                        }
-                        '-' => {
-                            e.1 += 1;
-                            p.1 += 1;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    trace_ghost_reassignments(app, "attribution", &ghost_notes);
-    let _ = &mut empty;
-    CLAIM_ATTR_SPAWNS.store(spawns.get(), std::sync::atomic::Ordering::Relaxed);
-    (out, totals, totals_by_path, unowned_by_path)
-}
-
-static CLAIM_ATTR_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-// avoid-futile-joint-commit: per-path index of items whose lines on that path
-// are JOINTLY attributed (an `itemIds` run — a same-click approval, one
-// shared capture boundary). Pure and unit-tested so the /__worklist board's
-// per-item `jointWith` field and the commit-time refusal
-// (op=refuse-joint-interval, above) reason from the identical logic without
-// either one needing an app handle.
-fn joint_owners_from_runs(
-    runs_by_path: &std::collections::HashMap<String, Vec<serde_json::Value>>,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let mut out: std::collections::HashMap<String, std::collections::HashSet<String>> =
-        Default::default();
-    for (path, runs) in runs_by_path {
-        for run in runs {
-            if let Some(members) = run.get("itemIds").and_then(|v| v.as_array()) {
-                let set = out.entry(path.clone()).or_default();
-                for m in members {
-                    if let Some(s) = m.as_str() {
-                        set.insert(s.to_string());
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 // avoid-futile-joint-commit: this item's `jointWith` — the other item ids it
@@ -49298,6 +48632,24 @@ fn interval_build_patch<R: tauri::Runtime>(
     (patch, committed)
 }
 
+// `git diff --numstat` lines → path → (added, removed). Binary files report
+// "-\t-" and count as (0, 0).
+fn parse_numstat_take(text: &str) -> std::collections::BTreeMap<String, (usize, usize)> {
+    let mut out = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let path = p.trim().trim_matches('"').to_string();
+        if path.is_empty() {
+            continue;
+        }
+        out.insert(path, (a.parse().unwrap_or(0), r.parse().unwrap_or(0)));
+    }
+    out
+}
+
 fn patch_creates_file(patch: &str) -> bool {
     patch
         .lines()
@@ -49338,7 +48690,17 @@ fn git_apply_failed_paths(err: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod issue_430_tests {
-    use super::{git_apply_failed_paths, patch_creates_file};
+    use super::{git_apply_failed_paths, parse_numstat_take, patch_creates_file};
+
+    // issue-425-retire-replay: the entangled take is read from numstat.
+    #[test]
+    fn numstat_take_parses_text_binary_and_quoted_paths() {
+        let t = parse_numstat_take("3\t1\ta.txt\n-\t-\timg.png\n2\t0\t\"dir/b c.txt\"\n\n");
+        assert_eq!(t.get("a.txt"), Some(&(3, 1)));
+        assert_eq!(t.get("img.png"), Some(&(0, 0)));
+        assert_eq!(t.get("dir/b c.txt"), Some(&(2, 0)));
+        assert_eq!(t.len(), 3);
+    }
 
     #[test]
     fn failed_paths_parse_the_issue_430_error() {
@@ -49372,9 +48734,10 @@ fn commit_precheck_cached<R: tauri::Runtime>(
     id: &str,
     declared: &[String],
     key: &str,
-) -> Result<(), Vec<String>> {
+) -> Result<std::collections::BTreeMap<String, (usize, usize)>, Vec<String>> {
+    type Take = std::collections::BTreeMap<String, (usize, usize)>;
     static CACHE: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<String, (String, Result<(), Vec<String>>)>>,
+        Mutex<std::collections::HashMap<String, (String, Result<Take, Vec<String>>)>>,
     > = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
     if let Ok(g) = cache.lock() {
@@ -49386,16 +48749,24 @@ fn commit_precheck_cached<R: tauri::Runtime>(
     }
     let mut files: std::collections::HashMap<String, Vec<String>> = Default::default();
     files.insert(id.to_string(), declared.to_vec());
+    let pre_started = std::time::Instant::now();
     let r = interval_commit_precheck(app, &[id.to_string()], &files);
+    let pre_ms = pre_started.elapsed().as_millis();
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
             "worklist-commit",
             &format!(
-                "op=commit-precheck item={} result={}",
+                "op=commit-precheck item={} ms={} result={}",
                 id,
+                pre_ms,
                 match &r {
-                    Ok(()) => "applies".to_string(),
+                    Ok(take) => {
+                        let (a, rm) = take
+                            .values()
+                            .fold((0, 0), |acc, v| (acc.0 + v.0, acc.1 + v.1));
+                        format!("applies take=+{}-{}", a, rm)
+                    }
                     Err(p) => format!("dependent paths={}", p.join(",")),
                 }
             ),
@@ -49445,13 +48816,18 @@ fn last_commit_refusal_for(id: &str, head: &str) -> Option<(i64, String)> {
 // touched). Ok(()) when committing `ids` alone would apply; Err(failing paths)
 // when the patch is defined relative to work not in the request. A request
 // with nothing to stage is Ok here; the gate's no-interval refusal covers it.
+// issue-425-retire-replay: on success, also returns what the commit would
+// take per path, (added, removed) from `git diff --cached --numstat HEAD`
+// after applying the patch to the scratch index. That is the staged result,
+// so an item that created a file and later rewrote it counts the file once,
+// as the commit will, not once per interval section.
 fn interval_commit_precheck<R: tauri::Runtime>(
     app: &AppHandle<R>,
     ids: &[String],
     item_files: &std::collections::HashMap<String, Vec<String>>,
-) -> Result<(), Vec<String>> {
+) -> Result<std::collections::BTreeMap<String, (usize, usize)>, Vec<String>> {
     let Some(root) = project_root(Some(app)) else {
-        return Ok(());
+        return Ok(Default::default());
     };
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let idx = std::env::temp_dir().join(format!(
@@ -49474,16 +48850,20 @@ fn interval_commit_precheck<R: tauri::Runtime>(
     };
     let result = (|| {
         if git_idx(&["read-tree", "HEAD"]).is_err() {
-            return Ok(());
+            return Ok(Default::default());
         }
         let (patch, _) = interval_build_patch(app, ids, item_files, &git_idx, &pfile);
         if patch.trim().is_empty() || std::fs::write(&pfile, &patch).is_err() {
-            return Ok(());
+            return Ok(Default::default());
         }
-        match git_idx(&["apply", "--cached", "--check", &pfile.to_string_lossy()]) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(git_apply_failed_paths(&e)),
+        // A real apply, not --check: the index is scratch, and the applied
+        // state is what the take is read from. Fails exactly when --check would.
+        if let Err(e) = git_idx(&["apply", "--cached", &pfile.to_string_lossy()]) {
+            return Err(git_apply_failed_paths(&e));
         }
+        let numstat =
+            git_idx(&["diff", "--cached", "--numstat", "--no-renames", "HEAD"]).unwrap_or_default();
+        Ok(parse_numstat_take(&numstat))
     })();
     let _ = std::fs::remove_file(&idx);
     let _ = std::fs::remove_file(&pfile);
@@ -49904,11 +49284,11 @@ mod residual_disclosure_tests {
     }
 }
 
-// issue-273-membership-engine-observe: the HEAD-diff MEMBERSHIP engine,
-// observe-only (docs/attribution-model.md §4, Migration step 1). Runs beside
-// the replay (`claim_attribution_runs`) on every board serve and feeds
-// NOTHING but traces — the board payload, pane, gate, and staging all keep
-// reading the replay until the observation earns the flip (§6 criteria 1, 7).
+// issue-273-membership-engine-observe: the HEAD-diff MEMBERSHIP engine
+// (docs/attribution-model.md §4). It began observe-only beside the
+// claim-interval replay; it is now the only ownership model. The pane reads
+// it (7d19f27), the gate routes by it (8c0d7d5), and the replay is deleted
+// (issue-425-retire-replay).
 //
 // Universe: the current `git diff HEAD` restricted to live BEGUN items'
 // declared paths, plus untracked non-ignored files under those paths
@@ -49952,16 +49332,22 @@ mod residual_disclosure_tests {
 // HEAD-relative deletion when the candidate's baseline (its `base_tree`,
 // membership-attributes-deletions below) coincides with HEAD. The caller
 // decides that by the blob-equality rule; this struct only measures.
-// Superseded by the line rule (issue-273); kept, with its tests, until the
-// replay-retirement step decides what the frozen staging path still needs.
+// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
+// the frozen staging path doesn't need it (staging builds its patch from
+// `claim_interval_diff`). It stays only because the acceptance fixtures for
+// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
+// means rewriting those fixtures against the line rule (a follow-up item).
 #[allow(dead_code)]
 struct MembershipFootprint {
     added_lines: Vec<usize>,
     removed: usize,
 }
 
-// Superseded by the line rule (issue-273); kept, with its tests, until the
-// replay-retirement step decides what the frozen staging path still needs.
+// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
+// the frozen staging path doesn't need it (staging builds its patch from
+// `claim_interval_diff`). It stays only because the acceptance fixtures for
+// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
+// means rewriting those fixtures against the line rule (a follow-up item).
 #[allow(dead_code)]
 fn membership_patch_footprint(patch: &str) -> MembershipFootprint {
     let mut added_lines: Vec<usize> = Vec::new();
@@ -50018,8 +49404,11 @@ fn membership_patch_footprint(patch: &str) -> MembershipFootprint {
 // declared ambiguous rather than resolved by coin flip (§4, the never-guess
 // principle). Hunks with no changed line are skipped: pure context anchors
 // nothing.
-// Superseded by the line rule (issue-273); kept, with its tests, until the
-// replay-retirement step decides what the frozen staging path still needs.
+// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
+// the frozen staging path doesn't need it (staging builds its patch from
+// `claim_interval_diff`). It stays only because the acceptance fixtures for
+// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
+// means rewriting those fixtures against the line rule (a follow-up item).
 #[allow(dead_code)]
 fn membership_hunk_new_blocks(patch: &str) -> Vec<Vec<String>> {
     let mut blocks: Vec<Vec<String>> = Vec::new();
@@ -50068,8 +49457,11 @@ fn membership_hunk_new_blocks(patch: &str) -> Vec<Vec<String>> {
 
 // Non-overlapping occurrences of `block` as consecutive lines of `content`.
 // > 1 is the ambiguity signal.
-// Superseded by the line rule (issue-273); kept, with its tests, until the
-// replay-retirement step decides what the frozen staging path still needs.
+// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
+// the frozen staging path doesn't need it (staging builds its patch from
+// `claim_interval_diff`). It stays only because the acceptance fixtures for
+// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
+// means rewriting those fixtures against the line rule (a follow-up item).
 #[allow(dead_code)]
 fn membership_block_occurrences(content: &str, block: &[String]) -> usize {
     if block.is_empty() {
@@ -50229,8 +49621,11 @@ fn membership_conservation_breach(
 // here: it resolves to Single and rides `claim_interval_diff`'s scope for
 // that id. Ghosts fall out for free — a ghost is not on the board, so it is
 // never begun.
-// Superseded by the line rule (issue-273); kept, with its tests, until the
-// replay-retirement step decides what the frozen staging path still needs.
+// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
+// the frozen staging path doesn't need it (staging builds its patch from
+// `claim_interval_diff`). It stays only because the acceptance fixtures for
+// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
+// means rewriting those fixtures against the line rule (a follow-up item).
 #[allow(dead_code)]
 fn membership_joint_patches(
     root: &Path,
@@ -50479,8 +49874,11 @@ fn membership_net_patch(
 // the path from nothing). Fail-open: any git failure reads as "not
 // HEAD-relative", the same conservative direction as every other
 // degradation here.
-// Superseded by the line rule (issue-273); kept, with its tests, until the
-// replay-retirement step decides what the frozen staging path still needs.
+// Superseded by the line rule (issue-273). issue-425-retire-replay decided:
+// the frozen staging path doesn't need it (staging builds its patch from
+// `claim_interval_diff`). It stays only because the acceptance fixtures for
+// #425's criteria 2-5 and the deletion matrix are built on it; retiring it
+// means rewriting those fixtures against the line rule (a follow-up item).
 #[allow(dead_code)]
 fn membership_blob_matches_head(
     root: &Path,
@@ -50537,6 +49935,35 @@ struct MembershipPathBuckets {
     // which runs off a bare partition with no access to the probe loop's
     // local state, has everything the check needs.
     universe: (usize, usize),
+    // issue-425-retire-replay: which present-file lines each owner wrote, as
+    // (startLine, endLine, members), 1-based and inclusive; one member is a
+    // single owner, several a joint one. Unowned lines have no run. The same
+    // contract the replay's `attribution_runs_for_path` serves the pane.
+    runs: Vec<(usize, usize, Vec<String>)>,
+    // The same for removed lines, numbered by their position in HEAD's
+    // version of the file.
+    removed_runs: Vec<(usize, usize, Vec<String>)>,
+}
+
+// Collapse a path's (present line, step) list into ownership runs: adjacent
+// lines whose steps resolve to the same non-empty member set form one run.
+// A step missing from `step_members`, or resolving to no members, leaves its
+// lines unowned, so they break a run rather than joining a neighbour's.
+fn membership_runs(
+    added_lines: &[(usize, usize)],
+    step_members: &std::collections::BTreeMap<usize, Vec<String>>,
+) -> Vec<(usize, usize, Vec<String>)> {
+    let mut out: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    for &(line, step) in added_lines {
+        let Some(members) = step_members.get(&step).filter(|m| !m.is_empty()) else {
+            continue;
+        };
+        match out.last_mut() {
+            Some((_, end, who)) if *end + 1 == line && who == members => *end = line,
+            _ => out.push((line, line, members.clone())),
+        }
+    }
+    out
 }
 
 // Two-slot process-local memo: current plus previous. Single-slot (the
@@ -50779,6 +50206,15 @@ fn parse_line_diff(text: &str) -> Vec<LineDiffFile> {
 struct MembershipLineCredit {
     by_step: std::collections::BTreeMap<usize, (usize, usize)>,
     unexplained: (usize, usize),
+    // issue-425-retire-replay: the per-line truth behind `by_step`'s added
+    // counts, (1-based present line, step) in ascending line order, one entry
+    // per changed line a step explains. `membership_runs` turns it into the
+    // ownership runs the pane reads, so the replay can stop being their source.
+    added_lines: Vec<(usize, usize)>,
+    // The same for `by_step`'s removed counts: (1-based HEAD line, step) for
+    // each removed line a step explains, so a scoped diff can show an item's
+    // deletions as well as its additions.
+    removed_lines: Vec<(usize, usize)>,
 }
 
 fn membership_diff_u0(
@@ -50878,13 +50314,19 @@ fn membership_line_credit(
         for (old_start, old_count, new_start, new_count) in file.hunks {
             for j in new_start..new_start + new_count {
                 match hist.origin_at(j) {
-                    Some(LineOrigin::Step(k)) => credit.by_step.entry(k).or_insert((0, 0)).0 += 1,
+                    Some(LineOrigin::Step(k)) => {
+                        credit.by_step.entry(k).or_insert((0, 0)).0 += 1;
+                        credit.added_lines.push((j, k));
+                    }
                     _ => credit.unexplained.0 += 1,
                 }
             }
             for i in old_start..old_start + old_count {
                 match hist.removed_by.get(&i) {
-                    Some(k) => credit.by_step.entry(*k).or_insert((0, 0)).1 += 1,
+                    Some(k) => {
+                        credit.by_step.entry(*k).or_insert((0, 0)).1 += 1;
+                        credit.removed_lines.push((i, *k));
+                    }
                     None => credit.unexplained.1 += 1,
                 }
             }
@@ -50947,6 +50389,36 @@ fn membership_step_chain(
     (steps, holders)
 }
 
+// Set when a compute stores a new partition; the precompute worker emits
+// worklist-changed for it, so the board refetches once ownership is ready.
+static MEMBERSHIP_STORED_NEW: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// docs/decisions/2026-10-12-membership-cost-budget.md: per-event bounds,
+// checked where each cost is already measured. A run over its bound traces
+// op=membership-over-budget, so a breach reports itself.
+const MEMBERSHIP_BUDGET_SERVE_MS: u128 = 200;
+const MEMBERSHIP_BUDGET_COMPUTE_MS: u128 = 5_000;
+const MEMBERSHIP_BUDGET_GATE_MS: u128 = 1_000;
+
+fn membership_budget_check<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    kind: &str,
+    ms: u128,
+    limit: u128,
+) {
+    if ms > limit {
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            &format!(
+                "op=membership-over-budget kind={} ms={} limit={}",
+                kind, ms, limit
+            ),
+        );
+    }
+}
+
 // The engine driver, split along the seam
 // membership-precomputed-off-the-render-path found: everything here is
 // replay-free, so it is safe to run off the request path. Traces
@@ -50977,6 +50449,21 @@ fn membership_partition_engine<R: tauri::Runtime>(
 ) -> Option<(
     std::collections::BTreeMap<String, MembershipPathBuckets>,
     bool,
+)> {
+    membership_partition_engine_keyed(app, allow_compute).map(|(p, f, _)| (p, f))
+}
+
+// issue-425-retire-replay (Codex review): the engine, also returning the
+// state key computed in THIS call, so a caller can stamp its answer with the
+// state that answer was evaluated against. A shared "last key" slot, read
+// after the fact, could carry another request's key.
+fn membership_partition_engine_keyed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    allow_compute: bool,
+) -> Option<(
+    std::collections::BTreeMap<String, MembershipPathBuckets>,
+    bool,
+    String,
 )> {
     let started = std::time::Instant::now();
     let spawns = std::cell::Cell::new(0usize);
@@ -51012,6 +50499,13 @@ fn membership_partition_engine<R: tauri::Runtime>(
                 fresh
             ),
         );
+        // A memo hit is a serve's whole cost; a miss is a compute.
+        let ms = started.elapsed().as_millis();
+        if cached {
+            membership_budget_check(app, "serve", ms, MEMBERSHIP_BUDGET_SERVE_MS);
+        } else {
+            membership_budget_check(app, "compute", ms, MEMBERSHIP_BUDGET_COMPUTE_MS);
+        }
     };
     let Some(root) = project_root(Some(app)) else {
         return None;
@@ -51097,6 +50591,21 @@ fn membership_partition_engine<R: tauri::Runtime>(
         head.hash(&mut hasher);
         diff.hash(&mut hasher);
         untracked.join("\u{1}").hash(&mut hasher);
+        // issue-425-retire-replay (Codex review): names alone miss an edit to
+        // an untracked file, which `git diff HEAD` doesn't show. Size and
+        // mtime of the untracked files a begun item declares, not the whole
+        // untracked tree (#395's 28k-file virtualenv is why).
+        for u in &untracked {
+            if begun_files
+                .iter()
+                .any(|(_, fs)| fs.iter().any(|f| declared_covers(f, u)))
+            {
+                if let Ok(md) = std::fs::metadata(root.join(u)) {
+                    md.len().hash(&mut hasher);
+                    md.modified().ok().hash(&mut hasher);
+                }
+            }
+        }
         roster.join("\u{1}").hash(&mut hasher);
         intervals_raw.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
@@ -51124,7 +50633,7 @@ fn membership_partition_engine<R: tauri::Runtime>(
                         true,
                         true,
                     );
-                    return Some((cached, true));
+                    return Some((cached, true, state_key));
                 }
             }
             if !allow_compute {
@@ -51144,7 +50653,7 @@ fn membership_partition_engine<R: tauri::Runtime>(
                         true,
                         false,
                     );
-                    Some((prev, false))
+                    Some((prev, false, state_key))
                 } else {
                     membership_trace_unavailable_once(app, &state_key);
                     None
@@ -51351,6 +50860,7 @@ fn membership_partition_engine<R: tauri::Runtime>(
         let Some(buckets) = per_path.get_mut(path) else {
             continue;
         };
+        let mut step_members: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
         for (step, &(added, removed)) in &credit.by_step {
             if added == 0 && removed == 0 {
                 continue;
@@ -51393,8 +50903,11 @@ fn membership_partition_engine<R: tauri::Runtime>(
             let entry = buckets.per_item.entry(members.clone()).or_insert((0, 0));
             entry.0 += added;
             entry.1 += removed;
-            buckets.owners.extend(members);
+            buckets.owners.extend(members.iter().cloned());
+            step_members.insert(*step, members);
         }
+        buckets.runs = membership_runs(&credit.added_lines, &step_members);
+        buckets.removed_runs = membership_runs(&credit.removed_lines, &step_members);
     }
     cleanup();
     // Per-path finalization: stash this path's universe on the bucket so
@@ -51418,9 +50931,10 @@ fn membership_partition_engine<R: tauri::Runtime>(
     if let Ok(mut guard) = memo.lock() {
         let old_current = guard.current.take();
         guard.previous = old_current;
-        guard.current = Some((state_key, per_path.clone()));
+        guard.current = Some((state_key.clone(), per_path.clone()));
     }
-    Some((per_path, true))
+    MEMBERSHIP_STORED_NEW.store(true, std::sync::atomic::Ordering::SeqCst);
+    Some((per_path, true, state_key))
 }
 
 // Read-only entry point for the board serve. Delegates to
@@ -51435,7 +50949,30 @@ fn membership_partition<R: tauri::Runtime>(
     std::collections::BTreeMap<String, MembershipPathBuckets>,
     bool,
 )> {
-    membership_partition_engine(app, false)
+    membership_partition_keyed(app).map(|(p, f, _)| (p, f))
+}
+
+// The serve entry point with the state key of this read (see
+// `membership_partition_engine_keyed`).
+fn membership_partition_keyed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(
+    std::collections::BTreeMap<String, MembershipPathBuckets>,
+    bool,
+    String,
+)> {
+    let got = membership_partition_engine_keyed(app, false);
+    // issue-425-retire-replay: a serve that finds no live answer asks for
+    // one. Event triggers alone left a fresh launch with no partition until
+    // something changed on disk (the startup precompute had run, but the
+    // state moved before the first serve and nothing re-ran it), so the pane
+    // showed the replay's ownership, and with the replay gone would show
+    // none. This only queues the background precompute, which coalesces
+    // concurrent triggers; the serve itself still never computes.
+    if !matches!(got, Some((_, true, _))) {
+        membership_precompute(app);
+    }
+    got
 }
 
 static MEMBERSHIP_PRECOMPUTE_INFLIGHT: std::sync::atomic::AtomicBool =
@@ -51449,8 +50986,10 @@ static MEMBERSHIP_PRECOMPUTE_PENDING: std::sync::atomic::AtomicBool =
 
 // Runs the expensive probe loop on a background thread, filling the memo
 // for the next serve to read. Called after the events that invalidate the
-// state key (worklist-changed, git-status-changed) and once at startup —
-// never from a board serve. Concurrent triggers collapse to one run: a
+// state key (worklist-changed, git-status-changed), once at startup, and by
+// a board serve that found no fresh partition (`membership_partition`; the
+// serve queues this and returns, it never computes inline). Concurrent
+// triggers collapse to one run: a
 // trigger arriving while one is already in flight is dropped rather than
 // queued. That is safe: either the in-flight run already covers the state
 // that would have driven the dropped trigger, or it doesn't and the NEXT
@@ -51473,6 +51012,13 @@ fn membership_precompute<R: tauri::Runtime>(app: &AppHandle<R>) {
     std::thread::spawn(move || {
         loop {
             membership_partition_engine(&app, true);
+            // A new partition is ready: tell the pane, so the board and any
+            // selection prediction refetch now rather than on the next edit.
+            // The precompute this emit triggers finds an exact memo hit,
+            // stores nothing, and emits nothing, so this cannot loop.
+            if MEMBERSHIP_STORED_NEW.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                emit_replayable_signal(&app, "worklist-changed");
+            }
             // Keep the inflight latch held while consuming coalesced triggers,
             // so an event racing the final check either becomes this loop's
             // next pass or, after the latch is released, starts its own worker.
@@ -51517,6 +51063,21 @@ fn membership_precompute<R: tauri::Runtime>(app: &AppHandle<R>) {
 // * `membershipStale` (written beside this) scopes the WHOLE partition, not
 //   any path within it. A fallback serves one coherent snapshot; marking parts
 //   of it fresh would assert a mixture that never existed.
+// Membership runs in the replay's wire shape: `itemId` for a single owner,
+// `itemIds` for a joint one. One encoder for the board payload and the commit
+// gate's residual check, so both read runs the same way.
+fn membership_runs_json(runs: &[(usize, usize, Vec<String>)]) -> Vec<serde_json::Value> {
+    runs.iter()
+        .map(|(start, end, members)| {
+            if members.len() == 1 {
+                serde_json::json!({ "startLine": start, "endLine": end, "itemId": members[0] })
+            } else {
+                serde_json::json!({ "startLine": start, "endLine": end, "itemIds": members })
+            }
+        })
+        .collect()
+}
+
 fn membership_payload_json(
     partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
 ) -> serde_json::Value {
@@ -51544,9 +51105,15 @@ fn membership_payload_json(
                 e.1 += counts.1;
             }
         }
+        // The replay's run shape, so a pane consumer can switch source without
+        // changing how it reads one: `itemId` for a single owner, `itemIds`
+        // for a joint one.
+        // `removedRuns` has the same shape, numbered by HEAD-side lines.
         by_path.insert(
             path.clone(),
             serde_json::json!({
+                "runs": membership_runs_json(&m.runs),
+                "removedRuns": membership_runs_json(&m.removed_runs),
                 "owners": m.owners.iter().cloned().collect::<Vec<String>>(),
                 "single": pair(m.single),
                 "joint": pair(m.joint),
@@ -51562,12 +51129,11 @@ fn membership_payload_json(
     serde_json::json!({ "byPath": by_path, "itemTotals": totals_json })
 }
 
-// The conservation check and the divergence comparison, split out of the
-// old membership_engine_observe along the seam
-// membership-precomputed-off-the-render-path found: both are cheap (the
-// first is arithmetic over a partition already in hand, the second a set
-// comparison), so both stay on the serve, called right after
-// `membership_partition`.
+// The conservation check, split out of the old membership_engine_observe
+// along the seam membership-precomputed-off-the-render-path found: it is
+// arithmetic over a partition already in hand, so it stays on the serve,
+// called right after `membership_partition`. (The divergence comparison
+// against the replay went with the replay, issue-425-retire-replay.)
 //
 // `fresh` gates the conservation check — this is the load-bearing rule.
 // The check compares `partition`'s buckets against the diff `partition` was
@@ -51577,18 +51143,10 @@ fn membership_payload_json(
 // honestly (docs/developing-bram.md, soak-vs-tripwire). So the check runs
 // fresh-only; a stale serve skips it and traces the skip — "did not run"
 // must never look like "ran and found nothing".
-//
-// The divergence comparison is a set-equality check over data already in
-// the buckets, not an arithmetic identity against the partition's own
-// provenance, so it MAY still run when stale — but a stale disagreement
-// carries `stale=true` so nobody adjudicates it as a real one. Fresh lines
-// keep the exact pre-split format, with no added field.
 fn membership_report<R: tauri::Runtime>(
     app: &AppHandle<R>,
     partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
     fresh: bool,
-    replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-    replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) {
     if !fresh {
         append_bram_trace_line(
@@ -51639,38 +51197,6 @@ fn membership_report<R: tauri::Runtime>(
                     ),
                 );
             }
-        }
-        let mut replay: std::collections::BTreeSet<String> = replay_owners_by_path
-            .get(path)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        if let Some(j) = replay_joint_by_path.get(path) {
-            replay.extend(j.iter().cloned());
-        }
-        if replay != m.owners {
-            let join = |s: &std::collections::BTreeSet<String>| -> String {
-                if s.is_empty() {
-                    "-".to_string()
-                } else {
-                    s.iter().cloned().collect::<Vec<_>>().join(",")
-                }
-            };
-            let line = if fresh {
-                format!(
-                    "op=membership-diverges path={} replay={} membership={}",
-                    path,
-                    join(&replay),
-                    join(&m.owners)
-                )
-            } else {
-                format!(
-                    "op=membership-diverges path={} replay={} membership={} stale=true",
-                    path,
-                    join(&replay),
-                    join(&m.owners)
-                )
-            };
-            append_bram_trace_line(app, "claim-interval", &line);
         }
     }
 }
@@ -51870,6 +51396,7 @@ mod membership_wire_contract_tests {
                 .iter()
                 .map(|(m, c)| (m.iter().map(|s| s.to_string()).collect::<Vec<_>>(), *c))
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -52002,6 +51529,32 @@ mod membership_wire_contract_tests {
 
     // An empty partition still produces a well-formed envelope rather than
     // null-shaped surprises for the consumer that step 3 will add.
+    // issue-425-retire-replay: runs cross the wire in the replay's shape, so
+    // the pane's run readers can switch source unchanged.
+    #[test]
+    fn runs_serialize_in_the_replays_shape() {
+        let mut b = buckets((3, 0), (2, 0), (0, 0), (5, 0), &["a", "b"], &[]);
+        b.runs = vec![
+            (1, 3, vec!["a".to_string()]),
+            (7, 8, vec!["a".to_string(), "b".to_string()]),
+        ];
+        b.removed_runs = vec![(4, 4, vec!["b".to_string()])];
+        let v = one("f.txt", b);
+        assert_eq!(
+            v["byPath"]["f.txt"]["removedRuns"],
+            serde_json::json!([{"startLine": 4, "endLine": 4, "itemId": "b"}])
+        );
+        assert_eq!(
+            v["byPath"]["f.txt"]["runs"],
+            serde_json::json!([
+                {"startLine": 1, "endLine": 3, "itemId": "a"},
+                {"startLine": 7, "endLine": 8, "itemIds": ["a", "b"]}
+            ])
+        );
+        let empty = one("g.txt", buckets((0, 0), (0, 0), (0, 0), (1, 0), &[], &[]));
+        assert_eq!(empty["byPath"]["g.txt"]["runs"], serde_json::json!([]));
+    }
+
     #[test]
     fn an_empty_partition_serves_an_empty_envelope() {
         let v = membership_payload_json(&std::collections::BTreeMap::new());
@@ -52013,8 +51566,8 @@ mod membership_wire_contract_tests {
 #[cfg(test)]
 mod membership_line_credit_tests {
     use super::{
-        membership_line_credit, membership_step_chain, parse_line_diff, LineDiffFile, LineHistory,
-        LineOrigin, MembershipLineCredit,
+        membership_line_credit, membership_runs, membership_step_chain, parse_line_diff,
+        LineDiffFile, LineHistory, LineOrigin, MembershipLineCredit,
     };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -52504,13 +52057,72 @@ diff --git a/bin.dat b/bin.dat\nindex {b2}..{b3} 100644\nBinary files a/bin.dat 
         );
         assert!(membership_step_chain("{}", "now").0.is_empty());
     }
+
+    // issue-425-retire-replay: `added_lines` places each step's lines at
+    // their PRESENT positions (an insertion shifts what follows), and
+    // `membership_runs` turns them into the runs the pane reads. Step 1 is
+    // item `a`; step 2 is unclaimed, so its line is unowned and has no run.
+    #[test]
+    fn added_lines_become_present_file_runs() {
+        let root = scratch_repo("k");
+        std::fs::write(root.join("f.txt"), lines("line-", 10)).unwrap();
+        commit_all(&root, "head");
+        let b0 = snap(&root, "k0");
+        let mut v: Vec<String> = lines("line-", 10).lines().map(String::from).collect();
+        v[3] = "a4".into();
+        v.insert(8, "a-ins-1".into());
+        v.insert(9, "a-ins-2".into());
+        std::fs::write(root.join("f.txt"), v.join("\n") + "\n").unwrap();
+        let b1 = snap(&root, "k1");
+        v[1] = "chat2".into();
+        std::fs::write(root.join("f.txt"), v.join("\n") + "\n").unwrap();
+        let now = snap(&root, "k2");
+        let (credit, _) = credit_of(&root, &[b0, b1], &now, "f.txt");
+        assert_eq!(credit.added_lines, vec![(2, 2), (4, 1), (9, 1), (10, 1)]);
+        // Removals are numbered by HEAD line: `a` replaced HEAD line 4, the
+        // unclaimed step replaced HEAD line 2.
+        assert_eq!(credit.removed_lines, vec![(2, 2), (4, 1)]);
+        let step_members: BTreeMap<usize, Vec<String>> =
+            [(1usize, vec!["a".to_string()])].into_iter().collect();
+        assert_eq!(
+            membership_runs(&credit.added_lines, &step_members),
+            vec![
+                (4, 4, vec!["a".to_string()]),
+                (9, 10, vec!["a".to_string()])
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Adjacent lines join one run only when their member sets match; a gap,
+    // a different owner, or a joint set each start a new run.
+    #[test]
+    fn runs_break_on_gaps_and_owner_changes() {
+        let a = vec!["a".to_string()];
+        let b = vec!["b".to_string()];
+        let ab = vec!["a".to_string(), "b".to_string()];
+        let step_members: BTreeMap<usize, Vec<String>> = [
+            (1, a.clone()),
+            (2, b.clone()),
+            (3, ab.clone()),
+            (4, a.clone()),
+        ]
+        .into_iter()
+        .collect();
+        // Line 3 is step 9 (no members): unowned, so it splits a's lines.
+        let added = vec![(1, 1), (2, 4), (3, 9), (4, 1), (5, 2), (6, 3), (7, 3)];
+        assert_eq!(
+            membership_runs(&added, &step_members),
+            vec![(1, 2, a.clone()), (4, 4, a), (5, 5, b), (6, 7, ab),]
+        );
+    }
 }
 
 #[cfg(test)]
 mod membership_acceptance_fixture_tests {
     use super::{
-        item_joint_with, joint_owners_from_runs, membership_blob_matches_head,
-        membership_candidate_base, membership_conservation_breach, membership_net_patch,
+        item_joint_with, membership_blob_matches_head, membership_candidate_base,
+        membership_conservation_breach, membership_joint_owners, membership_net_patch,
         membership_patch_footprint, membership_unowned, resolve_interval_path_owner,
         untracked_declared_paths, IntervalPathOwner,
     };
@@ -52854,12 +52466,13 @@ mod membership_acceptance_fixture_tests {
         // #356 and pre-capture-only work are refusal contracts.  Keep the
         // exact operation names beside the fixture until the integration
         // harness exercises the HTTP gate directly.
-        let mut runs = std::collections::HashMap::new();
-        runs.insert(
-            "shared.txt".to_string(),
-            vec![serde_json::json!({"startLine": 1, "endLine": 2, "itemIds": ["a", "b"]})],
-        );
-        let joint = joint_owners_from_runs(&runs);
+        // issue-425-retire-replay: the joint fact comes from membership.
+        let mut b = super::MembershipPathBuckets::default();
+        b.per_item
+            .insert(vec!["a".to_string(), "b".to_string()], (2, 0));
+        let mut partition = std::collections::BTreeMap::new();
+        partition.insert("shared.txt".to_string(), b);
+        let joint = membership_joint_owners(&partition);
         assert_eq!(joint["shared.txt"].len(), 2);
         assert_eq!(
             item_joint_with("a", &["shared.txt".to_string()], &joint),
@@ -68518,6 +68131,36 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    // issue-425-retire-replay (Codex review): what committing the ticked
+    // items TOGETHER would take. Per-row willCommit assumes each item commits
+    // alone; a selection can route differently (both owners of a file
+    // selected leaves no outside owner, so the gate takes the whole file).
+    if path == "__worklist/will-commit" {
+        let mut ids: Vec<String> = Vec::new();
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("ids=") {
+                ids = percent_decode(v)
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+        if ids.is_empty() {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                br#"{"error":"ids required"}"#.to_vec(),
+            );
+        }
+        let mut pred = worklist_selection_prediction(app, &ids);
+        // Echo the selection, so a pane holding an answer for an earlier
+        // selection can tell it isn't this one's.
+        pred["ids"] = serde_json::json!(ids);
+        let body = serde_json::to_vec(&pred).unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     // issue-327 independence: measured per-claimant separability for one path,
     // fetched on demand when a file expander renders its Ownership summary.
     if path == "__worklist/independence" {
@@ -68871,13 +68514,28 @@ fn route_request<R: tauri::Runtime>(
                         // diff rows showed no claimants while the column beside
                         // them showed three). The pane reads claimants from the
                         // changedFiles row it is already rendering.
-                        by_file.push(serde_json::json!({
+                        let mut rec = serde_json::json!({
                             "path": fp,
                             "patch": diff,
                             "untracked": untracked.contains(fp.as_str()),
                             "lines": diff.lines().count(),
                             "bytes": diff.len(),
-                        }));
+                        });
+                        // issue-425-retire-replay: `patch` is plain `git diff`
+                        // (index baseline). When the file has staged changes the
+                        // HEAD-based body differs, and membership's removed-line
+                        // numbers only match that one, so the scoped view reads
+                        // `headPatch` when it is present.
+                        if let Some(head) = change_index
+                            .as_ref()
+                            .and_then(|idx| idx.head_diff_by_path.get(fp.as_str()))
+                        {
+                            if per_file.get(fp.as_str()) != Some(head) {
+                                rec["headPatch"] =
+                                    serde_json::Value::String(cap_patch(fp, head.clone()));
+                            }
+                        }
+                        by_file.push(rec);
                     }
                     if !combined.is_empty() && !diff.is_empty() {
                         combined.push('\n');
@@ -69020,43 +68678,10 @@ fn route_request<R: tauri::Runtime>(
                 serde_json::Value::Array(unclaimed),
             );
         }
-        // issue-327: per-path ownership runs from the claim-interval replay, so
-        // the overlaps panel can say what each claimant DID rather than only
-        // that they share a path, and the diff view can mark where authorship
-        // changes. One source of truth for both surfaces. Always present, same
-        // absent-vs-empty reasoning as above.
+        // issue-425-retire-replay: ownership comes from membership alone (the
+        // claim-interval replay that fed `attribution` / `attributionTotals`
+        // is deleted). The pane reads runs from `membership.byPath[*].runs`.
         {
-            let attr_started = std::time::Instant::now();
-            let (runs, totals, totals_by_path, _unowned_by_path) = claim_attribution_runs(app);
-            let paths = runs.len();
-            let total: usize = runs.values().map(|v| v.len()).sum();
-            // Which begun items have attributed lines on each path — the
-            // entanglement test the will-commit computation below shares
-            // with the commit route's own scan.
-            let owners_by_path = replay_owners_from_runs(&runs);
-            // avoid-futile-joint-commit: surface the same joint-attribution
-            // fact the commit-time refusal (op=refuse-joint-interval) would
-            // hit, BEFORE any commit is attempted — computed from `&runs`
-            // while it is still borrowed, ahead of the move into `map` below.
-            let joint_owners_by_path = joint_owners_from_runs(&runs);
-            let mut map = serde_json::Map::new();
-            for (k, v) in runs {
-                map.insert(k, serde_json::Value::Array(v));
-            }
-            // issue-327: per-item interval-patch shortstat, so the strip can
-            // report what a commit actually takes rather than the whole-file
-            // total. `{ itemId: { added, removed } }`.
-            let mut totals_map = serde_json::Map::new();
-            for (id, (a, r)) in totals {
-                totals_map.insert(id, serde_json::json!({ "added": a, "removed": r }));
-            }
-            if let Some(obj) = doc.as_object_mut() {
-                obj.insert("attribution".to_string(), serde_json::Value::Object(map));
-                obj.insert(
-                    "attributionTotals".to_string(),
-                    serde_json::Value::Object(totals_map),
-                );
-            }
             // will-commit-matches-the-button: per begun item, the headline
             // number computed the way worklist-commit EXECUTES — per path,
             // whole-file stat where this item is the only begun claimant
@@ -69073,12 +68698,17 @@ fn route_request<R: tauri::Runtime>(
             // Routing this per path from the replay (as before) predicted an
             // interval take the gate no longer makes — the gate-425-r2 demo,
             // 2026-10-06, whose agent wrote its message from that expectation.
-            // Display tolerates a stale partition; with none, fall back to the
-            // replay's owners, per path, as before.
+            // Display tolerates a stale partition; with none, no take is
+            // served and the pane says ownership is pending.
             let wc_partition = membership_partition(app).map(|(p, _)| p);
             // issue-430: the HEAD the precheck cache and refusal records key on.
             let wc_head = git_run(app, &["rev-parse", "HEAD"])
                 .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            // issue-425-retire-replay: part of the precheck key below; the
+            // interval patch is built from this record.
+            let wc_intervals_raw = project_root(Some(app))
+                .and_then(|r| std::fs::read_to_string(r.join(CLAIM_INTERVALS_REL)).ok())
                 .unwrap_or_default();
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
                 // Begun the way the gate counts it (handle_worklist_commit's
@@ -69121,6 +68751,41 @@ fn route_request<R: tauri::Runtime>(
                             }
                             _ => Vec::new(),
                         };
+                    // issue-425-retire-replay: an entangled item is
+                    // interval-staged, so its take is what that staging
+                    // produces: the precheck applies the same patch to a
+                    // scratch index and reads the result's numstat. Keyed on
+                    // what the patch is built from (HEAD, the claim record,
+                    // the item's current per-file diffs), so a serve re-runs
+                    // git only when one of them moved. When the patch doesn't
+                    // apply (issue-430's dependent case) the gate refuses;
+                    // the strip then shows membership's own lines for the item.
+                    let precheck: Option<
+                        Result<std::collections::BTreeMap<String, (usize, usize)>, Vec<String>>,
+                    > = if item_entangled == Some(true) {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        wc_intervals_raw.hash(&mut h);
+                        // The real content, never the display-capped
+                        // `diffByFile` (Codex review: a capped placeholder can
+                        // survive an edit unchanged).
+                        if let Some(idx) = change_index.as_ref() {
+                            precheck_content_hash(idx, &declared).hash(&mut h);
+                        }
+                        declared.hash(&mut h);
+                        let key = format!("{}|{:016x}", wc_head, h.finish());
+                        Some(commit_precheck_cached(app, &id, &declared, &key))
+                    } else {
+                        None
+                    };
+                    let own_lines = |path: &str| -> (usize, usize) {
+                        wc_partition
+                            .as_ref()
+                            .and_then(|p| p.get(path))
+                            .and_then(|b| b.per_item.get(&vec![id.clone()]))
+                            .copied()
+                            .unwrap_or((0, 0))
+                    };
                     let Some(records) = item.get_mut("changedFiles").and_then(|v| v.as_array_mut())
                     else {
                         continue;
@@ -69137,15 +68802,9 @@ fn route_request<R: tauri::Runtime>(
                         else {
                             continue;
                         };
-                        let entangled = match item_entangled {
-                            Some(e) => e,
-                            None => owners_by_path
-                                .get(&path)
-                                .map(|o| {
-                                    o.iter().any(|owner| *owner != id && begun.contains(owner))
-                                })
-                                .unwrap_or(false),
-                        };
+                        // No partition: nothing is entangled, and no take is
+                        // served (below); the pane says ownership is pending.
+                        let entangled = item_entangled.unwrap_or(false);
                         // issue-273 postscript: the residue-driven interval
                         // branch (and its two successor corrections) were
                         // withdrawn the same evening they shipped — three
@@ -69155,11 +68814,10 @@ fn route_request<R: tauri::Runtime>(
                         // re-grounded (see the drawing-board design item).
                         let (a, r) = if entangled {
                             interval_paths.push(path.clone());
-                            totals_by_path
-                                .get(&path)
-                                .and_then(|m| m.get(&id))
-                                .copied()
-                                .unwrap_or((0, 0))
+                            match &precheck {
+                                Some(Ok(take)) => take.get(&path).copied().unwrap_or((0, 0)),
+                                Some(Err(_)) | None => own_lines(&path),
+                            }
                         } else {
                             (
                                 rec.get("added").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
@@ -69173,9 +68831,11 @@ fn route_request<R: tauri::Runtime>(
                         // not add up", 2026-09-04: the header was honest but
                         // its addends were invisible — the entangled row
                         // showed only the file total).
-                        if let Some(obj) = rec.as_object_mut() {
-                            obj.insert("takeAdded".to_string(), serde_json::json!(a));
-                            obj.insert("takeRemoved".to_string(), serde_json::json!(r));
+                        if wc_partition.is_some() {
+                            if let Some(obj) = rec.as_object_mut() {
+                                obj.insert("takeAdded".to_string(), serde_json::json!(a));
+                                obj.insert("takeRemoved".to_string(), serde_json::json!(r));
+                            }
                         }
                     }
                     if !interval_paths.is_empty() {
@@ -69190,17 +68850,9 @@ fn route_request<R: tauri::Runtime>(
                     }
                     // issue-430-dependent-commit-offer: an entangled item is
                     // interval-staged, and the gate refuses a patch that does
-                    // not apply to HEAD on its own. Run that same check now
-                    // (cached on HEAD + the take) so the pane can withhold the
-                    // single-item Commit and name what it depends on.
-                    let precheck: Option<Result<(), Vec<String>>> = if item_entangled == Some(true)
-                    {
-                        let key =
-                            format!("{}|{}|{}|{}", wc_head, wc.0, wc.1, interval_paths.join(","));
-                        Some(commit_precheck_cached(app, &id, &declared, &key))
-                    } else {
-                        None
-                    };
+                    // not apply to HEAD on its own. The precheck above ran that
+                    // same check, so the pane can withhold the single-item
+                    // Commit and name what it depends on.
                     let depends_on: Option<(Vec<String>, Vec<String>)> = match &precheck {
                         Some(Err(failing)) => {
                             let owners: Vec<String> = wc_partition
@@ -69243,10 +68895,16 @@ fn route_request<R: tauri::Runtime>(
                                 serde_json::json!({ "atMs": at_ms, "reason": reason }),
                             );
                         }
-                        obj.insert(
-                            "willCommit".to_string(),
-                            serde_json::json!({ "added": wc.0, "removed": wc.1 }),
-                        );
+                        // issue-425-retire-replay (Codex review): with no
+                        // membership partition there is no honest take to
+                        // promise, so none is served; the pane shows
+                        // "Calculating ownership…" until the ready signal.
+                        if wc_partition.is_some() {
+                            obj.insert(
+                                "willCommit".to_string(),
+                                serde_json::json!({ "added": wc.0, "removed": wc.1 }),
+                            );
+                        }
                         // issue-425-gate-routes-by-membership: what a whole-file
                         // commit of this item would take that no item wrote —
                         // the same lines the commit response will disclose as
@@ -69275,12 +68933,11 @@ fn route_request<R: tauri::Runtime>(
             // a joint run only ever exists on a path a begun item's capture
             // touched, so an unbegun item's files simply never match.
             // issue-432: from membership, the model the gate's refusal now
-            // reads, so pane and gate agree; the replay only when there is no
-            // partition at all, as the will-commit display does.
+            // reads, so pane and gate agree.
             let joint_owners_by_path = wc_partition
                 .as_ref()
                 .map(membership_joint_owners)
-                .unwrap_or(joint_owners_by_path);
+                .unwrap_or_default();
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
                 for item in items.iter_mut() {
                     let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
@@ -69303,64 +68960,40 @@ fn route_request<R: tauri::Runtime>(
                     }
                 }
             }
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
-                    "op=attribute paths={} runs={} spawns={} pathspec={} ms={}",
-                    paths,
-                    total,
-                    CLAIM_ATTR_SPAWNS.load(std::sync::atomic::Ordering::Relaxed),
-                    CLAIM_ATTR_PATHSPEC.load(std::sync::atomic::Ordering::Relaxed),
-                    attr_started.elapsed().as_millis()
-                ),
-            );
-            // issue-273-membership-engine-observe (attribution-model.md §4,
-            // Migration step 1): the HEAD-diff membership engine runs beside
-            // the replay on every serve, OBSERVE-ONLY — its partition feeds
-            // only the [claim-interval] membership traces (op=membership,
-            // op=membership-diverges, op=membership-conservation-broken).
-            // Nothing in this payload reads it; the replay above stays the
-            // authority for every consumer until the observation earns the
-            // step-2+ flips.
+            // The membership partition, the board's only ownership source
+            // (issue-425-retire-replay).
             //
             // membership-precomputed-off-the-render-path: the serve now only
             // READS the memo (`membership_partition`, `allow_compute=false`)
             // — the probe loop that fills it runs off the request path, on
             // `membership_precompute`'s invalidating-event triggers and at
-            // startup. `membership_report` runs the conservation check and
-            // divergence comparison against whatever came back; `fresh`
+            // startup. `membership_report` runs the conservation check against
+            // whatever came back; `fresh`
             // (true = compute or exact-key hit, false = carried-over
             // previous partition) gates the conservation check specifically
             // — see membership_report's header for why a stale check would
             // manufacture a false breach. `membershipStale` below is the
-            // payload's observation of that same fact — carried for
-            // migration step 2 to read; nothing reads it yet.
-            let (membership_stale, membership_payload) = match membership_partition(app) {
-                Some((partition, fresh)) => {
-                    membership_report(
-                        app,
-                        &partition,
-                        fresh,
-                        &owners_by_path,
-                        &joint_owners_by_path,
-                    );
-                    (!fresh, membership_payload_json(&partition))
-                }
-                None => (false, serde_json::Value::Null),
-            };
+            // payload's observation of that same fact.
+            let (membership_stale, membership_payload, membership_key) =
+                match membership_partition_keyed(app) {
+                    Some((partition, fresh, key)) => {
+                        membership_report(app, &partition, fresh);
+                        (!fresh, membership_payload_json(&partition), key)
+                    }
+                    None => (false, serde_json::Value::Null, String::new()),
+                };
             if let Some(obj) = doc.as_object_mut() {
                 obj.insert(
                     "membershipStale".to_string(),
                     serde_json::Value::Bool(membership_stale),
                 );
-                // membership-crosses-the-wire: the partition itself, so the
-                // pane can stop inferring ownership from declared paths.
-                // DELIBERATELY UNREAD — every consumer still sources from the
-                // replay; migration step 3 spends this. Serving it first means
-                // the field can be watched against real boards before anything
-                // depends on it, which is the same observe-then-consume
-                // discipline steps 1a and 1b used.
+                obj.insert(
+                    "membershipStateKey".to_string(),
+                    serde_json::Value::String(membership_key),
+                );
+                // membership-crosses-the-wire: the partition itself: counts,
+                // and per-line `runs` / `removedRuns` the pane's ownership
+                // views read (issue-425-retire-replay).
                 obj.insert("membership".to_string(), membership_payload);
             }
         }
@@ -71505,6 +71138,33 @@ fn ensure_no_unrelated_staged_files(
     }
 }
 
+// issue-425-retire-replay: what the precheck cache key hashes for an item:
+// the full `git diff HEAD` body of each declared tracked path, and the bytes
+// of each declared untracked one. Never the display-capped `diffByFile`, whose
+// placeholders (generated files, patches over 200 KB) can survive an edit.
+fn precheck_content_hash(idx: &WorklistChangeIndex, declared: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut covered: Vec<&String> = idx
+        .head_diff_by_path
+        .keys()
+        .chain(idx.status_by_path.keys())
+        .filter(|p| declared.iter().any(|d| declared_covers(d, p)))
+        .collect();
+    covered.sort();
+    covered.dedup();
+    for p in covered {
+        p.hash(&mut h);
+        match idx.head_diff_by_path.get(p) {
+            Some(body) => body.hash(&mut h),
+            None => std::fs::read(idx.root.join(p))
+                .unwrap_or_default()
+                .hash(&mut h),
+        }
+    }
+    h.finish()
+}
+
 // count-changed-files-rung1: per-item change activity derived from disk.
 // Returns (changedFiles, changeSummary) for the /__worklist payload — one
 // record per listed file plus roll-up totals, with display labels computed
@@ -71540,7 +71200,55 @@ struct WorklistChangeIndex {
     counts: std::collections::HashMap<String, (i64, i64)>,
     hunks_by_path: std::collections::HashMap<String, i64>,
     diff_by_path: std::collections::HashMap<String, String>,
+    // issue-425-retire-replay: `git diff HEAD` bodies (staged + unstaged),
+    // uncapped. The baseline membership numbers removed lines against, and
+    // what the precheck cache key hashes.
+    head_diff_by_path: std::collections::HashMap<String, String>,
     spawns: usize,
+}
+
+#[cfg(test)]
+mod precheck_content_hash_tests {
+    use super::{cap_patch, precheck_content_hash, WorklistChangeIndex};
+    use std::collections::HashMap;
+
+    fn idx(path: &str, body: &str) -> WorklistChangeIndex {
+        let mut head = HashMap::new();
+        head.insert(path.to_string(), body.to_string());
+        WorklistChangeIndex {
+            root: std::env::temp_dir(),
+            status_by_path: HashMap::new(),
+            counts: HashMap::new(),
+            hunks_by_path: HashMap::new(),
+            diff_by_path: HashMap::new(),
+            head_diff_by_path: head,
+            spawns: 0,
+        }
+    }
+
+    // Codex review of issue-425-retire-replay: two edits to a generated file
+    // cap to the same placeholder, so a key built from the capped patch would
+    // not change. The content hash must.
+    #[test]
+    fn edits_hidden_by_the_display_cap_still_change_the_key() {
+        let path = "app/vendor/bundle.min.js";
+        let before = "@@ -1 +1 @@\n-a\n+b\n";
+        let after = "@@ -1 +1 @@\n-a\n+c\n";
+        assert_eq!(
+            cap_patch(path, before.to_string()),
+            cap_patch(path, after.to_string())
+        );
+        let declared = vec![path.to_string()];
+        assert_ne!(
+            precheck_content_hash(&idx(path, before), &declared),
+            precheck_content_hash(&idx(path, after), &declared)
+        );
+        // Undeclared paths don't move it.
+        assert_eq!(
+            precheck_content_hash(&idx(path, before), &["other.txt".to_string()]),
+            precheck_content_hash(&idx(path, after), &["other.txt".to_string()])
+        );
+    }
 }
 
 fn worklist_change_index<R: tauri::Runtime>(
@@ -71554,6 +71262,7 @@ fn worklist_change_index<R: tauri::Runtime>(
         counts: std::collections::HashMap::new(),
         hunks_by_path: std::collections::HashMap::new(),
         diff_by_path: std::collections::HashMap::new(),
+        head_diff_by_path: std::collections::HashMap::new(),
         spawns: 0,
     };
     if all_paths.is_empty() {
@@ -71609,6 +71318,8 @@ fn worklist_change_index<R: tauri::Runtime>(
     for (path, body) in split_diff_by_file(&head_diff) {
         let n = body.lines().filter(|l| l.starts_with("@@")).count() as i64;
         idx.hunks_by_path.insert(path.to_string(), n);
+        idx.head_diff_by_path
+            .insert(path.to_string(), body.to_string());
     }
 
     // The displayed per-item diff bodies come from plain `git diff` (unstaged
@@ -72916,87 +72627,18 @@ fn release_claim_on_commit_refusal<R: tauri::Runtime>(
     );
 }
 
-// Which begun items the replay credits with lines on each path: the
-// entanglement test shared by the board serve, the commit route, and (since
-// gate-computes-membership-fresh) the gate's membership comparison. Joint
-// runs carry `itemIds` instead and are gathered by joint_owners_from_runs.
-fn replay_owners_from_runs(
-    runs: &std::collections::HashMap<String, Vec<serde_json::Value>>,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let mut owners: std::collections::HashMap<String, std::collections::HashSet<String>> =
-        Default::default();
-    for (k, v) in runs {
-        for run in v {
-            if let Some(id) = run.get("itemId").and_then(|x| x.as_str()) {
-                owners.entry(k.clone()).or_default().insert(id.to_string());
-            }
-        }
-    }
-    owners
-}
-
-// gate-computes-membership-fresh: the gate's comparison, pure. For every
-// changed path the commit would stage (a partition path covered by a
-// requested item's declared files), does membership's owner set equal the
-// replay's (single owners plus joint members) -- the same test
-// membership_report applies on board serves? Returns (paths checked,
-// divergences as (path, replay, membership)).
-fn gate_membership_comparison(
-    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
-    requested_files: &[String],
-    replay_owners: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-    replay_joint: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-) -> (
-    usize,
-    Vec<(
-        String,
-        std::collections::BTreeSet<String>,
-        std::collections::BTreeSet<String>,
-    )>,
-) {
-    let mut checked = 0usize;
-    let mut diverged = Vec::new();
-    for (path, m) in partition {
-        if !requested_files.iter().any(|d| declared_covers(d, path)) {
-            continue;
-        }
-        checked += 1;
-        let mut replay: std::collections::BTreeSet<String> = replay_owners
-            .get(path)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        if let Some(j) = replay_joint.get(path) {
-            replay.extend(j.iter().cloned());
-        }
-        if replay != m.owners {
-            diverged.push((path.clone(), replay, m.owners.clone()));
-        }
-    }
-    (checked, diverged)
-}
-
-// gate-computes-membership-fresh, observe-only: at every real commit, obtain a
-// membership partition that is fresh for the CURRENT state (allow_compute =
-// true either computes or hits the memo slot keyed on exactly this HEAD +
-// diff + untracked + roster + intervals -- never the stale previous slot),
-// compare it with the replay the gate is about to act on, and trace cost and
-// agreement. The replay still decides everything; nothing here can change the
-// commit's outcome or return an error into it. Migration step 4 will spend
-// this capability (and must then refuse, not proceed, when it is
-// unavailable); until then it is the pre-flip soak's instrument: gate-time
-// cost (criterion 7 has serve-time baselines only) and agreement at the
-// moment a commit actually happens.
-//
-// issue-425-gate-routes-by-membership: no longer observe-only. It returns the
-// fresh partition so the gate can ROUTE by it (see
-// membership_entangling_owners); None means membership had no answer, which
-// the gate refuses on rather than falling back to the replay. The divergence
-// traces stay, so disagreements remain visible until the replay retires.
+// gate-computes-membership-fresh: at every real commit, obtain a membership
+// partition that is fresh for the CURRENT state (allow_compute = true either
+// computes or hits the memo slot keyed on exactly this HEAD + diff +
+// untracked + roster + intervals, never the stale previous slot), and trace
+// its cost. The gate routes by it (membership_entangling_owners,
+// issue-425-gate-routes-by-membership); None means membership had no answer,
+// which the gate refuses on. The comparison with the replay that ran here
+// until issue-425-retire-replay went with the replay.
 fn gate_membership_observe<R: tauri::Runtime>(
     app: &AppHandle<R>,
     ids: &[String],
     requested_files: &[String],
-    runs_by_path: &std::collections::HashMap<String, Vec<serde_json::Value>>,
 ) -> Option<std::collections::BTreeMap<String, MembershipPathBuckets>> {
     let started = std::time::Instant::now();
     let Some((partition, fresh)) = membership_partition_engine(app, true) else {
@@ -73011,43 +72653,168 @@ fn gate_membership_observe<R: tauri::Runtime>(
         );
         return None;
     };
-    let replay_owners = replay_owners_from_runs(runs_by_path);
-    let replay_joint = joint_owners_from_runs(runs_by_path);
-    let (checked, diverged) =
-        gate_membership_comparison(&partition, requested_files, &replay_owners, &replay_joint);
-    let join = |s: &std::collections::BTreeSet<String>| -> String {
-        if s.is_empty() {
-            "-".to_string()
-        } else {
-            s.iter().cloned().collect::<Vec<_>>().join(",")
-        }
-    };
-    for (path, replay, membership) in &diverged {
-        append_bram_trace_line(
-            app,
-            "claim-interval",
-            &format!(
-                "op=gate-membership-diverges ids={} path={} replay={} membership={}",
-                ids.join(","),
-                path,
-                join(replay),
-                join(membership)
-            ),
-        );
-    }
+    let checked = partition
+        .keys()
+        .filter(|p| requested_files.iter().any(|d| declared_covers(d, p)))
+        .count();
     append_bram_trace_line(
         app,
         "claim-interval",
         &format!(
-            "op=gate-membership ids={} paths={} ms={} fresh={} agrees={}",
+            "op=gate-membership ids={} paths={} ms={} fresh={}",
             ids.len(),
             checked,
             started.elapsed().as_millis(),
-            fresh,
-            diverged.is_empty()
+            fresh
         ),
     );
+    membership_budget_check(
+        app,
+        "gate",
+        started.elapsed().as_millis(),
+        MEMBERSHIP_BUDGET_GATE_MS,
+    );
     Some(partition)
+}
+
+// issue-425-retire-replay: the gate's routing for a selection, run without
+// committing. Same inputs the gate uses: membership (stale is acceptable for
+// display, as for willCommit), begun = `applied` or `begunAtMs`, and
+// `membership_entangling_owners` over the selection's declared files with
+// every begun item outside the selection as a possible owner.
+// - entangled -> interval staging: the precheck's staged numstat for the
+//   whole selection, or the paths whose combined patch doesn't apply;
+// - otherwise -> whole files: each changed declared path's HEAD-diff universe,
+//   plus the unowned lines that ride along (what `unownedTaken` will report).
+fn worklist_selection_prediction<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+) -> serde_json::Value {
+    let Some((partition, fresh, state_key)) = membership_partition_keyed(app) else {
+        return serde_json::json!({ "ready": false });
+    };
+    let mut begun: std::collections::HashSet<String> = Default::default();
+    let mut files_map: std::collections::HashMap<String, Vec<String>> = Default::default();
+    if let Some(wf) = worklist_file(app) {
+        if let Some(doc) = std::fs::read_to_string(&wf)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        {
+            for it in doc
+                .get("items")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let Some(id) = it.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if it.get("status").and_then(|v| v.as_str()) == Some("applied")
+                    || it.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0
+                {
+                    begun.insert(id.to_string());
+                }
+                if ids.iter().any(|r| r == id) {
+                    files_map.insert(id.to_string(), worklist_item_files(it));
+                }
+            }
+        }
+    }
+    let mut requested_files: Vec<String> = files_map.values().flatten().cloned().collect();
+    requested_files.sort();
+    requested_files.dedup();
+    let outside: std::collections::HashSet<String> =
+        begun.iter().filter(|b| !ids.contains(b)).cloned().collect();
+    let owners = membership_entangling_owners(&partition, &requested_files, ids, &outside);
+    if !owners.is_empty() {
+        let mut entangled_with: Vec<String> = owners.into_iter().map(|(_, o)| o).collect();
+        entangled_with.sort();
+        entangled_with.dedup();
+        return match interval_commit_precheck(app, ids, &files_map) {
+            Ok(take) => {
+                let (a, r) = take
+                    .values()
+                    .fold((0, 0), |acc, v| (acc.0 + v.0, acc.1 + v.1));
+                serde_json::json!({
+                    "ready": true, "stale": !fresh, "stateKey": state_key, "mode": "interval",
+                    "added": a, "removed": r, "entangledWith": entangled_with,
+                })
+            }
+            Err(paths) => serde_json::json!({
+                "ready": true, "stale": !fresh, "stateKey": state_key, "mode": "interval",
+                "dependentPaths": paths, "entangledWith": entangled_with,
+            }),
+        };
+    }
+    selection_whole_file_json(&partition, fresh, state_key, &requested_files)
+}
+
+// The whole-file answer of `worklist_selection_prediction`, pure: the take
+// is each changed declared path's HEAD-diff universe, plus the unowned lines
+// that ride along. `state_key` is the key of the read `partition` came from,
+// stamped as given (Codex review: never a key looked up afterwards).
+fn selection_whole_file_json(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+    fresh: bool,
+    state_key: String,
+    requested_files: &[String],
+) -> serde_json::Value {
+    let paths: Vec<String> = partition
+        .keys()
+        .filter(|p| requested_files.iter().any(|d| declared_covers(d, p)))
+        .cloned()
+        .collect();
+    let (a, r) = paths.iter().fold((0, 0), |acc, p| {
+        let u = partition.get(p).map(|m| m.universe).unwrap_or((0, 0));
+        (acc.0 + u.0, acc.1 + u.1)
+    });
+    let unowned: Vec<serde_json::Value> = membership_unowned_taken(&partition, &paths)
+        .into_iter()
+        .map(|(p, a, r)| serde_json::json!({ "path": p, "added": a, "removed": r }))
+        .collect();
+    serde_json::json!({
+        "ready": true, "stale": !fresh, "stateKey": state_key, "mode": "whole-file",
+        "added": a, "removed": r, "unowned": unowned,
+    })
+}
+
+#[cfg(test)]
+mod selection_prediction_tests {
+    use super::{selection_whole_file_json, MembershipPathBuckets};
+    use std::collections::BTreeMap;
+
+    // issue-425-retire-replay, Codex review: the answer carries the key of the
+    // read its partition came from, and freshness as given. The entangled-with-
+    // unowned demo shape: two owners' lines plus one unowned line, +3 -3.
+    #[test]
+    fn whole_file_answer_stamps_its_own_key_and_counts_unowned() {
+        let mut b = MembershipPathBuckets {
+            universe: (3, 3),
+            single: (2, 2),
+            ..Default::default()
+        };
+        b.per_item.insert(vec!["top".to_string()], (1, 1));
+        b.per_item.insert(vec!["bottom".to_string()], (1, 1));
+        let mut partition = BTreeMap::new();
+        partition.insert("demo/f.txt".to_string(), b);
+        let v = selection_whole_file_json(
+            &partition,
+            false,
+            "K-of-this-read".to_string(),
+            &["demo/f.txt".to_string()],
+        );
+        assert_eq!(v["stateKey"], "K-of-this-read");
+        assert_eq!(v["stale"], true);
+        assert_eq!(v["mode"], "whole-file");
+        assert_eq!(
+            (v["added"].as_u64(), v["removed"].as_u64()),
+            (Some(3), Some(3))
+        );
+        assert_eq!(
+            v["unowned"],
+            serde_json::json!([{"path": "demo/f.txt", "added": 1, "removed": 1}])
+        );
+    }
 }
 
 // issue-425-gate-routes-by-membership: the begun items OUTSIDE the request
@@ -73737,11 +73504,6 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // The 409 survives only as the fallback when there is genuinely no interval
     // to stage (work predating capture) — the honest baseline.
     let mut needs_interval_stage = false;
-    // Hoisted from the scan block (issue-364): the residual-disclosure pass
-    // after an interval-staged commit reuses these. The runs stay valid
-    // across the commit because interval staging never touches the worktree
-    // the replay is positioned against.
-    let (runs_by_path, _, _, _unowned_by_path) = claim_attribution_runs(app);
     // issue-425-gate-routes-by-membership: the worktree snapshot comes
     // FIRST, so any edit after it — even one membership then sees — shows up
     // as drift at staging instead of being absorbed. Twins are included
@@ -73769,8 +73531,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         })
         .flat_map(worklist_item_files)
         .collect();
-    let Some(partition) = gate_membership_observe(app, &ids, &requested_files, &runs_by_path)
-    else {
+    let Some(partition) = gate_membership_observe(app, &ids, &requested_files) else {
         // Refuse rather than fall back to the replay: the replay is the
         // model that named 21 wrong neighbours (#419), and why membership
         // occasionally has no answer is not yet established.
@@ -73872,31 +73633,6 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                         when.map(|w| format!(" ({})", w)).unwrap_or_default(),
                         members.join(", "),
                         partners.join(", ")
-                    ),
-                );
-            }
-            // issue-432 soak: the replay's verdict, kept only as a trace so a
-            // true joint that membership misses stays visible until the
-            // replay retires (issue-425-retire-replay).
-            let replay_only: Vec<String> = runs_by_path
-                .get(path)
-                .into_iter()
-                .flatten()
-                .filter_map(|run| run.get("itemIds").and_then(|v| v.as_array()))
-                .flat_map(|members| members.iter().filter_map(|m| m.as_str()))
-                .filter(|m| !requested.contains(m) && begun_outside.contains(*m))
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            if !replay_only.is_empty() {
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    &format!(
-                        "op=joint-refusal-replay-only path={} replay=[{}]",
-                        path,
-                        replay_only.join(",")
                     ),
                 );
             }
@@ -74361,9 +74097,15 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                     continue;
                 }
                 let residual = diff_residual_lines(&patch);
-                let empty_runs: Vec<serde_json::Value> = Vec::new();
-                let runs = runs_by_path.get(&path).unwrap_or(&empty_runs);
-                let owner = residual_owner_label(&residual, runs, &begun_outside);
+                // issue-425-retire-replay: classify against membership's
+                // runs, from the gate's own pre-commit partition. Interval
+                // staging never touches the worktree, so present-file line
+                // numbers taken before the commit still hold after it.
+                let runs: Vec<serde_json::Value> = partition
+                    .get(&path)
+                    .map(|b| membership_runs_json(&b.runs))
+                    .unwrap_or_default();
+                let owner = residual_owner_label(&residual, &runs, &begun_outside);
                 append_bram_trace_line(
                     app,
                     "worklist-commit",
@@ -79707,6 +79449,7 @@ mod worklist_change_projection_tests {
             counts,
             hunks_by_path,
             diff_by_path: HashMap::new(),
+            head_diff_by_path: HashMap::new(),
             spawns: 0,
         }
     }
@@ -80212,26 +79955,8 @@ mod claim_interval_prune_tests {
 #[cfg(test)]
 mod claim_attribution_tests {
     use super::{
-        apply_attr_hunks, attr_replay_line_offset, attr_runs, item_joint_with,
-        joint_owners_from_runs, membership_joint_owners, membership_joint_refusal, parse_attr_diff,
-        MembershipPathBuckets,
+        item_joint_with, membership_joint_owners, membership_joint_refusal, MembershipPathBuckets,
     };
-
-    // attribution-run-line-offset-in-views: the tripwire's arithmetic. The
-    // #324/trace-vocabulary shape was a run rendered at line 56 while the
-    // real diff sat at 86 — a +30 offset the replay length would have exposed.
-    #[test]
-    fn replay_offset_detects_length_divergence() {
-        // Healthy: base 50, net +36, file 86 → no offset.
-        assert_eq!(attr_replay_line_offset(50, 36, 86), None);
-        // The live shape: replay reconstructs 56, file is 86 → +30.
-        assert_eq!(attr_replay_line_offset(50, 6, 86), Some(30));
-        // Shrink case: replay 100, file 90 → -10.
-        assert_eq!(attr_replay_line_offset(100, 0, 90), Some(-10));
-        // Net that would underflow clamps at 0, not a panic.
-        assert_eq!(attr_replay_line_offset(3, -10, 0), None);
-        assert_eq!(attr_replay_line_offset(3, -10, 5), Some(5));
-    }
 
     fn owners(n: usize) -> Vec<Option<String>> {
         vec![None; n]
@@ -80241,91 +79966,6 @@ mod claim_attribution_tests {
             .map(|x| x.as_deref().unwrap_or("."))
             .collect::<Vec<_>>()
             .join("")
-    }
-
-    #[test]
-    fn parses_path_and_hunk_start() {
-        let d =
-            "diff --git a/f.md b/f.md\n--- a/f.md\n+++ b/f.md\n@@ -3,2 +3,3 @@ ctx\n x\n+new\n y\n";
-        let m = parse_attr_diff(d);
-        let h = &m["f.md"];
-        assert_eq!(h.len(), 1);
-        assert_eq!(h[0].old_start, 3);
-        assert_eq!(h[0].lines.len(), 3);
-    }
-
-    #[test]
-    fn insertion_owns_only_the_added_lines() {
-        let mut o = owners(4);
-        let m = parse_attr_diff("+++ b/f\n@@ -2,1 +2,3 @@\n a\n+X\n+Y\n");
-        apply_attr_hunks(&mut o, &m["f"], "A");
-        assert_eq!(ids(&o), "..AA..");
-    }
-
-    // attribution-run-line-offset-in-views: a DELETED file's target line is
-    // `+++ /dev/null`, so its `-` hunks must attribute to the file named by
-    // `diff --git`, NOT bleed onto the preceding file. The live bug: a delete
-    // right after a modify put the deletions on the modified file, shifting
-    // every run and rendering the change as "no item".
-    #[test]
-    fn deleted_file_hunks_do_not_bleed_onto_preceding_file() {
-        let d = "diff --git a/keep.md b/keep.md\n--- a/keep.md\n+++ b/keep.md\n\
-                 @@ -1,1 +1,1 @@\n-old\n+new\n\
-                 diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n\
-                 --- a/gone.txt\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n";
-        let m = parse_attr_diff(d);
-        // keep.md gets ONLY its own +1/-1, not gone.txt's three deletions.
-        let keep_net: isize = m["keep.md"]
-            .iter()
-            .flat_map(|h| h.lines.iter())
-            .map(|(c, _)| match c {
-                '+' => 1,
-                '-' => -1,
-                _ => 0,
-            })
-            .sum();
-        assert_eq!(keep_net, 0, "keep.md must not absorb gone.txt's deletions");
-        assert!(
-            m.contains_key("gone.txt"),
-            "the deletion attributes to gone.txt"
-        );
-    }
-
-    // fix-attribution-run-line-offset: the chain-replay must place a sole
-    // claimant's added lines at their TRUE positions even when the base tree
-    // is old and an earlier interval grew the file (a committed resize). This
-    // is the adversarial shape #327's interval staging depends on; it
-    // reproduces (in-repo, no git needed) the scratch case that proved the
-    // algorithm sound after the 2026-09-03 field anomaly. base is 40 lines;
-    // item-old inserts 5 after line 5 (file → 45); item-mid touches nothing;
-    // prose edits near the end. Prose's run must sit where prose actually
-    // edited, not shifted by the intervening growth.
-    fn hunks(diff: &str) -> Vec<super::AttrHunk> {
-        super::parse_attr_diff(diff)["f"].clone()
-    }
-    #[test]
-    fn attribution_replay_survives_intervening_resize() {
-        let base_n = 40;
-        let step_old = (
-            Some("item-old".to_string()),
-            hunks("+++ b/f\n@@ -5,1 +5,6 @@\n line5\n+g1\n+g2\n+g3\n+g4\n+g5\n"),
-        );
-        // item-mid touches the file in neither direction; it simply is not a
-        // step for this path (mirrors an empty interval diff).
-        let step_prose = (
-            Some("prose".to_string()),
-            hunks("+++ b/f\n@@ -41,1 +41,3 @@\n line38\n+edit1\n+edit2\n"),
-        );
-        let runs = super::attribution_runs_for_path(base_n, &[step_old, step_prose]);
-        // item-old owns the 5 grown lines at 6..10; prose owns its 2 edits at
-        // the grown position 42..43 — not shifted low.
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0]["itemId"], "item-old");
-        assert_eq!(runs[0]["startLine"], 6);
-        assert_eq!(runs[0]["endLine"], 10);
-        assert_eq!(runs[1]["itemId"], "prose");
-        assert_eq!(runs[1]["startLine"], 42);
-        assert_eq!(runs[1]["endLine"], 43);
     }
 
     // joint-interval-files-disambiguation: per-(interval, path) resolution.
@@ -80372,21 +80012,6 @@ mod claim_attribution_tests {
             resolve_interval_path_owner(&ids[..1], "anything.txt", &declared),
             IntervalPathOwner::Single(ref s) if s == "a"
         ));
-    }
-
-    // A joint owner rides the marker encoding through the replay and expands
-    // into an itemIds run — never an itemId, never silently dropped.
-    #[test]
-    fn joint_marker_expands_to_item_ids_run() {
-        let sep = super::JOINT_RUN_SEP;
-        let joint = format!("{}a{}b", sep, sep);
-        let step = (Some(joint), hunks("+++ b/f\n@@ -1,0 +1,2 @@\n+j1\n+j2\n"));
-        let runs = super::attribution_runs_for_path(3, &[step]);
-        assert_eq!(runs.len(), 1);
-        assert!(runs[0].get("itemId").is_none());
-        assert_eq!(runs[0]["itemIds"], serde_json::json!(["a", "b"]));
-        assert_eq!(runs[0]["startLine"], 1);
-        assert_eq!(runs[0]["endLine"], 2);
     }
 
     // avoid-futile-joint-commit: joint_owners_from_runs / item_joint_with feed
@@ -80477,17 +80102,17 @@ mod claim_attribution_tests {
 
     #[test]
     fn joint_with_reflects_only_declared_shared_paths() {
-        let mut runs_by_path: std::collections::HashMap<String, Vec<serde_json::Value>> =
-            Default::default();
-        runs_by_path.insert(
-            "shared.xmlui".to_string(),
-            vec![serde_json::json!({"startLine": 1, "endLine": 4, "itemIds": ["a", "b"]})],
-        );
-        runs_by_path.insert(
-            "solo.xmlui".to_string(),
-            vec![serde_json::json!({"startLine": 1, "endLine": 2, "itemId": "a"})],
-        );
-        let joint = joint_owners_from_runs(&runs_by_path);
+        // issue-425-retire-replay: from membership, as the board serves it.
+        let mut shared = MembershipPathBuckets::default();
+        shared
+            .per_item
+            .insert(vec!["a".to_string(), "b".to_string()], (4, 0));
+        let mut solo = MembershipPathBuckets::default();
+        solo.per_item.insert(vec!["a".to_string()], (2, 0));
+        let mut partition = std::collections::BTreeMap::new();
+        partition.insert("shared.xmlui".to_string(), shared);
+        partition.insert("solo.xmlui".to_string(), solo);
+        let joint = membership_joint_owners(&partition);
 
         // "a" declares both files: the joint one names "b" back; the
         // single-owner one names nobody.
@@ -80506,123 +80131,6 @@ mod claim_attribution_tests {
 
         // An item that declares neither file has nothing to report.
         assert!(item_joint_with("a", &[], &joint).is_empty());
-    }
-
-    // The regression this whole design exists to avoid: identical line CONTENT
-    // owned by different claimants. A content-keyed lookup collapses these.
-    #[test]
-    fn duplicate_lines_are_attributed_by_position_not_content() {
-        let mut o = owners(2);
-        // A inserts a blank + fence at the top...
-        let a = parse_attr_diff("+++ b/f\n@@ -1,0 +1,2 @@\n+\n+```\n");
-        apply_attr_hunks(&mut o, &a["f"], "A");
-        // ...C inserts an IDENTICAL blank + fence further down.
-        let c = parse_attr_diff("+++ b/f\n@@ -4,0 +4,2 @@\n+\n+```\n");
-        apply_attr_hunks(&mut o, &c["f"], "C");
-        assert_eq!(ids(&o), "AA.CC.");
-    }
-
-    // Four claimants, three hunks: two edited ADJACENT regions and git merged
-    // them. Whole-hunk attribution fails here; the replay must not.
-    #[test]
-    fn adjacent_claimants_split_within_one_region() {
-        let mut o = owners(2);
-        let a = parse_attr_diff("+++ b/f\n@@ -1,0 +1,3 @@\n+a1\n+a2\n+a3\n");
-        apply_attr_hunks(&mut o, &a["f"], "A");
-        let d = parse_attr_diff("+++ b/f\n@@ -4,0 +4,2 @@\n+d1\n+d2\n");
-        apply_attr_hunks(&mut o, &d["f"], "D");
-        assert_eq!(ids(&o), "AAADD..");
-        let runs = attr_runs(&o);
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0]["itemId"], "A");
-        assert_eq!(runs[0]["endLine"], 3);
-        assert_eq!(runs[1]["itemId"], "D");
-        assert_eq!(runs[1]["startLine"], 4);
-        assert_eq!(runs[1]["endLine"], 5);
-    }
-
-    #[test]
-    fn deletions_remove_ownership_and_shift_later_hunks() {
-        let mut o = owners(5);
-        let a = parse_attr_diff("+++ b/f\n@@ -2,2 +2,1 @@\n-old\n+new\n");
-        apply_attr_hunks(&mut o, &a["f"], "A");
-        assert_eq!(ids(&o), ".A...");
-    }
-
-    // Unowned lines are a state, not a gap: they must not appear as runs, and
-    // must not be folded into a neighbouring claimant's run.
-    #[test]
-    fn unowned_lines_are_excluded_from_runs() {
-        let mut o = owners(3);
-        let a = parse_attr_diff("+++ b/f\n@@ -2,0 +2,1 @@\n+X\n");
-        apply_attr_hunks(&mut o, &a["f"], "A");
-        let runs = attr_runs(&o);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["startLine"], 2);
-        assert_eq!(runs[0]["endLine"], 2);
-    }
-
-    #[test]
-    fn zero_work_interval_contributes_nothing() {
-        let mut o = owners(3);
-        let m = parse_attr_diff("");
-        assert!(m.is_empty());
-        apply_attr_hunks(&mut o, &[], "A");
-        assert_eq!(ids(&o), "...");
-        assert!(attr_runs(&o).is_empty());
-    }
-
-    // issue-273: a clear now cuts an empty-ids boundary (record_claim_interval
-    // called with `&[]` from clear_inflight_claim_sentinel /
-    // shrink_inflight_claim_sentinel). That boundary's effective owner
-    // resolves to `None` (resolve_interval_path_owner's `ids.len() == 0 =>
-    // Unowned` arm), so a step recorded after a clear must attribute nothing
-    // — exercised here at the same pure-replay level as
-    // unowned_lines_are_excluded_from_runs, extended to a second step so the
-    // boundary itself, not just a single unowned hunk, is under test.
-    #[test]
-    fn clear_boundary_excludes_subsequent_edits_from_runs() {
-        let step_a = (
-            Some("A".to_string()),
-            hunks("+++ b/f\n@@ -0,0 +1,1 @@\n+first\n"),
-        );
-        // The clear boundary: resolve_interval_path_owner(&[], ...) yields
-        // Unowned, i.e. `None` here — a direct edit made with no claim live.
-        let step_after_clear = (None, hunks("+++ b/f\n@@ -2,0 +2,1 @@\n+second\n"));
-        let runs = super::attribution_runs_for_path(0, &[step_a, step_after_clear]);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["itemId"], "A");
-        assert_eq!(runs[0]["startLine"], 1);
-        assert_eq!(runs[0]["endLine"], 1);
-        // Line 2 (the post-clear edit) must not appear in any run.
-        assert!(runs
-            .iter()
-            .all(|r| r["startLine"] != 2 && r["endLine"] != 2));
-    }
-
-    // issue-273: a shrink cuts a boundary owned by whoever REMAINS. Modeled
-    // here as a joint [a, b] step (a same-click plural approval, per
-    // joint-interval-files-disambiguation) followed by a step owned solely by
-    // "b" — the shape a shrink-to-[b] boundary produces. Edits after the
-    // shrink must attribute to "b" alone, never staying joint and never
-    // falling to "a".
-    #[test]
-    fn shrink_boundary_attributes_subsequent_edits_to_remaining_owner() {
-        let sep = super::JOINT_RUN_SEP;
-        let joint_step = (
-            Some(format!("{}a{}b", sep, sep)),
-            hunks("+++ b/f\n@@ -0,0 +1,1 @@\n+first\n"),
-        );
-        let shrunk_step = (
-            Some("b".to_string()),
-            hunks("+++ b/f\n@@ -2,0 +2,1 @@\n+second\n"),
-        );
-        let runs = super::attribution_runs_for_path(0, &[joint_step, shrunk_step]);
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0]["itemIds"], serde_json::json!(["a", "b"]));
-        assert!(runs[0].get("itemId").is_none());
-        assert_eq!(runs[1]["itemId"], "b");
-        assert!(runs[1].get("itemIds").is_none());
     }
 }
 
@@ -80656,10 +80164,7 @@ mod search_not_ready_tests {
 // on a serve, while every path an item could own diffs exactly as before.
 #[cfg(test)]
 mod attribution_pathspec_tests {
-    use super::{
-        attr_diff_args, attr_interval_cache_key, attribution_pathspec, declared_covers,
-        parse_attr_diff,
-    };
+    use super::{attribution_pathspec, declared_covers};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -80717,8 +80222,17 @@ mod attribution_pathspec_tests {
     }
 
     fn run_diff(root: &Path, a: &str, b: Option<&str>, spec: &[String]) -> String {
-        let args = attr_diff_args(a, b, spec);
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        // `git diff <a> [<b>] -- <pathspec…>`, the shape the claim capture's
+        // scoped diffs use.
+        let mut args: Vec<&str> = vec!["diff", a];
+        if let Some(b) = b {
+            args.push(b);
+        }
+        if !spec.is_empty() {
+            args.push("--");
+            args.extend(spec.iter().map(|s| s.as_str()));
+        }
+        let refs = args;
         String::from_utf8_lossy(&git(root, None, &refs).stdout).into_owned()
     }
 
@@ -80769,44 +80283,6 @@ mod attribution_pathspec_tests {
         (root, t1, t2)
     }
 
-    // Equivalence: on every path an item could own, the scoped diff is the
-    // unscoped diff. Fails if the pathspec drops a declared path -- a
-    // directory entry, a created file under it, or a worktree twin.
-    #[test]
-    fn scoped_diff_equals_unscoped_on_declared_paths() {
-        let (root, t1, t2) = raymond_repo("equiv");
-        let d = declared();
-        let spec = attribution_pathspec(&d);
-        for (a, b) in [(t1.as_str(), Some(t2.as_str())), (t2.as_str(), None)] {
-            let full = parse_attr_diff(&run_diff(&root, a, b, &[]));
-            let scoped = parse_attr_diff(&run_diff(&root, a, b, &spec));
-            let full_declared: HashMap<_, _> =
-                full.into_iter().filter(|(p, _)| covered(&d, p)).collect();
-            assert_eq!(
-                scoped.keys().collect::<std::collections::BTreeSet<_>>(),
-                full_declared
-                    .keys()
-                    .collect::<std::collections::BTreeSet<_>>(),
-                "scoped paths must equal the declared-covered unscoped paths"
-            );
-            for (p, h) in &full_declared {
-                assert_eq!(
-                    format!("{:?}", scoped[p]),
-                    format!("{:?}", h),
-                    "hunks differ on {}",
-                    p
-                );
-            }
-        }
-        // The fixture really exercises the three declaration shapes.
-        let closed = parse_attr_diff(&run_diff(&root, &t1, Some(&t2), &spec));
-        assert!(closed.contains_key("app/new.txt"));
-        assert!(closed.contains_key(".claude/worktrees/w1/src/z.rs"));
-        let open = parse_attr_diff(&run_diff(&root, &t2, None, &spec));
-        assert!(open.contains_key("docs/y.md"));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     // Cost: the untracked tree the boundaries captured contributes nothing
     // to either diff. Fails if the pathspec is removed from attr_diff_args.
     #[test]
@@ -80841,34 +80317,6 @@ mod attribution_pathspec_tests {
         let mut d = HashMap::new();
         d.insert("no-files".to_string(), Vec::<String>::new());
         assert!(attribution_pathspec(&d).is_empty());
-    }
-
-    // Cache: a closed interval diffed under one declared set must not serve
-    // another, or adding a file to an item's `files` would never attribute
-    // that file's history. Fails if the key omits the pathspec.
-    #[test]
-    fn cache_key_changes_with_the_declared_set() {
-        let a = attribution_pathspec(&declared());
-        let mut more = declared();
-        more.get_mut("file-item")
-            .unwrap()
-            .push("other.txt".to_string());
-        let b = attribution_pathspec(&more);
-        assert_ne!(
-            attr_interval_cache_key("t1", "t2", &a),
-            attr_interval_cache_key("t1", "t2", &b)
-        );
-        // Same set, any declaration order -> same key (no needless misses).
-        let mut shuffled = HashMap::new();
-        shuffled.insert(
-            "file-item".to_string(),
-            vec!["src/z.rs".to_string(), "docs/y.md".to_string()],
-        );
-        shuffled.insert("dir-item".to_string(), vec!["app/".to_string()]);
-        assert_eq!(
-            attr_interval_cache_key("t1", "t2", &a),
-            attr_interval_cache_key("t1", "t2", &attribution_pathspec(&shuffled))
-        );
     }
 }
 
@@ -81523,77 +80971,5 @@ mod push_withheld_tests {
     fn default_and_origin_head_are_not_another_branch() {
         let c = vec![v(&["main", "origin/main", "origin/HEAD", "origin"])];
         assert!(push_withheld_branches("main", "main", &c).is_empty());
-    }
-}
-
-// gate-computes-membership-fresh: the gate's comparison and the shared replay
-// owner derivation, pure.
-#[cfg(test)]
-mod gate_membership_tests {
-    use super::{gate_membership_comparison, replay_owners_from_runs, MembershipPathBuckets};
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-
-    fn bucket(owners: &[&str]) -> MembershipPathBuckets {
-        MembershipPathBuckets {
-            owners: owners
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<BTreeSet<_>>(),
-            ..Default::default()
-        }
-    }
-
-    fn set(xs: &[&str]) -> HashSet<String> {
-        xs.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn replay_owners_collects_single_item_runs_per_path() {
-        let mut runs: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-        runs.insert(
-            "a.rs".into(),
-            vec![
-                serde_json::json!({"itemId": "x"}),
-                serde_json::json!({"itemId": "y"}),
-                serde_json::json!({"itemIds": ["x", "y"]}),
-            ],
-        );
-        let owners = replay_owners_from_runs(&runs);
-        assert_eq!(owners["a.rs"], set(&["x", "y"]));
-    }
-
-    // Agreement on the requested paths; a divergence on a path the commit
-    // does not stage is not the gate's business. Fails if the requested-path
-    // filter is dropped (the unrelated divergence would be counted).
-    #[test]
-    fn agrees_on_requested_paths_and_ignores_others() {
-        let mut partition = BTreeMap::new();
-        partition.insert("app/a.rs".to_string(), bucket(&["item-a"]));
-        partition.insert("other/b.rs".to_string(), bucket(&["item-b"]));
-        let mut replay = HashMap::new();
-        replay.insert("app/a.rs".to_string(), set(&["item-a"]));
-        replay.insert("other/b.rs".to_string(), set(&["someone-else"]));
-        let (checked, diverged) =
-            gate_membership_comparison(&partition, &["app/".to_string()], &replay, &HashMap::new());
-        assert_eq!(checked, 1);
-        assert!(diverged.is_empty());
-    }
-
-    // A disagreement on a staged path is reported with both owner sets.
-    // Joint replay members count as owners, as in membership_report.
-    #[test]
-    fn reports_divergence_with_both_owner_sets() {
-        let mut partition = BTreeMap::new();
-        partition.insert("a.rs".to_string(), bucket(&["x"]));
-        let mut joint = HashMap::new();
-        joint.insert("a.rs".to_string(), set(&["x", "y"]));
-        let (checked, diverged) =
-            gate_membership_comparison(&partition, &["a.rs".to_string()], &HashMap::new(), &joint);
-        assert_eq!(checked, 1);
-        assert_eq!(diverged.len(), 1);
-        let (path, replay, membership) = &diverged[0];
-        assert_eq!(path, "a.rs");
-        assert_eq!(replay.iter().cloned().collect::<Vec<_>>(), vec!["x", "y"]);
-        assert_eq!(membership.iter().cloned().collect::<Vec<_>>(), vec!["x"]);
     }
 }

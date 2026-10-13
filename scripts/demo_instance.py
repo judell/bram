@@ -62,6 +62,7 @@ STARTERS = (
     "new-file-left-out",
     "chat-edit-in-item-file",
     "joint-owner-committed",
+    "entangled-with-unowned",
 )
 
 # The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
@@ -152,6 +153,17 @@ def _joint_owner_shared(prefix: str, owner_edit: bool, later_edit: bool = False)
     return "".join(lines)
 
 
+def _entangled_unowned(top: bool, middle: bool, bottom: bool) -> str:
+    # 17 lines: the three changed lines (1, 9, 17) are 7 lines apart, more
+    # than git's 2 x 3 lines of context, so each lands in its own hunk.
+    lines = ["top: changed by A" if top else "top: base"]
+    lines += ["middle"] * 7
+    lines += ["middle: changed with no claim" if middle else "middle: base"]
+    lines += ["middle"] * 7
+    lines += ["bottom: changed by B" if bottom else "bottom: base"]
+    return "\n".join(lines) + "\n"
+
+
 def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
     if starter == "multi-file":
         return _multi_file_seeds(prefix)
@@ -203,6 +215,7 @@ def starter_seed(starter: str, prefix: str) -> tuple[str, str]:
             f"demo/{prefix}.txt",
             "reedit: the created sibling arrives under two claim windows\n",
         ),
+        "entangled-with-unowned": (f"demo/{prefix}.txt", _entangled_unowned(False, False, False)),
     }
     try:
         return seeds[starter]
@@ -678,6 +691,24 @@ class StarterBuilder:
         self.file(path, _chat_edit_file(2))
         self.boundary([author])
         self.file(path, _chat_edit_file(3))
+        self.boundary([])
+
+    def starter_entangled_with_unowned(self, prefix: str) -> None:
+        # issue-425-retire-replay (Codex review): two begun owners of one file
+        # plus a third hunk nobody owns. Each row alone is interval-staged and
+        # predicts only its own hunk; committing both together leaves no
+        # outside owner, so the gate takes the whole file, unowned hunk
+        # included. The per-row numbers then don't add up to the commit.
+        path = f"demo/{prefix}.txt"
+        a, b = f"{prefix}-top", f"{prefix}-bottom"
+        self.item(a, path, "The top line is unchanged.", "The top line identifies item A.")
+        self.item(b, path, "The bottom line is unchanged.", "The bottom line identifies item B.")
+        self.boundary([a])
+        self.file(path, _entangled_unowned(True, False, False))
+        self.boundary([])
+        self.file(path, _entangled_unowned(True, True, False))
+        self.boundary([b])
+        self.file(path, _entangled_unowned(True, True, True))
         self.boundary([])
 
     def starter_joint_owner_committed(self, prefix: str) -> None:

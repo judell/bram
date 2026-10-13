@@ -30,4 +30,7 @@ Status: decided YYYY-MM-DD · revisit <when>
 
 ## Index
 
+- [2026-10-12 — Membership's cost budget, set before the replay is deleted](2026-10-12-membership-cost-budget.md)
 - [2026-10-07 — No wider automatic switching to the Transcript](2026-10-07-no-wider-transcript-autoswitch.md)
+- [2026-09-24 — Finish crediting each item's own lines; freeze same-tree hunk separation](2026-09-24-freeze-same-tree-hunk-separation.md)
+- [2026-09-22 — Line ownership comes from HEAD-diff membership, not the positional replay](2026-09-22-membership-over-replay.md)

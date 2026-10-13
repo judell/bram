@@ -3754,7 +3754,7 @@ window.__bramItemChangedSplitDeclared = function (item, items, claim, coSelected
 
 // The shared paths behind the strip's counts. Filenames only -- the row
 // stays a scan line and the paths are one hover away.
-window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTotals) {
+window.__bramWorklist2StripTooltip = function (item, claim, items) {
   // issue-406: which commit took the work, by its subject (a bare SHA
   // doesn't say whether it's the right one), and why the row counts as
   // landed.
@@ -3795,13 +3795,14 @@ window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTo
     // will-commit-matches-the-button: same preference order as the strip, so
     // header and tooltip quote one number with one meaning.
     var wc = item.willCommit;
-    var totals = (attributionTotals || {})[item.id];
-    var takesAdded = wc ? wc.added : totals ? totals.added : fileAdded;
-    var takesRemoved = wc ? wc.removed : totals ? totals.removed : fileRemoved;
+    if (!wc) return "Calculating ownership\u2026";
+    var takesAdded = wc.added;
+    var takesRemoved = wc.removed;
     var changed = split.exclusive.length + split.shared.length;
     var lines = [];
     lines.push(
-      "Commits +" + takesAdded + " −" + takesRemoved +
+      ((item.commitDependsOn || []).length ? "Own changes +" : "Commits +") +
+        takesAdded + " −" + takesRemoved +
         " — exclusive files whole, own hunks on shared files",
     );
     if (takesAdded !== fileAdded || takesRemoved !== fileRemoved) {
@@ -4170,7 +4171,7 @@ window.__bramGreenLitAge = function (item) {
 };
 
 // issue-327: how many of a file's changed lines this item actually wrote,
-// from the claim-interval runs in the payload. Runs describe lines PRESENT in
+// from the ownership runs (__bramOwnershipRunsByPath). Runs describe lines PRESENT in
 // the final file, so this counts additions only -- a deletion leaves no line to
 // attribute. Reporting a "-" figure here would be inventing one.
 window.__bramOwnClause = function (item, attribution) {
@@ -4505,9 +4506,9 @@ window.__bramOwnershipRows = function (patch, runs) {
 // per-commit convention (scope, don't annotate); "unattributed" appears only
 // when some changed line has no owner. The row's own item is listed first: it
 // is the default lens.
-window.__bramDiffScopeOptions = function (patch, runs, rowId) {
+window.__bramDiffScopeOptions = function (patch, runs, rowId, removedRuns) {
   var opts = [{ value: "__all", label: "All" }];
-  var spans = runs || [];
+  var spans = (runs || []).concat(removedRuns || []);
   var seen = {};
   var order = [];
   for (var i = 0; i < spans.length; i++) {
@@ -4524,14 +4525,134 @@ window.__bramDiffScopeOptions = function (patch, runs, rowId) {
       label: order[j] + (order[j] === rowId ? " (this item)" : ""),
     });
   }
-  var rows = window.__bramOwnershipRows(patch, spans);
-  for (var k = 0; k < rows.length; k++) {
-    if (rows[k].kind === "line" && !rows[k].owner) {
-      opts.push({ value: "__unattributed", label: "unattributed" });
-      break;
-    }
+  if (window.__bramScopedPatch(patch, runs, removedRuns, "__unattributed")) {
+    opts.push({ value: "__unattributed", label: "unattributed" });
   }
   return opts;
+};
+
+// issue-425-retire-replay: the patch a scoped view is cut from. `headPatch`
+// (HEAD-based) when the file has staged changes, since membership numbers
+// removed lines against HEAD; otherwise the displayed `patch`, which is then
+// the same diff. "All" keeps rendering `patch`.
+window.__bramScopeBasePatch = function (rowItem, path) {
+  var rec = window.__bramDiffForPath(rowItem, path) || {};
+  return rec.headPatch || rec.patch || "";
+};
+
+// issue-425-retire-replay (Codex review): what Commit takes for 2+ ticked
+// items, from the host's /__worklist/will-commit (the gate's own routing run
+// for the selection). Per-row "Will commit" assumes each item commits alone,
+// and a selection can route differently. The request is keyed on the board's
+// membership state key; an answer is shown only if it is fresh and was
+// computed under that same key, for this same selection.
+window.__bramSelectionPredictionKey = function (board, sel) {
+  var ids = sel || [];
+  if (ids.length < 2) return "";
+  // Codex review: key on the state ownership is derived from (the host's
+  // membership state key), not on line counts, which can stay the same while
+  // ownership or a dependency changes. Empty until membership has a key.
+  var k = (board && board.membershipStateKey) || "";
+  // Freshness too (Codex review): while membership computes, the board can
+  // already carry the final key, marked stale. The ready signal refetches the
+  // board, which flips it to fresh under the same key; this makes that flip
+  // change the request, so the prediction refetches instead of staying hidden.
+  return k ? ids.join(",") + "|" + k + "|" + (board.membershipStale ? "stale" : "fresh") : "";
+};
+
+window.__bramSelectionTakeLine = function (pred, sel, board) {
+  if (!pred || !pred.ready || pred.stale || (sel || []).length < 2) return "";
+  // Only this selection's answer, computed under the board's current state.
+  if ((pred.ids || []).slice().sort().join(",") !== sel.slice().sort().join(",")) return "";
+  if (!board || !board.membershipStateKey || pred.stateKey !== board.membershipStateKey) return "";
+  if ((pred.dependentPaths || []).length) {
+    return "Together these can't commit: their changes depend on work by " +
+      window.__bramNameList(pred.entangledWith || []) + ".";
+  }
+  var take = "+" + (pred.added || 0) + " \u2212" + (pred.removed || 0);
+  if (pred.mode === "whole-file") {
+    var un = pred.unowned || [];
+    var ua = 0, ur = 0;
+    for (var i = 0; i < un.length; i++) { ua += un[i].added || 0; ur += un[i].removed || 0; }
+    return "Together, Commit takes these files whole: " + take +
+      (un.length ? ", including +" + ua + " \u2212" + ur + " no item wrote" : "") + ".";
+  }
+  return "Together, Commit takes only these items' own lines: " + take +
+    " (shared with " + window.__bramNameList(pred.entangledWith || []) + ").";
+};
+
+// Removed-line ownership for one path ({startLine, endLine, itemId | itemIds},
+// numbered by HEAD-side lines), from membership. Empty without a partition.
+window.__bramFileRemovedRuns = function (board, path) {
+  var byPath = board && board.membership && board.membership.byPath;
+  return (byPath && byPath[path] && byPath[path].removedRuns) || [];
+};
+
+// issue-425-retire-replay: a scope's view of a file, cut from the CURRENT diff
+// (what a commit takes), not from the item's claim-interval history. Keeps
+// each hunk that holds at least one line credited to `scope` (an item id, as
+// sole or joint owner, or "__unattributed" for lines nobody owns). Added lines
+// are matched by present line against `runs`, removed lines by HEAD line
+// against `removedRuns`. Hunks are git's, so a hunk mixing owners shows all of
+// them. Returns "" when no hunk qualifies.
+window.__bramScopedPatch = function (patch, runs, removedRuns, scope, allPatch) {
+  // "All" renders the displayed patch (plain `git diff`), so hunk navigation
+  // counts that one; `allPatch` carries it when the base differs.
+  if (!scope || scope === "__all") return (allPatch !== undefined ? allPatch : patch) || "";
+  if (!patch) return "";
+  var ownerAt = function (spans, n) {
+    var list = spans || [];
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      if (n >= s.startLine && n <= s.endLine) return s.itemIds || (s.itemId ? [s.itemId] : null);
+    }
+    return null;
+  };
+  var matches = function (owners) {
+    if (scope === "__unattributed") return !owners;
+    return !!owners && owners.indexOf(scope) !== -1;
+  };
+  var lines = patch.split("\n");
+  var head = [];
+  var hunks = [];
+  var cur = null;
+  var oldN = 0;
+  var newN = 0;
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i];
+    var m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(ln);
+    if (m) {
+      cur = { lines: [ln], keep: false };
+      hunks.push(cur);
+      oldN = parseInt(m[1], 10);
+      newN = parseInt(m[2], 10);
+      continue;
+    }
+    if (!cur) {
+      head.push(ln);
+      continue;
+    }
+    cur.lines.push(ln);
+    var c = ln.charAt(0);
+    if (c === "+") {
+      if (matches(ownerAt(runs, newN))) cur.keep = true;
+      newN++;
+    } else if (c === "-") {
+      if (matches(ownerAt(removedRuns, oldN))) cur.keep = true;
+      oldN++;
+    } else if (c === " ") {
+      oldN++;
+      newN++;
+    }
+  }
+  var out = head.slice();
+  var any = false;
+  for (var h = 0; h < hunks.length; h++) {
+    if (!hunks[h].keep) continue;
+    any = true;
+    out = out.concat(hunks[h].lines);
+  }
+  return any ? out.join("\n") : "";
 };
 
 // Scope selection is CONTROLLED and id-keyed, the diffKeys discipline one
@@ -4705,6 +4826,27 @@ window.__bramFileChangesCell = function (rec, rowBegun) {
   return total + suffix;
 };
 
+// issue-425-retire-replay: the pane's one source for per-line ownership runs
+// ({startLine, endLine, itemId | itemIds}, present-file lines): membership's.
+// With no partition yet there are none; the strip says ownership is pending.
+// Returns the payload's own array, never a copy: the File tab's rows are
+// memoized on input identity (see __bramFileContextRows).
+window.__bramFileRuns = function (board, path) {
+  if (!board) return undefined;
+  var byPath = board.membership && board.membership.byPath;
+  return byPath && byPath[path] ? byPath[path].runs : undefined;
+};
+
+// The same source as a path -> runs map, for readers that walk an item's files.
+window.__bramOwnershipRunsByPath = function (board) {
+  if (!board) return {};
+  var byPath = board.membership && board.membership.byPath;
+  if (!byPath) return {};
+  var out = {};
+  for (var p in byPath) if (byPath[p] && byPath[p].runs) out[p] = byPath[p].runs;
+  return out;
+};
+
 window.__bramItemOwnAdded = function (item, attribution) {
   var attr = attribution || {};
   var files = (item && item.changedFiles) || [];
@@ -4805,7 +4947,7 @@ window.__bramGateStrandedExitLine = function (claim, agentStatus, _tick) {
   return "The agent has finished \u2014 send a message to continue.";
 };
 
-window.__bramWorklist2Strip = function (item, claim, items, attribution, attributionTotals, agentStatus) {
+window.__bramWorklist2Strip = function (item, claim, items, attribution, agentStatus) {
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for
   // scannability, never buried in the expanded body.
@@ -4899,8 +5041,8 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
       // against its own plan -- "1 of 2 planned" is the signal that a commit
       // now would be committing something unfinished.
       // issue-327: lead with what a commit actually TAKES. Interval staging
-      // commits the item's own hunks, so the headline is its interval-patch
-      // shortstat (attributionTotals). On a contended path that is less than
+      // commits the item's own hunks, so the headline is the host's willCommit
+      // (issue-425-retire-replay: staged from the item's patch). On a contended path that is less than
       // the file total, which is shown as "on disk" context; for an
       // unentangled item the two are equal and it reads as it always did. The
       // old dual-number collapses into one honest figure. Items predating
@@ -4920,10 +5062,14 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
       // exclusive paths, interval take on entangled ones). The older
       // fallbacks — interval totals, then file sums — cover hosts that
       // predate it.
+      // issue-425-retire-replay: willCommit is the only source; the host
+      // omits it only while membership has no partition.
       var wc = item.willCommit;
-      var totals = (attributionTotals || {})[item.id];
-      var takesAdded = wc ? wc.added : totals ? totals.added : fileAdded;
-      var takesRemoved = wc ? wc.removed : totals ? totals.removed : fileRemoved;
+      // No partition yet: the host serves no take, and a whole-file sum
+      // would promise lines the gate may not take (Codex review).
+      if (!wc) return withCloses("Calculating ownership\u2026");
+      var takesAdded = wc.added;
+      var takesRemoved = wc.removed;
       var changedCount = split.exclusive.length + split.shared.length;
       var partialFlag =
         (cs.total || 0) > changedCount
@@ -4943,8 +5089,12 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
       // the redesign is the drawing-board item.
       // The one committable branch: here (and only here) the close reads as
       // the claim it is — the gate is about to offer the tick.
+      // issue-425-retire-replay (Codex review): when the host's precheck
+      // found the item's patch can't apply alone (commitDependsOn), the gate
+      // would refuse it, so the number is the item's own lines, not a promise.
+      var wcLabel = (item.commitDependsOn || []).length ? "Own changes +" : "Will commit +";
       return withCloses(
-        "Will commit +" + takesAdded + " −" + takesRemoved +
+        wcLabel + takesAdded + " −" + takesRemoved +
           partialFlag + sharedFlag,
         true,
       );

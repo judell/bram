@@ -472,6 +472,26 @@ the discipline for completing them serially.
   wrote "the new file and the top hunk only" before a whole-file commit
   that also took a neighbour's unowned line (demo, 2026-10-06) is the
   case this prevents.
+- **Committing several items at once: read the selection's prediction,
+  not the rows.** Each item's `willCommit` assumes it commits alone. The
+  gate routes the whole request at once, so together the items can
+  commit differently: two owners of one file, committed together, leave
+  no outside owner, and the gate takes the file whole, including lines
+  neither row counted. For a commit of more than one id, read
+  `GET /__worklist/will-commit?ids=<id1>,<id2>`:
+  - `mode: "whole-file"`: `added` / `removed` for the files taken whole,
+    plus `unowned: [{path, added, removed}]`, the lines no item wrote that
+    ride along (the success body's `unownedTaken` will name the same).
+  - `mode: "interval"`: the selection's own lines, `added` / `removed`,
+    with `entangledWith` naming the outside owners whose lines stay.
+  - `dependentPaths` present: the combined patch doesn't apply alone, and
+    the gate will refuse; `entangledWith` names whose work it depends on.
+  - `ready: false` or `stale: true`: membership isn't current yet; read
+    again in a moment.
+
+  Write the message from that answer. Summing the rows' `willCommit` is
+  the mistake this prevents (Codex's review of issue-425-retire-replay:
+  two rows of +1 −1 committed together as +3 −3).
 - **Refusals that mean "try again".** `commit refused: Bram couldn't work
   out which lines belong to which item right now…` (membership had no
   answer) and `commit refused: <path> changed while the commit was being

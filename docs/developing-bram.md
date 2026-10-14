@@ -799,6 +799,44 @@ both facts and the exact git toplevel before acting. Transfer a scenario
 branch with ordinary Git plumbing (for example, a bundle), but never add
 an upstream to the disposable instance.
 
+### Membership starter checks
+
+`scripts/membership-starter-check.py` turns the starters into a regression
+check for line ownership. It hydrates one board with every starter (or the
+ones named with `--starter`), launches the locally built Bram on it, waits for
+a fresh membership compute, and checks `/__worklist` against
+`EXPECTATIONS` in `scripts/demo_instance.py`: each path's owners and its
+single, joint and unowned line counts, paths that must have no entry, and
+selected items' `willCommit`. Any give-up (`op=membership … reason=`),
+unexplained line or conservation breach in the run's trace fails it too.
+
+```sh
+python3 -I scripts/membership-starter-check.py
+python3 -I scripts/membership-starter-check.py --starter new-file-left-out
+```
+
+The exit status is the number of failed checks. On failure the demo is left
+running on the failing board.
+
+**When to run it:** after a change to the membership engine, claim capture or
+the board serve, and before a release that touches them. The Rust tests cover
+the line rule's pure functions; this covers the integration they can't reach,
+which is where judell/bram#437 lived (the engine's scratch-index seed failed
+on two ordinary board shapes, and the field found it first).
+
+**One board is a canary.** All starters share one compute, so one broken
+starter can fail them all, as `membership-unanswerable` would have before
+#437. Rerun with `--starter` to narrow it down.
+
+**Adding a starter means adding its expectation** in the same change, written
+from what the starter is meant to show. When the engine and the table
+disagree, read the starter first: the table is a claim about intended
+behaviour, not a recording of current output. It can't check anything the pane
+computes (the board header, strip wording); those stay rendered checks.
+
+It needs a windowing session, so it runs on demand, not in CI, like
+`setup-harness.sh`.
+
 ### Relationship to the scripted sections
 
 The Worklist-gate walkthrough and the startup-dance harness are

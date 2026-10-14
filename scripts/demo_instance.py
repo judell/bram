@@ -66,6 +66,119 @@ STARTERS = (
     "membership-unanswerable",
 )
 
+# What membership should answer for each starter, checked by
+# scripts/membership-starter-check.py against a live demo's /__worklist.
+# Paths are relative to the repo with "{p}" for the starter's prefix. Per path:
+# `owners` (the sorted owner ids), and the (added, removed) line counts in
+# `single`, `joint` and `unowned`. A path listed under `absent` must have no
+# membership entry. `will_commit` pins an item's (added, removed) take where the
+# starter exists to pin that count. Each entry restates its starter's own
+# comment; when the engine and this table disagree, read the starter first.
+EXPECTATIONS: dict[str, dict[str, Any]] = {
+    # Two begun items each own one hunk of one file.
+    "disjoint-entanglement": {
+        "paths": {
+            "demo/{p}.txt": {"owners": ["{p}-bottom", "{p}-top"], "single": (2, 2)},
+        },
+    },
+    # prepare rewrote the line (its removal is prepare's); consume rewrote it
+    # again (the surviving addition is consume's).
+    "dependency": {
+        "paths": {
+            "demo/{p}.txt": {"owners": ["{p}-consume", "{p}-prepare"], "single": (1, 1)},
+        },
+    },
+    # replace rewrote draft's added line, so the surviving line is replace's and
+    # draft owns nothing (attribution-model.md, "Supersession and drift").
+    "supersession": {
+        "paths": {"demo/{p}.txt": {"owners": ["{p}-replace"], "single": (1, 0)}},
+    },
+    # Written with no claim open: nobody's.
+    "unattributed": {
+        "paths": {"demo/{p}.txt": {"owners": [], "unowned": (1, 1)}},
+    },
+    # Six items approved in one click share one claim: one jointly owned line.
+    "many-claimants": {
+        "paths": {
+            "demo/{p}.txt": {
+                "owners": [f"{{p}}-{n}" for n in range(1, 7)],
+                "joint": (1, 1),
+            },
+        },
+    },
+    # A proposed, never-begun item: nothing to attribute.
+    "expired-authorization": {"absent": ["demo/{p}.txt"]},
+    # Identical-context duplicates: the line rule is positional, so both edits
+    # are the aligning item's, and nothing is ambiguous.
+    "ambiguous-duplicate": {
+        "paths": {"demo/{p}.txt": {"owners": ["{p}-align"], "single": (2, 2)}},
+    },
+    # #367: a file created in one window and re-edited in a second counts its
+    # five lines once, not once per window.
+    "reedit-own-lines": {
+        "paths": {"demo/{p}-created.txt": {"owners": ["{p}-author"], "single": (5, 0)}},
+        "will_commit": {"{p}-author": (5, 0)},
+    },
+    # One begun item over five files; the listed-but-untouched one has no entry.
+    "multi-file": {
+        "paths": {
+            "demo/{p}/README.md": {"owners": ["{p}-feature"], "single": (80, 1)},
+            "demo/{p}/app.js": {"owners": ["{p}-feature"], "single": (3, 2)},
+            "demo/{p}/format.js": {"owners": ["{p}-feature"], "single": (3, 0)},
+            "demo/{p}/styles.css": {"owners": ["{p}-feature"], "single": (1, 1)},
+        },
+        "absent": ["demo/{p}/untouched.txt"],
+    },
+    # #406: the landed row's work is in HEAD, the reverted row left nothing.
+    "committed-outside": {"absent": ["demo/{p}-landed.txt", "demo/{p}-reverted.txt"]},
+    # #419: the author owns its new file and its top-line edit. The neighbour's
+    # edit to the shared file is unowned, because the neighbour doesn't declare
+    # that file (membership credits only begun items that declare the path).
+    "new-file-left-out": {
+        "paths": {
+            "demo/{p}-new.txt": {"owners": ["{p}-author"], "single": (3, 0)},
+            "demo/{p}-shared.txt": {
+                "owners": ["{p}-author"],
+                "single": (1, 1),
+                "unowned": (1, 1),
+            },
+        },
+    },
+    # #273: the item keeps its surviving lines (2, 3 and two appended, plus its
+    # removals of 2, 3 and 5); the chat turn's lines 5 and 8 are unowned.
+    "chat-edit-in-item-file": {
+        "paths": {
+            "demo/{p}-file.txt": {
+                "owners": ["{p}-author"],
+                "single": (4, 3),
+                "unowned": (2, 1),
+            },
+        },
+    },
+    # #432: the owner committed and left; the later item owns the shared file.
+    "joint-owner-committed": {
+        "paths": {"demo/{p}-shared.txt": {"owners": ["{p}-later"], "single": (1, 1)}},
+        "absent": ["demo/{p}-vendor.txt"],
+    },
+    # Two owners of one file plus one hunk nobody owns.
+    "entangled-with-unowned": {
+        "paths": {
+            "demo/{p}.txt": {
+                "owners": ["{p}-bottom", "{p}-top"],
+                "single": (2, 2),
+                "unowned": (1, 1),
+            },
+        },
+        "will_commit": {"{p}-top": (1, 1), "{p}-bottom": (1, 1)},
+    },
+    # #437: a declared file not yet created and an ignored declared file must
+    # not stop the compute; the planner owns its edit.
+    "membership-unanswerable": {
+        "paths": {"demo/{p}/code.txt": {"owners": ["{p}-planner"], "single": (1, 1)}},
+        "will_commit": {"{p}-planner": (1, 1)},
+    },
+}
+
 # The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
 # with git's default 3-line hunk context, the claim-era edit below produces
 # two hunks whose new-side block (context + added lines) is the same 7-line

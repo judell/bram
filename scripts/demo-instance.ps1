@@ -14,13 +14,26 @@ if ($launching) {
   }
 
   $running = @(Get-Process bram -ErrorAction SilentlyContinue)
-  $headIso = (& git -C $repoRoot log -1 --format=%cI 2>$null | Select-Object -Last 1)
-  if ($LASTEXITCODE -eq 0 -and $headIso) {
-    $headDate = [datetimeoffset]::Parse($headIso).LocalDateTime
+  # The binary depends only on src-tauri/ (app/** is served from disk through
+  # the junction), so compare it with the newest git-tracked file there. The
+  # old yardstick, HEAD's commit time, refused after scripts- or docs-only
+  # commits and missed uncommitted Rust edits (demo-launcher-staleness-from-
+  # rust-sources; demo_instance.py's assert_binary_current is the twin).
+  $tracked = @(& git -C $repoRoot ls-files src-tauri 2>$null)
+  if ($LASTEXITCODE -eq 0 -and $tracked.Count) {
+    $newestRel = $null
+    $newestTime = [datetime]::MinValue
+    foreach ($rel in $tracked) {
+      $full = Join-Path $repoRoot $rel
+      if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }  # deleted in the worktree
+      $t = (Get-Item -LiteralPath $full).LastWriteTime
+      if ($t -gt $newestTime) { $newestTime = $t; $newestRel = $rel }
+    }
     $exeInfo = Get-Item -LiteralPath $exe
-    if ($exeInfo.LastWriteTime -lt $headDate) {
+    if ($newestRel -and $exeInfo.LastWriteTime -lt $newestTime) {
       $pids = if ($running.Count) { $running.Id -join ", " } else { "none" }
-      throw "Stale bram.exe: binary predates HEAD. Running Bram PIDs: $pids. Stop only the intended PID, then rebuild with .\build.ps1."
+      $when = $newestTime.ToString("yyyy-MM-dd HH:mm")
+      throw "Stale bram.exe: older than $newestRel (changed $when). Running Bram PIDs: $pids. Stop only the intended PID, then rebuild with .\build.ps1."
     }
   }
   if (Test-Path -LiteralPath $guard -PathType Leaf) {

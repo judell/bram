@@ -766,8 +766,8 @@ scripts/demo-instance.sh stop
 On Windows, use the same verbs through
 `scripts\demo-instance.ps1`. Run the established `build.ps1` from a VS
 Developer PowerShell first. The launcher refuses a debug binary older
-than HEAD or a half-build where `bram-guard.exe` is newer than a locked
-`bram.exe`; it names existing Bram PIDs rather than killing them. On
+than its Rust sources (see below) or a half-build where `bram-guard.exe`
+is newer than a locked `bram.exe`; it names existing Bram PIDs rather than killing them. On
 every launch it verifies a directory junction named `app` beside the
 target-triple debug executable, pointing at this checkout's `app/`.
 That is the Windows disk-serving equivalent of Unix's repo-root
@@ -778,7 +778,12 @@ the corresponding PowerShell launch smoke on Windows before calling it
 done.
 
 Both launchers delegate process creation to the shared engine, which
-also refuses a binary older than this checkout's HEAD. It
+also refuses a stale binary: one older than the newest git-tracked file
+under `src-tauri/`, committed or not, since under the symlink (or
+junction) launch `app/**` is served from disk and only the Rust can make
+the binary stale. The refusal names that file. Until 2026-10-13 the test
+was "older than HEAD's commit time", which refused after scripts- and
+docs-only commits and missed uncommitted Rust edits. It
 captures stdout/stderr under the demo repo's git directory, records the
 exact child PID, enables tracing, and removes
 `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,

@@ -1211,17 +1211,40 @@ def scrub_agent_environment(env: Mapping[str, str]) -> dict[str, str]:
     return clean
 
 
+def newest_rust_source(root: Path) -> tuple[float, str] | None:
+    """The newest modification time among git-tracked files under src-tauri/,
+    and that file. Under the ./bram symlink launch the binary depends only on
+    src-tauri/ (app/** is served from disk), so this is the yardstick for a
+    stale binary. None when git can't list the files."""
+    listing = run_git(root, "ls-files", "-z", "src-tauri", check=False)
+    newest: tuple[float, str] | None = None
+    for rel in filter(None, listing.split("\0")):
+        try:
+            mtime = (root / rel).stat().st_mtime
+        except OSError:
+            continue  # deleted in the worktree
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, rel)
+    return newest
+
+
 def assert_binary_current(binary: Path) -> None:
-    """Refuse evidence from a debug binary older than the checked-out HEAD."""
-    head_raw = run_git(SOURCE_ROOT, "log", "-1", "--format=%ct", check=False)
-    if not head_raw.isdigit():
+    """Refuse evidence from a debug binary older than its Rust sources.
+
+    The test used to be "older than HEAD's commit time", which was wrong both
+    ways: any commit tripped it, scripts- and docs-only ones included, and an
+    uncommitted Rust edit, which never moves HEAD, slipped through. Comparing
+    against the newest tracked file under src-tauri/ catches committed and
+    uncommitted Rust changes and ignores everything else."""
+    newest = newest_rust_source(SOURCE_ROOT)
+    if newest is None:
         return
-    binary_mtime = binary.stat().st_mtime
-    head_time = int(head_raw)
-    if binary_mtime < head_time:
+    newest_mtime, newest_path = newest
+    if binary.stat().st_mtime < newest_mtime:
+        changed = time.strftime("%Y-%m-%d %H:%M", time.localtime(newest_mtime))
         raise DemoError(
-            "stale Bram binary: "
-            f"{binary} predates HEAD; rebuild before measuring this checkout"
+            f"stale Bram binary: {binary} is older than {newest_path} "
+            f"(changed {changed}); rebuild with cargo build"
         )
 
 

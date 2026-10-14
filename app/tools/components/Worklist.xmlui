@@ -27,6 +27,13 @@
        state transfer, 2026-08-20). Chevron Button + when-bound body per
        https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop —
        the old tab's proven shape. -->
+  <!-- issue-419-header-from-membership: the files table's ⓘ explanations.
+       One dialog for every cell; each ⓘ passes {title, body} to open(),
+       read here as $param
+       (https://www.xmlui.org/docs/reference/components/ModalDialog#open). -->
+  <ModalDialog id="fileCellInfoDialog" title="{$param &amp;&amp; $param.title}">
+    <Markdown content="{($param &amp;&amp; $param.body) || ''}" />
+  </ModalDialog>
   <DataSource
     id="worklist"
     url="/__worklist"
@@ -710,10 +717,18 @@
                      +404 −18") so the header is visibly the sum of the
                      column's first numbers — the addends were invisible
                      before (Jon, 2026-09-04: "still does not add up"). -->
-                <Text
-                  variant="code"
-                  fontSize="$fontSize-sm"
-                  value="{window.__bramFileChangesCell($item, rowBegun)}" />
+                <HStack gap="$space-1" verticalAlignment="center">
+                  <Text
+                    variant="code"
+                    fontSize="$fontSize-sm"
+                    value="{window.__bramFileChangesCell($item, rowBegun)}" />
+                  <!-- issue-419-header-from-membership: the ⓘ explanation,
+                       the Context tab's ghost-button pattern; one shared
+                       dialog takes the text as its open() parameter. -->
+                  <Button label="ⓘ" variant="ghost" size="xs"
+                    tooltip="Explain these changes"
+                    onClick="fileCellInfoDialog.open(window.__bramFileChangesExplain($item, rowItem, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))" />
+                </HStack>
               </Column>
               <!-- worklist-files-column-wider: 1* (was 3*), so the files column's 2*
                    gets two thirds of the flexible width, about half the table
@@ -727,17 +742,28 @@
                      file now; `planned:` = it merely declares this file —
                      zero of the CHANGES-column lines are its. Style-only
                      distinction failed twice: muting read as accident, and
-                     the counts read as belonging to the sharers. -->
-                <VStack gap="$space-0">
+                     the counts read as belonging to the sharers.
+                     issue-419-header-from-membership (Jon, 2026-10-13):
+                     relabelled `has lines here:` / `declares it, no lines
+                     here:`, from membership. The tense words described
+                     progress, while the column is about lines in this file:
+                     an item whose lines were all rewritten by another read
+                     `planned:`, as if it had never started. -->
+                <HStack gap="$space-1" verticalAlignment="center">
+                <VStack gap="$space-0" width="*">
                   <Text
                     when="{window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
                     overflowMode="flow"
-                    value="{'done: ' + window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
+                    value="{'has lines here: ' + window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
                   <Text
                     when="{window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
                     overflowMode="flow"
-                    value="{'planned: ' + window.__bramJoinIds(window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
+                    value="{'declares it, no lines here: ' + window.__bramJoinIds(window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
                 </VStack>
+                <Button label="ⓘ" variant="ghost" size="xs"
+                  tooltip="Explain who else lists this file"
+                  onClick="fileCellInfoDialog.open(window.__bramFileSharedExplain($item, rowItem, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))" />
+                </HStack>
               </Column>
             </Table>
             <Text

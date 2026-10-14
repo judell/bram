@@ -4898,8 +4898,156 @@ window.__bramItemOwnAdded = function (item, attribution) {
 // reason as d1798ca in the overlaps panel: an item that has not begun cannot
 // have written anything, so it cannot be sharing the file with anyone. That fix
 // did not reach this column because only the panel was looked at.
+// issue-419-header-from-membership: the owners membership credits with lines
+// on `path`, or null when the board carries no partition yet (fresh launch),
+// in which case callers keep the declared reading. Membership credits only
+// begun items that declare the path; an undeclared writer's lines are
+// unowned, which the header reports separately.
+window.__bramMembershipOwners = function (path) {
+  var m = window.__bramBoardMembership();
+  if (!m) return null;
+  var entry = m.byPath[path];
+  return (entry && entry.owners) || [];
+};
+
+// issue-419-header-from-membership: true when membership credits `item` no
+// line in any of its changed files (all of them rewritten by others). False
+// with no partition, or no changed files, so the strip keeps its old wording.
+window.__bramItemLinesAllRewritten = function (item) {
+  if (!window.__bramBoardMembership()) return false;
+  var changed = ((item && item.changedFiles) || []).filter(function (f) {
+    return f && ((f.added || 0) > 0 || (f.removed || 0) > 0);
+  });
+  if (!changed.length) return false;
+  return changed.every(function (f) {
+    var owners = window.__bramMembershipOwners(f.path) || [];
+    return owners.indexOf(item.id) === -1;
+  });
+};
+
+// issue-419-header-from-membership: the files table's ⓘ explanations (Jon,
+// 2026-10-13: "for these complex situations lets have a little i modal to
+// expand the explanation … for every changes and shared with"). Each returns
+// {title, body}; the body is Markdown for Worklist.xmlui's fileCellInfoDialog.
+function __bramPm(c) {
+  return "+" + ((c && c.added) || 0) + " −" + ((c && c.removed) || 0);
+}
+function __bramNonzero(c) {
+  return !!c && ((c.added || 0) > 0 || (c.removed || 0) > 0);
+}
+function __bramPerItemFor(entry, id) {
+  // This item's own lines and its jointly owned lines, separately.
+  var own = { added: 0, removed: 0 };
+  var joint = [];
+  ((entry && entry.perItem) || []).forEach(function (p) {
+    var members = p.members || [];
+    if (members.indexOf(id) === -1) return;
+    if (members.length === 1) {
+      own.added += (p.counts && p.counts.added) || 0;
+      own.removed += (p.counts && p.counts.removed) || 0;
+    } else {
+      joint.push(p);
+    }
+  });
+  return { own: own, joint: joint };
+}
+function __bramSharerReason(it, path, claim) {
+  if (!it || !window.__bramWorklist2Begun(it, claim)) return "hasn't started";
+  var wc = it.willCommit;
+  var did = wc && ((Number(wc.added) || 0) + (Number(wc.removed) || 0)) > 0;
+  if (did && window.__bramItemLinesAllRewritten(it)) {
+    return "started, but its lines here were rewritten by another item";
+  }
+  return "started, but hasn't written in this file";
+}
+
+window.__bramFileChangesExplain = function (rec, item, items, claim) {
+  var path = (rec && rec.path) || "";
+  var id = (item && item.id) || "";
+  var title = "Changes in " + path;
+  var lines = [];
+  if (rec && rec.status === "ignored") {
+    lines.push("**" + path + "** exists on disk, but `.gitignore` hides it from git, so git sees no change and there is nothing to commit.");
+    lines.push("To commit it, add a `!` exception to `.gitignore`, or force-stage it (`git add -f`).");
+    return { title: title, body: lines.join("\n\n") };
+  }
+  if (!__bramNonzero(rec)) {
+    lines.push("**" + path + "** is the same as in the last commit. " + id + " lists it, but nothing in it has changed yet.");
+    return { title: title, body: lines.join("\n\n") };
+  }
+  var kind = rec.status === "new" ? " (a new file)" : rec.status === "deleted" ? " (deleted)" : "";
+  lines.push("**" + path + "**" + kind + " differs from the last commit by **" + __bramPm(rec) + "** lines. That's the whole file's change, whoever made it.");
+  var m = window.__bramBoardMembership();
+  var entry = m && m.byPath[path];
+  if (!m) {
+    lines.push("Bram hasn't worked out who wrote which of these lines yet; this appears shortly after launch.");
+    return { title: title, body: lines.join("\n\n") };
+  }
+  var mine = __bramPerItemFor(entry, id);
+  var who = ["- **" + id + "** (this item): " + __bramPm(mine.own)];
+  mine.joint.forEach(function (p) {
+    who.push("- jointly with " + p.members.filter(function (x) { return x !== id; }).join(", ") + " (approved in one click): " + __bramPm(p.counts));
+  });
+  ((entry && entry.perItem) || []).forEach(function (p) {
+    var members = p.members || [];
+    if (members.indexOf(id) !== -1) return;
+    who.push("- " + members.join(" and ") + (members.length > 1 ? " (jointly)" : "") + ": " + __bramPm(p.counts));
+  });
+  if (__bramNonzero(entry && entry.unowned)) {
+    who.push("- no item: " + __bramPm(entry.unowned) + ". Written while no item that lists this file was being worked on: in a chat turn, by hand, or by an item that doesn't list it.");
+  }
+  lines.push("Who wrote those lines:\n\n" + who.join("\n"));
+  var others = ((entry && entry.owners) || []).filter(function (x) { return x !== id; });
+  if (window.__bramItemLinesAllRewritten(item)) {
+    lines.push(id + "'s own earlier edits here were all rewritten by " + others.join(", ") + ", so none of its lines are in the file now. Commit " + others.join(", ") + " first.");
+  } else if (others.length && typeof rec.takeAdded === "number") {
+    lines.push("Because " + others.join(", ") + " also " + (others.length === 1 ? "has" : "have") + " lines here, committing " + id + " on its own takes only its own lines, **+" + rec.takeAdded + " −" + rec.takeRemoved + "**, hunk by hunk. Committing them together takes the whole file.");
+  } else if (!others.length) {
+    lines.push("Committing " + id + " takes the whole file, **" + __bramPm(rec) + "**" + (__bramNonzero(entry && entry.unowned) ? ", including the lines no item wrote. The commit reports those as taken." : "."));
+  }
+  return { title: title, body: lines.join("\n\n") };
+};
+
+window.__bramFileSharedExplain = function (rec, item, items, claim) {
+  var path = (rec && rec.path) || "";
+  var id = (item && item.id) || "";
+  var title = "Who else lists " + path;
+  var sharers = (rec && rec.sharedWith) || [];
+  if (!sharers.length) {
+    return { title: title, body: "No other item lists **" + path + "**, so this file doesn't tie " + id + "'s commit to any other item's." };
+  }
+  var byId = {};
+  (items || []).forEach(function (it) { if (it && it.id) byId[it.id] = it; });
+  var m = window.__bramBoardMembership();
+  var entry = m && m.byPath[path];
+  var withLines = [];
+  var rows = sharers.map(function (s) {
+    if (!m) return "- **" + s + "**: " + (window.__bramWorklist2Begun(byId[s], claim) ? "started" : "hasn't started");
+    var c = __bramPerItemFor(entry, s).own;
+    if ((entry && entry.owners || []).indexOf(s) !== -1) {
+      withLines.push(s);
+      return "- **" + s + "** has lines here: " + __bramPm(c) + ".";
+    }
+    return "- **" + s + "** lists it, but has no lines here: " + __bramSharerReason(byId[s], path, claim) + ".";
+  });
+  var body = ["Other items that list **" + path + "**:", rows.join("\n")];
+  if (!m) {
+    body.push("Bram hasn't worked out who wrote which lines yet, so this shows only who has started.");
+  } else if (withLines.length && window.__bramItemLinesAllRewritten(item)) {
+    body.push(id + "'s own edits here were rewritten by " + withLines.join(", ") + ", so it has no lines in this file now. Commit " + withLines.join(", ") + " first.");
+  } else if (withLines.length) {
+    body.push("Because " + withLines.join(", ") + " " + (withLines.length === 1 ? "has" : "have") + " lines in this file, committing " + id + " on its own takes only its own lines, hunk by hunk. Committing them together takes the whole file.");
+  } else {
+    body.push("None of them has lines here now, so committing " + id + " takes this file without involving them.");
+  }
+  return { title: title, body: body.join("\n\n") };
+};
+
 window.__bramSharedWithBegun = function (file, items, claim) {
   var sharers = (file && file.sharedWith) || [];
+  // "done": a sharer that actually wrote lines here.
+  var owners = file && window.__bramMembershipOwners(file.path);
+  if (owners) return sharers.filter(function (s) { return owners.indexOf(s) !== -1; });
   var list = items || [];
   var byId = {};
   for (var i = 0; i < list.length; i++) if (list[i] && list[i].id) byId[list[i].id] = list[i];
@@ -4918,6 +5066,10 @@ window.__bramSharedWithBegun = function (file, items, claim) {
 // so the credit lie d1798ca fixed cannot return through this door.
 window.__bramSharedWithPlanned = function (file, items, claim) {
   var sharers = (file && file.sharedWith) || [];
+  // "planned": everyone who declares it but has written nothing here yet,
+  // begun or not, so a begun-but-idle declarant appears in one column.
+  var owners = file && window.__bramMembershipOwners(file.path);
+  if (owners) return sharers.filter(function (s) { return owners.indexOf(s) === -1; });
   var list = items || [];
   var byId = {};
   for (var i = 0; i < list.length; i++) if (list[i] && list[i].id) byId[list[i].id] = list[i];
@@ -5156,8 +5308,17 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
       return withCloses("No changes of its own yet");
     }
     var blockers = window.__bramItemShareBlockers(item, items, claim);
+    // issue-419-header-from-membership: superseded. The item did work in its
+    // windows (ownLines > 0 above), but membership credits it no line in any
+    // of its changed files: another item rewrote them. "Shares its changed
+    // files" didn't say why it should wait (Jon, 2026-10-13: "i am unclear
+    // what this is saying").
+    var rewritten = blockers.length && window.__bramItemLinesAllRewritten(item);
     return withCloses(
-      blockers.length
+      rewritten
+        ? "Its lines here were rewritten by " + blockers.join(", ") + " · commit " +
+            (blockers.length === 1 ? "that" : "those") + " first"
+        : blockers.length
         ? "Shares its changed files with " + blockers.join(", ") + " · commit " +
             (blockers.length === 1 ? "that" : "those") + " first"
         : "Its changes are all in shared files",
@@ -6072,17 +6233,35 @@ window.__bramOverlapHeaderLine = function (items, claim) {
   var plannedClause = plannedOnly
     ? " \u00b7 " + plannedOnly + " file" + (plannedOnly === 1 ? "" : "s") + " planned by multiple items"
     : "";
+  // issue-419-header-from-membership: #419's board said "no shared files"
+  // while a commit would take a line nobody's item wrote (an undeclared
+  // neighbour's edit, which membership leaves unowned). Say so here, before
+  // the commit's own unownedTaken disclosure.
+  var unownedClause = window.__bramUnownedFilesClause();
   if (!index.length) {
     return head + (declaredIdx.length
       ? " \u00b7 no shared files changed" + plannedClause
-      : " \u00b7 no shared files");
+      : " \u00b7 no shared files") + unownedClause;
   }
   var touched = {};
   index.forEach(function (e) { e.claimants.forEach(function (id) { touched[id] = true; }); });
   var k = Object.keys(touched).length;
   return head + " \u00b7 " + index.length + " shared file" + (index.length === 1 ? "" : "s") +
     " across " + (k === n && n > 1 ? "all " : "") + k + " item" + (k === 1 ? "" : "s") +
-    plannedClause;
+    plannedClause + unownedClause;
+};
+
+// issue-419-header-from-membership: " · N file(s) with lines no item owns",
+// from membership's per-path unowned bucket; "" with none, or with no
+// partition yet.
+window.__bramUnownedFilesClause = function () {
+  var m = window.__bramBoardMembership();
+  if (!m) return "";
+  var n = Object.keys(m.byPath).filter(function (path) {
+    var u = (m.byPath[path] || {}).unowned || {};
+    return (u.added || 0) > 0 || (u.removed || 0) > 0;
+  }).length;
+  return n ? " · " + n + " file" + (n === 1 ? "" : "s") + " with lines no item owns" : "";
 };
 
 // The overlap that MATTERS AT THE GATE: declared overlap intersected with
@@ -6100,6 +6279,24 @@ window.__bramOverlapHeaderLine = function (items, claim) {
 // won't-build) -- and two items on a dirty shared file is contention
 // PRECISELY because which of them wrote it cannot be known.
 window.__bramOverlapChangedIndex = function (items, claim) {
+  // issue-419-header-from-membership: the comment below predates membership.
+  // Bram does now know who wrote which lines: membership credits each changed
+  // line to the claim window that wrote it, among begun items that declare
+  // the path. So a changed path is shared exactly when membership credits two
+  // or more owners there; a begun declarant with no lines in the file isn't
+  // sharing it. The declared reading below stays as the fallback for a board
+  // with no partition yet.
+  var m = window.__bramBoardMembership();
+  if (m) {
+    var shared = [];
+    Object.keys(m.byPath).sort().forEach(function (path) {
+      var owners = ((m.byPath[path] || {}).owners || []).slice().sort();
+      if (owners.length >= 2) {
+        shared.push({ path: path, claimants: owners, begunCount: owners.length, total: owners.length });
+      }
+    });
+    return shared;
+  }
   var declared = window.__bramOverlapIndex(items, claim) || [];
   if (!declared.length) return [];
   var list = items || [];

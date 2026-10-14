@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import fnmatch
 import hashlib
 import json
 import os
@@ -1388,6 +1389,40 @@ def status(repo: Path) -> dict[str, Any]:
     }
 
 
+def prune_scenarios(
+    repo: Path, matches: Sequence[str], keep: int, dry_run: bool, gc: bool
+) -> tuple[list[str], list[str]]:
+    """Remove scenario branches matching any glob in `matches`, keeping the
+    newest `keep` of them and never the active scenario. Returns (removed,
+    skipped). "Newest" is by name, not commit date: scenario commits carry
+    fixed dates (`_fixed_git_env`) so their trees are reproducible, and the
+    starter check's `check-YYYYMMDD-HHMMSS` names sort in time order."""
+    repo = validate_demo(repo)
+    active_path = _runtime_root(repo) / "active.json"
+    active = (read_json(active_path) if active_path.exists() else {}).get("name")
+    names = run_git(
+        repo, "for-each-ref", "--format=%(refname:strip=3)", "refs/heads/scenario"
+    ).splitlines()
+    matched = sorted(
+        (n for n in names if any(fnmatch.fnmatchcase(n, m) for m in matches)), reverse=True
+    )
+    removed: list[str] = []
+    skipped: list[str] = []
+    for i, name in enumerate(matched):
+        if name == active:
+            skipped.append(f"{name} (active)")
+            continue
+        if i < keep:
+            skipped.append(f"{name} (kept)")
+            continue
+        if not dry_run:
+            run_git(repo, "branch", "-D", f"scenario/{name}")
+        removed.append(name)
+    if gc and not dry_run:
+        run_git(repo, "gc", "--prune=now", "--quiet")
+    return removed, skipped
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1427,6 +1462,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = sub.add_parser("status", help="show scenarios and live fixture state")
     status_parser.add_argument("--json", action="store_true")
+
+    prune = sub.add_parser(
+        "prune",
+        help="remove scenario branches (default: the starter check's check-* boards)",
+    )
+    prune.add_argument(
+        "--match",
+        action="append",
+        help="glob over scenario names; repeatable (default: check-*)",
+    )
+    prune.add_argument(
+        "--keep", type=int, default=0, help="keep the newest N matches, newest by name"
+    )
+    prune.add_argument("--dry-run", action="store_true", help="list, change nothing")
+    prune.add_argument(
+        "--gc", action="store_true", help="then git gc --prune=now to reclaim the space"
+    )
     return parser
 
 
@@ -1464,6 +1516,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"items: {value['items']}  claims: {len(value['claimRefs'])}")
                 print(f"dirty paths: {len(value['dirty'])}  pid: {value['pid'] or '-'}")
                 print(f"log: {value['log']}")
+        elif args.command == "prune":
+            removed, skipped = prune_scenarios(
+                args.repo, args.match or ["check-*"], args.keep, args.dry_run, args.gc
+            )
+            verb = "would remove" if args.dry_run else "removed"
+            for name in removed:
+                print(f"{verb} scenario/{name}")
+            for note in skipped:
+                print(f"kept scenario/{note}")
+            print(f"{verb} {len(removed)} scenario(s)" + (" and ran gc" if args.gc and not args.dry_run else ""))
         return 0
     except DemoError as exc:
         print(f"demo-instance: {exc}", file=sys.stderr)

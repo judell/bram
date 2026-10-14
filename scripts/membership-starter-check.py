@@ -42,6 +42,7 @@ sys.path.insert(0, str(SCRIPTS))
 import demo_instance  # noqa: E402
 
 LAUNCHER = SCRIPTS / "demo-instance.sh"
+KEEP_BOARDS = 3  # passing check-* boards kept after a run
 FRESH = re.compile(r"\[claim-interval\] op=membership paths=\d+ .*cached=false fresh=true")
 # A compute that gave up: `paths=0 … cached=false fresh=false`, with a
 # `reason=` since #437 and without one on older builds. (Since #437 an empty
@@ -176,6 +177,9 @@ def main() -> int:
         print(f"demo left running on scenario/{name}; stop with scripts/demo-instance.sh stop")
     else:
         run(repo, "stop")
+        # One board per run piles up; a passing board is never looked at again.
+        # A failing run prunes nothing, so its board survives for inspection.
+        run(repo, "prune", "--match", "check-*", "--keep", str(KEEP_BOARDS))
     return len(failures)
 
 

@@ -718,6 +718,7 @@ different location. The useful verbs are:
 | `reset` | rehydrate the active scenario |
 | `status [--json]` | report scenarios, active state, item/ref counts, PID, and log path |
 | `launch` / `stop` | start the real binary or stop only its recorded PID |
+| `prune [--match GLOB] [--keep N] [--dry-run] [--gc]` | remove scenario branches matching the glob (default `check-*`, the starter check's boards), keeping the newest N by name and never the active scenario; captured scenarios are untouched unless named. `--gc` then reclaims the space |
 
 The starter names are `disjoint-entanglement`, `dependency`,
 `supersession`, `unattributed`, `many-claimants`,
@@ -816,7 +817,9 @@ python3 -I scripts/membership-starter-check.py --starter new-file-left-out
 ```
 
 The exit status is the number of failed checks. On failure the demo is left
-running on the failing board.
+running on the failing board. After a passing run it prunes its own boards to
+the newest three (`prune --match 'check-*' --keep 3`); a failing run prunes
+nothing.
 
 **When to run it:** after a change to the membership engine, claim capture or
 the board serve, and before a release that touches them. The Rust tests cover

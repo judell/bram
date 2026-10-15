@@ -45,7 +45,13 @@ __bram_prompt() {
     __bram_at_prompt=
     printf '\033]7779;bram;exec\007'
     eval "$pc"
+    local rc=$?
     PROMPT_COMMAND=__bram_prompt
+    # The inherited command has returned (e.g. an attach that ended), so the
+    # shell is at a prompt again: say so, or the host keeps believing a
+    # command is still running.
+    __bram_at_prompt=1
+    printf '\033]7779;bram;prompt;%s\007' "$rc"
   fi
 }
 PROMPT_COMMAND=__bram_prompt

@@ -34,25 +34,22 @@ __bram_preexec() {
 __bram_inherited_pc="$PROMPT_COMMAND"
 __bram_prompt() {
   local s=$?
-  printf '\033]7779;bram;prompt;%s\007' "$s"
-  __bram_at_prompt=1
   if [ -n "$__bram_inherited_pc" ]; then
     local pc="$__bram_inherited_pc"
     __bram_inherited_pc=
     # The DEBUG trap does not fire for commands run inside a function, so say
     # a command started ourselves; otherwise the host keeps believing a bare
     # shell is in the foreground and refuses to type (reason=shell-foreground).
+    # No prompt is reported before it: the shell is not ready for input until
+    # the inherited command returns (e.g. an attach that ended).
     __bram_at_prompt=
     printf '\033]7779;bram;exec\007'
     eval "$pc"
-    local rc=$?
+    s=$?
     PROMPT_COMMAND=__bram_prompt
-    # The inherited command has returned (e.g. an attach that ended), so the
-    # shell is at a prompt again: say so, or the host keeps believing a
-    # command is still running.
-    __bram_at_prompt=1
-    printf '\033]7779;bram;prompt;%s\007' "$rc"
   fi
+  printf '\033]7779;bram;prompt;%s\007' "$s"
+  __bram_at_prompt=1
 }
 PROMPT_COMMAND=__bram_prompt
 trap '__bram_preexec' DEBUG

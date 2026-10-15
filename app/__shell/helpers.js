@@ -3546,6 +3546,26 @@ window.__bramFooterContextLine = function (claim, proposing, sel, agentStatus) {
   return parts.join(" · ");
 };
 
+// footer-selection-uncheck-in-place: the footer offers each selected id as a
+// ticked box you can untick right there — but only for a plain selection.
+// While a claim is live the line names the claimed ids instead, and a claimed
+// row can't be unticked in the Worklist either (__bramWorklist2RowSelectable),
+// so the footer doesn't offer it.
+window.__bramFooterSelectionEditable = function (claim, sel) {
+  var ids = (claim && claim.ids) || [];
+  return !ids.length && !!(sel && sel.length);
+};
+
+// Untick one id from the footer. Writes the shared store the gate bar already
+// writes; Worklist.xmlui's w2SelStore bridge mirrors it back into the row
+// checkboxes, and the message addressee line follows the store.
+window.__bramW2Unselect = function (id) {
+  var cur = window.__bramW2Selection || [];
+  var next = cur.filter(function (x) { return x !== id; });
+  window.__bramIframeTrace("w2-selection", { op: "footer-unselect", id: String(id), count: next.length });
+  if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection(next);
+};
+
 // issue-265: the per-item indicator's kind, resolved from ONE source with a
 // bounded local echo. Host state wins whenever the claim covers the item;
 // the echo only fills the gap between the click and the host's sentinel

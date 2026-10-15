@@ -1,0 +1,10 @@
+<!-- A ticked Checkbox, drawn: the footer's selection chips can't use a live
+     Checkbox (footer-selection-uncheck-in-place). The box takes the Icon's
+     color (currentColor); the check is XMLUI's own checkbox indicator, the
+     clip-path polygon from xmlui/src/components/Toggle/Toggle.module.scss
+     (14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%) mapped into the
+     center half of the box, as the real ::before is 0.5em of a 1em box. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect x="0.5" y="0.5" width="15" height="15" rx="3" fill="currentColor" />
+  <polygon points="5.12,7.52 4,9.2 8,12 12,5.28 10.4,4 7.44,8.96" fill="#ffffff" />
+</svg>

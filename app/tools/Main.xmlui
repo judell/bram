@@ -935,12 +935,42 @@
             when="{!!window.__bramFooterContextLine(headerInflightClaim.value, !!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing), footerSel.value, mainAgentStatus.value)}"
             width="*" verticalAlignment="center" var.footerProposingFlag="{!!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing)}">
             <Text
-              when="{!!window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value)}"
+              when="{!!window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value) &amp;&amp; !window.__bramFooterSelectionEditable(headerInflightClaim.value, footerSel.value)}"
               width="100%"
               fontSize="$fontSize-md"
               fontStyle="italic"
               color="$color-primary-600"
               value="{window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value)}" />
+            <!-- footer-selection-uncheck-in-place: a plain selection (no
+                 claim) shows each id behind a ticked box; clicking the box
+                 or the id drops it from the selection right here. The box is
+                 drawn, not a Checkbox: a live Checkbox inside Items keeps its
+                 own state by position (an untick would carry to the next id),
+                 and a readOnly one swallowed the click (live, 2026-10-15: the
+                 dom-click reached the INPUT, the row onClick never fired).
+                 Which ids render is decided by the data, per
+                 https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop
+                 (Icon: https://www.xmlui.org/docs/reference/components/Icon;
+                 custom icon registered in config.json under icon.*).
+                 Wraps because ids are long. -->
+            <HStack
+              when="{window.__bramFooterSelectionEditable(headerInflightClaim.value, footerSel.value)}"
+              width="100%" wrapContent="true" gap="$space-1" verticalAlignment="center">
+              <Text fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="Selected in Worklist:" />
+              <Items data="{footerSel.value}">
+                <HStack
+                  gap="$space-0_5"
+                  verticalAlignment="center"
+                  tooltip="Untick to remove from the selection"
+                  onClick="window.__bramW2Unselect($item)">
+                  <!-- The real checked box, drawn (resources/checkbox-checked.svg),
+                       in its theme color backgroundColor-checked-Checkbox. -->
+                  <Icon name="checkbox-checked" size="1em" color="$color-primary-500" />
+                  <Text fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="{$item}" />
+                </HStack>
+              </Items>
+              <Text when="{footerProposingFlag}" fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="· Proposing a new item…" />
+            </HStack>
           </HStack>
         </HStack>
         <!-- switch-to-transcript-on-action: the indexing status moved to the

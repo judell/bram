@@ -1,0 +1,5 @@
+{
+  "xmluiConfig": { "compileScripts": true },
+  "themes": ["themes/bram.json"],
+  "defaultTheme": "bram"
+}

@@ -1,0 +1,101 @@
+<App>
+  <!-- A frozen excerpt of a Bram Studio session, rendered with the row markup
+       of Bram's transcript (app/tools/components/SessionDetail.xmlui, which
+       mirrors Transcript.xmlui) minus the find bar. turns.json is the
+       session's /__turns projection, sliced to the excursion, with each
+       Edit's word-diff annotation stored alongside it. One page, one scroll:
+       the List has no firm height, so it hands its scroll to the page
+       (https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region). -->
+  <DataSource id="turns" url="turns.json" />
+  <variable name="events"
+    value="{turns.value ? window.__bramTranscriptEventsFromTurns(turns.value, null) : []}" />
+
+  <VStack gap="$space-2" paddingVertical="$space-4" paddingHorizontal="$space-24">
+    <!-- Placeholders: https://www.xmlui.org/docs/reference/components/H1 -->
+    <H1 value="Screencast repair with Bram, Claude, and a handful of command-line tools" />
+
+    <!-- data is a URL, not an expression: https://www.xmlui.org/docs/reference/components/Markdown -->
+    <Markdown data="summary.md"/>
+
+    <List id="sessionList"
+      var.expanded="{[]}"
+      data="{events}"
+      idKey="id">
+      <property name="emptyListTemplate"><Fragment/></property>
+      <VStack gap="$space-1" paddingVertical="$space-1" borderBottom="1px solid $borderColor">
+          <!-- user message -->
+          <VStack
+            when="{$item.kind === 'user'}"
+            backgroundColor="$color-surface-100"
+            padding="$space-2"
+            borderRadius="$borderRadius"
+            gap="$space-1">
+            <Text value="You" fontWeight="bold" color="$color-primary-600" fontSize="$fontSize-sm" />
+            <Markdown content="{window.__bramHardBreaks($item.text)}" interpolateBindings="false" allowHtml="false" />
+          </VStack>
+          <!-- assistant text, and thinking (rendered as reply text, as in Bram) -->
+          <Markdown
+            when="{$item.kind === 'text' || $item.kind === 'thinking'}"
+            interpolateBindings="false" allowHtml="false"
+            content="{$item.text}" />
+          <!-- tool call (foldable) -->
+          <VStack when="{$item.kind === 'tool'}" gap="$space-0_5">
+            <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item)">
+              <HStack gap="$space-1" verticalAlignment="center">
+                <Text
+                  fontSize="$fontSize-sm"
+                  fontWeight="bold"
+                  tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                  value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name + ($item.nameDetail ? ' (' + $item.nameDetail + ')' : '')}" />
+                <Text
+                  when="{window.__bramRowIntent($item)}"
+                  fontSize="$fontSize-sm"
+                  color="$textColor-secondary"
+                  maxLines="1"
+                  tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                  value="{'— ' + window.__bramRowIntent($item)}" />
+                <Text
+                  when="{!window.__bramRowIntent($item) &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
+                  fontSize="$fontSize-sm"
+                  color="$textColor-secondary"
+                  tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                  value="{$item.summary}" />
+              </HStack>
+            </Link>
+            <VStack
+              when="{(expanded || []).includes($item.id)}"
+              gap="$space-1"
+              backgroundColor="$color-surface-50"
+              padding="$space-2"
+              borderRadius="$borderRadius">
+              <Markdown
+                when="{window.__bramShowToolCommand($item)}"
+                overflowMode="scroll"
+                interpolateBindings="false" allowHtml="false"
+                content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description)}" />
+              <Markdown
+                when="{$item.commandMarkdown}"
+                overflowMode="flow"
+                content="{$item.commandMarkdown}" interpolateBindings="false" allowHtml="false" />
+              <DiffView
+                when="{$item.diff}"
+                text="{$item.diff}"
+                annotated="{$item.diffAnnotated}" />
+              <Markdown
+                when="{$item.result &amp;&amp; !$item.isError}"
+                overflowMode="{window.__bramFreeformResultMode($item)}"
+                breakMode="word"
+                interpolateBindings="false" allowHtml="false"
+                content="{window.__bramFormatToolResult($item.result, $item.name, $item.summary)}" />
+              <Text
+                when="{$item.result &amp;&amp; $item.isError}"
+                fontFamily="$fontFamily-monospace"
+                fontSize="$fontSize-xs"
+                color="$color-danger-600"
+                value="{$item.result}" />
+            </VStack>
+          </VStack>
+      </VStack>
+    </List>
+  </VStack>
+</App>

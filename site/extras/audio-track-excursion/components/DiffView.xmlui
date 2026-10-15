@@ -1,0 +1,28 @@
+<Component name="DiffView">
+  <!-- Static variant of app/tools/components/DiffView.xmlui, compact mode only.
+       Bram's version fetches word-diff segments from the host's
+       /__diff/annotate; here they were fetched once at build time and arrive
+       as $props.annotated. Same rows, same Theme, same Text segments. -->
+  <Theme
+    backgroundColor-mark-diffAdd-Text="$color-success-200"
+    backgroundColor-mark-diffDel-Text="$color-danger-200">
+    <VStack
+      gap="0"
+      padding="$space-2"
+      backgroundColor="$color-surface-50"
+      borderRadius="$borderRadius"
+      overflowX="auto">
+      <Items data="{diffViewRows($props.annotated, $props.text)}">
+        <Text
+          width="100%"
+          whiteSpace="pre-wrap"
+          fontFamily="$fontFamily-monospace"
+          fontSize="$fontSize-sm"
+          backgroundColor="{$item.bg}"
+          color="{$item.color}"
+          paddingHorizontal="$space-2"
+          segments="{$item.segments}" />
+      </Items>
+    </VStack>
+  </Theme>
+</Component>

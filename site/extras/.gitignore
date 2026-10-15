@@ -1,0 +1,3 @@
+# Copied from app/vendor/ by .github/workflows/pages.yml at deploy time;
+# copy it by hand for a local preview. Not committed twice.
+vendor/

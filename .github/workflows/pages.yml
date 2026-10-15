@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "app/vendor/xmlui-standalone.umd.js"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -29,6 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # site/extras/ pages run on Bram's own XMLUI engine. Copy it in rather
+      # than commit a second 5 MB copy (site/extras/.gitignore).
+      - name: Copy the XMLUI engine for site/extras
+        run: mkdir -p site/extras/vendor && cp app/vendor/xmlui-standalone.umd.js site/extras/vendor/
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site

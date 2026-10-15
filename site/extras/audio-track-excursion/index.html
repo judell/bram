@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Refining the audio track</title>
+    <!-- Boots like app/tools/index.html: config first, then the transcript
+         helpers (they must be on window before xmlui-standalone snapshots it),
+         then the engine. The engine is copied into ../vendor/ at deploy time
+         by .github/workflows/pages.yml rather than committed twice. -->
+    <script>
+      (function () {
+        var cfg = {};
+        try {
+          var x = new XMLHttpRequest();
+          x.open("GET", "config.json", false);
+          x.send();
+          if (x.status >= 200 && x.status < 300 && x.responseText) cfg = JSON.parse(x.responseText);
+        } catch (e) {}
+        window.APP_CONFIG = cfg;
+        window.appGlobals = cfg.appGlobals || {};
+      })();
+    </script>
+    <script src="extras.js"></script>
+    <script src="../vendor/xmlui-standalone.umd.js"></script>
+    <style>
+      /* Same override as app/tools/index.html: the bundle's CSS sets
+         user-select: none broadly, which blocks selecting transcript text. */
+      p, h1, h2, h3, h4, h5, h6, li, code, pre, blockquote,
+      td, th, dt, dd, figcaption,
+      [class*="_text_"], [class*="_paragraph_"], [class*="_markdown_"],
+      [class*="_heading_"] {
+        user-select: text;
+        -webkit-user-select: text;
+      }
+    </style>
+  </head>
+  <body></body>
+</html>

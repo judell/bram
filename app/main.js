@@ -215,12 +215,40 @@ window.submitTerminalTurn = function (text) {
   }
 };
 
+// xterm-renderer (#441): which renderer xterm draws with, and whether the
+// WebGL context was lost. A loss used to be disposed silently, so the trace
+// couldn't say when xterm had switched renderers. One line at boot,
+// otherwise only on a loss.
+const logXtermRenderer = (fields) => {
+  invoke("log_from_right_pane", {
+    payload: {
+      kind: "iframe-trace",
+      subkind: "xterm-renderer",
+      context: "parent",
+      ...fields,
+    },
+  }).catch(() => {});
+};
 try {
   const webgl = new WebglAddon.WebglAddon();
   term.loadAddon(webgl);
-  webgl.onContextLoss(() => webgl.dispose());
+  logXtermRenderer({ op: "active", renderer: "webgl" });
+  webgl.onContextLoss(() => {
+    logXtermRenderer({
+      op: "context-lost",
+      terminal_hidden: document.body.classList.contains("terminal-hidden"),
+      uptime_ms: Math.round(performance.now()),
+    });
+    webgl.dispose();
+    logXtermRenderer({ op: "fallback", renderer: "dom" });
+  });
 } catch (e) {
   console.warn("webgl addon failed, falling back to canvas/dom renderer", e);
+  logXtermRenderer({
+    op: "load-failed",
+    renderer: "fallback",
+    error: String((e && e.message) || e).slice(0, 200),
+  });
 }
 
 const captureViewport = () => {

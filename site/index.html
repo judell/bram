@@ -69,12 +69,12 @@
   .caption { color: var(--muted); font-size: 0.92rem; margin-top: 8px; text-align: center; }
   table.links { width: 100%; border-collapse: collapse; table-layout: fixed; }
   table.links col.date { width: 7.5rem; }
-  /* One width for every table, sized for the longest screencast title, so
-     the link column lines up across Screencasts, Blog and Elsewhere. */
-  table.links col.src { width: 10.5rem; }
+  /* Share column widths across Screencasts, Blog and Elsewhere;
+     wrap longer labels so their full text stays readable. */
+  table.links col.src { width: 12rem; }
   table.links td { padding: 6px 12px 6px 0; vertical-align: top; }
   table.links td.date { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
-  table.links td.src { white-space: nowrap; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  table.links td.src { color: var(--muted); overflow-wrap: anywhere; }
   @media (max-width: 560px) { table.links col.src { width: 0; } table.links td.src { padding: 0; font-size: 0; } }</style>
 </head>
 <body>

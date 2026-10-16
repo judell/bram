@@ -8474,6 +8474,7 @@ window.bramStagePastedImage = function (file, target) {
           var entry = { path: json.path, target: stageTarget };
           window.bramPendingPastedImages.push(entry);
           bramNotifyPasteState();
+          __bramQueueImagesChanged(stageTarget);
           bramTracePasteImage("staged", {
             path: json.path,
             target: stageTarget,
@@ -8559,6 +8560,7 @@ window.bramRemovePastedImagePath = function (path) {
       arr.splice(i, 1);
       bramTracePasteImage("removed", { path: path, target: e.target || "", pendingAfter: bramPendingPastedImageSummary() });
       bramNotifyPasteState();
+      __bramQueueImagesChanged(e.target || "");
       return;
     }
   }
@@ -15764,8 +15766,72 @@ var __BRAM_QUEUE_RECOVERY_KEY = "bram.agent-message-queue.unsaved";
 // it — the populated queue cannot be clobbered by a click-before-hydrate.
 window.__bramQueueVersion = null;
 var __bramQueueSaveTimer = null;
+// queue-persist-pasted-images: the staged-image store
+// (bramPendingPastedImages, keyed by target) stays the one source of truth
+// for a note's screenshots. Each save writes a copy of the note's paths into
+// its entry as `images`, and restore re-stages them, so a pasted screenshot
+// survives a reload or relaunch like the note's text does. Persisted paths
+// live in ~/.cache/bram/paste/, which nothing prunes; any future pruning
+// must spare paths named in .bram-queue.json.
+var __bramQueueLastEntries = null;
+function __bramQueueWithImages(entries) {
+  return (entries || []).map(function (e) {
+    if (!e || !e.id) return e;
+    var copy = Object.assign({}, e);
+    var paths = window.bramPendingPastedImagePathsForTarget("queue-item:" + e.id);
+    if (paths.length) copy.images = paths;
+    else delete copy.images;
+    return copy;
+  });
+}
+// Staging or removing a screenshot changes no entry, so no queue mutation
+// fires a save. Re-save the last entries the queue handed us. Before
+// hydration there is nothing to re-save (issue-324's no-clobber guard).
+function __bramQueueImagesChanged(target) {
+  if (String(target || "").indexOf("queue-item:") !== 0) return;
+  if (window.__bramQueueVersion === null || !__bramQueueLastEntries) return;
+  __bramQueueScheduleSave(__bramQueueLastEntries);
+}
+// Put a restored note's screenshots back in the staged store. Skips paths
+// already staged for that note, since hydration can run on every remount.
+// Returns how many it staged.
+function __bramQueueRestageImages(entries) {
+  var store = window.bramPendingPastedImages || [];
+  var added = 0;
+  (entries || []).forEach(function (e) {
+    if (!e || !e.id || !Array.isArray(e.images)) return;
+    var target = "queue-item:" + e.id;
+    e.images.forEach(function (path) {
+      if (!path) return;
+      var dup = store.some(function (s) { return s && s.path === path && (s.target || "") === target; });
+      if (dup) return;
+      store.push({ path: path, target: target });
+      added++;
+    });
+  });
+  window.bramPendingPastedImages = store;
+  if (added) {
+    // Without this, the next consume of any target treats the store as
+    // stale and empties it.
+    window.bramPastedImageForCurrentTurn = true;
+    bramNotifyPasteState();
+  }
+  return added;
+}
+// A deleted note's screenshots go with it, rather than staying staged under
+// a target no editor shows.
+function __bramQueueDropImages(id) {
+  var target = "queue-item:" + id;
+  var before = window.bramPendingPastedImages || [];
+  var kept = before.filter(function (e) { return !(e && (e.target || "") === target); });
+  if (kept.length === before.length) return;
+  window.bramPendingPastedImages = kept;
+  bramTracePasteImage("queue-delete", { target: target, dropped: before.length - kept.length, retained: bramPendingPastedImageSummary() });
+  bramNotifyPasteState();
+}
 function __bramQueueScheduleSave(entries) {
-  var snapshot = entries || [];
+  __bramQueueLastEntries = entries || [];
+  var snapshot = __bramQueueWithImages(entries);
   var payload = JSON.stringify({
     entries: snapshot,
     version: window.__bramQueueVersion,
@@ -16119,29 +16185,41 @@ window.__bramQueueRestore = function (hostEntries, hostVersion) {
   // carries it as its precondition base. Before this runs, __bramQueueVersion
   // stays null and no save can land (host refuses a version-less write).
   window.__bramQueueVersion = typeof hostVersion === "number" ? hostVersion : 0;
-  window.__bramIframeTrace("queue", { op: "hydrate", version: window.__bramQueueVersion });
+  var restored = __bramQueueRestoreEntries(hostEntries);
+  __bramQueueLastEntries = restored.entries;
+  // queue-persist-pasted-images: images = screenshots re-staged by this
+  // hydration (a count; paths are in the paste-image trace). Re-stage before
+  // any save, which stamps entries from the staged store.
+  var images = __bramQueueRestageImages(restored.entries);
+  window.__bramIframeTrace("queue", { op: "hydrate", version: window.__bramQueueVersion, images: images });
+  if (restored.ahead) __bramQueueScheduleSave(restored.entries);
+  return restored.entries;
+};
+// Returns { entries, ahead }: ahead means the sessionStorage snapshot won and
+// differs from the host copy, so the host write needs retrying.
+function __bramQueueRestoreEntries(hostEntries) {
   var fallback = Array.isArray(hostEntries) ? hostEntries : [];
   var raw = "";
   try {
     raw = sessionStorage.getItem(__BRAM_QUEUE_RECOVERY_KEY) || "";
   } catch {}
-  if (!raw) return fallback;
+  if (!raw) return { entries: fallback, ahead: false };
   try {
     var recovered = JSON.parse(raw);
     if (!recovered || !Array.isArray(recovered.entries)) throw new Error("invalid entries");
     // queue-remount-stale-hydration: the snapshot is now persistent, so
     // reschedule the host write only when it is genuinely ahead of the
     // host — otherwise every tab switch would emit a redundant save.
-    if (JSON.stringify(recovered.entries) !== JSON.stringify(fallback)) {
-      __bramQueueScheduleSave(recovered.entries);
-    }
-    return recovered.entries;
+    return {
+      entries: recovered.entries,
+      ahead: JSON.stringify(recovered.entries) !== JSON.stringify(fallback),
+    };
   } catch (e) {
     try { sessionStorage.removeItem(__BRAM_QUEUE_RECOVERY_KEY); } catch {}
     window.logToHost({ kind: "queue-restore", phase: "err", error: String(e) });
-    return fallback;
+    return { entries: fallback, ahead: false };
   }
-};
+}
 window.__bramQueueUpdate = function (entries, idx, text) {
   var next = (entries || []).slice();
   if (!next[idx]) return entries;
@@ -16215,6 +16293,8 @@ window.__bramQueueRemove = function (entries, idx, suppressTrace) {
   if (removed && removed.id) window.__bramVoiceStopOnSend("queue-item:" + removed.id);
   if (!suppressTrace) {
     window.__bramIframeTrace("queue", { op: "delete", id: (removed && removed.id) || "", chars: String((removed && removed.text) || "").length });
+    // A user Delete; a send has already consumed the note's screenshots.
+    if (removed && removed.id) __bramQueueDropImages(removed.id);
   }
   next.splice(idx, 1);
   __bramQueueScheduleSave(next);
@@ -16250,18 +16330,23 @@ window.__bramQueueSend = function (entries, idx, worklistItems) {
   var text = entry && String(entry.text || "").trim();
   if (!text) return entries;
   var mode = window.__bramQueueSendMode(entry);
+  var imageTarget = "queue-item:" + (entry.id || "");
+  var images = window.bramPendingPastedImageCountForTarget(imageTarget);
   if (mode === "iterate") {
     var targetItemId = String(entry.targetItemId || "");
     var items = worklistItems || [];
     if (!items.some(function (item) { return item.id === targetItemId; })) return entries;
-    window.sendIterateWithFeedbackDraft(items, targetItemId, text);
+    // queue-persist-pasted-images: Feedback mode carries the note's
+    // screenshots too, as markers in the feedback draft (the Worklist
+    // feedback path's protocol).
+    window.sendIterateWithFeedbackDraft(items, targetItemId, window.__bramWithStagedImageMarkers(text, imageTarget));
   } else {
     // Include any images pasted onto this item's strip (queue-items-voice-and-
     // image-paste): consume the staged pastes for this item's target and embed
     // their @<path> markers, same as the Worklist message send.
-    toTurn(window.__bramWithStagedImageMarkers(text, "queue-item:" + (entry.id || "")));
+    toTurn(window.__bramWithStagedImageMarkers(text, imageTarget));
   }
-  window.__bramIframeTrace("queue", { op: "send", id: entry.id || "", mode: mode, chars: text.length });
+  window.__bramIframeTrace("queue", { op: "send", id: entry.id || "", mode: mode, chars: text.length, images: images });
   return window.__bramQueueRemove(entries, idx, true);
 };
 // Ready = no open turn (agent-status not "working") and no pending menu.

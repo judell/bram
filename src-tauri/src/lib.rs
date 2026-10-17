@@ -6010,7 +6010,16 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
         "hooks need review",
         "hook needs review",
         "trust all and continue",
+    ];
+    // issue-443: footer-anchored since 2026-10-16. Until then any marker
+    // anywhere in the tail fired, and a Claude reply QUOTING this prompt
+    // wedged pane sends (four refuse-prompt shape=hooks-trust 04:10-04:12Z,
+    // on a Claude pane, with no Codex running). The live prompt ends with
+    // one of these; a quoting reply is followed by the composer's chrome.
+    // Codex 0.148.0 (2026-08-22 specimen) and 0.162.1 (2026-10-16 capture).
+    const HOOKS_TRUST_FOOTERS: &[&str] = &[
         "press enter to confirm or esc to go back",
+        "enter confirm \u{b7} esc skip",
     ];
     // terminal-attention-slash-panel (#423): a Claude slash-command panel
     // left open with no turn running. Specimen: Claude's /status panel,
@@ -6024,6 +6033,8 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     // Usage Stats") is at its top, so only the footer can be required at
     // the end.
     const SLASH_PANEL_MARKERS: &[&str] = &["esc to cancel"];
+    const CODEX_HOOKS_TABLE_TITLE: &str = "lifecycle hooks from config";
+    const CODEX_HOOKS_EVENT_FIELDS: &[&str] = &["matcher", "source", "timeout", "trust"];
     // terminal-attention-folder-trust-prompts: each CLI's first-run folder
     // trust prompt. Pairs, both of which must be present, so an agent quoting
     // one phrase in an idle reply can't fire it. Specimens: Claude Code and
@@ -6084,7 +6095,9 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
         tail.chars().skip(n.saturating_sub(FOOTER_WINDOW)).collect()
     };
     let ends_with_footer = |marker: &str| end.contains(&squash(marker));
-    if HOOKS_TRUST_MARKERS.iter().any(|marker| has(marker)) {
+    if HOOKS_TRUST_MARKERS.iter().any(|marker| has(marker))
+        && HOOKS_TRUST_FOOTERS.iter().any(|f| ends_with_footer(f))
+    {
         return Some("hooks-trust");
     }
     if FOLDER_TRUST_PAIRS
@@ -6096,6 +6109,25 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     let (update_a, update_b, update_footer) = CODEX_UPDATE;
     if has(update_a) && has(update_b) && ends_with_footer(update_footer) {
         return Some("codex-update");
+    }
+    // issue-443: Codex's hook-management screens, reached by "1. Review
+    // hooks". Keys act there: on the table a bare `t` trusts every hook; on
+    // an event's list space/Enter toggle one (Andrew's 0.147 run switched
+    // Bram's own guard off this way). While a hook is untrusted these
+    // screens say "needs review" and read as hooks-trust above; this catches
+    // them once that line is gone. Specimens: Codex 0.162.1, 2026-10-16,
+    // the table (title + footer "t trust all · enter review · esc close")
+    // and the PreToolUse list (field labels + footer "esc back"). Markers
+    // are the parts that don't depend on trust state; the trusted-state
+    // paint itself has not been captured.
+    // Strictly last, not within FOOTER_WINDOW: both specimens end exactly in
+    // their footer, and "esc close" or "esc back" mid-sentence in a reply
+    // that quotes them would otherwise fit in the window.
+    let ends_exactly = |marker: &str| tail.ends_with(&squash(marker));
+    if (has(CODEX_HOOKS_TABLE_TITLE) && ends_exactly("esc close"))
+        || (CODEX_HOOKS_EVENT_FIELDS.iter().all(|m| has(m)) && ends_exactly("esc back"))
+    {
+        return Some("codex-hooks-manage");
     }
     if SLASH_PANEL_MARKERS
         .iter()
@@ -6143,7 +6175,9 @@ impl TerminalAttentionTracker {
     // `pty_tail_snippet`, not a pre-computed string, so the lock + copy +
     // ANSI-strip cost is paid only when this detector has something to
     // decide.
-    fn step<F: FnOnce() -> String>(
+    // tail_fn returns the tail and whether Codex is the live provider (lazy:
+    // read only on the one evaluation per silence episode).
+    fn step<F: FnOnce() -> (String, bool)>(
         &mut self,
         authoritative_open: bool,
         bytes: usize,
@@ -6186,8 +6220,8 @@ impl TerminalAttentionTracker {
             return out;
         }
 
-        let tail = tail_fn();
-        match terminal_attention_prompt_shape(&tail) {
+        let (tail, codex_live) = tail_fn();
+        match prompt_shape_for_provider(&tail, codex_live) {
             Some(shape) => {
                 self.active = true;
                 self.shape = Some(shape);
@@ -6352,28 +6386,53 @@ mod terminal_attention_tests {
     }
 
     #[test]
-    fn hooks_trust_markers_classify() {
+    fn hooks_trust_needs_a_marker_and_its_footer() {
+        // issue-443: footer-anchored. Codex 0.148.0's footer and 0.162.1's.
         assert_eq!(
-            terminal_attention_prompt_shape("Hooks need review before this session can continue."),
+            terminal_attention_prompt_shape(
+                "Hooks need review 3 hooks are new or changed. Press enter to confirm or esc to go back"
+            ),
             Some("hooks-trust")
         );
-        // The live 2026-08-08 18:15:45 candidate capture — current Codex
-        // phrasing (singular, hard-wrapped mid-word by the grid), which the
-        // incident-derived markers missed on the banner's first field test.
+        assert_eq!(
+            terminal_attention_prompt_shape(
+                "Hooks need review 3 hooks are new or changed. Hooks can run outside the sandbox after you trust them. \u{203a} 1. Review hooks 2. Trust all and continue 3. Continue without trusting (hooks won't run) enter confirm \u{b7} esc skip"
+            ),
+            Some("hooks-trust")
+        );
+        // A marker alone, or the footer alone, is no longer the prompt.
+        assert_eq!(
+            terminal_attention_prompt_shape("Hooks need review before this session can continue."),
+            None
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape("Press enter to confirm or esc to go back"),
+            None
+        );
+        // The 2026-08-08 18:15:45 candidate capture: an event's hook list,
+        // truncated by the grid before its footer. The whole screen ends
+        // "esc back" and reads as codex-hooks-manage (pane tests, 0.162.1).
         assert_eq!(
             terminal_attention_prompt_shape(
                 "PreToolUse hooks1 hook needs review before it can r[!] Hook 1 \u{b7} newEventPreToolUseMatcher^(apply_patch|Bash|Write|Edit|mcp__.*)$SourceUser config - ~/.codex/con"
             ),
-            Some("hooks-trust")
+            None
         );
+    }
+
+    // issue-443 regression, 2026-10-16 04:10-04:12Z: a Claude reply quoting
+    // the Codex hooks prompt, followed by Claude's composer chrome, fired
+    // hooks-trust and refused four pane sends on a Claude pane.
+    #[test]
+    fn claude_reply_quoting_the_hooks_prompt_is_not_the_prompt() {
+        const TAIL: &str = "Two useful facts from that capture: Your own Codex 0.162 also asks for hook review at boot. \"Hooks need review / 3 hooks are new or changed\" means your Bram guard hooks aren't trusted. 0.162 says \"enter confirm \u{b7} esc skip\" where the pinned specimen says \"Press enter to confirm or esc to go back\". Bram's shape still matches, through its \"trust all and continue\" marker. \u{273b} Baked for 9s \u{2500}\u{2500}\u{2500} \u{276f} \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} \u{2190} for agents";
+        assert_eq!(terminal_attention_prompt_shape(TAIL), None);
+        // And if a quote did end the tail, a Claude pane still never reads a
+        // Codex-only shape.
+        const ENDS_IN_QUOTE: &str = "Hooks need review 3 hooks are new or changed. Press enter to confirm or esc to go back";
+        assert_eq!(super::prompt_shape_for_provider(ENDS_IN_QUOTE, false), None);
         assert_eq!(
-            terminal_attention_prompt_shape("Press enter to confirm or esc to go back"),
-            Some("hooks-trust")
-        );
-        assert_eq!(
-            terminal_attention_prompt_shape(
-                "1. Review hooks 2. Trust all and continue 3. Continue without trusting"
-            ),
+            super::prompt_shape_for_provider(ENDS_IN_QUOTE, true),
             Some("hooks-trust")
         );
     }
@@ -6390,21 +6449,17 @@ mod terminal_attention_tests {
         const TAIL: &str = "Hooks need review 3 hooks are new or changed. Hooks can run outside the sandbox after you trust the \u{203a} 1. Review hooks 2. Trust all and continue 3. Continue without trusting (hooks won't run) Press enter to confirm or esc to go back";
         assert_eq!(terminal_attention_prompt_shape(TAIL), Some("hooks-trust"));
 
-        // Three markers match this one specimen, and each suffices alone --
-        // the property actually worth guarding, because it means Codex can
-        // reword any two of these lines without blinding the detector. A
-        // refactor that narrowed the marker list to a single entry would still
-        // pass the assertion above and fail here.
-        for line in [
-            "Hooks need review",
-            "2. Trust all and continue",
-            "Press enter to confirm or esc to go back",
-        ] {
+        // Each title or option marker suffices with the footer, so Codex can
+        // reword the others without blinding the detector. A refactor that
+        // narrowed the marker list to one entry would fail here.
+        for line in ["Hooks need review", "2. Trust all and continue"] {
             assert!(TAIL.contains(line), "specimen no longer contains {line:?}");
             assert_eq!(
-                terminal_attention_prompt_shape(line),
+                terminal_attention_prompt_shape(&format!(
+                    "{line} Press enter to confirm or esc to go back"
+                )),
                 Some("hooks-trust"),
-                "{line:?} should classify on its own"
+                "{line:?} should classify with the footer"
             );
         }
     }
@@ -17434,7 +17489,10 @@ fn pty_spawn(
                     }
                 }
                 for transition in terminal_attention.step(authoritative_open, bytes, || {
-                    pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS)
+                    (
+                        pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS),
+                        current_provider(&app_for_throughput) == Some(SessionProvider::Codex),
+                    )
                 }) {
                     trace_terminal_attention_transition(
                         &app_for_throughput,
@@ -18429,9 +18487,10 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // user answers the prompt. codex-update joins them: its Enter runs
     // "Update now" and exits Codex. slash-panel is left out: Esc closes it,
     // and an Enter there grants nothing.
-    let prompt_shape =
-        terminal_attention_prompt_shape(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS))
-            .filter(|shape| matches!(*shape, "folder-trust" | "hooks-trust" | "codex-update"));
+    let prompt_shape = pane_input_blocking_prompt(
+        &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
+        current_provider(app) == Some(SessionProvider::Codex),
+    );
     let mut prompt_restores: Vec<(String, String)> = Vec::new();
 
     for line in content.lines() {
@@ -20483,64 +20542,24 @@ fn switch_agent(
                 // detector's footer-anchored shapes), hold the turn and offer
                 // it instead: the user answers the prompt, then clicks
                 // Catch … up.
-                let prompt_on_screen = terminal_attention_prompt_shape(&pty_tail_snippet(
-                    TERMINAL_ATTENTION_TAIL_CHARS,
-                ));
                 if resume_reason == "fresh-for-new-session" {
-                    if let Some(shape) = prompt_on_screen {
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "agent-switch",
-                                &format!(
-                                    "op=fresh-partner-catch-up provider={} result=held reason=prompt-on-screen shape={}",
-                                    session_provider_label(target_provider),
-                                    shape
-                                ),
-                            );
-                        }
-                    }
-                }
-                if resume_reason == "fresh-for-new-session" && prompt_on_screen.is_none() {
-                    if let (Some((fp, fid)), Some((path, turns))) =
-                        (pair_from.as_ref(), digest.as_ref())
-                    {
-                        let title = session_title_by_id(app, *fp, fid);
-                        let text = catch_up_turn_text(
-                            &catch_up_from_label(*fp, fid, title.as_deref()),
-                            *turns,
-                            path,
-                        );
-                        let state = app.state::<AppState>();
-                        let queued = queue_pty_intent_inner(
+                    // issue-443: a Codex target is waited on, off the launch
+                    // thread (which still has the first command to type).
+                    if target_provider == SessionProvider::Codex {
+                        let (app2, from, d) = (app.clone(), pair_from.clone(), digest.clone());
+                        std::thread::spawn(move || {
+                            fresh_partner_catch_up(&app2, target_provider, from, d, true)
+                        });
+                    } else {
+                        fresh_partner_catch_up(
                             app,
-                            serde_json::json!({
-                                "kind": "toTurn",
-                                "data": text,
-                                "source": "fresh-partner-catch-up",
-                            }),
-                            &state,
+                            target_provider,
+                            pair_from.clone(),
+                            digest,
+                            false,
                         );
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "agent-switch",
-                                &format!(
-                                    "op=fresh-partner-catch-up provider={} turns={} result={}",
-                                    session_provider_label(target_provider),
-                                    turns,
-                                    match &queued {
-                                        Ok(()) => "queued".to_string(),
-                                        Err(e) => format!("error detail={}", e),
-                                    }
-                                ),
-                            );
-                        }
-                        if queued.is_ok() {
-                            emit_catch_up_offer(app, None, None, None);
-                            return;
-                        }
                     }
+                    return;
                 }
                 emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
                 return;
@@ -20812,6 +20831,169 @@ const SESSION_DIGEST_CAP: usize = 40;
 // new work in the session that read it, and the partners catch each other up
 // on catching up (demo, 2026-10-04 18:51-18:53).
 const CATCH_UP_TURN_MARK: &str = "continued while you were away";
+
+// issue-443: when a fresh partner's catch-up may be typed.
+//
+// Never into a prompt. tau-parsers 2026-10-08 21:45Z: Codex's first run there
+// opened its folder-trust prompt, the catch-up was pasted into it, and its
+// Enter accepted "Trust and continue" on the user's behalf; the text itself
+// was lost. A recognized prompt holds the turn and offers it instead: the user
+// answers the prompt, then clicks Catch … up.
+//
+// And never before the agent can read it. #443 (Codex 0.147, Windows): launch
+// confirmation fires on the shell's exec marker, and the catch-up went in 1.4 s
+// before Codex's first frame, which was its hooks prompt. On Codex 0.162.1
+// (captured 2026-10-16) focus reporting turns on at ~0.1 s and the first screen
+// arrives 0.7-5.5 s later, so the boot hold, which releases on those modes,
+// opens before any screen exists. So for Codex the turn waits for its composer
+// (`Waiting`), and is offered rather than sent if the composer never shows.
+#[derive(Debug, PartialEq)]
+enum CatchUpReadiness {
+    Prompt(&'static str),
+    Ready,
+    Waiting,
+}
+
+fn catch_up_readiness(tail: &str, codex: bool, wait_for_composer: bool) -> CatchUpReadiness {
+    if let Some(shape) = prompt_shape_for_provider(tail, codex) {
+        CatchUpReadiness::Prompt(shape)
+    } else if !wait_for_composer || codex_composer_ready(tail) {
+        CatchUpReadiness::Ready
+    } else {
+        CatchUpReadiness::Waiting
+    }
+}
+
+// Codex's idle composer: its header and, ending the screen, the footer
+// "? for shortcuts" (0.162.1 specimen: "›Ask Codex to do anything … ← for
+// agents · ? for shortcuts"). The header keeps a stale Claude footer, which
+// can also read "? for shortcuts", from passing.
+fn codex_composer_ready(tail: &str) -> bool {
+    let squashed: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    squashed.contains("openaicodex") && squashed.ends_with("?forshortcuts")
+}
+
+const CATCH_UP_COMPOSER_WAIT_MS: i64 = 30_000;
+const CATCH_UP_COMPOSER_POLL_MS: u64 = 250;
+
+fn fresh_partner_catch_up<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    target_provider: SessionProvider,
+    pair_from: Option<(SessionProvider, String)>,
+    digest: Option<(String, usize)>,
+    wait_for_composer: bool,
+) {
+    let provider = session_provider_label(target_provider);
+    let started = unix_now_ms();
+    let readiness = loop {
+        let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
+        let r = catch_up_readiness(
+            &tail,
+            target_provider == SessionProvider::Codex,
+            wait_for_composer,
+        );
+        if r != CatchUpReadiness::Waiting
+            || unix_now_ms().saturating_sub(started) >= CATCH_UP_COMPOSER_WAIT_MS
+        {
+            break r;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(CATCH_UP_COMPOSER_POLL_MS));
+    };
+    let waited_ms = unix_now_ms().saturating_sub(started);
+    let held_reason = match readiness {
+        CatchUpReadiness::Prompt(shape) => Some(format!("prompt-on-screen shape={}", shape)),
+        CatchUpReadiness::Waiting => Some("no-composer".to_string()),
+        CatchUpReadiness::Ready => None,
+    };
+    if let Some(reason) = held_reason {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=fresh-partner-catch-up provider={} result=held reason={} waited_ms={}",
+                    provider, reason, waited_ms
+                ),
+            );
+        }
+        emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
+        return;
+    }
+    if let (Some((fp, fid)), Some((path, turns))) = (pair_from.as_ref(), digest.as_ref()) {
+        let title = session_title_by_id(app, *fp, fid);
+        let text = catch_up_turn_text(
+            &catch_up_from_label(*fp, fid, title.as_deref()),
+            *turns,
+            path,
+        );
+        let state = app.state::<AppState>();
+        let queued = queue_pty_intent_inner(
+            app,
+            serde_json::json!({
+                "kind": "toTurn",
+                "data": text,
+                "source": "fresh-partner-catch-up",
+            }),
+            &state,
+        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=fresh-partner-catch-up provider={} turns={} waited_ms={} result={}",
+                    provider,
+                    turns,
+                    waited_ms,
+                    match &queued {
+                        Ok(()) => "queued".to_string(),
+                        Err(e) => format!("error detail={}", e),
+                    }
+                ),
+            );
+        }
+        if queued.is_ok() {
+            emit_catch_up_offer(app, None, None, None);
+            return;
+        }
+    }
+    emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
+}
+
+#[cfg(test)]
+mod catch_up_readiness_tests {
+    use super::{catch_up_readiness as r, CatchUpReadiness::*};
+    // Codex 0.162.1 captures, 2026-10-16 (stripped tails).
+    const COMPOSER: &str = ">_ OpenAI Codex (v0.162.1)~/bram \u{203a}Ask Codex to do anything GPT-6-Astra high\u{b7}~/bram\u{2190} for agents \u{b7} ? for shortcuts";
+    const UPDATE: &str = "Update available \u{b7} 0.162.1 \u{2192} 0.163.0Release notes: https://github.com/openai/codex/releases/latest\u{203a} 1. Update now (runs `npm install -g @openai/codex`) 2.Skip3.Skipuntilnextversionenter continue \u{b7} esc skip";
+    // What the tail holds when launch confirms: the shell, with Codex typed.
+    const SHELL: &str = "jonudell@Tuck bram % codex";
+    // A Claude screen whose footer also reads "? for shortcuts".
+    const CLAUDE: &str = "\u{276f} \u{2500}\u{2500}\u{2500} ? for shortcuts";
+
+    #[test]
+    fn codex_waits_for_its_composer() {
+        assert_eq!(r(SHELL, true, true), Waiting);
+        assert_eq!(r(CLAUDE, true, true), Waiting);
+        assert_eq!(r(COMPOSER, true, true), Ready);
+    }
+
+    #[test]
+    fn a_prompt_holds_the_turn() {
+        assert_eq!(r(UPDATE, true, true), Prompt("codex-update"));
+    }
+
+    #[test]
+    fn without_waiting_only_a_prompt_holds() {
+        assert_eq!(r(SHELL, false, false), Ready);
+        // A Codex-only shape doesn't hold a Claude target.
+        assert_eq!(r(UPDATE, false, false), Ready);
+    }
+}
 
 fn catch_up_turn_text(from: &str, turns: usize, path: &str) -> String {
     format!(
@@ -41298,6 +41480,107 @@ mod shell_prompt_shape_tests {
 // and a stray CR is a no-op; one nudge per entry regardless.
 const SUBMIT_NUDGE_AFTER_MS: i64 = 5_000;
 
+// The prompt shapes no pane send and no submit-nudge CR may reach: an Enter
+// there answers the prompt on the user's behalf. slash-panel is left out:
+// Esc closes it, and an Enter there grants nothing.
+// issue-443: shapes that only Codex draws. They count only while Codex is
+// the live provider, as the per-chunk boot-prompt classifier already
+// requires (op=boot-prompt-expired reason=provider): a Claude reply quoting
+// one of these screens is not the screen.
+fn codex_only_prompt_shape(shape: &str) -> bool {
+    matches!(shape, "hooks-trust" | "codex-hooks-manage" | "codex-update")
+}
+
+fn prompt_shape_for_provider(stripped_tail: &str, codex_live: bool) -> Option<&'static str> {
+    terminal_attention_prompt_shape(stripped_tail)
+        .filter(|shape| codex_live || !codex_only_prompt_shape(shape))
+}
+
+fn pane_input_blocking_prompt(stripped_tail: &str, codex_live: bool) -> Option<&'static str> {
+    prompt_shape_for_provider(stripped_tail, codex_live).filter(|shape| {
+        matches!(
+            *shape,
+            "folder-trust" | "hooks-trust" | "codex-hooks-manage" | "codex-update"
+        )
+    })
+}
+
+#[cfg(test)]
+mod pane_input_blocking_prompt_tests {
+    use super::pane_input_blocking_prompt;
+    #[test]
+    fn hooks_review_blocks_and_slash_panel_does_not() {
+        // The pinned Codex hooks-review specimen (terminal_attention_tests).
+        const HOOKS: &str = "Hooks need review 3 hooks are new or changed. Hooks can run outside the sandbox after you trust the \u{203a} 1. Review hooks 2. Trust all and continue 3. Continue without trusting (hooks won't run) Press enter to confirm or esc to go back";
+        assert_eq!(pane_input_blocking_prompt(HOOKS, true), Some("hooks-trust"));
+        assert_eq!(
+            pane_input_blocking_prompt("Status Config Usage Stats Esc to cancel", true),
+            None
+        );
+        assert_eq!(
+            pane_input_blocking_prompt("\u{203a} Write tests for @filename", true),
+            None
+        );
+    }
+
+    // Codex 0.162.1 hook-management screens, captured 2026-10-16 (stripped
+    // tails, home path anonymized). Captured while Bram's hooks were
+    // untrusted, so they carry "needs review" and read as hooks-trust.
+    const TABLE: &str = "HooksLifecycle hooks from config and enabled plugins.\u{26a0} 3 hooks need review before they can run.EventInstalledActive      Review    Description\u{203a} PreToolUse            1           0           1           Before a tool executes                  PermissionRequest1           0           1           When permission is requestedPostToolUse1           0           1           After a tool executesPreCompact0           0           0           Before context compactionPostCompact0           0           0           After context compactionSessionStart0           0           0           When a new session startsSessionEnd0           0           0           Right before a session ends UserPromptSubmit      0           0           0           When the user submits a prompt\u{2193}t trust all \u{b7} enter review \u{b7} esc close                                                            ";
+    const EVENT: &str = ">_ OpenAI Codex (v0.162.1)~/bramPreToolUse hooks1 hook needs review before it can run.\u{203a} [!]  1  Bram worklist guard \u{b7} new                                                                  Event     PreToolUseMatcher   ^(apply_patch|Bash|Write|Edit|mcp__.*)$Source    User config -~/.codex/config.tomlCmmand   \"/Users/example/.bram/bram-guard\"guardcodex-worklistMode      SyncTimeout   10sTrust     New hook - reviewrequired \u{b7} escback                ";
+    const COMPOSER: &str = ">_ OpenAI Codex (v0.162.1)~/bram \u{203a}Ask Codex to do anything GPT-6-Astra high\u{b7}~/bram\u{2190} for agents \u{b7} ? for shortcuts";
+
+    #[test]
+    fn codex_hook_screens_block_in_either_trust_state() {
+        // The untrusted captures say "needs review" but end in their own
+        // footers, not the review prompt's, so they read as the manage shape.
+        assert_eq!(
+            pane_input_blocking_prompt(TABLE, true),
+            Some("codex-hooks-manage")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(EVENT, true),
+            Some("codex-hooks-manage")
+        );
+        // On a Claude pane, neither blocks.
+        assert_eq!(pane_input_blocking_prompt(TABLE, false), None);
+        // Modeled trusted state: the review lines removed. Not a live
+        // capture; the markers are the parts that don't depend on trust.
+        let table = TABLE.replace("\u{26a0} 3 hooks need review before they can run.", "");
+        let event = EVENT
+            .replace("1 hook needs review before it can run.", "")
+            .replace("New hook - reviewrequired", "Trusted");
+        assert_eq!(
+            pane_input_blocking_prompt(&table, true),
+            Some("codex-hooks-manage")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(&event, true),
+            Some("codex-hooks-manage")
+        );
+    }
+
+    #[test]
+    fn composer_and_quotes_do_not_block() {
+        assert_eq!(pane_input_blocking_prompt(COMPOSER, true), None);
+        // An agent reply quoting the screens, not ending in their footer.
+        assert_eq!(
+            pane_input_blocking_prompt(
+                "Codex showed Lifecycle hooks from config and said esc close, then I continued.",
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(
+                "Fields were Matcher, Source, Timeout and Trust; press esc back to leave. Done.",
+                true,
+            ),
+            None
+        );
+    }
+}
+
 fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     if send_gate_blocking_menu_tool().is_some() {
         return;
@@ -41353,11 +41636,24 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     // there — observed live 2026-08-28 as `bash: 00~We: command not found` /
     // `syntax error near unexpected token '('`. Consume the entry's one
     // nudge (a later CR would not help it either) and trace the suppression.
-    if agent_boot_hold_active() || pty_tail_shows_shell_prompt_or_continuation() {
+    // issue-443: never nudge into a recognized prompt either. A CR there
+    // answers it: at hooks-trust it chose "Review hooks", at folder-trust
+    // "Trust and continue", at codex-update "Update now". The pane-send guard
+    // already refuses sends at these shapes; the nudge had no such check.
+    let prompt_shape = pane_input_blocking_prompt(
+        &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
+        current_provider(app) == Some(SessionProvider::Codex),
+    );
+    if agent_boot_hold_active()
+        || prompt_shape.is_some()
+        || pty_tail_shows_shell_prompt_or_continuation()
+    {
         let reason = if agent_boot_hold_active() {
-            "awaiting-agent-boot"
+            "awaiting-agent-boot".to_string()
+        } else if let Some(shape) = prompt_shape {
+            format!("prompt-on-screen shape={}", shape)
         } else {
-            "shell-prompt"
+            "shell-prompt".to_string()
         };
         if let Ok(mut l) = send_ledger_cell().lock() {
             if let Some(e) = l.iter_mut().find(|e| e.id == id) {
@@ -46845,6 +47141,101 @@ fn normalize_codex_hook_block_for_currentness(block: &str) -> String {
     kept.join("\n")
 }
 
+// issue-443 (D): Codex records a hook switched off as `enabled = false` in its
+// `[hooks.state."<config path>:<event>:<group>:<index>"]` table. Andrew's run
+// (Codex 0.147, Windows) left one on Bram's PreToolUse guard after Bram's own
+// keystrokes toggled it in Codex's hooks screen, and every status surface
+// still said the hooks were installed. The format is from his report: no 0.162
+// specimen of a disabled hook has been captured. Matched on the events Bram
+// registers; Bram's block is normally the only hook set in that config.
+const CODEX_BRAM_HOOK_EVENTS: &[&str] = &["pre_tool_use", "permission_request", "post_tool_use"];
+
+fn codex_hooks_state_key(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix("[hooks.state.\"")?
+        .strip_suffix("\"]")
+}
+
+fn codex_key_is_bram_event(key: &str) -> bool {
+    key.split(':')
+        .any(|seg| CODEX_BRAM_HOOK_EVENTS.contains(&seg))
+}
+
+fn is_enabled_false(line: &str) -> bool {
+    let squashed: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    squashed == "enabled=false"
+}
+
+// The hooks.state keys of Bram-event hooks Codex has switched off.
+fn codex_disabled_bram_hooks(config: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current: Option<&str> = None;
+    for line in config.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            current = codex_hooks_state_key(t).filter(|k| codex_key_is_bram_event(k));
+            continue;
+        }
+        if let Some(key) = current {
+            if is_enabled_false(t) && !out.iter().any(|k| k == key) {
+                out.push(key.to_string());
+            }
+        }
+    }
+    out
+}
+
+// Setup's repair: drop those `enabled = false` lines wherever they sit (inside
+// Bram's marker block the rewrite already drops them; outside it, only this
+// does), so running Setup switches Bram's guard back on.
+fn strip_disabled_bram_hook_flags(config: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_bram_state = false;
+    for line in config.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_bram_state = codex_hooks_state_key(t).map_or(false, codex_key_is_bram_event);
+        } else if in_bram_state && is_enabled_false(t) {
+            continue;
+        }
+        out.push(line);
+    }
+    let mut joined = out.join("\n");
+    if config.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
+#[cfg(test)]
+mod codex_disabled_hook_tests {
+    use super::{codex_disabled_bram_hooks, strip_disabled_bram_hook_flags};
+    // Shape from #443 (Codex 0.147, Windows): Bram's PreToolUse guard off.
+    const CFG: &str = "model = \"x\"\n\n[hooks.state]\n\n[hooks.state.\"C:\\\\Users\\\\a\\\\.codex\\\\config.toml:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:pre\"\nenabled = false\n\n[hooks.state.\"C:\\\\Users\\\\a\\\\.codex\\\\config.toml:permission_request:0:0\"]\ntrusted_hash = \"sha256:perm\"\n\n[tui]\nenabled = false\n";
+
+    #[test]
+    fn finds_only_bram_event_hooks_switched_off() {
+        let found = codex_disabled_bram_hooks(CFG);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].ends_with(":pre_tool_use:0:0"), "{found:?}");
+        assert!(codex_disabled_bram_hooks("[tui]\nenabled = false\n").is_empty());
+        assert!(codex_disabled_bram_hooks(
+            "[hooks.state.\"/c.toml:pre_tool_use:0:0\"]\nenabled = true\n"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn repair_drops_only_those_flags() {
+        let fixed = strip_disabled_bram_hook_flags(CFG);
+        assert!(codex_disabled_bram_hooks(&fixed).is_empty());
+        assert!(fixed.contains("trusted_hash = \"sha256:pre\""));
+        // The [tui] flag is not a hook's and stays.
+        assert!(fixed.ends_with("[tui]\nenabled = false\n"), "{fixed}");
+        assert_eq!(strip_disabled_bram_hook_flags("a = 1\n"), "a = 1\n");
+    }
+}
+
 fn codex_hook_block_current(config_path: &Path, guard_link: Option<&Path>) -> bool {
     // No installable link means no valid expected block, so an installed
     // block (necessarily broken) reads as stale/unregistered.
@@ -46854,6 +47245,11 @@ fn codex_hook_block_current(config_path: &Path, guard_link: Option<&Path>) -> bo
     let Ok(disk) = std::fs::read_to_string(config_path) else {
         return false;
     };
+    // issue-443: a Bram hook Codex has switched off is not current, whatever
+    // the block says, so Status reads needs-setup and Setup repairs it.
+    if !codex_disabled_bram_hooks(&disk).is_empty() {
+        return false;
+    }
     extract_marker_block(
         &disk,
         ENHANCE_CODEX_TOML_MARKER_START,
@@ -47687,6 +48083,15 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
     }
     let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    // issue-443: switch Bram's own hooks back on if Codex recorded them off.
+    let disabled = codex_disabled_bram_hooks(&existing);
+    if !disabled.is_empty() {
+        skipped.push(format!(
+            "re-enabled Bram hook(s) Codex had switched off: {}",
+            disabled.join(", ")
+        ));
+    }
+    let existing = strip_disabled_bram_hook_flags(&existing);
     let cleaned = strip_marker_block(
         &existing,
         ENHANCE_CODEX_LEGACY_TOML_MARKER_START,

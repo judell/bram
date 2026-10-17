@@ -16083,12 +16083,6 @@ window.__bramFilesTableRows = function (files, keys, itemId) {
   });
   return open.length ? open : all;
 };
-window.__bramFilesHiddenNote = function (files, keys, itemId) {
-  var all = files || [];
-  var shown = window.__bramFilesTableRows(all, keys, itemId).length;
-  if (shown >= all.length) return "";
-  return "Showing " + shown + " of " + all.length + " files. Click \u25BC to show them all.";
-};
 // The triangle is the click target (Jon: "treat the triangle as the active
 // site"): open this file's diff, closing any other of the item's, or close
 // it if it's already open. One file at a time, as row selection gave.

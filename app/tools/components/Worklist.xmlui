@@ -687,7 +687,11 @@
                    size. Peer: the ghost ✕ in Commits.xmlui.
                    https://www.xmlui.org/docs/reference/components/Button
                    https://www.xmlui.org/docs/reference/components/Column -->
-              <Column header="" width="36px">
+              <!-- files-table-bigger-triangle-no-hidden-note: xl in 44px (was md
+                   in 36px). Jon: the triangle is the control, so it should
+                   read as one; the "Showing 1 of N files" caption that
+                   explained it is gone. -->
+              <Column header="" width="44px">
                 <Button
                   when="{!!window.__bramDiffDisclosure(diffKeys, rowId, $item.path, rowBegun, rowItem)}"
                   variant="ghost"
@@ -695,7 +699,7 @@
                   tooltip="{window.__bramDiffToggleTooltip(diffKeys, rowId, $item.path)}"
                   onClick="diffKeys = window.__bramDiffToggleFile(diffKeys, rowId, $item.path)">
                   <Text
-                    fontSize="$fontSize-md"
+                    fontSize="$fontSize-xl"
                     color="$textColor-secondary"
                     value="{window.__bramDiffDisclosure(diffKeys, rowId, $item.path, rowBegun, rowItem)}" />
                 </Button>
@@ -766,10 +770,6 @@
                 </HStack>
               </Column>
             </Table>
-            <Text
-              when="{!!window.__bramFilesHiddenNote($item.changedFiles, diffKeys, rowId)}"
-              variant="caption"
-              value="{window.__bramFilesHiddenNote($item.changedFiles, diffKeys, rowId)}" />
             <Items
               when="{$item.changedFiles}"
               data="{$item.changedFiles}">

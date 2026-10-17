@@ -40,4 +40,20 @@ Status: decided 2026-10-17 · revisit when XMLUI releases #3941
 
 - Wait for an XMLUI release containing #3941. Rejected: the gain is large, and running it in Bram as well as Studio is how the fixes get exercised before release.
 
+**WebKit follow-up (2026-10-17, after vendoring):** measured in Bram's real webview, with push events live, covering the two things headless Chrome couldn't. A demo instance launched from a git worktree, through its own `./bram` symlink, served its own `app/` (checked by planting a marker only in the worktree's copy), so engine swaps never touched the working pane. A driver loaded only there read XMLUI's in-page `render:pass` log; Safari reports no long tasks, so render time stands in for busy time. Baseline (`2c11457`) and candidate 4 alternated, three runs each, each run on a freshly launched demo (`perf444`, 28 items). The commit scenario has two baseline runs; the third timed out before it.
+
+| real webview, median (range) | baseline | candidate 4 |
+|---|---|---|
+| first visit, 7 tabs: render passes | 596 (584–614) | **303** (293–309) |
+| first visit: top-level render ms | 10,285 (7,092–11,197) | **6,341** (3,266–6,463) |
+| first visit: time to settle, ms | 7,714 (6,269–8,268) | 6,457 (3,706–6,610) |
+| 10 `worklist.json` changes (`worklist-changed`): passes | 2,289 (2,102–2,407) | **1,124** (1,024–1,172) |
+| same: top-level render ms | 45,873 (33,005–51,423) | **19,702** (19,467–20,076) |
+| 5 empty commits (git events): passes | 1,557 (1,545–1,569) | **790** (658–790) |
+| same: top-level render ms | 17,427 (9,837–25,017) | 10,163 (8,709–14,194) |
+
+- Render passes halve in every scenario, with no overlap. Render time drops ~40% on first visits and ~57% per Worklist change, also without overlap. Settle time and commit render time improve, but their ranges overlap.
+- **A Worklist change is expensive on both builds:** ~4.6 s of top-level render time per `worklist.json` change on the baseline, ~2 s on candidate 4. Render time can include overlapping or waiting passes, so this isn't a 2 s freeze, but it's the heaviest path measured, and the next target.
+- **By feel:** a blind paired test in Jon's own pane (worklist item `blind-test-xmlui-candidate-4`, dropped) scored 2 of 3, which is chance. The gain is real by measurement but not obvious in ordinary use.
+
 **Revisit when:** XMLUI releases #3941 (vendor the release and rerun this measurement), or a regression is traced to this build (go back to `9d271b4f…0d62`, which is 0.14.27).

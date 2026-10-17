@@ -47278,6 +47278,117 @@ mod codex_disabled_hook_tests {
     }
 }
 
+// codex-hook-trust-survives-setup-and-is-visible: Codex records hook trust
+// as `[hooks.state."<path>:<event>:<g>:<i>"]` tables holding `trusted_hash`,
+// and inserts them after the last hooks table -- inside Bram's marker block
+// (Jon's 2026-08-22 backup). Setup rewrites that block whole, so every
+// Setup run, from ANY Bram instance (the config is global), discarded the
+// trust and Codex silently stopped running Bram's hooks: 2026-10-17 05:06Z,
+// a demo instance's auto-setup (codexNeeded=true wrote=10) did exactly this.
+// These lift the tables out of the old block so the rewrite keeps them.
+fn codex_hooks_state_tables(block: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_state = false;
+    for line in block.lines() {
+        let t = line.trim();
+        if t == ENHANCE_CODEX_TOML_MARKER_END {
+            break;
+        }
+        if t.starts_with('[') {
+            in_state = t == "[hooks.state]" || t.starts_with("[hooks.state.");
+        }
+        if in_state {
+            out.push(line);
+        }
+    }
+    while out.last().map_or(false, |l| l.trim().is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+// `block` with `state` placed just before its end marker.
+fn codex_block_with_state(block: &str, state: &str) -> String {
+    if state.trim().is_empty() {
+        return block.to_string();
+    }
+    match block.rfind(ENHANCE_CODEX_TOML_MARKER_END) {
+        Some(i) => format!("{}\n{}\n{}", block[..i].trim_end(), state, &block[i..]),
+        None => block.to_string(),
+    }
+}
+
+// The events Bram registers that have no trust record: Codex won't run
+// those hooks until the user trusts them in Codex. Format from Codex 0.148
+// (the backup) and #443 (0.147); no 0.162 specimen of a trust write.
+fn codex_untrusted_bram_hooks(config: &str) -> Vec<&'static str> {
+    let mut trusted: Vec<&'static str> = Vec::new();
+    let mut current: Option<&str> = None;
+    for line in config.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            current = codex_hooks_state_key(t);
+            continue;
+        }
+        if let Some(key) = current {
+            let squashed: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+            if squashed.starts_with("trusted_hash=") {
+                for ev in CODEX_BRAM_HOOK_EVENTS {
+                    if key.split(':').any(|seg| seg == *ev) && !trusted.contains(ev) {
+                        trusted.push(ev);
+                    }
+                }
+            }
+        }
+    }
+    CODEX_BRAM_HOOK_EVENTS
+        .iter()
+        .copied()
+        .filter(|ev| !trusted.contains(ev))
+        .collect()
+}
+
+#[cfg(test)]
+mod codex_hook_trust_tests {
+    use super::*;
+    const STATE: &str = "[hooks.state]\n\n[hooks.state.\"/Users/example/.codex/config.toml:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:pre\"\n\n[hooks.state.\"/Users/example/.codex/config.toml:permission_request:0:0\"]\ntrusted_hash = \"sha256:perm\"\n\n[hooks.state.\"/Users/example/.codex/config.toml:post_tool_use:0:0\"]\ntrusted_hash = \"sha256:post\"";
+
+    fn block_with_state() -> String {
+        let link = PathBuf::from("/Users/example/.bram/bram-guard");
+        let block = codex_hook_toml_block(Some(&link)).expect("block");
+        codex_block_with_state(&block, STATE)
+    }
+
+    #[test]
+    fn trust_tables_round_trip_through_a_rewrite() {
+        let link = PathBuf::from("/Users/example/.bram/bram-guard");
+        let fresh = codex_hook_toml_block(Some(&link)).expect("block");
+        let old = block_with_state();
+        let lifted = codex_hooks_state_tables(&old);
+        assert_eq!(lifted, STATE);
+        // Rewriting a current block with its trust carried over changes nothing.
+        assert_eq!(codex_block_with_state(&fresh, &lifted), old);
+        // And the result still reads as current.
+        assert_eq!(normalize_codex_hook_block_for_currentness(&old), fresh);
+    }
+
+    #[test]
+    fn untrusted_lists_the_events_without_a_hash() {
+        assert!(codex_untrusted_bram_hooks(&block_with_state()).is_empty());
+        let link = PathBuf::from("/Users/example/.bram/bram-guard");
+        let bare = codex_hook_toml_block(Some(&link)).expect("block");
+        assert_eq!(codex_untrusted_bram_hooks(&bare).len(), 3);
+        let partial = bare.replace(
+            ENHANCE_CODEX_TOML_MARKER_END,
+            "[hooks.state.\"/c.toml:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:x\"\n# bram:end",
+        );
+        assert_eq!(
+            codex_untrusted_bram_hooks(&partial),
+            vec!["permission_request", "post_tool_use"]
+        );
+    }
+}
+
 fn codex_hook_block_current(config_path: &Path, guard_link: Option<&Path>) -> bool {
     // No installable link means no valid expected block, so an installed
     // block (necessarily broken) reads as stale/unregistered.
@@ -47371,6 +47482,35 @@ mod codex_hook_currentness_tests {
     }
 }
 
+// One trace line when the set of untrusted Bram hooks changes; the status
+// route runs often, so an unchanged set stays quiet.
+fn trace_codex_hooks_untrusted<R: tauri::Runtime>(app: &AppHandle<R>, events: &[&'static str]) {
+    static LAST: OnceLock<Mutex<Option<Vec<&'static str>>>> = OnceLock::new();
+    let cell = LAST.get_or_init(|| Mutex::new(None));
+    let mut last = match cell.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if last.as_deref() == Some(events) {
+        return;
+    }
+    *last = Some(events.to_vec());
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "enhance",
+            &format!(
+                "op=codex-hooks-untrusted events={}",
+                if events.is_empty() {
+                    "none".to_string()
+                } else {
+                    events.join(",")
+                }
+            ),
+        );
+    }
+}
+
 fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     use serde_json::json;
     let proj = project_root(Some(app)).ok_or("no project root")?;
@@ -47412,6 +47552,18 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         .as_ref()
         .map(|config| codex_hook_block_current(config, guard_link_if_installed().as_deref()))
         .unwrap_or(false);
+    // codex-hook-trust-survives-setup-and-is-visible: Bram's hooks Codex
+    // hasn't trusted. Only meaningful once the block is installed.
+    let codex_hooks_untrusted: Vec<&'static str> = if codex_hook_block_current {
+        codex_config_path
+            .as_ref()
+            .and_then(|config| std::fs::read_to_string(config).ok())
+            .map(|text| codex_untrusted_bram_hooks(&text))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    trace_codex_hooks_untrusted(app, &codex_hooks_untrusted);
     let codex_instr_current = codex_config_path
         .as_ref()
         .map(|p| codex_instr_block_current(p))
@@ -47539,6 +47691,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "codexAgents": codex_agents_has_marker,
         "sidecar": sidecar_exists,
         "codexHookBlockCurrent": codex_hook_block_current,
+        "codexHooksUntrusted": codex_hooks_untrusted,
         "codexAgentsCurrent": codex_agents_current,
         "codexInstrCurrent": codex_instr_current,
         "hookRegistered": hook_registered,
@@ -48159,8 +48312,14 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
                     .find(ENHANCE_CODEX_TOML_MARKER_END)
                     .map(|i| start_idx + i + ENHANCE_CODEX_TOML_MARKER_END.len())
                     .unwrap_or(cleaned.len());
+                // codex-hook-trust-survives-setup-and-is-visible: keep the
+                // trust records Codex wrote inside the old block.
+                let state = codex_hooks_state_tables(&cleaned[start_idx..end_offset]);
                 let mut s = cleaned.clone();
-                s.replace_range(start_idx..end_offset, toml_block);
+                s.replace_range(
+                    start_idx..end_offset,
+                    &codex_block_with_state(toml_block, &state),
+                );
                 s
             } else if cleaned.trim().is_empty() {
                 format!("{}\n", toml_block)

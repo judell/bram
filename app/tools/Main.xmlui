@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -767,6 +767,33 @@
       size="xs"
       tooltip="Dismiss for this session"
       onClick="strayScaffoldBannerDismissed = true" />
+  </HStack>
+
+  <!-- codex-hook-trust-survives-setup-and-is-visible: Codex hasn't trusted
+       Bram's hooks, so it doesn't run them -- Codex sessions go unguarded.
+       Shown whichever agent is active (the next switch to Codex is the one
+       at risk). Separate from the Setup banner: Setup can't grant trust;
+       that's the user's decision in Codex. Same session-scoped dismissal as
+       the stray-scaffold banner above. -->
+  <HStack
+    when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.codexHooksUntrusted &amp;&amp; enhanceStatus.value.codexHooksUntrusted.length > 0 &amp;&amp; !codexTrustBannerDismissed}"
+    backgroundColor="$color-warn-100"
+    padding="$space-2"
+    gap="$space-3"
+    wrapContent="true"
+    verticalAlignment="center">
+    <Text fontSize="$fontSize-sm">
+      Codex hasn't trusted Bram's hooks, so Codex sessions run without the worklist guard.
+      Start Codex, choose <Text inline="true" fontWeight="$fontWeight-bold" value="Review hooks" />,
+      then trust them.
+    </Text>
+    <SpaceFiller />
+    <Button
+      label="✕"
+      variant="ghost"
+      size="xs"
+      tooltip="Dismiss for this session"
+      onClick="codexTrustBannerDismissed = true" />
   </HStack>
 
   <!-- issue-320: gate on providerNeedsSetup ALONE, not activeProvider. The

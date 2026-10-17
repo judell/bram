@@ -30,6 +30,7 @@ Status: decided YYYY-MM-DD · revisit <when>
 
 ## Index
 
+- [2026-10-17 — Bram vendors xmlui#3941 candidate 4 before it is released, and keeps measuring](2026-10-17-xmlui-3941-candidates.md)
 - [2026-10-13 — The gate walkthrough runs on demand; field reports are the release check](2026-10-13-gate-walkthrough-on-demand.md)
 - [2026-10-12 — Membership's cost budget, set before the replay is deleted](2026-10-12-membership-cost-budget.md)
 - [2026-10-07 — No wider automatic switching to the Transcript](2026-10-07-no-wider-transcript-autoswitch.md)

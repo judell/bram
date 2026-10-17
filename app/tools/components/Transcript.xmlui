@@ -462,7 +462,13 @@
            Hide/Show and tab switches. Lifecycle events:
            https://www.xmlui.org/docs/howto/clean-up-when-a-panel-closes -->
       <VStack when="{worklistOpen}" height="100%">
+        <!-- transcript-worklist-pane-tint: a faint tint marks "the Worklist,
+             shown inside the Transcript". The secondary scale because rows
+             use primary for highlights and the Transcript uses surface;
+             $color-* (not $const-color-*) follows dark mode.
+             https://www.xmlui.org/docs/styles-and-themes/theme-variables -->
         <VStack height="100%" overflowY="auto" paddingTop="$space-2"
+          backgroundColor="$color-secondary-50"
           testId="transcript-worklist-pane"
           onMount="window.__bramWorklistPaneMounted()"
           onUnmount="window.__bramWorklistPaneUnmounted()">

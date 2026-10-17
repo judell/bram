@@ -5786,9 +5786,16 @@ window.__bramStartVerb = function (items, sel, claim) {
   var list = items || [];
   var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
   if (picked.length !== chosen.length) return "Start";
+  // resume-verb-for-begun-or-changed-items: a begun item (begunAtMs, stamped
+  // at its first approval and never moved) is resumed even once its
+  // authorization has expired (30 min) or been displaced. Live 2026-10-17:
+  // issue-443's work was on disk, its approval 43 minutes old, and the
+  // button read Start, as if nothing had happened. Lines written before an
+  // item existed don't count: they belong to no item (membership marks them
+  // unowned), so a never-approved item still reads Start.
   var resuming = picked.every(function (i) {
     return (
-      i.activeAuthorization === "approved" &&
+      (i.activeAuthorization === "approved" || !!i.begunAtMs) &&
       !window.__bramItemInflightKind(claim, i.id, "", "", 0)
     );
   });

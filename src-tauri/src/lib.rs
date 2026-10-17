@@ -6073,11 +6073,15 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     // codex_tui__update_prompt__tests__update_prompt_modal.snap) and the
     // live case 2026-10-13 03:32Z, where a catch-up's Enter ran
     // `npm install -g @openai/codex` and exited Codex.
-    const CODEX_UPDATE: (&str, &str, &str) = (
-        "update available",
-        "update now",
-        "enter continue \u{b7} esc skip",
-    );
+    // issue-443: any one marker plus the footer. Codex repaints only the
+    // cells that changed, so live bytes can lack letters the previous frame
+    // left in place: Codex 0.162.1's real paint strips to "Updat available"
+    // (2026-10-16 capture), and requiring "update available" missed it, so a
+    // fresh partner's catch-up was not held there. The snapshot this shape
+    // came from is clean text and could not show that.
+    const CODEX_UPDATE_MARKERS: &[&str] =
+        &["update now", "skip until next version", "update available"];
+    const CODEX_UPDATE_FOOTER: &str = "enter continue \u{b7} esc skip";
     // All whitespace removed, on both sides of the match. The CLIs lay out
     // words with cursor-column moves (CSI n G), which strip_ansi drops
     // without leaving a space, so the tail reads "Esctocancel" and
@@ -6106,8 +6110,7 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     {
         return Some("folder-trust");
     }
-    let (update_a, update_b, update_footer) = CODEX_UPDATE;
-    if has(update_a) && has(update_b) && ends_with_footer(update_footer) {
+    if CODEX_UPDATE_MARKERS.iter().any(|m| has(m)) && ends_with_footer(CODEX_UPDATE_FOOTER) {
         return Some("codex-update");
     }
     // issue-443: Codex's hook-management screens, reached by "1. Review
@@ -20889,7 +20892,32 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
 ) {
     let provider = session_provider_label(target_provider);
     let started = unix_now_ms();
+    // issue-443 retest 2026-10-17 04:39Z: the user switched back to Claude
+    // while this waited. The switch's Esc dismissed Codex's prompt, the
+    // composer showed, and the catch-up was queued 60 ms later, then typed
+    // into Claude. Launch generations are taken before a switch's
+    // interrupts, so a superseded generation means this partner is leaving.
+    let generation = AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let superseded = |waited_ms: i64| {
+        if agent_launch_is_current(generation) {
+            return false;
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=fresh-partner-catch-up provider={} result=dropped reason=launch-superseded waited_ms={}",
+                    provider, waited_ms
+                ),
+            );
+        }
+        true
+    };
     let readiness = loop {
+        if superseded(unix_now_ms().saturating_sub(started)) {
+            return;
+        }
         let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
         let r = catch_up_readiness(
             &tail,
@@ -20930,6 +20958,9 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
             *turns,
             path,
         );
+        if superseded(waited_ms) {
+            return;
+        }
         let state = app.state::<AppState>();
         let queued = queue_pty_intent_inner(
             app,
@@ -20985,6 +21016,17 @@ mod catch_up_readiness_tests {
     #[test]
     fn a_prompt_holds_the_turn() {
         assert_eq!(r(UPDATE, true, true), Prompt("codex-update"));
+    }
+
+    // Codex 0.162.1's update prompt from live bytes through strip_ansi
+    // (2026-10-16 capture): the composer drawn first, then the prompt, with
+    // the "e" of "Update" missing because that cell didn't change.
+    const LIVE_UPDATE: &str = "\u{203a}Ask Codex to do anything?forshortcuts ~/bramUpdat available \u{b7} 0.162.1 \u{2192} 0.163.0Release notes: https://github.com/openai/codex/releases/latest\u{203a} 1. Update now (runs `npm install -g @openai/codex`)                                               2.Skip3.Skipuntilnextversionenter continue \u{b7} esc skip ";
+
+    #[test]
+    fn live_update_paint_holds_and_its_composer_is_not_ready() {
+        assert_eq!(r(LIVE_UPDATE, true, true), Prompt("codex-update"));
+        assert!(!super::codex_composer_ready(LIVE_UPDATE));
     }
 
     #[test]

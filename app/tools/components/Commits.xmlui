@@ -232,6 +232,8 @@
            in favor of the shell's modal. -->
       <!-- pinKey: a search change replaces the rows wholesale; pin the page
            to top so virtua's re-anchor can't drag it down the new list. -->
+      <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="Tagged commits came from a Worklist item. Others have no Worklist record: direct edits, releases, outside commits." />
       <ResultList data="{commitRows}" query="{searchQuery.trim()}"
         pinKey="{searchNeedle}" pinVia="commits">
         <property name="rowTemplate">
@@ -250,8 +252,23 @@
             <Text
               value="{$item.commit.message.split('\n')[0]}"
               fontSize="$fontSize-sm"
-              width="*"
-              maxLines="1" />
+              width="*" />
+            <!-- commits-list-shows-worklist-item: one tag per Worklist item
+                 the commit landed (itemIds, joined host-side in
+                 attach_history_item_ids). Opens the item in History the way
+                 CommitDetail's "Worklist history:" link does; the
+                 row-control testId keeps the click from also opening the
+                 row's detail (__bramRowClickHit). -->
+            <Items data="{$item.itemIds || []}">
+              <Link
+                noIndicator
+                testId="row-control-worklist-item"
+                tooltip="Open this Worklist item in History"
+                onClick="navigate('/history', { queryParams: { entry: $item } })">
+                <Text value="{$item}" variant="code" fontSize="$fontSize-xs"
+                  color="$color-primary-600" maxLines="1" />
+              </Link>
+            </Items>
             <Text
               when="{!$item.pushed &amp;&amp; $item.pendingCloses &amp;&amp; $item.pendingCloses.length > 0}"
               value="{'closes ' + $item.pendingCloses.map(p => '#' + p.issue).join(' ') + ' on push'}"

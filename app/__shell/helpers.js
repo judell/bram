@@ -4386,6 +4386,14 @@ window.__bramRowClickHit = function (e, item, prev) {
   return item;
 };
 
+// commits-list-shows-worklist-item: History tints the row a commit tag
+// deep-linked to. Touching another row releases the tint (returns ''); a
+// null hit (the modal closing) or the tinted row itself keeps it.
+window.__bramReleaseTint = function (hit, tinted) {
+  if (!hit || !tinted || hit.id === tinted) return tinted || "";
+  return "";
+};
+
 // file-tab-truncation-misses-changes: when the preview payload is still
 // truncated (file beyond even the File tab's raised budget), say so instead
 // of silently rendering a wrong-looking prefix — the pre-fix failure was a

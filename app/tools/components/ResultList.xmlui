@@ -14,6 +14,10 @@
                    (modal title). Per type the detail needs: session
                    {id, provider}, commit {key sha suffix, link}, issue
                    {key number suffix}, worklist-history {extra}.
+                   Optional `rowTint`: a color (theme token) that marks
+                   the row, e.g. the entry a deep link opened.
+       Events: rowSelect(hit) fires when the open row changes — the
+                   clicked row, or null when its modal closes.
          query   — highlight / find-nav term for the modal detail.
          pinKey  — signature string; a change pins the page to top.
          pinVia  — trace label for the pin (defaults 'result-list').
@@ -25,6 +29,12 @@
        (search-hit-hover-and-modal-expansion). -->
   <ChangeListener listenTo="{$props.query || ''}"
     onDidChange="() => selectedHit = null" />
+
+  <!-- commits-list-shows-worklist-item: selectedHit is internal, so tell
+       the consumer which row is open (History releases its deep-link tint
+       on it). https://www.xmlui.org/docs/howto/emit-a-custom-event-from-a-component -->
+  <ChangeListener listenTo="{selectedHit}"
+    onDidChange="(c) => emitEvent('rowSelect', c.newValue)" />
 
   <!-- search-list-render-forensics (d71ef50): data transition vs. first
        mounted range distinguishes a nonempty prop from unmaterialized rows. -->
@@ -82,7 +92,15 @@
              the row — without this, an embedded Link opened the detail modal
              on its way to navigating (the interstitial Jon reported). The
              helper returns the previous selection for such clicks. -->
-        <Card onClick="(e) => selectedHit = window.__bramRowClickHit(e, $item, selectedHit)">
+        <Card when="{!$item.rowTint}" onClick="(e) => selectedHit = window.__bramRowClickHit(e, $item, selectedHit)">
+          <Slot name="rowTemplate" item="{$item}" />
+        </Card>
+        <!-- commits-list-shows-worklist-item: a tinted row gets its own Card
+             so the backgroundColor prop doesn't override the themed hover
+             on every other row. Conditional backgroundColor per
+             https://www.xmlui.org/docs/howto/correlate-a-table-with-another-view -->
+        <Card when="{!!$item.rowTint}" backgroundColor="{$item.rowTint}"
+          onClick="(e) => selectedHit = window.__bramRowClickHit(e, $item, selectedHit)">
           <Slot name="rowTemplate" item="{$item}" />
         </Card>
       </property>

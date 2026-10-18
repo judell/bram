@@ -5,11 +5,13 @@
   var.searchNeedle="{searchQuery.trim().toLowerCase()}"
   var.historyBlobbed="{blobHistoryRows(historyList.value)}"
   var.filteredHistory="{filterHistoryList(historyBlobbed, searchNeedle)}"
+  var.tintEntry="{$queryParams.entry || ''}"
   var.visibleHistory="{filteredHistory.slice(0, searchNeedle ? 9999 : (historyExpanded ? 9999 : 50))}"
   var.historyRows="{visibleHistory.map(h => Object.assign({}, h, {
     key: 'history:' + h.id,
     type: 'worklist-history',
-    source: h.title || ''
+    source: h.title || '',
+    rowTint: h.id === tintEntry ? '$color-secondary-50' : ''
   }))}"
   var.deepLinkedGroup="{$queryParams.entry ? (((historyList.value || []).find(h => h.id === $queryParams.entry)) || null) : null}">
 
@@ -22,7 +24,16 @@
        https://www.xmlui.org/docs/howto/deep-link-to-a-tab-or-section); the
        ChangeListener below covers historyList finishing its async load
        after mount, and a second Open while already on this tab — same
-       belt-and-suspenders shape as Worklist.xmlui's expand param. -->
+       belt-and-suspenders shape as Worklist.xmlui's expand param.
+       commits-list-shows-worklist-item: the deep-linked row also carries a
+       rowTint (ResultList), so it stays marked after the modal closes; the
+       $color-secondary-50 tint matches the Transcript's Worklist pane.
+       tintEntry holds it: touching another row releases it (ResultList's
+       rowSelect, below), and so does leaving the tab — the Page unmounts,
+       and the nav link returns with no entry param; the ChangeListener
+       resets it on any entry change in case the page stays mounted. -->
+  <ChangeListener listenTo="{$queryParams.entry || ''}"
+    onDidChange="(c) => tintEntry = c.newValue" />
 
   <!-- issue-230: reverse-chron browse of worklist history as a simplified
        inline-expander table (matching Commits/Sessions), not the old cards.
@@ -82,7 +93,8 @@
       <!-- pinKey: a search change replaces the rows wholesale; pin the page
            to top so virtua's re-anchor can't drag it down the new list. -->
       <ResultList data="{historyRows}" query="{searchQuery.trim()}"
-        pinKey="{searchNeedle}" pinVia="history">
+        pinKey="{searchNeedle}" pinVia="history"
+        onRowSelect="(hit) => tintEntry = window.__bramReleaseTint(hit, tintEntry)">
         <property name="rowTemplate">
           <HStack gap="$space-3" verticalAlignment="center">
             <Text

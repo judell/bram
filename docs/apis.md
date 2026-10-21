@@ -141,87 +141,73 @@ when running in the Bram source repo itself (detected via
 
 ## 3. Worklist & authorization
 
-The pending-worklist surface plus the verified-authorization endpoint that
-agents read after an `approved:` / `drop:` payload arrives. Per-item
-`hash` is computed server-side (SipHash via `DefaultHasher` over the
-canonical JSON serialization) and travels with each item — the UI
-propagates it back into the structured payload so the watcher can verify
-without re-shipping content.
+For policy, enforcement limits, and decision history, see
+[authorization.md](authorization.md). This section describes the wire and
+handler behavior. The pane records gate actions through Tauri
+`record_worklist_action_authorization` before delivering an agent turn;
+turn text alone does not create that grant.
 
-| Surface | Kind | Query / params | Response | Consumer |
+Served item data can include a `hash`, but approval no longer compares
+content hashes or produces `rejected_stale` for a mismatch. Worklist
+`version` checks guard file-write races, not human consent.
+
+| Surface | Kind | Query / params | Response / behavior | Consumer |
 | --- | --- | --- | --- | --- |
-| `/__worklist` | HTTP GET | — | `{ description, items: [{ id, status, file(s), before, after, hash, diff? }], exists, resourcesExists, path }` | agent pane iframe |
-| `/__worklist/init` | HTTP GET | — | same shape as `/__worklist` (file created if missing) | agent pane iframe |
-| `/__worklist/resolve` | HTTP GET | `ids=foo,bar` | active: `{ kind, ids, items, mismatchedIds, issuedAtMs, source, consumedAtMs }` · consumed: `{ kind: "no_active_authorization", consumedAtMs }` | agent (curl) |
-| `/__worklist/mutate` | HTTP POST | body `{ op: "prune" \| "advance", ids: [...], status?: "applied" }` | `{ ok: true, pruned: [...] }` / `{ ok: true, advanced: [...] }`, or 400 `{ error: "…" }` on auth-kind mismatch | agent (curl) |
-| `/__worklist/commit` | HTTP POST | body `{ ids: [...], message: "..." }` | `{ ok: true, sha, queuedCloses: [n, ...] }` (`queuedCloses` = issues the host enqueued for close-on-push from the gate dialog's ticks; `[]` when declined or none declared — #354: narrate closes from this, not from `closesIssues`), or 400/500 `{ error: "..." }` | agent (curl) |
+| `/__worklist` | HTTP GET | — | `{ description, version, items: [{ id, status, file(s), before, after, hash, diff?, ... }], exists, resourcesExists, path, ... }`; augmented board state | agent pane / agent |
+| `/__worklist/init` | HTTP GET | — | board payload; creates the file if missing | agent pane |
+| `/__worklist/resolve` | HTTP GET | optional `ids=foo,bar` | recorded `{ kind, ids, items, issuedAtMs, source, consumedAtMs, interruptedAtMs, commitToo }`, or `{ kind: "no_active_authorization", consumedAtMs }` | agent |
+| `/__worklist/mutate` | HTTP POST | `{ op: "prune" \| "advance", ids: [...], status?: "applied" }` | `{ ok: true, pruned: [...] }` / `{ ok: true, advanced: [...] }`, or refusal | agent |
+| `/__worklist/commit` | HTTP POST | `{ ids: [...], message: "..." }` | `{ ok: true, sha, queuedCloses: [n, ...], ... }`; may include `retained` / `residualPaths`; commits and performs its own prune | agent |
+| `/__worklist/drop` | HTTP POST | `{ ids: [...] }` | `{ ok: true, pruned: [...] }`; records its own drop grant, resolves, prunes | feedback-less pane Drop; handler does not establish caller identity |
+| `/__worklist/clear-landed` | HTTP POST | `{ ids: [...], via?: "pane" \| "agent" }` | `{ ok: true, cleared: [{id, sha}], refused: [...] }` when at least one clears; refuses if none qualify | pane / agent; Git evidence replaces a Drop grant |
+| `/__worklist/plan` | HTTP POST | `{ summary, steps: [{ verb: "drop" \| "commit" \| "feedback", ids, text? }] }` | validates and stores a version-bound recommendation; feedback requires text and cannot share a plan with commit | agent proposes; pane executes on user click |
 | `/__worklist/will-commit` | HTTP GET | `ids=a,b` | `{ ready, stale, mode: "whole-file" \| "interval", added, removed, unowned?: [{ path, added, removed }], entangledWith?: [...], dependentPaths?: [...], ids, stateKey }` (`ready: false` when membership has no partition yet). The gate's routing for that selection, run without committing: what committing those items together would take. The pane shows an answer only when it is fresh and its `stateKey` matches the board's `membershipStateKey` (issue-425-retire-replay) | gate bar (selection line); agent before a multi-id `worklist-commit` |
 | `/__worklist-config` | HTTP GET | — | `{ batchCommitActions: bool }` from `.bram.json` `worklist` block; defaults to `false` | agent pane iframe (`Workspace.xmlui` gates batch-commit UI on this) |
 | `/query` | HTTP POST | body `{ sql, params? }` (or a bare SQL string) — the de-facto XMLUI `dataType="sql"` wire contract | 200 JSON array of column-keyed row objects; 409 when `.bram.json` has no `db`; 400 on bad body / SQL error; read-only enforced at the engine (read-only open + `PRAGMA query_only`) | target app / pane markup (`DataSource dataType="sql"`), #355 |
 
-- `/__worklist` injects a `diff` field on each `applied` item (the output
-  of `git diff -- <file>`) so rows with changes to commit can preview their
-  pending change inline (the legacy tab badges these rows TO COMMIT).
-- `/__worklist/resolve` returns the most recent verified authorization
-  record. Active-record `kind` is one of `approved`, `drop`, `rejected_stale`.
-  When `rejected_stale`, the supplied hashes did not match the on-disk
-  file at receive time — the agent must surface staleness and refuse to
-  edit. The optional `ids=` query filters `items[]` and `ids[]` to the
-  named subset.
-- **Consume-on-read for `approved`.** A successful resolve of an `approved`
-  record consumes it (sets `consumedAtMs` on the file). Subsequent reads
-  return `{ kind: "no_active_authorization", consumedAtMs }` — agents
-  must NOT treat that as authorization. This is the architectural
-  backstop for the `iterate:` / `talk:` / any-non-authorization turn that
-  reflexively curls the resolver: it gets an unambiguous "nothing here"
-  instead of stale approval data. `drop` records are **not** consumed by
-  the resolver — `maybe_enforce_worklist_policy` (in `lib.rs`) consumes
-  drop after observing the prune so authorized prunes survive the
-  watcher round-trip.
-- Authorization payloads the agent sees in chat carry only `{id, hash}`
-  pairs. To fetch the full verified content the agent calls
-  `/__worklist/resolve` rather than parsing the `approved:` line.
-- `/__worklist/mutate` is the symmetric mechanical-mutations counterpart
-  to `/__worklist/resolve`. `prune` requires `kind: "drop"` (or
-  `kind: "approved"` for the post-commit prune case) covering every
-  requested id; `advance` requires `kind: "approved"`. This is the
-  canonical path for mechanical worklist state changes; direct edits to
-  `resources/worklist.json` are for proposal authoring and iterate-time
-  prose refinement. The chat doesn't render a diff and the server-side
-  auth check is uniform.
-- `/__worklist/commit` is the server-side commit gate for approved items
-  with changes to commit. It requires an `approved` auth record covering
-  every id. An id at `status:"applied"` always qualifies; a `status:"proposed"`
-  id also qualifies as long as its own files carry uncommitted changes on
-  disk (`rung6-commit-gate-accepts-proposed-with-work`) — an advance to
-  `applied` is no longer required to commit, though it remains valid. It
-  stages only those items' listed `file`/`files`, refuses when unrelated
-  files are already staged, commits with the supplied message, then prunes
-  through the same mutation machinery that clears the inflight sentinel and
-  records history.
-- **Authorization state-machine enforcement.** `record_worklist_authorization_from_input`
-  parses the structured turn and calls `build_worklist_authorization_record`
-  to verify each supplied item hash against the resolved on-disk worklist
-  item. Hash drift produces `kind: "rejected_stale"` with no verified
-  item bodies. `handle_worklist_mutate` delegates auth-kind, id-coverage,
-  and post-commit prune checks to pure helpers before it edits
-  `worklist.json`: `advance` requires an `approved` record; `prune`
-  requires `drop`, except the post-commit prune path accepts `approved`
-  only when every requested item is already `status: "applied"`.
-  Provider hooks (`worklist-guard.py`) reject direct `worklist.json`
-  status changes or item removals so mechanical state changes stay on
-  the host route.
-- A same-turn `resolve → edit files → mutate` flow is supported. An
-  `approved` record becomes `no_active_authorization` for subsequent
-  `/__worklist/resolve` reads after the first GET, but `/__worklist/mutate`
-  still uses the stored auth record from that turn.
-- **Side effect: inflight sentinel.** `/__worklist/resolve` writes
-  `resources/.inflight-claim.json` (with `kind` matching the auth
-  record) as part of serving an `approved` or `drop` record;
-  `/__worklist/mutate` clears the file as part of a successful
-  advance or prune. Both writes emit the `inflight-claim-changed`
-  Tauri event so iframe subscribers re-fetch `/__inflight`. See
-  section 11 for the full mechanism.
+- **Recorded bodies and consumption.** `handle_worklist_resolve` filters
+  ids if requested and resolves draft bodies. It establishes a claim for
+  approved/drop items. It consumes an **approved** record on read;
+  subsequent resolver reads return `no_active_authorization`. A **drop**
+  record is not consumed on read. Resolve itself is not the final freshness
+  check, and a successful resolve is not a reusable grant for unrelated work.
+- **Payloads.** Approved/drop turns carry `items: [{id, feedback?, gate?}]`;
+  feedback turns use `{id, feedbackRef}` with inline feedback as fallback.
+  Hash pairs are not required. `gate:"apply-and-commit"` sets `commitToo`.
+  The stored `approved` kind does not otherwise distinguish Start from
+  Commit. The ordinary Start path already has a claim; provider instructions
+  may still require resolve before application.
+- **Mutations.** `validate_worklist_mutate_authorization` checks kind, ids,
+  and reconciliation freshness. Advance requires `approved` and can only
+  set `applied`. Prune requires `drop`, or `approved` with the post-commit
+  status check: applied ids, unless `commitToo` permits proposed ones.
+  That check does not independently prove a commit happened. Agents let
+  the commit route prune after committing. Direct Worklist writes are for
+  proposal metadata; review prose lives in separate drafts.
+- **Commit.** `ensure_worklist_commit_authorized` checks approved ids and
+  publish freshness. The route separately checks item existence, work on
+  disk, declared paths, membership, and message restrictions. Proposed
+  items with changes can qualify without an advance. It uses whole-file
+  staging for exclusive paths and selected membership hunks for entangled
+  paths; see [the mechanics reference](../app/__shell/reference/worklist-mechanics.md).
+  Report any retained ids/residual paths. `queuedCloses` is the authority
+  for saying an issue will close after push, not the item's `closesIssues`.
+- **Freshness.** Both mutation and commit validators deliberately ignore
+  `consumedAtMs` so resolve → edit → mutate remains valid. The normal grant
+  TTL is 30 minutes from issuance. A recorded interrupt prevents publication
+  but permits reconciliation within TTL. The invalidator skips already-
+  consumed records; consumption is not comprehensive revocation.
+- **Retirement.** Advance/prune retire affected claim ids. Unconsumed grants
+  shrink by resolved ids until final consumption; already-consumed grants
+  do not shrink. Turn-end retires the execution claim; a still-live approval
+  can rearm it on the next turn. See section 11 and
+  [authorization lifecycle](authorization.md#records-transport-and-lifecycle).
+- **Enforcement limits.** Rust hooks (`guard.rs` / `guard_policy.rs`) reject
+  direct lifecycle rewrites and check tool coverage, with the watcher as a
+  further check on unauthorized removal. Coverage is not equivalent to
+  approval and Bash checks are coarse. Direct Drop assumes a pane caller;
+  clear-landed is a deliberate evidence-checked exception. Neither transport
+  availability nor an agent-authored recommendation is human consent.
 
 ### 3a. Codex filesystem lifecycle channel (#130)
 
@@ -229,7 +215,7 @@ Codex's sandbox refuses loopback connections (`curl: (7)` even when Bram
 listens), so Codex drives the lifecycle through files instead of the HTTP
 routes above. The host watches the intent file and dispatches it through the
 *same* handlers (`handle_worklist_resolve`, `handle_worklist_mutate`,
-`handle_worklist_commit`, `handle_worklist_end`, `handle_issue_close`), so all
+`handle_worklist_commit`, `handle_iterate_end`), so all
 side effects and auth checks are identical.
 
 | Surface | Type | Shape |
@@ -237,12 +223,15 @@ side effects and auth checks are identical.
 | `resources/.worklist-intent.json` | file (agent writes) | `{ nonce, route, body? }` — `route` ∈ `worklist-resolve` \| `worklist-mutate` \| `worklist-commit` \| `worklist-end`; `body` is the matching HTTP route's request body |
 | `resources/.worklist-result.json` | file (host writes) | `{ nonce, ok, status, result? , error?, completedAtMs }` — `result` is the HTTP route's response body verbatim; `error` present when `ok:false` |
 
-- The watcher drain reads-then-deletes the intent file (so duplicate notify
-  events in one burst no-op), writes the result atomically (`.tmp` + rename),
+- The watcher drain reads the intent, dispatches it, writes the result
+  atomically (`.tmp` + rename), then deletes the intent,
   and traces `[worklist-intent] route=… nonce=… ok=… status=…`.
 - Startup deletes any stale intent/result files
   (`cleanup_stale_worklist_intent`) so a leftover result can't be misread as a
   reply to a fresh intent — the agent must match `nonce`.
+- Match the response nonce; surface missing/mismatched responses and
+  `ok:false`. Unknown routes fail. The dispatcher has no direct-Drop,
+  clear-landed, plan, issue-close, or iterate-bracket route.
 - The Codex PreToolUse guard exempts `resources/.worklist-intent.json` from
   worklist coverage. Claude is unaffected and keeps using the HTTP routes.
 
@@ -580,34 +569,20 @@ file / event reference.
 - **File invariants.** Either absent or contains valid JSON with all
   three fields (`ids`, `claimedAt`, `kind`). Writes are atomic via
   `.tmp` + rename. The host serializes writes (single-process).
-- **Lifecycle by `kind`.**
-  - `approved` — written as a side effect of `/__worklist/resolve`
-    serving a `kind:"approved"` record; cleared by
-    `/__worklist/mutate advance` covering every claimed id, with the
-    host PTY / turn-end fallback able to clear a lingering claim if the
-    cycle still needs to drain.
-  - `drop` — written as a side effect of `/__worklist/resolve` serving a
-    `kind:"drop"` record; cleared by `/__worklist/mutate prune`
-    covering every claimed id, with the same host fallback.
-  - `iterate` — written by the host on the `toTurn` write path when an
-    `iterate:` prefix is detected; cleared by the same turn-finished
-    detectors that clear `approved` and `drop` sentinels.
-    `POST /__worklist/end` remains as the explicit manual unwind. It is
-    **not iterate-specific** — it is the correct unwind for any live claim,
-    including an `approved` claim whose turn ended with nothing to apply.
-    Body: `{"ids": [...]}` naming the claimed ids. Both are required; a
-    `GET` returns `POST only`, and an empty body returns
-    `{"error":"ids[] required"}`.
-- **Coverage rule for clears.** `clear` operations are no-ops unless
-  every id currently claimed is in the supplied ids. Partial coverage
-  intentionally leaves the file in place — a stuck sentinel is the
-  diagnostic for an incomplete agent contract.
-- **No live-session timeout.** Stuck claims stay claimed until the
-  matching end / mutate call arrives, or until Bram restart (the
-  startup helper `cleanup_stale_inflight_claim` deletes any leftover
-  sentinel and emits one final `inflight-claim-changed`). This is by
-  design: a stuck spinner surfaces the failure case instead of hiding
-  it.
+- **Lifecycle by `kind`.** Approval recording establishes an `approved`
+  claim before delivery; resolve can also establish approved/drop claims.
+  The host establishes `iterate` claims on the addressed-turn path.
+  Turn-end clears execution claims; a still-live approved grant can rearm
+  its claim on the next turn. Claim lifetime is not authorization lifetime.
+- **Per-id retirement.** Advance/prune/commit retire the resolved ids and
+  preserve any remaining claim. `POST /__worklist/end {"ids":[...]}` is an
+  explicit early release and uses the same shrink helper; GET or empty ids
+  are refused. A full-clear helper, in contrast, refuses partial coverage.
+- **No arbitrary live-session timeout.** Cooperative lifecycle calls,
+  matching turn-end detection, explicit release, and startup cleanup retire
+  claims. An expired mutation grant releases the refused ids as well. A
+  lingering spinner should be diagnosed from those records, not treated as
+  proof that approval remains valid.
 - **Independent turn completion detection.** In addition to cooperative
   agent calls, the host watches session JSONL for durable completion
   records. Claude clears on the most recent assistant record with
@@ -691,5 +666,6 @@ changed. Approximate line ranges for orientation:
 - IPC commands: `lib.rs:1279–1880` (individual `#[tauri::command]`
   functions) and `lib.rs:5654` (the `tauri::generate_handler!`
   registration).
-- Worklist authorization plumbing: `lib.rs:85–95` (record struct),
-  `:4247–4400` (parser, recorder, reader).
+- Worklist authorization plumbing: use the current symbol map in
+  [authorization.md](authorization.md#where-the-implementation-lives);
+  historical line offsets no longer locate these handlers.

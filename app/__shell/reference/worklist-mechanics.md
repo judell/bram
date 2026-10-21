@@ -18,7 +18,7 @@ are honored. The user-facing contract is identical for both agents.
   opted-out turn, deduped host-side so the guard's per-tool-call firing
   doesn't produce duplicates.
 - **Codex, prose opt-out.** Bram's host-side `toTurn` path matches the
-  same phrase and writes a one-turn `direct-edit` record
+  same phrase and writes a `direct-edit` record
   (`kind:"direct-edit"`, `paths:["*"]`, 1h TTL) to
   `resources/.worklist-direct-edit.json` — the grant's own sidecar,
   separate from the single-slot `.worklist-authorization.json` that any
@@ -27,7 +27,7 @@ are honored. The user-facing contract is identical for both agents.
   stay honored for one release). The same `toTurn` path records a
   `direct-edit` line in the audit ledger.
 - **`skip-worklist:` prefix (both agents).** When the host's `toTurn`
-  write path sees the prefix it writes the same one-turn `direct-edit`
+  write path sees the prefix it writes the same `direct-edit`
   record to `resources/.worklist-direct-edit.json`, then forwards the
   entire turn text including the prefix. The PreToolUse hook allows the
   edits via the existing `fresh_bypass()` path.
@@ -37,6 +37,13 @@ are honored. The user-facing contract is identical for both agents.
   outbound-turns/<id>-turn.json" frame names, where a multi-line, long
   or image-carrying message's words live (#431); the host-side matcher
   sees the raw text before framing.
+
+The **policy** is same-turn permission for the requested work, not
+standing permission. The sidecar's **mechanical lifetime** is one hour;
+the guard checks age and paths, not turn identity. It can therefore
+remain usable after that turn. Do not interpret this as permission to
+carry the user's opt-out into unrelated work. Neither an opt-out nor
+a tool allow supplies an approved/drop lifecycle grant.
 
 ## Feedback payload details
 
@@ -79,10 +86,12 @@ Authorization and execution are separate records:
   every turn's work attributed, and the gate is locked exactly while
   something is running.
 
-On an apply gate, `resolve` is skipped because the host sets the
-sentinel at approval time and `mutate op:"advance"` consumes the
-`approved` auth; `resolve`'s return value would only repeat the
-proposal you authored.
+On the ordinary apply path, `resolve` is unnecessary because the host
+sets the claim at approval time. If the installed provider instructions
+require resolve, use that flow and capture its response. An approved
+resolve consumes the whole record for future resolver reads; mutate
+still validates the stored grant. Consumption and per-id retirement
+are different operations (see below).
 
 `worklist-commit` retires claims by the ids it resolves, whichever
 approval carried the click.
@@ -237,15 +246,18 @@ sentinel, and the auth checks are identical.
    { "nonce": "<unique-per-request>", "route": "<route>", "body": { ... } }
    ```
 
-   `route` is one of `worklist-resolve`, `worklist-mutate`, or
-   `worklist-commit`. `body` matches the HTTP route:
+   `route` is one of `worklist-resolve`, `worklist-mutate`,
+   `worklist-commit`, or `worklist-end`. `body` matches the HTTP route:
    - `worklist-resolve` — omit, or `{ "ids": [...] }` to filter.
    - `worklist-mutate` — `{ "op": "advance", "ids": [...], "status": "applied" }`
      or `{ "op": "prune", "ids": [...] }`.
    - `worklist-commit` — `{ "ids": [...], "message": "..." }`.
+   - `worklist-end` — `{ "ids": [...] }`, explicit early claim release.
 
    There is no `issue-close` route: closing is fully automatic on the
    user's next Push. The agent never writes a close intent.
+   Direct Drop, clear-landed, plan, and the retired iterate brackets
+   also have no route in this dispatcher. Unknown routes fail.
 
 2. **Read** `resources/.worklist-result.json` for the record whose
    `nonce` matches (ignore stale results from prior requests):
@@ -282,15 +294,19 @@ committed, or dropped — in separate turns, each clearing its own slice
 of the spinner. (Where the core conventions say a call "clears the
 sentinel", that is the one-id case.)
 
-The authorization record retires by the same named subset. Until the
+An unconsumed authorization record retires by the same named subset. Until the
 last id resolves it keeps `consumedAtMs` empty, removes the completed
 ids and their embedded bodies, and traces
 `[auth-record] op=consume-shrink resolved=[...] remaining=[...]`. This
 is load-bearing for `split-shared-files`: one plural Commit approval
 can produce several sequential `worklist-commit` calls without the first
 commit consuming authority for the rest. The original `issuedAtMs` and
-interrupt flag remain unchanged, so TTL and cancel fail-closed behavior
-still cover the whole sequence.
+interrupt flag remain unchanged: TTL still bounds the whole sequence,
+and an interruption blocks publication while allowing reconciliation.
+If an approved resolve has already consumed the whole record, the
+retirement helper returns `AlreadyConsumed` rather than shrinking it.
+Do not assume consumption is a universal replay barrier: route checks
+and the current board state still matter.
 
 This is distinct from `op=clear-partial`, which is still a refusal: the
 blunt clears — turn-end detectors, cancel paths, startup cleanup, the
@@ -311,11 +327,11 @@ Parallelize the *work*; serialize the *gates*.
   `worklist-commit`. Every lifecycle call stays in the orchestrator's
   own turn, after the subagents return.
 - The reason is structural: the inflight sentinel holds one claim
-  (writing a second overwrites the first), and an authorization record
-  carries one whole-record consumed flag (the first `mutate` consumes
-  it, and the next subagent is told `no_active_authorization` for work
-  that was in fact approved). Neither surface can represent two
-  concurrent claimants.
+  (writing a second overwrites the first), and authorization is one
+  shared record. Per-id retirement supports serial completion of a
+  batch, not independent concurrent claimants. An approved resolve
+  consumes the whole record for later resolver reads. Keep lifecycle
+  calls in the orchestrator so those effects stay coordinated.
 - Before delegating in parallel, intersect the `files` lists of the
   candidate items. **Non-empty intersection → do not parallelize those
   two**; run them in sequence.
@@ -642,85 +658,90 @@ right item commits.
 
 ## Edits made in chat turns
 
-A chat turn (nothing selected, or **Send as chat instead**) is addressed to no item, so its
-edits are credited to no item, even when they're for an item that has
-begun. The gate builds an item's commit from the item's own turns, so work
-done between them is a gap it can't account for. This stays true until the
-gate carries unowned lines itself (#273).
+An unrelated chat turn with no execution claim credits its edits to no
+item, even when a begun item declares the file. A still-live approval can
+rearm a claim on a later turn of the same authorized work; that is a
+continuation, not new authority inferred from chat. Addressed feedback
+also establishes the item's claim.
 
-**Marking an item applied ends its claim, too.** `mutate op:"advance"`
-consumes the authorization, and edits made after it, even later in the same
-Start turn, are credited to no item, exactly like chat-turn edits. So finish
-every edit, and every test that might send you back to edit, before
-advancing. If a check after advancing turns up something to fix, don't edit:
-say so, and ask the user to send it as feedback on the item (an addressed
-turn opens a new claim), then edit in that turn. Apply-and-commit turns have
-no advance, so their edits stay claimed up to the commit.
+**Marking an item applied ends its claim, too.** Finish every edit and
+check that might require a correction before advancing. Further edits
+need an authorized continuation with a claim, normally feedback on the
+item. Apply-and-commit turns have no intermediate advance.
 
-**Symptoms:**
+Unowned lines can ride with a later whole-file commit, disclosed as
+`unownedTaken`; an entangled commit uses the membership partition and
+can leave residual work. Neither outcome makes unrelated chat edits
+belong to the item. Inspect what the gate will commit and report retained
+ids/residual paths; see Interval staging and entangled commits.
 
-- **A partial landing.** The `worklist-commit` response carries
-  `residualPaths` entries with `"owner":"unowned"` and `retained: [id]`. Only
-  the lines from the item's own turns landed, and the commit message may
-  describe more than the commit holds.
-- **A refusal with a misleading reason.** Two shapes are on record, and both
-  blame "another begun item" that contributed nothing:
-  - "this item's changes are entirely shared with another begun item and it
-    has no claim interval to stage from";
-  - "the requested item's interval patch does not apply to HEAD — its change
-    is defined relative to another begun item's work".
-- **Before committing:** the row's Ownership tab lists lines under "no item".
+With the user's explicit go-ahead for an outside-gate recovery commit,
+clear the landed rows using the verified cleanup path described above.
+A refusal alone does not authorize a plain-git workaround. Do not reset
+and reconstruct another item's edits to force a commit through.
 
-**Recovery:**
-
-- **Resetting the files and re-applying the diff in an addressed turn does
-  not work.** That turn is recorded relative to a tree that already holds
-  the unowned lines, so its patch doesn't apply to HEAD either.
-- **What works:** with the user's go-ahead, a plain `git commit` of the
-  item's files, then clearing the row with the "Committed outside the
-  Worklist" offer. Until `landed-detector-needs-item-work` lands, that offer
-  can also flag a begun item with no work of its own, and **Clear them**
-  ignores selection. If any flagged row isn't really done, Drop the finished
-  row alone instead.
-- Save the full diff as a patch in scratch space before trying anything, so
-  a failed attempt can't lose work.
-
-**Prevention:** when the user redirects begun work in chat, ask them to send
-it as feedback on the item (or press Start or Resume) before editing; and
-in a Start turn, advance only after the last edit and the last test.
-Receipts: judell/bram#273 (comments 5885260506 and 5897031890); for the
-advance case, `landed-detector-needs-item-work` (2026-09-29), where a
-regression fix written after the advance was left behind by `45c5239` and
-recovered outside the Worklist as `332bd7f`.
+Historical receipts: judell/bram#273 (comments 5885260506 and 5897031890)
+and `landed-detector-needs-item-work` (2026-09-29): a correction written
+after advance was left behind by `45c5239` and recovered as `332bd7f`.
+Those cases explain the claim discipline; their old replay-era refusal
+messages and batch-Clear UI are not the current implementation.
 
 ## Enforcement and security contract
 
 The structured `approved:` / `drop:` line is not authority by itself.
-The host records each clicked id into
-`resources/.worklist-authorization.json` with its kind (`approved` /
-`drop`); `/__worklist/resolve` is the only way an agent receives the
-recorded item bodies; `/__worklist/mutate` is the only way an agent
-advances or prunes:
+The pane asks the host to record clicked ids in
+`resources/.worklist-authorization.json` with kind `approved` / `drop`.
+Resolve delivers the recorded item bodies. The ordinary agent
+advance/prune channel is mutate:
 
 - `advance` requires an `approved` auth record covering every id.
-- `prune` requires `drop`, except the post-commit prune path also
-  accepts `approved` when the requested ids are already `applied`.
+- `prune` requires `drop`, except the post-commit prune path accepts
+  `approved` for applied ids, or with `commitToo` for apply-and-commit.
+  This status check does not itself prove a commit occurred. Let the
+  commit route handle its own pruning; do not prune ahead of it.
+- `worklist-commit` independently checks `approved`, ids and publish
+  freshness. A separate Commit click is policy unless Start & commit
+  was authorized. The stored kind does not distinguish apply-only
+  from commit-only approval; that limitation does not expand consent.
 
-Same-turn `resolve → edit files → mutate` is valid: `mutate` reads the
-stored auth record, not just resolve's consumption state.
+Same-turn `resolve → edit files → mutate` is valid. Approved resolve
+sets `consumedAtMs`; Drop resolve does not. Mutate and commit do not
+use that stamp as a blanket denial: they check the stored kind, ids,
+and freshness. Expiry is 30 minutes from issuance. An interrupt marked
+on the record blocks commit/publication but allows advance/prune
+reconciliation within that TTL. Already-consumed records are skipped
+by the interrupt invalidator, so consumption is not comprehensive
+revocation. A failed lifecycle request must be surfaced, not worked
+around.
 
-There is **no content-hash verification**. Bram shares a worklist
-between agents serially, never concurrently. The remaining concurrency
-guard is the `version` integer on `worklist.json` (file-write races,
-hook-enforced); self-authorization is gated structurally — `resolve` /
-`mutate` are the only channels and the auth record is consumed on
-read — not by a hash.
+There is **no approval content-hash verification**. The `version`
+integer on `worklist.json` guards file-write races; it does not verify
+human consent. Authorization is single-slot (a new click replaces it),
+while direct-edit grants have their own sidecar. Neither file is an
+OS-isolated or tamper-proof capability.
 
-Defense in depth: Claude and Codex each install PreToolUse hooks that
-validate worklist coverage before file-mutating tools run, and the
-desktop watcher reverts unauthorized prunes. Both guards also reject
-`worklist.json` writes that put non-empty `before` / `after` on any
-proposed item — prose must live in `resources/worklist-drafts/<id>.md`.
+**Exceptions and limits:**
+
+- `clear-landed` is deliberate host-verified cleanup without a Drop
+  grant; see Rows committed outside the Worklist. It is not a general
+  way to abandon an item or uncommitted work.
+- Feedback-less pane Drop uses a host-direct HTTP route that records
+  its own grant. The handler assumes the caller is the pane; it does
+  not independently establish a human click. Agents must not use this
+  exposure to bypass the Drop decision.
+- A posted recommendation is not approval. Do recommended is the
+  user's click using existing action paths. Phrase-based dropping of
+  recommended items (#446) is not implemented at this baseline.
+- Both providers use Rust PreToolUse guards. File coverage can exist
+  for an unapproved proposal; some stronger checks emit `would-deny`
+  observations without blocking. Bash coverage is coarser than
+  file-aware coverage. A tool allow never overrides the approval rule.
+- The watcher checks unauthorized prunes, and guards reject direct
+  lifecycle changes and inline draft prose. These are defense in
+  depth, not isolation from arbitrary same-user code. Browser CORS
+  restrictions do not prevent a local process reaching loopback.
+
+Continue to use the prescribed approval flow despite these limits.
 
 ## Signature deny reasons
 

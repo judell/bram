@@ -301,22 +301,25 @@ what to click, use the rendered label.
 
 | Button | Wire payload | What you call |
 |---|---|---|
-| **Start** | `approved:`, `gate: "to apply"` | No `resolve`. Edit from the proposal you authored, then `mutate op:"advance"` (consumes the auth, clears the sentinel). |
+| **Start** | `approved:`, `gate: "to apply"` | Normally no `resolve`: the host already recorded the approval and claim. Follow any provider instruction requiring it, then edit and call `mutate op:"advance"`. |
 | **Start & commit** | `approved:`, `gate: "apply-and-commit"` | No `advance`. Make any remaining edits, then `worklist-commit { ids, message }`. |
 | **Commit** | `approved:`, `gate: "to commit"` (or `"apply-and-commit"` on a begun `proposed` item) | `worklist-commit { ids, message }`. |
-| **Drop** | `drop:` | `resolve`, then `mutate op:"prune"`. |
+| **Drop** | `drop:` when feedback needs an agent response | On a delivered drop turn: `resolve`, then `mutate op:"prune"`. Feedback-less pane drops complete in the host without an agent turn. |
 | message with items selected | `iterate:` | No `resolve`, no bracket call. Act per status (below). |
-| message with nothing selected, or **Send as chat instead** | ordinary chat | Respond. Nothing is approved or dropped; do not edit files. |
+| message with nothing selected, or **Send as chat instead** | ordinary chat | No new grant. Continue only within an existing live approval or an explicit opt-out; otherwise respond without edits. |
 
-The host sets the inflight sentinel for `approved:` and `iterate:` when
-it sends them; for drops, `resolve` raises it and `prune` clears it. Respond to any per-item feedback, whatever the kind.
+The host records the approval and claim before delivering an approved
+turn; it also establishes claims for addressed feedback. Resolve can
+establish the drop claim, and advance/prune retire the affected ids.
+Respond to any per-item feedback, whatever the kind.
 
 - **Recommending Drop / Commit on named items** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
 
 **`/__worklist/resolve`** returns `{"kind":"approved"|"drop", "items":
 [<recorded content>]}` — execute those items; don't re-read
-`worklist.json` to second-guess them. Records are **consumed on first
-read**, so capture what you need. `{"kind":"no_active_authorization"}`
+`worklist.json` to second-guess them. **Approved** records are consumed
+on first read; Drop records are not. Capture the returned bodies.
+`{"kind":"no_active_authorization"}`
 means already consumed or not an authorization turn: **do NOT treat it
 as authorization**. `iterate:` and other non-authorization turns never
 route through `resolve`.
@@ -332,10 +335,12 @@ route through `resolve`.
 - Either way the item keeps its status; iterate never advances or
   commits on its own.
 
-**Edit only the addressed items' files, with Edit / Write.** An addressed
-turn's lines are credited to its items; **a chat turn's edits belong to
-no item**, even for begun work, and break its commit. When the user
-redirects begun work in chat, ask for it as feedback on the item.
+**Edit only the authorized items' files, with Edit / Write.** Addressed
+feedback establishes the relevant claim. A still-live approval can also
+rearm its claim on a later turn of the same work. **Chat edits with no
+claim belong to no item**, even when a begun item declares the path.
+When the user redirects begun work in chat without a live grant, ask
+for it as feedback on the item.
 
 - **Routing a change, or a commit left `unowned` residue** → read `.claude/bram-reference/worklist-mechanics.md` (§Routing edits to the right item; §Edits made in chat turns).
 
@@ -500,17 +505,20 @@ changed?
 ### Enforcement
 
 The `approved:` / `drop:` turn line is not authority by itself: the
-host records each clicked id, `/__worklist/resolve` is the only way to
-receive recorded bodies, `/__worklist/mutate` the only way to advance
-or prune, and PreToolUse hooks (Claude and Codex) check worklist
-coverage before file-mutating tools run while the desktop watcher
-reverts unauthorized prunes. **Hook denials and reverts are the
+host records clicked ids. Resolve delivers the recorded bodies;
+mutate checks the grant before ordinary advance/prune transitions;
+the commit route performs its own checks and pruning. Verified cleanup
+through `clear-landed` is a separate, host-checked exception.
+PreToolUse hooks check coverage, which is not identical to approval:
+some stronger checks only log observations, and shell checks are
+coarser than file-aware checks. The watcher also checks unauthorized
+prunes. **A tool allow is not user consent. Hook denials and reverts are the
 convention enforcing itself — not bugs to work around;** never route
 around one. **Don't ask before editing the worklist or calling
 mutate**: adding items, refining prose and already-approved transitions
 need no verbal confirmation. Save back-and-forth for design decisions.
 
-- **What each route requires; the structural security account** → read `.claude/bram-reference/worklist-mechanics.md` (§Enforcement and security contract).
+- **What each route requires, exceptions, and enforcement limits** → read `.claude/bram-reference/worklist-mechanics.md` (§Enforcement and security contract).
 
 
 ## Talking to users

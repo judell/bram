@@ -1,5 +1,10 @@
 # Conventions rationale
 
+For the consolidated current policy, implementation, exceptions and
+pending decisions, see [authorization.md](authorization.md). This file
+preserves the history behind the rules; an older incident description
+is not evidence that its implementation still governs today.
+
 Source-repo only; never seeded into managed projects. This file holds
 the history behind `app/__shell/conventions.md` (the always-loaded core,
 seeded as `.claude/bram-conventions.md`) and the operational reference

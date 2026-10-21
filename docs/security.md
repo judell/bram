@@ -1,5 +1,12 @@
 # Bram security assessment and action plan
 
+For the current authorization policy and its implementation limits, see
+[authorization.md](authorization.md). This is the broader historical
+assessment; a DONE row records the named fix, not a guarantee that every
+authorization path is protected. The 2026-10-21 source review documents
+direct Drop's caller assumption, coverage checks weaker than approval,
+and consumption/interrupt limitations. It adds no new live exploit probe.
+
 Status: original assessment 2026-07-10; **verified re-review 2026-07-24**;
 **long-tail cleanup + Rust-guard truth pass 2026-09-09** (M7/L2/L3 fixed;
 M1 mooted and M5/L4 resolved by the Rust guard migration — see rows).
@@ -27,8 +34,10 @@ The actors that matter:
 
 - **The agent process** (Claude/Codex in the PTY). Trusted to read, untrusted
   to mutate without worklist coverage. Its file writes are gated by the
-  provider PreToolUse guard; its git/GitHub side effects are gated by the
-  worklist authorization record.
+  provider PreToolUse guard. Worklist commit/mutate routes check the
+  authorization record; plain git/forge commands use separate, coarser
+  guard rules and are not all gated by that record. User consent remains
+  required by policy even where the tool guard permits a call.
 - **The target-app iframe** (optional, off by default). May host arbitrary web
   content. As of C1 it is served at a distinct `bramapp://localhost` origin,
   cut off from `window.__TAURI__` and the dynamic host routes — display-only.
@@ -288,7 +297,7 @@ day, **M** = half to two days, **L** = more than two days.
 | H1 | Bracketed-paste `\x1b[201~` smuggling / auto-submit. | **DONE** — paste-end neutralized in outbound payloads (`6a13cde`). |
 | H2 | Worklist authorization forged from PTY input. | **DONE** — host-owned approve/drop auth (`6d49edf`). Root cause #3. |
 | H3 | Claude guard exits 0 for all `Bash`; write ops bypass the worklist. | **DONE (regressed 2026-07-23, re-fixed)** — `_BASH_WRITE_PATTERNS` landed in the guard, but the `Bash` matcher was dropped from the registration by unrelated collateral (`a8d2acb`), leaving the branch unreachable for three and a half weeks. The original DONE verified the script, not the artifact that runs. Re-fixed by registering the surface in `CLAUDE_GUARD_MATCHERS` and verifying by probe (#261). Root cause #4. |
-| H4 | Auth did not fail closed on interrupt. | **DONE** — `invalidate_worklist_authorization` at every interrupt site; `validate_*`/`ensure_*` reject an interrupted or past-TTL record (`d044b34`, `e75fea2`). |
+| H4 | Auth did not fail closed on interrupt. | **Original fix landed** (`d044b34`, `e75fea2`); #255 subsequently permits reconciliation (advance/prune) after interruption while publication stays blocked by a recorded interrupt. TTL applies to both. Already-consumed records are skipped by the invalidator; see [current limits](authorization.md#resolve-consumption-expiry-and-interruption). |
 | H5 | Issue-close / push side effects ungated. | **DONE** — agent `/__issue/close` route removed; closing is a host consequence of the user's explicit Push (`8c64ef7`). |
 | H6 | Loopback wildcard CORS let any cross-origin browser page that learned the port read responses. | **DONE — browser vector** (`issue-113-h6-loopback-cors-and-token`). The blanket `Access-Control-Allow-Origin: *` is gone; ACAO is echoed only for the shell (agent-pane) origin and omitted for every other Origin and for no-Origin callers (`cors_allowed_origin`). Confirmed by soak that real pane traffic sends no Origin, so the change is transparent to it; a cross-origin browser page — and the target pane's `bramapp://` origin — can no longer read loopback responses. **Residual (accepted):** a same-user *local process* is not browser-CORS-bound; a per-session token was designed and deliberately dropped as low-value, since such a process could equally read the token (env via `ps eww`, or a port-adjacent file). |
 

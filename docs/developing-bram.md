@@ -12,6 +12,13 @@ repo?* If yes, it belongs in `app/__shell/conventions.md`.
 The rules below are agent-neutral: they bind Claude, Codex, and any
 future provider editing this repo.
 
+For the authorization policy, shipped checks, intentional exceptions,
+and known gaps, start with [authorization.md](authorization.md). A change
+to authorization must update its action matrix, the affected API entry,
+and the seeded operational instructions together, naming the enforcement
+point and evidence. Do not leave a managed project's instructions
+dependent on this repo's unseeded `docs/` directory.
+
 For the architectural map of Bram's Git-backed mechanisms—temporary
 indexes, claim and safety refs, selective commits, linked worktrees,
 scenario branches, and remote-tracking state—see

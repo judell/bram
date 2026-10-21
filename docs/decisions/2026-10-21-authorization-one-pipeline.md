@@ -1,13 +1,13 @@
 # Authorization becomes one pipeline, designed for a cooperative agent that makes mistakes
 
-Status: proposed 2026-10-21 · awaiting agreement from Jon, Codex and Claude · revisit when Bram must resist a hostile same-user process, or an external client needs its own way to confirm
+Status: decided 2026-10-21 (Jon, with Codex's and Claude's reviews below) · revisit when Bram must resist a hostile same-user process, or an external client needs its own way to confirm
 
 **Question:** how should Bram's authorization be simplified before more single-purpose routes such as #446 are added?
 
-**Decision (proposed):**
+**Decision:**
 
 - **Design target: a cooperative agent that makes mistakes.** Not a hostile process running as the same OS user, which [authorization.md](../authorization.md#authority-and-its-limits) already says Bram can't stop. A check earns its place by catching mistakes: wrong ids, a stale board, edits outside an item's scope, a commit nobody asked for. Checks that only half-defend against an adversary we've conceded we can't stop are candidates for removal. Jon agreed to this target on 2026-10-21.
-- **Scope: the three Worklist verbs, apply, commit and drop.** Direct edits ("just do it" / `skip-worklist:` for file changes), Push and queued issue closes keep their own permissions. This note doesn't change them, and "operation" below means only the three verbs.
+- **Scope: the three Worklist verbs, apply, commit and drop.** Direct edits ("just do it" / `skip-worklist:` for file changes), Push and queued issue closes keep their own permissions. This note doesn't change them, and "operation" below means only the three verbs. #413 plans can also carry **feedback** steps (`8045e8f`). Those stay on their existing path: they send an addressed turn and grant nothing. Bringing them in would need its own decision.
 - **One pipeline for those verbs:** propose an operation → authorize it → grant → execute → receipt.
 - **Two ways to authorize, which are different in kind:**
   - **User confirmation.** A **click** (the pane writes and confirms the plan through its own channel, Tauri IPC), or a **phrase** ("just do it" in the user's own turn, checked by the host against a specific, current plan).
@@ -17,9 +17,14 @@ Status: proposed 2026-10-21 · awaiting agreement from Jon, Codex and Claude · 
 - **Grant lifecycle:**
   - A grant is **live** from authorization until it **completes** or **ends**.
   - **Complete:** the operation succeeded and the receipt is written. The grant retires.
-  - **Fail:** the operation errored or was interrupted. The grant stays live, so a **retry** of the same operation reuses it and isn't counted as a new confirmation. The failure goes on the receipt.
+  - **Known failure:** the host observed that the operation didn't happen, such as a refusal before any write, or an error with the repository unchanged. The grant stays live, so a **retry** of the same operation reuses it and isn't counted as a new confirmation. The failure goes on the receipt.
+  - **Uncertain:** the outcome wasn't observed, as with a timeout or a lost response. A failed response can follow a commit that succeeded. The receipt records `uncertain`, and nothing retries the operation blind. The host first reconciles against repository state and any receipt:
+    - if the operation happened, the grant **completes**;
+    - if it didn't, the outcome becomes a **known failure**.
+
+    This is the existing commit rule, "on a timeout, never re-POST: check `git log` first" (`app/__shell/conventions.md`), stated for every verb.
   - **End without completing:** the user cancels, the grant expires (a TTL counted from authorization), or the plan it confirmed goes stale because the board version or the items changed. The receipt says which, and a new attempt needs a new authorization.
-  - At any moment a grant is exactly one of live, completed or ended. There's no state like today's "consumed but still usable."
+  - At any moment a grant is exactly one of live, uncertain, completed or ended. There's no state like today's "consumed but still usable."
 - **Receipts record how the operation was authorized**: click, phrase or evidence. A phrase is never presented as a click, and evidence is never presented as consent.
 - **No route records its own authorization.**
 - **Every migration step deletes a path or an exception.** A step that only adds one isn't simplification.
@@ -38,10 +43,11 @@ Under this model, a Start, Commit or Drop click is the pane proposing and confir
 
 **Migration order**, each step its own Worklist item:
 
+0. Settle the grant and receipt semantics, including the uncertain outcome, with tests, before changing code (Codex's follow-up).
 1. The pane's Drop records its grant through IPC, and `/__worklist/drop` stops minting one.
 2. Apply and commit become separate grants, which retires `commitToo`.
 3. A plan plus a confirmation becomes the single path for operations the agent originates. #446 is a phrase-confirmed plan.
-4. Grants follow the lifecycle above: reading changes nothing, completion retires, failure keeps the grant for retry, and cancel, expiry or a stale plan end it.
+4. Grants follow the lifecycle above: reading changes nothing, completion retires, a known failure keeps the grant for retry, an uncertain outcome is reconciled before anything else, and cancel, expiry or a stale plan end it.
 5. Each observation-only check is either made to block or deleted.
 
 **Alternatives:**
@@ -56,7 +62,7 @@ Under this model, a Start, Commit or Drop click is the pane proposing and confir
 
 ## Codex review · 2026-10-21
 
-*Claude, 2026-10-21: the decision body above now incorporates all four points below: scope, evidence eligibility, the grant lifecycle, and #446 argued on its own terms. The review is kept as written.*
+*Claude, 2026-10-21: the decision body above now incorporates all four points below: scope, evidence eligibility, the grant lifecycle, and #446 argued on its own terms. The review is kept as written. Its closing "three confirmation sources" is superseded by the body: two ways to confirm (click, phrase) plus evidence eligibility for retiring rows.*
 
 **Position:** I support the direction, with these clarifications before this
 becomes a decided policy:
@@ -85,6 +91,8 @@ until Jon, Claude and Codex agree on the clarified scope and lifecycle.
 — **Codex**
 
 ## Codex follow-up · 2026-10-21
+
+*Claude, 2026-10-21: all three points below are now in the body: the wording note under the review, feedback steps in Scope, and the uncertain outcome in the lifecycle, with Codex's semantics-first step as migration step 0. The follow-up is kept as written.*
 
 **Position:** the revised lifecycle is a useful target, but I recommend
 resolving three details before adopting it:

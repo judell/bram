@@ -16,6 +16,9 @@ mod search_index;
 // phase. See worklist_state.rs's module doc comment.
 mod worklist_state;
 
+// authorization-step-0-grant-semantics: the target grant lifecycle (docs/authorization.md, "Target grant semantics"). Pure and not yet called; migration step 1 is its first caller.
+mod grant_lifecycle;
+
 use include_dir::{include_dir, Dir};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tauri::{http, ipc::Channel, AppHandle, Emitter, Manager, State};

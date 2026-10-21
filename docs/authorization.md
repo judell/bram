@@ -253,91 +253,182 @@ the agent's authority.
 
 ## Looking Forward
 
-**The biggest simplification would be to give every action one meaning,
-regardless of whether it comes from a button, chat, Claude, or Codex.**
-Today the history of how an action was implemented often determines its
-rules. The aim should be a small, consistent model that those interfaces
-all use.
+The direction is decided:
+[Authorization becomes one pipeline](decisions/2026-10-21-authorization-one-pipeline.md),
+which carries Codex's and Claude's reviews. It governs where it differs from
+this document's current-state account. Codex's original principles are in
+`c240f5b`.
 
-This is Codex's proposed direction from the 2026-10-21 discussion, pending
-Claude's review and a joint discussion with Jon. It is not an adopted policy
-or a description of shipped behavior. Four principles would guide it.
+## Target grant semantics (migration step 0)
 
-Claude's review and Jon's answers are recorded in the proposed decision
-[Authorization becomes one pipeline](decisions/2026-10-21-authorization-one-pipeline.md).
-Once that note is decided, it governs, and this section will be reduced to
-a pointer.
+This is the contract the decision's migration steps 1 to 5 implement. It is
+**not shipped behavior**: nothing calls it yet. The pure state machine in
+[grant_lifecycle.rs](../src-tauri/src/grant_lifecycle.rs) encodes it, with
+tests for each transition in the table below. The tests pin the code's
+transition behavior; keeping this prose table aligned with them remains a
+review responsibility.
 
-### 1. Make the promise precise
+**Out of scope here:** how each route calls the grant book, and the final
+storage decision (#325). **Intended store:** the state mirror's database
+(`worklist_state.rs`). The grant book is shadowed there first, under
+migration discipline rule 1, and becomes authoritative at the switch. This
+would be the mirror's first phase-B use for authorization. **Open
+question:** the guard is a separate process. It reads
+`resources/.worklist-authorization.json` directly for grant age
+(`guard_policy.rs`, `AUTH_REL`) and uses that file's existence as the
+project-root marker. It will need to read the database itself, or ask the
+host over the loopback port, and the root marker must stay a file.
 
-Bram provides an approval workflow with enforcement at specific boundaries.
-Its current architecture cannot promise isolation from arbitrary code
-running as the same OS user. State that boundary clearly, and distinguish
-accidental overreach by a cooperating agent from a hostile process defeating
-the system. Strengthening the workflow and building an OS security boundary
-are different projects; evaluate each guarantee against the intended actor.
+### The grant
 
-### 2. Record permission for an operation, not a conversation state
+A grant is keyed by **(item, verb)**, where the verb is `apply`, `commit` or
+`drop`. It records:
 
-A grant should identify an action and its scope: apply this proposal,
-commit these items, or drop this selection. Reading the grant should have
-no effect. Completing the operation should retire it; cancellation should
-explicitly revoke it. Unrelated actions should not overwrite one another's
-permission.
+- `confirmedBy`: `click` or `phrase`;
+- the plan version it confirmed, when it confirmed a plan;
+- `issuedAtMs`;
+- its state.
 
-That would remove much of the reasoning around consumed-but-still-usable
-approval, apply and commit sharing one kind, and single-slot displacement.
-The exact scope, freshness and retry rules still need design, including
-what happens when the proposal or repository changes after approval.
-This follows [#325's protocol-first direction](https://github.com/judell/bram/issues/325):
-changing storage alone would not establish these semantics.
+Grants under different keys never affect each other. A new authorization
+for a key whose grant is `live` ends the old grant as `replaced`, and the
+ended grant goes back to the caller with its receipt, so the record of the
+replacement is kept. A grant that is `uncertain` can't be replaced until it
+has been reconciled.
 
-### 3. Give each operation one host implementation
+### Evidence-based row retirement
 
-Buttons, HTTP requests, and filesystem requests should reach the same
-operation and checks. Direct Drop currently creates its own permission,
-while ordinary Drop requires permission recorded elsewhere. That difference
-should disappear: recording consent and executing an operation need explicit
-boundaries, even when one pane click performs both immediately.
+`clear-landed` is not a third way to authorize a grant. The host verifies
+that an item's declared paths are clean and that a qualifying commit landed;
+for a never-begun item, the checks also require a commit after the row first
+appeared whose message names the item. The verified evidence records the item,
+commit SHA, verification time, and whether the item had begun. It makes that
+row eligible for retirement only. A separate evidence-retirement receipt
+records the evidence and retirement time. This evidence does not authorize
+apply, commit, or a Drop of work that has not already landed, and it is never
+recorded as user consent.
 
-Chat could supply another input to this model without creating a separate
-authorization system. For #446, the agent posts a concrete recommendation;
-the host checks a supported user confirmation against that recommendation.
-The provenance of that confirmation still needs an explicit policy. A
-transcript phrase and a protected pane click must not be presented as
-equivalent evidence merely because they request the same operation.
+### States
 
-### 4. Separate permission, activity, and outcome
+| State | Meaning | May execute? |
+| --- | --- | --- |
+| `live` | Authorized, not yet completed. | yes |
+| `uncertain` | An attempt's outcome wasn't observed. | no: reconcile first |
+| `completed` | The operation happened. Terminal. | no |
+| `ended(reason)` | `cancelled`, `expired`, `stale` or `replaced`. Terminal. | no |
 
-Keep three questions independent:
+### Transitions
 
-- **May it happen?** A scoped grant.
-- **Is it happening?** Execution state.
-- **What happened?** Repository evidence and a receipt.
+Each event either moves the grant and appends one receipt entry, or is
+refused, leaving the state and receipt unchanged. **Read** is a no-op in
+every state, and appends nothing.
 
-A spinner should not determine permission. Reading approval should not
-change permission. An agent forgetting to announce completion should not
-leave the board permanently wrong. `clear-landed` already demonstrates part
-of this direction: reconciliation can follow checked evidence without
-inventing a new human decision. Evidence still has limits; a commit touching
-a file does not by itself prove the proposal's intent was fulfilled.
+| Event | from `live` | from `uncertain` | from `completed` / `ended` |
+| --- | --- | --- | --- |
+| execute → ok | `completed` | refused | refused |
+| execute → known failure | `live` (retry allowed) | refused | refused |
+| execute → unobserved | `uncertain` | refused | refused |
+| reconcile → happened | refused | `completed` | refused |
+| reconcile → did not happen | refused | `live` | refused |
+| cancel | `ended(cancelled)` | refused | refused |
+| TTL elapsed | `ended(expired)` | refused | refused |
+| plan stale | `ended(stale)` | refused | refused |
+| replaced by new authorization | `ended(replaced)` | refused | refused |
+| read | unchanged | unchanged | unchanged |
 
-### A first case to review together
+**Why `uncertain` refuses cancel, TTL and stale.** Whether the operation
+happened is unknown, and ending the grant would discard that question. A
+commit that did land changes the board, which makes its own plan stale, so
+checking staleness first would misread success as staleness. Reconciliation
+comes first. A grant that reconciles to `live` then faces the usual TTL and
+staleness checks.
 
-The person using Bram could retain the familiar choices: review before
-editing, review before committing, or explicitly authorize both. These
-choices should compose through the same mechanism. How much ceremony to
-require remains distinct from which interface carries the decision, as
-[#400](https://github.com/judell/bram/issues/400) and
-[#402](https://github.com/judell/bram/issues/402) already distinguish.
+A **retry** is just another execute on a `live` grant. It isn't a new
+authorization and adds no `authorized` entry.
 
-Start the design discussion with the operation/grant contract and use
-ordinary Drop plus #446 as its first concrete case. Each migration should
-remove an old path or exception, rather than add another layer. Before
-implementation, review together which guarantees this preserves, which it
-changes, how chat consent is established, and how cancellation and retries
-work. The current-state account above remains the baseline against which
-to judge that simplification.
+### The receipt
+
+The receipt is append-only, one per grant. Its entries:
+
+- `confirmed(by)`, once, when the grant is created;
+- `attempt(ok | knownFailure | unobserved)`;
+- `reconciled(happened | didNotHappen)`;
+- `ended(reason)`.
+
+The grant receipt is how a phrase stays distinguishable from a click after
+the fact. Evidence-based retirement has its separate receipt described above.
+
+### What this structure simplifies and enables
+
+Keying grants by item and verb removes unrelated permissions overwriting one
+another. Reads no longer consume authority, and explicit terminal states
+replace today's consumed-but-still-usable cases. The same transitions make
+known-failure retry and uncertain-outcome reconciliation explicit, with a
+receipt for each attempt.
+
+Once a caller uses this contract, the Worklist can give apply, commit and
+Drop one host executor each while preserving whether permission came from a
+click or a phrase. That supports the migration's first steps:
+`/__worklist/drop` stops recording its own grant, so the pane's Drop
+confirms through its own channel and every Drop runs on one host executor;
+then apply and commit grants separate; and later a current recommended plan
+can be confirmed by a phrase for #446.
+Evidence-based `clear-landed` can share the row-retirement executor while
+remaining visibly distinct from consent. The contract is independent of its
+storage backend, so the mirror can first shadow it and later become
+authoritative after the guard's direct-file dependency is resolved.
+
+## Migration discipline
+
+Every migration step from the decision follows these rules. They come from
+the last large migration, replay → membership (#425,
+[decision](decisions/2026-09-22-membership-over-replay.md)). Its shadow
+comparison and its one-consumer-at-a-time switch worked. Five things didn't:
+
+- The soak was three days, on one machine's board shapes.
+- The no-answer refusal shipped with no unit test and had never fired live.
+- That refusal failed closed for every commit.
+- The fallback was deleted six days after the gate switched.
+- The regression check (`membership-starter-check.py`) arrived after the
+  field incident, #437 on 2026-10-13.
+
+The rules:
+
+1. **Shadow before switching.** After step 0, the grant book runs beside
+   the current record. It receives the same events and decides nothing.
+   Whenever the two would answer a route call differently, it logs
+   `op=grant-diverges`. The divergence tripwire in `worklist_state.rs` is
+   the precedent. Users see no change during the shadow phase.
+2. **Exit criteria are written before each step starts.** At minimum:
+   - a stated number of gate operations across at least two machines,
+     including one non-macOS board;
+   - every divergence ruled on, with none unexplained.
+
+   The step's item records the criteria and the evidence that met them.
+3. **Switch in one release and delete in a later one.** The old path stays
+   available while a switch is in the field.
+4. **Fall back; don't refuse everything.** While both paths exist, an
+   internal error in the new path falls through to the old one and is
+   traced. A final step removes the fallback once the trace shows it has
+   stopped firing.
+5. **Every refusal and failure path ships tested and fired.** That means a
+   unit test, plus one live firing on a demo board before the release.
+   This includes the uncertain outcome.
+6. **Authorization starters come first.** Before step 1, add starters to
+   `scripts/demo_instance.py` for the shapes that have caused trouble,
+   each with an expectation table like the membership check's:
+   - a Drop while an approval is live (#325);
+   - an expired approval;
+   - an interrupt mid-apply;
+   - a commit that times out after landing.
+7. **Smallest blast radius first.** Step 1 changes one route and one pane
+   call. Step 2 changes every Start and Commit, so it gets the longest
+   soak.
+8. **Read both records during the transition.** A pane and host from
+   different builds (during an upgrade), or a grant in flight across the
+   code change, must still resolve.
+
+There is no deadline between steps. A soak that turns up divergences holds
+the next step until they're explained.
 
 ## Verification and maintenance
 

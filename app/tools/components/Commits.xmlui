@@ -240,35 +240,49 @@
           <HStack gap="$space-3" verticalAlignment="center">
             <Text when="{$item.pushed}" value="✓" color="$color-success-600" fontSize="$fontSize-xs" width="12px" />
             <Text when="{!$item.pushed}" value=" " width="12px" />
-            <Text value="{$item.sha.slice(0, 7)}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" width="64px" />
+            <Text value="{$item.sha.slice(0, 7)}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" width="64px" when-xl />
             <Text value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}" fontSize="$fontSize-xs" color="$textColor-secondary" overflowMode="none" width="88px" />
-            <HStack width="232px" gap="$space-1" verticalAlignment="center">
-              <Text value="{$item.commit.author.login || $item.commit.author.name}" fontSize="$fontSize-sm" color="$textColor-secondary" width="*" maxLines="1" />
-              <HStack gap="8px" verticalAlignment="center">
-                <Text value="{'+' + ($item.additions || 0)}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-success-700" />
-                <Text value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-danger-700" />
-              </HStack>
+            <!-- commits-item-tags-wrap: below xl (1200px pane width) the sha
+                 and +/- counts hide, giving the subject room; the row's
+                 detail still shows both.
+                 https://www.xmlui.org/docs/howto/show-different-content-per-breakpoint
+                 Fixed widths plus when-* only: width-lg was ignored in these
+                 rows while when-lg applied (suspected XMLUI bug, 2026-10-21). -->
+            <Text value="{$item.commit.author.login || $item.commit.author.name}" fontSize="$fontSize-sm" color="$textColor-secondary" width="80px" breakMode="word" />
+            <HStack gap="8px" width="104px" verticalAlignment="center" when-xl>
+              <Text value="{'+' + ($item.additions || 0)}" textAlign="right" width="48px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-success-700" />
+              <Text value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}" textAlign="right" width="48px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-danger-700" />
             </HStack>
             <Text
               value="{$item.commit.message.split('\n')[0]}"
               fontSize="$fontSize-sm"
-              width="*" />
+              width="2*" />
             <!-- commits-list-shows-worklist-item: one tag per Worklist item
                  the commit landed (itemIds, joined host-side in
                  attach_history_item_ids). Opens the item in History the way
                  CommitDetail's "Worklist history:" link does; the
                  row-control testId keeps the click from also opening the
-                 row's detail (__bramRowClickHit). -->
-            <Items data="{$item.itemIds || []}">
-              <Link
-                noIndicator
-                testId="row-control-worklist-item"
-                tooltip="Open this Worklist item in History"
-                onClick="navigate('/history', { queryParams: { entry: $item } })">
-                <Text value="{$item}" variant="code" fontSize="$fontSize-xs"
-                  color="$color-primary-600" maxLines="1" />
-              </Link>
-            </Items>
+                 row's detail (__bramRowClickHit).
+                 commits-item-tags-wrap: a one-third star column on every row,
+                 tagged or not, sharing the leftover width 2:1 with the subject
+                 (https://www.xmlui.org/docs/howto/make-a-set-of-equal-width-cards)
+                 so the subject column lines up; tags stack one
+                 per line and long ids wrap at their hyphens. The id is the
+                 Link's own label, not a nested Text, which would not wrap
+                 (https://www.xmlui.org/docs/howto/wrap-long-text-in-a-link). -->
+            <VStack width="*" gap="$space-1">
+              <Items data="{$item.itemIds || []}">
+                <Link
+                  noIndicator
+                  testId="row-control-worklist-item"
+                  tooltip="Open this Worklist item in History"
+                  label="{$item}"
+                  breakMode="word"
+                  fontFamily="$fontFamily-monospace"
+                  fontSize="$fontSize-xs"
+                  onClick="navigate('/history', { queryParams: { entry: $item } })" />
+              </Items>
+            </VStack>
             <Text
               when="{!$item.pushed &amp;&amp; $item.pendingCloses &amp;&amp; $item.pendingCloses.length > 0}"
               value="{'closes ' + $item.pendingCloses.map(p => '#' + p.issue).join(' ') + ' on push'}"

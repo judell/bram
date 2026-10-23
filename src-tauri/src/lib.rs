@@ -8267,6 +8267,7 @@ fn session_provider_label(provider: SessionProvider) -> &'static str {
     match provider {
         SessionProvider::Claude => "claude",
         SessionProvider::Codex => "codex",
+        SessionProvider::Opencode => "opencode",
     }
 }
 
@@ -18197,6 +18198,7 @@ fn pty_spawn(
             let other = match launch.provider {
                 SessionProvider::Claude => SessionProvider::Codex,
                 SessionProvider::Codex => SessionProvider::Claude,
+                SessionProvider::Opencode => SessionProvider::Claude,
             };
             if agent_cli_on_path(session_provider_label(other)) {
                 append_bram_trace_line(
@@ -19343,6 +19345,7 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
                 .get(&sid)
                 .cloned()
                 .or_else(|| codex_session_title(&path).ok().flatten()),
+            SessionProvider::Opencode => None,
         };
         let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
         if let Some(obj) = item.as_object_mut() {
@@ -20482,6 +20485,7 @@ fn switch_agent(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "switch")?;
@@ -20520,11 +20524,8 @@ fn switch_agent(
     // provider-session-counterparts: the session being left, and its partner
     // on the target side. A partner whose file is gone is skipped, and the
     // switch falls back to today's order.
-    let target_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let target_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     let leaving = current_provider(&app)
         .filter(|p| *p != target_provider)
         .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
@@ -20569,7 +20570,13 @@ fn switch_agent(
     // partner the switch could mean (tau-accounting 2026-10-08 20:40Z: an
     // unnamed, unpaired Codex session and no offer). Both reasons require the
     // leaving session never to have been paired or unpaired.
+    // opencode-provider-switch: an OpenCode partner would get a queued name
+    // that never binds and a typed catch-up; partners for it arrive with
+    // opencode-partner-handoff.
     let fresh_reason: Option<&'static str> = leaving.as_ref().and_then(|(p, sid)| {
+        if target_provider == SessionProvider::Opencode {
+            return None;
+        }
         let conn = worklist_state_open(&app)?;
         let label = session_provider_label(*p);
         if !worklist_state::session_never_paired(&conn, label, sid).ok()? {
@@ -20774,11 +20781,8 @@ fn switch_agent(
     // swallowed it and stranded the session at bare PowerShell. The shared
     // launch routine gates on the shell's prompt, confirms the agent came up,
     // and on timeout types nothing.
-    let session_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let session_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     launch_agent_command(AgentLaunch {
         app: app.clone(),
         generation,
@@ -20926,9 +20930,11 @@ fn record_pair_for<R: tauri::Runtime>(
     if a.0 == b.0 {
         return;
     }
-    let (claude, codex) = match a.0 {
-        SessionProvider::Claude => (a.1.as_str(), b.1.as_str()),
-        SessionProvider::Codex => (b.1.as_str(), a.1.as_str()),
+    let (claude, codex) = match (a.0, b.0) {
+        (SessionProvider::Claude, SessionProvider::Codex) => (a.1.as_str(), b.1.as_str()),
+        (SessionProvider::Codex, SessionProvider::Claude) => (b.1.as_str(), a.1.as_str()),
+        // Pairs are Claude↔Codex until opencode-partner-handoff.
+        _ => return,
     };
     let Some(conn) = worklist_state_open(app) else {
         return;
@@ -20990,12 +20996,15 @@ fn pair_sessions_route<R: tauri::Runtime>(
     );
     emit_pair_offer(app, None, None);
     if let Some(fp) = from {
-        let (fid, tp) = match fp {
-            SessionProvider::Claude => (claude.clone(), SessionProvider::Codex),
-            SessionProvider::Codex => (codex.clone(), SessionProvider::Claude),
+        let target = match fp {
+            SessionProvider::Claude => Some((claude.clone(), SessionProvider::Codex)),
+            SessionProvider::Codex => Some((codex.clone(), SessionProvider::Claude)),
+            SessionProvider::Opencode => None,
         };
-        let digest = write_session_digest(app, fp, &fid, true);
-        emit_catch_up_offer(app, Some(&(fp, fid)), Some(tp), digest);
+        if let Some((fid, tp)) = target {
+            let digest = write_session_digest(app, fp, &fid, true);
+            emit_catch_up_offer(app, Some(&(fp, fid)), Some(tp), digest);
+        }
     }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
@@ -21017,6 +21026,7 @@ fn session_title_by_id<R: tauri::Runtime>(
             .ok()
             .and_then(|titles| titles.get(id).cloned())
             .or_else(|| codex_session_title(&path).ok().flatten()),
+        SessionProvider::Opencode => None,
     }
 }
 
@@ -21074,6 +21084,9 @@ fn unpair_session<R: tauri::Runtime>(
     let (claude, codex) = match provider {
         SessionProvider::Claude => (session_id, ""),
         SessionProvider::Codex => ("", session_id),
+        SessionProvider::Opencode => {
+            return Err("OpenCode sessions have no partners yet".to_string());
+        }
     };
     let wrote = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms(), "unpair")
         .map_err(|e| e.to_string())?;
@@ -21855,6 +21868,7 @@ fn session_path_for_id<R: tauri::Runtime>(
             path.exists().then_some(path)
         }
         SessionProvider::Codex => codex_session_path_for_id(app, id),
+        SessionProvider::Opencode => None,
     }
 }
 
@@ -22099,14 +22113,12 @@ fn reload_agent_session(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "session-reload")?;
-    let session_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let session_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     clear_pending_session_title_for_resume(&app, session_provider, &session, "session-reload");
     cancel_agent_boot_hold(&app, "session-reload");
     // provider-session-counterparts: an explicit resume always wins over a
@@ -22231,6 +22243,7 @@ fn start_agent_fresh(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "start-fresh")?;
@@ -22255,11 +22268,8 @@ fn start_agent_fresh(
     pty_write_internal(&app, &state, "\x03", "agent-fresh-interrupt-1")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-fresh-interrupt-2")?;
-    let session_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let session_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     launch_agent_command(AgentLaunch {
         app: app.clone(),
         generation,
@@ -22548,6 +22558,7 @@ fn apply_pending_session_title<R: tauri::Runtime>(
             SessionProvider::Claude => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
             }
+            SessionProvider::Opencode => Err("OpenCode sessions can't be renamed yet".to_string()),
         };
         match rename_result {
             Ok(_) => {
@@ -22602,8 +22613,9 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        claim_pending_session_title, codex_session_is_visible, fresh_partner_reason,
-        fresh_partner_title, merge_pending_session_entry, new_session_launch_command,
+        agent_provider_from_command, agent_resume_command, claim_pending_session_title,
+        codex_session_is_visible, fresh_partner_reason, fresh_partner_title,
+        merge_pending_session_entry, new_session_launch_command,
         pending_session_title_abandoned_by_resume, pending_session_title_can_claim,
         pending_title_marks_new_session, provider_switch_launch, session_change_snapshot,
         switch_starts_fresh_partner, PendingSessionTitle, SessionEntry, SessionProvider,
@@ -22779,6 +22791,7 @@ mod pending_session_title_tests {
         for (provider, expected) in [
             ("claude", "claude --continue"),
             ("codex", "codex resume --last"),
+            ("opencode", "opencode --continue"),
         ] {
             assert_eq!(
                 provider_switch_launch(provider, true, None, None, None, None, None).0,
@@ -22792,6 +22805,17 @@ mod pending_session_title_tests {
         assert_eq!(
             provider_switch_launch("codex", true, Some("pinned"), None, None, None, None).0,
             "codex resume pinned"
+        );
+        // opencode-provider-switch: an explicit session uses --session, and
+        // `shell.agent: "opencode"` no longer falls through to Claude.
+        assert_eq!(
+            agent_resume_command("opencode", "ses_abc").as_deref(),
+            Some("opencode --session ses_abc")
+        );
+        assert_eq!(agent_provider_from_command(Some("opencode")), "opencode");
+        assert_eq!(
+            SessionProvider::from_str("opencode"),
+            Some(SessionProvider::Opencode)
         );
         let rec = PendingSessionTitle {
             provider: "claude".into(),
@@ -23062,9 +23086,19 @@ fn create_new_session(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
+    // opencode-provider-switch: the queued name binds when the new session's
+    // file surfaces, and Bram can't see OpenCode's sessions yet
+    // (opencode-sessions-browser), so the name would never be applied.
+    if provider_key == "opencode" {
+        return Err(
+            "Named new sessions aren't available for OpenCode yet. Start a new session from inside OpenCode."
+                .to_string(),
+        );
+    }
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
@@ -23101,11 +23135,7 @@ fn create_new_session(
     // command itself on shell-prompt evidence in a spawned waiter below.
     // provider-session-pair-offer: Create from the pane's pair offer pairs
     // the new session with the session it was offered for (another provider's).
-    let new_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let new_provider = SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     let pair_with: Option<(SessionProvider, String)> = pair_with_provider
         .as_deref()
         .and_then(SessionProvider::from_str)
@@ -23281,7 +23311,9 @@ fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfi
 
 fn agent_provider_from_command(command: Option<&str>) -> &'static str {
     let lower = command.unwrap_or("").to_ascii_lowercase();
-    if lower.contains("codex") {
+    if lower.contains("opencode") {
+        "opencode"
+    } else if lower.contains("codex") {
         "codex"
     } else {
         // Covers claude/claud and the empty/unknown setting default.
@@ -23322,6 +23354,7 @@ fn agent_launch_command(provider: &str) -> Option<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => Some("codex"),
         "claude" | "claud" => Some("claude"),
+        "opencode" => Some("opencode"),
         _ => None,
     }
 }
@@ -23342,6 +23375,9 @@ fn new_session_launch_command(provider: &str, title: &str, session_id: Option<&s
             launch
         }
         "codex" => "codex".to_string(),
+        // No naming flag, and New session refuses OpenCode until its
+        // sessions are visible (opencode-sessions-browser).
+        "opencode" => "opencode".to_string(),
         _ => "".to_string(),
     }
 }
@@ -23361,6 +23397,14 @@ fn agent_resume_command(provider: &str, session_id: &str) -> Option<String> {
             "claude --continue".to_string()
         } else {
             format!("claude --resume {}", id)
+        }),
+        // opencode-provider-switch: `--continue` with nothing to continue
+        // opens the TUI over a sessionID validation error, so callers reach
+        // the empty-id form only once a session is known to exist.
+        "opencode" => Some(if id.is_empty() {
+            "opencode --continue".to_string()
+        } else {
+            format!("opencode --session {}", id)
         }),
         _ => None,
     }
@@ -23966,7 +24010,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             let mirror_worklist_lifecycle_to_issue =
                 c.mirror_worklist_lifecycle_to_issue.unwrap_or(false);
             (
-                // Normalize to the launched provider (`claude` / `codex`) so the
+                // Normalize to the launched provider (`claude` / `codex` / `opencode`) so the
                 // box always shows what actually starts, mapping legacy/blank
                 // values (e.g. "agent") to `claude`. Matches the autostart path.
                 agent_provider_from_command(shell.as_ref().and_then(|s| s.agent.as_deref()))
@@ -27128,6 +27172,10 @@ struct SessionEntry {
 enum SessionProvider {
     Claude,
     Codex,
+    // opencode-provider-switch: launch, resume and the header switcher only.
+    // Its sessions live in SQLite, not transcript files, so every
+    // file-discovery site answers "none" for it until opencode-sessions-browser.
+    Opencode,
 }
 
 impl SessionProvider {
@@ -27135,6 +27183,7 @@ impl SessionProvider {
         match value {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "opencode" => Some(Self::Opencode),
             _ => None,
         }
     }
@@ -27153,6 +27202,8 @@ fn provider_needs_setup_for(
     match active {
         Some(SessionProvider::Claude) => claude_needs,
         Some(SessionProvider::Codex) => codex_needs,
+        // Nothing for Setup to install yet; opencode-worklist-guard adds it.
+        Some(SessionProvider::Opencode) => false,
         None => claude_needs || codex_needs,
     }
 }
@@ -27313,6 +27364,7 @@ fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String>
             .and_then(|stem| stem.to_str())
             .map(str::to_string),
         SessionProvider::Codex => codex_session_meta(path).ok().flatten().map(|(id, _)| id),
+        SessionProvider::Opencode => None,
     }
 }
 
@@ -28382,6 +28434,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
         let sessions = match provider {
             SessionProvider::Claude => discover_claude_sessions(app, limit)?,
             SessionProvider::Codex => discover_codex_sessions(app, limit)?,
+            SessionProvider::Opencode => Vec::new(),
         };
         return Ok((provider, sessions));
     }
@@ -28391,6 +28444,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
     let sessions = match provider {
         SessionProvider::Claude => claude,
         SessionProvider::Codex => codex,
+        SessionProvider::Opencode => Vec::new(),
     };
     Ok((provider, sessions))
 }
@@ -28456,6 +28510,7 @@ fn session_meta<R: tauri::Runtime>(
     let count = match provider {
         SessionProvider::Claude => count_claude_sessions(app)?,
         SessionProvider::Codex => count_codex_sessions(app)?,
+        SessionProvider::Opencode => 0,
     };
     let discovery_notes = if provider == SessionProvider::Claude && count == 0 {
         claude_sessions_dir_lookup(app)
@@ -32363,6 +32418,7 @@ fn live_session_id<R: tauri::Runtime>(
             .ok()
             .flatten()
             .and_then(|p| codex_session_meta(&p).ok().flatten().map(|(id, _)| id)),
+        SessionProvider::Opencode => None,
     }
 }
 
@@ -32515,6 +32571,9 @@ fn rename_session<R: tauri::Runtime>(
         }
         SessionProvider::Codex => {
             append_codex_session_title(&session.id, trimmed)?;
+        }
+        SessionProvider::Opencode => {
+            return Err("OpenCode sessions can't be renamed yet".to_string());
         }
     }
     Ok(b"{\"ok\":true}".to_vec())
@@ -32721,6 +32780,7 @@ fn latest_session_path<R: tauri::Runtime>(
     let path = match provider {
         SessionProvider::Claude => latest_claude_session_path(app)?,
         SessionProvider::Codex => latest_codex_session_path(app)?,
+        SessionProvider::Opencode => None,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -32745,6 +32805,7 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
     match provider {
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
+        SessionProvider::Opencode => Ok(None),
     }
 }
 
@@ -33821,6 +33882,7 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
     let provider_str = match provider {
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
+        Some(SessionProvider::Opencode) => "opencode",
         None => "",
     };
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -34186,6 +34248,7 @@ fn read_conversation_state<R: tauri::Runtime>(
     let provider_str = match provider {
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
+        Some(SessionProvider::Opencode) => "opencode",
         None => "",
     };
     let Some((path, mtime_ms, len)) = resolve_conversation_path_meta(app, preferred)? else {
@@ -38958,6 +39021,7 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
     let provider_label = match current_provider(app) {
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Claude) => "claude",
+        Some(SessionProvider::Opencode) => "opencode",
         None => "unknown",
     };
     // session-size-note-not-warning (Jon, 2026-10-04): size is information,
@@ -46659,6 +46723,58 @@ fn collect_codex_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<Con
     out
 }
 
+// opencode-provider-switch: the files OpenCode loads as instructions and
+// config. It reads AGENTS.md from the project and from its config dir
+// (`$XDG_CONFIG_HOME/opencode`, default `~/.config/opencode`).
+fn collect_opencode_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<ContextFile> {
+    let mut out: Vec<ContextFile> = Vec::new();
+    let Some(proj_root) = project_root(Some(app)) else {
+        return out;
+    };
+    let mut push = |category: &'static str, path: PathBuf, display: String| {
+        if path.is_file() {
+            out.push(ContextFile {
+                category,
+                path,
+                display,
+                kind: Some("opencode"),
+            });
+        }
+    };
+    for name in ["AGENTS.md", "opencode.json", "opencode.jsonc"] {
+        push("project", proj_root.join(name), name.to_string());
+    }
+    let mut dot_opencode: Vec<PathBuf> = std::fs::read_dir(proj_root.join(".opencode"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    dot_opencode.sort();
+    for path in dot_opencode {
+        let display = format!(
+            ".opencode/{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+        );
+        push("project", path, display);
+    }
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home_dir().map(|h| h.join(".config")))
+        .map(|base| base.join("opencode"));
+    if let Some(dir) = config_dir {
+        for name in ["AGENTS.md", "opencode.json", "opencode.jsonc"] {
+            push(
+                "settings",
+                dir.join(name),
+                format!("~/.config/opencode/{}", name),
+            );
+        }
+    }
+    out
+}
+
 fn collect_context_files<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -46666,6 +46782,7 @@ fn collect_context_files<R: tauri::Runtime>(
     match context_provider(app, preferred) {
         SessionProvider::Claude => collect_claude_context_files(app),
         SessionProvider::Codex => collect_codex_context_files(app),
+        SessionProvider::Opencode => collect_opencode_context_files(app),
     }
 }
 
@@ -46828,6 +46945,14 @@ fn context_list<R: tauri::Runtime>(
                 json!({ "key": "rules", "label": "Rules", "items": rules }),
             ],
         ),
+        SessionProvider::Opencode => (
+            "opencode",
+            "OpenCode Context shows the `AGENTS.md` instructions and `opencode.json` config OpenCode loads for this project, plus its global config under `~/.config/opencode/`.",
+            vec![
+                json!({ "key": "project", "label": "Project", "items": project }),
+                json!({ "key": "settings", "label": "Settings", "items": settings }),
+            ],
+        ),
     };
     json!({ "provider": provider_name, "summary": summary, "sections": sections })
 }
@@ -46845,10 +46970,7 @@ fn context_search<R: tauri::Runtime>(
     let needle = q.trim().to_lowercase();
     if needle.is_empty() {
         return json!({
-            "provider": match provider {
-                SessionProvider::Claude => "claude",
-                SessionProvider::Codex => "codex",
-            },
+            "provider": session_provider_label(provider),
             "results": []
         });
     }
@@ -46887,10 +47009,7 @@ fn context_search<R: tauri::Runtime>(
         }
     }
     json!({
-        "provider": match provider {
-            SessionProvider::Claude => "claude",
-            SessionProvider::Codex => "codex",
-        },
+        "provider": session_provider_label(provider),
         "results": results,
         "truncated": total_hits >= MAX_HITS
     })
@@ -47920,6 +48039,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let active_provider_json = match active_provider {
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
+        Some(SessionProvider::Opencode) => json!("opencode"),
         None => serde_json::Value::Null,
     };
     // Mis-launch signals. Bram manages whatever directory it is started from,
@@ -55924,6 +56044,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
         let active = match current_provider(app) {
             Some(SessionProvider::Claude) => "claude",
             Some(SessionProvider::Codex) => "codex",
+            Some(SessionProvider::Opencode) => "opencode",
             None => "none",
         };
         if active != provider_label {
@@ -62817,6 +62938,13 @@ mod needs_you_tests {
             Some(SessionProvider::Codex),
             true,
             false
+        ));
+        // opencode-provider-switch: nothing to install for OpenCode yet, so an
+        // OpenCode session never shows a banner it can't act on.
+        assert!(!provider_needs_setup_for(
+            Some(SessionProvider::Opencode),
+            true,
+            true
         ));
     }
 

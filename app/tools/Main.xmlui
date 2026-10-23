@@ -586,6 +586,7 @@
           onDidChange="(next) => window.__bramHandleAgentSwitcherChange(next, (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '', agentSwitcherSelect, toast)">
           <Option value="claude" label="Claude" />
           <Option value="codex" label="Codex" />
+          <Option value="opencode" label="OpenCode" />
         </RadioGroup>
         <!-- switch-to-transcript-on-action: the "Starting <item>…" claim
              message moved to the footer status line (Jon: it belongs there,

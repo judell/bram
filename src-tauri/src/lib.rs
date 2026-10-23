@@ -47985,6 +47985,15 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "nestedUnder": nested_under,
         "nestedUnderIgnoredHome": nested_under_ignored_home,
         "strayHomeScaffold": stray_home_scaffold,
+        // issue-445: ancestor CLAUDE.md files still carrying a legacy
+        // xmlui-desktop block (Setup names them; this shows them at startup).
+        "legacyAncestorImports": root
+            .as_ref()
+            .map(|p| ancestor_legacy_conventions_imports(p)
+                .iter()
+                .map(|m| m.to_string_lossy().to_string())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
         "gitToplevel": git_toplevel,
         "enhanced": core_installed && claude_installed && codex_installed,
         "activeProvider": active_provider_json,
@@ -48167,10 +48176,31 @@ fn stray_home_scaffold_marker(home: &Path, root: &Path) -> Option<PathBuf> {
     marker.exists().then_some(marker)
 }
 
+// issue-445: Claude Code loads every ancestor CLAUDE.md, so a legacy
+// xmlui-desktop block above the project (typically ~/CLAUDE.md from a
+// pre-rename home Setup) feeds retired conventions into every project
+// below it -- ones the guard now denies, like editing worklist-history.
+// Setup's own migration reads only the project's CLAUDE.md, so it never
+// saw these. Unlike the #294 check this IS an any-ancestor walk: a managed
+// parent can be legitimate, a legacy block never is. Named, not edited --
+// Setup does not write outside the project.
+fn ancestor_legacy_conventions_imports(root: &Path) -> Vec<PathBuf> {
+    root.ancestors()
+        .skip(1)
+        .map(|dir| dir.join("CLAUDE.md"))
+        .filter(|md| {
+            std::fs::read_to_string(md)
+                .map(|s| s.contains(ENHANCE_LEGACY_MARKER_START))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod home_scaffold_tests {
     use super::{
-        nested_managed_parent, path_is_home_dir, stray_home_scaffold_marker, WORKLIST_AUTH_REL,
+        ancestor_legacy_conventions_imports, nested_managed_parent, path_is_home_dir,
+        stray_home_scaffold_marker, WORKLIST_AUTH_REL,
     };
     use std::path::PathBuf;
 
@@ -48252,6 +48282,38 @@ mod home_scaffold_tests {
         // not the stray-scaffold warning's.
         assert!(stray_home_scaffold_marker(&home, &home).is_none());
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn legacy_block_in_ancestor_claude_md_is_named() {
+        let top = scratch("legacy-ancestor");
+        let proj = top.join("mid").join("proj");
+        std::fs::create_dir_all(&proj).expect("create project dir");
+
+        // A legacy block in the project's own CLAUDE.md is Setup's
+        // migration territory, not this warning's.
+        std::fs::write(
+            proj.join("CLAUDE.md"),
+            "<!-- xmlui-desktop:start -->\n@.claude/xmlui-desktop-conventions.md\n<!-- xmlui-desktop:end -->\n",
+        )
+        .expect("write project CLAUDE.md");
+        // A current Bram block in a parent is a legitimate managed parent.
+        std::fs::write(
+            top.join("mid").join("CLAUDE.md"),
+            "<!-- bram:start -->\n@.claude/bram-conventions.md\n<!-- bram:end -->\n",
+        )
+        .expect("write parent CLAUDE.md");
+        assert!(ancestor_legacy_conventions_imports(&proj).is_empty());
+
+        // A legacy block in a grandparent is named.
+        let legacy = top.join("CLAUDE.md");
+        std::fs::write(
+            &legacy,
+            "# mine\n<!-- xmlui-desktop:start -->\n@.claude/xmlui-desktop-conventions.md\n<!-- xmlui-desktop:end -->\n",
+        )
+        .expect("write grandparent CLAUDE.md");
+        assert_eq!(ancestor_legacy_conventions_imports(&proj), vec![legacy]);
+        let _ = std::fs::remove_dir_all(&top);
     }
 }
 
@@ -48521,6 +48583,17 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
              treat unmanaged paths under home as a project with an empty worklist \
              (issue #294); remove or rename it",
             marker.display()
+        ));
+    }
+
+    // issue-445: a legacy xmlui-desktop block in an ancestor CLAUDE.md
+    // imports retired conventions into this project. Name it; don't edit it.
+    for md in ancestor_legacy_conventions_imports(&proj) {
+        skipped.push(format!(
+            "{} carries a legacy <!-- xmlui-desktop:start --> … <!-- xmlui-desktop:end --> block \
+             — it imports retired conventions (such as editing resources/worklist-history/) \
+             that the guard now denies, into every project below it (issue #445); delete that block",
+            md.display()
         ));
     }
 

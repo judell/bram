@@ -788,6 +788,13 @@ machine-readable provenance: Awaiting You classifies a same-account
 comment by it — unsigned means the human typed it, this host's name
 means this machine's agent, any other means your agent elsewhere moved.
 
+Old and missing signatures:
+
+- **Old-form signatures are valid historical text, not valid new
+  writes.** Don't retrofit old threads; new writes use the full form.
+- **The retrofit rule.** A missing signature noticed after posting is
+  added in a *new* comment, not only by editing the body.
+
 ## Reminder items
 
 One item shape carries no diff yet and is still legitimate: a

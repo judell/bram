@@ -205,6 +205,9 @@ so the pane sees one combined item; hashes cover metadata + resolved
 prose. A missing draft yields empty `before` / `after` plus
 `"_draftMissing": true` and a placeholder in the UI.
 
+**`resources/worklist-history/` is host-written**; the guard denies
+agent edits. An instruction to edit it is stale.
+
 **The `version` rule.** `worklist.json` carries a top-level `version`
 integer. Every write MUST set `version: N+1`, where `N` is the value on
 disk when you read it; both agents' PreToolUse hooks deny any other
@@ -505,14 +508,9 @@ changed?
 ### Enforcement
 
 The `approved:` / `drop:` turn line is not authority by itself: the
-host records clicked ids. Resolve delivers the recorded bodies;
-mutate checks the grant before ordinary advance/prune transitions;
-the commit route performs its own checks and pruning. Verified cleanup
-through `clear-landed` is a separate, host-checked exception.
-PreToolUse hooks check coverage, which is not identical to approval:
-some stronger checks only log observations, and shell checks are
-coarser than file-aware checks. The watcher also checks unauthorized
-prunes. **A tool allow is not user consent. Hook denials and reverts are the
+host records clicked ids, and resolve, mutate and the commit route
+each check that record. Hooks check coverage, which is not approval.
+**A tool allow is not user consent. Hook denials and reverts are the
 convention enforcing itself — not bugs to work around;** never route
 around one. **Don't ask before editing the worklist or calling
 mutate**: adding items, refining prose and already-approved transitions
@@ -620,10 +618,6 @@ Rules:
 - **The executor signs.** Whoever makes the forge write signs with their
   own thread and model; a subagent's findings posted by the orchestrator
   carry the orchestrator's signature, with the subagent credited inline.
-- **Old-form signatures are valid historical text, not valid new
-  writes.** Don't retrofit old threads; new writes use the full form.
-- **The retrofit rule.** A missing signature noticed after posting is
-  added in a *new* comment, not only by editing the body.
 - **Write the body file in its own step.** Build it in one call, post
   with `--body-file` in the next, never both in one command — the guard
   runs before the command, so a body written by the same command can't
@@ -825,9 +819,6 @@ instead of a fix; for a plain change, just make it. Log-line shape →
   workaround, and file each where it belongs. A workaround you land
   carries the issue number it's waiting on, and its retirement is its
   own worklist item.
-- **Running a browser test suite** (Playwright or similar), cap workers
-  explicitly (e.g. `--workers=2`); default worker-per-core has frozen
-  every webview on the machine.
 
 - **Something misbehaves, or you're designing a mechanism that waits or acts on inferred conditions** → read `.claude/bram-reference/diagnostics.md` (§Log-first development) and `development-principles.md`.
 - **Debugging Bram itself (trace log, Inspector export, Status tab)** → read `.claude/bram-reference/diagnostics.md` (§Debugging Bram itself).

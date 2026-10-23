@@ -26,8 +26,28 @@ __bram_preexec() {
   __bram_at_prompt=
   printf '\033]7779;bram;exec\007'
 }
+# A launcher may hand us its own PROMPT_COMMAND (bram_herdr.py does, to run
+# `herdr agent attach` before the first prompt). Assigning ours outright would
+# discard it, so keep it and run it once from __bram_prompt. Such a command
+# usually starts with `unset PROMPT_COMMAND`, which would also switch our
+# reporting off, so put ours back afterwards.
+__bram_inherited_pc="$PROMPT_COMMAND"
 __bram_prompt() {
   local s=$?
+  if [ -n "$__bram_inherited_pc" ]; then
+    local pc="$__bram_inherited_pc"
+    __bram_inherited_pc=
+    # The DEBUG trap does not fire for commands run inside a function, so say
+    # a command started ourselves; otherwise the host keeps believing a bare
+    # shell is in the foreground and refuses to type (reason=shell-foreground).
+    # No prompt is reported before it: the shell is not ready for input until
+    # the inherited command returns (e.g. an attach that ended).
+    __bram_at_prompt=
+    printf '\033]7779;bram;exec\007'
+    eval "$pc"
+    s=$?
+    PROMPT_COMMAND=__bram_prompt
+  fi
   printf '\033]7779;bram;prompt;%s\007' "$s"
   __bram_at_prompt=1
 }

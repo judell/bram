@@ -27198,13 +27198,15 @@ fn provider_needs_setup_for(
     active: Option<SessionProvider>,
     claude_needs: bool,
     codex_needs: bool,
+    opencode_needs: bool,
 ) -> bool {
     match active {
         Some(SessionProvider::Claude) => claude_needs,
         Some(SessionProvider::Codex) => codex_needs,
-        // Nothing for Setup to install yet; opencode-worklist-guard adds it.
-        Some(SessionProvider::Opencode) => false,
-        None => claude_needs || codex_needs,
+        Some(SessionProvider::Opencode) => opencode_needs,
+        // opencode_needs is already false wherever OpenCode isn't installed
+        // (opencode_plugin_wanted), so it raises no banner for non-users.
+        None => claude_needs || codex_needs || opencode_needs,
     }
 }
 
@@ -31999,7 +32001,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
     let claude_needs = status["claudeNeedsSetup"].as_bool().unwrap_or(false);
     let codex_needs = status["codexNeedsSetup"].as_bool().unwrap_or(false);
-    if !claude_needs && !codex_needs {
+    let opencode_needs = status["opencodeNeedsSetup"].as_bool().unwrap_or(false);
+    if !claude_needs && !codex_needs && !opencode_needs {
         append_bram_trace_line(app, "auto-setup", "op=skip reason=current");
         return;
     }
@@ -32013,8 +32016,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
                 app,
                 "auto-setup",
                 &format!(
-                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} wrote={} skipped={}",
-                    first_run, claude_needs, codex_needs, wrote, skipped
+                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} wrote={} skipped={}",
+                    first_run, claude_needs, codex_needs, opencode_needs, wrote, skipped
                 ),
             );
             if first_run && wrote > 0 {
@@ -45374,6 +45377,11 @@ const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";
 const ENHANCE_SETTINGS_REL: &str = ".claude/settings.json";
 const ENHANCE_SETTINGS_LOCAL_REL: &str = ".claude/settings.local.json";
 const ENHANCE_CODEX_HOOK_INSTALL_REL: &str = ".bram/codex-worklist-guard.py";
+// opencode-worklist-guard: OpenCode's guard registration is a project plugin
+// it discovers on its own; the seeded copy is owned by its marker, as skills are.
+const ENHANCE_OPENCODE_PLUGIN_REL: &str = ".opencode/plugins/bram.js";
+const ENHANCE_OPENCODE_PLUGIN_BUNDLE_REL: &str = "__shell/opencode/bram-plugin.js";
+const OPENCODE_PLUGIN_MARKER: &str = "bram-managed";
 const ENHANCE_CODEX_CONFIG_REL: &str = ".codex/config.toml";
 const ENHANCE_CODEX_TRUST_ACK_LEGACY_REL: &str = ".bram/codex-trust-ack";
 // TOML-comment markers delimit the Bram block inside codex's
@@ -48034,8 +48042,18 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         || !codex_hook_block_current
         || !codex_instr_current
         || (!is_source_repo && !codex_docs_current);
-    let provider_needs_setup =
-        provider_needs_setup_for(active_provider, claude_needs_setup, codex_needs_setup);
+    // opencode-worklist-guard: OpenCode's whole install is the project plugin
+    // (its instructions arrive through AGENTS.md, seeded above for Codex).
+    // Only where OpenCode can run; elsewhere the plugin is never seeded.
+    let opencode_plugin_current = opencode_plugin_current(app, &proj);
+    let opencode_needs_setup =
+        opencode_plugin_wanted(app, &proj) && (!core_installed || !opencode_plugin_current);
+    let provider_needs_setup = provider_needs_setup_for(
+        active_provider,
+        claude_needs_setup,
+        codex_needs_setup,
+        opencode_needs_setup,
+    );
     let active_provider_json = match active_provider {
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
@@ -48122,6 +48140,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "codexInstalled": codex_installed,
         "claudeNeedsSetup": claude_needs_setup,
         "codexNeedsSetup": codex_needs_setup,
+        "opencodeNeedsSetup": opencode_needs_setup,
+        "opencodePluginCurrent": opencode_plugin_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
         "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
@@ -48687,6 +48707,9 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // the gate prose. Replaced the per-turn UserPromptSubmit injection after
     // verifying developer-role context is salient enough on its own.
     install_codex_developer_instructions()?;
+    // opencode-worklist-guard: the OpenCode guard plugin. Runs on the source
+    // repo too: it is the guard's registration, not a seeded doc.
+    seed_opencode_plugin(app, &proj, &mut wrote, &mut skipped)?;
 
     // issue-227: surface stale legacy-hook references in user-global settings.
     // These block the #217 shim prune; Setup cannot fix them, only name them.
@@ -48728,6 +48751,71 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         "codexHookNeedsTrust": codex_hook_install.installed,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+// opencode-worklist-guard: seed the plugin only where OpenCode can run (its
+// CLI is on PATH, it is the active agent) or where it is already installed
+// and so kept current. Projects whose users never run OpenCode get no
+// `.opencode/` directory. The PATH probe is the host's, which can be poorer
+// than the terminal's; the active-agent case covers that, with the banner.
+fn opencode_plugin_wanted<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    proj.join(ENHANCE_OPENCODE_PLUGIN_REL).exists()
+        || current_provider(app) == Some(SessionProvider::Opencode)
+        || agent_cli_on_path("opencode")
+}
+
+fn opencode_plugin_bundle<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Vec<u8>> {
+    serve_app_file(Some(app), ENHANCE_OPENCODE_PLUGIN_BUNDLE_REL).map(|(bytes, _mime)| bytes)
+}
+
+fn opencode_plugin_current<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    match (
+        std::fs::read(proj.join(ENHANCE_OPENCODE_PLUGIN_REL)),
+        opencode_plugin_bundle(app),
+    ) {
+        (Ok(disk), Some(bundle)) => disk == bundle,
+        _ => false,
+    }
+}
+
+// Ownership as for bundled skills: Setup writes or refreshes only a file
+// carrying its marker, and a user's own `.opencode/plugins/bram.js` is kept
+// and reported in `skipped`.
+fn seed_opencode_plugin<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    if !opencode_plugin_wanted(app, proj) {
+        return Ok(());
+    }
+    let bytes = opencode_plugin_bundle(app)
+        .ok_or_else(|| "OpenCode plugin bundle not found".to_string())?;
+    let dest = proj.join(ENHANCE_OPENCODE_PLUGIN_REL);
+    match std::fs::read(&dest) {
+        Ok(existing) if existing == bytes => {}
+        Ok(existing) => {
+            if String::from_utf8_lossy(&existing).contains(OPENCODE_PLUGIN_MARKER) {
+                std::fs::write(&dest, &bytes)
+                    .map_err(|e| format!("write {}: {}", dest.display(), e))?;
+                wrote.push(dest.display().to_string());
+            } else {
+                skipped.push(dest.display().to_string());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e2| format!("create {}: {}", parent.display(), e2))?;
+            }
+            std::fs::write(&dest, &bytes)
+                .map_err(|e2| format!("write {}: {}", dest.display(), e2))?;
+            wrote.push(dest.display().to_string());
+        }
+        Err(e) => return Err(format!("read {}: {}", dest.display(), e)),
+    }
+    Ok(())
 }
 
 fn remove_legacy_codex_trust_ack() {
@@ -62906,45 +62994,60 @@ mod needs_you_tests {
     fn provider_needs_setup_none_falls_back_to_project_level() {
         // No provider active — the fresh/failure-path launch #320 is about.
         assert!(
-            provider_needs_setup_for(None, true, false),
+            provider_needs_setup_for(None, true, false, false),
             "claude needs → banner"
         );
         assert!(
-            provider_needs_setup_for(None, false, true),
+            provider_needs_setup_for(None, false, true, false),
             "codex needs → banner"
         );
-        assert!(provider_needs_setup_for(None, true, true));
         assert!(
-            !provider_needs_setup_for(None, false, false),
-            "neither needs → no banner"
+            provider_needs_setup_for(None, false, false, true),
+            "opencode needs (only ever true where it's installed) → banner"
+        );
+        assert!(provider_needs_setup_for(None, true, true, false));
+        assert!(
+            !provider_needs_setup_for(None, false, false, false),
+            "none needs → no banner"
         );
         // Provider active — unchanged: exactly that provider's need.
         assert!(provider_needs_setup_for(
             Some(SessionProvider::Claude),
             true,
+            false,
             false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Claude),
             false,
+            true,
             true
         ));
         assert!(provider_needs_setup_for(
             Some(SessionProvider::Codex),
             false,
-            true
+            true,
+            false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Codex),
             true,
-            false
+            false,
+            true
         ));
-        // opencode-provider-switch: nothing to install for OpenCode yet, so an
-        // OpenCode session never shows a banner it can't act on.
+        // opencode-worklist-guard: an OpenCode session answers for its plugin
+        // alone.
+        assert!(provider_needs_setup_for(
+            Some(SessionProvider::Opencode),
+            false,
+            false,
+            true
+        ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Opencode),
             true,
-            true
+            true,
+            false
         ));
     }
 

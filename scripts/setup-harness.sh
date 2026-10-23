@@ -168,6 +168,23 @@ assert_setup_landed() {
   assert_field claudeNeedsSetup false
   assert_field codexNeedsSetup false
 
+  # opencode-worklist-guard: the guard plugin is seeded where OpenCode is
+  # installed (opencode_plugin_wanted keys on its CLI) and nowhere else, so
+  # projects that never run OpenCode get no .opencode/ directory.
+  assert_field opencodeNeedsSetup false
+  if command -v opencode > /dev/null 2>&1; then
+    assert_file "$dir" ".opencode/plugins/bram.js"
+    if cmp -s "$dir/.opencode/plugins/bram.js" "$REPO_ROOT/app/__shell/opencode/bram-plugin.js"; then
+      ok "OpenCode plugin matches the bundle"
+    else
+      bad "OpenCode plugin matches the bundle" "seeded copy differs from app/__shell/opencode/bram-plugin.js"
+    fi
+  elif [ -e "$dir/.opencode" ]; then
+    bad "no .opencode/ without OpenCode" "Setup created it with no opencode on PATH"
+  else
+    ok "no .opencode/ without OpenCode"
+  fi
+
   # Tonight's bug: firstRun keys on .bram.json (lib.rs:33551 / 21336), which
   # Setup does not write, so the "first time in this repo" banner survives a
   # successful Setup. Same shape as #211.

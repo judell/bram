@@ -1,0 +1,58 @@
+<!-- Orientation site: an overview and architecture diagrams (see index.html).
+     From Bram's orientation template, first built for tau-hub,
+     together-groups-beta and pwkm. Content lives in OVERVIEW.md and
+     architecture/; the diagram list and caption in arch.js's SITE block.
+     Tabs/TabItem: https://www.xmlui.org/docs/reference/components/Tabs
+     Markdown file via DataSource -> content: https://www.xmlui.org/docs/howto/render-markdown-content-as-a-page -->
+<App>
+  <Tabs>
+    <TabItem label="Overview">
+      <DataSource id="overview" url="OVERVIEW.md" />
+      <Markdown when="{overview.loaded}" content="{overview.value}" />
+    </TabItem>
+    <TabItem label="Architecture">
+      <!-- Mermaid diagrams from architecture/*.mmd, rendered once on mount:
+           https://www.xmlui.org/docs/howto/run-a-one-time-action-on-page-load
+           Each renders as live SVG in an IFrame so labels can carry hover text:
+           https://www.xmlui.org/docs/reference/components/IFrame (srcdoc) -->
+      <VStack gap="$space-5"
+        var.svgs="{null}" var.detail="{null}"
+        onMount="svgs = Arch.diagrams()">
+        <!-- A click on a box or arrow inside a diagram frame posts
+             {type: 'arch-detail', diagram, key}; open its Markdown section.
+             https://www.xmlui.org/docs/reference/components/MessageListener -->
+        <MessageListener
+          onMessageReceived="(msg) => {
+            if (!msg || msg.type !== 'arch-detail') return;
+            const d = Arch.detail(msg.diagram, msg.key);
+            if (d) { detail = d; detailDialog.open(); } }" />
+        <ModalDialog id="detailDialog" width="70vw" maxWidth="70vw" title="{detail?.title}">
+          <VStack gap="$space-3" padding="$space-2" paddingTop="0">
+            <Markdown content="{detail?.body || ''}" />
+            <HStack><Button label="Close" onClick="detailDialog.close()" /></HStack>
+          </VStack>
+        </ModalDialog>
+        <Text variant="caption">{Arch.caption}</Text>
+        <Text when="{!svgs}" variant="caption">Rendering diagrams…</Text>
+        <Items items="{Arch.sections}">
+          <VStack gap="$space-2">
+            <Heading level="h3">{$item.title}</Heading>
+            <Text>{$item.note}</Text>
+            <Text when="{svgs &amp;&amp; svgs[$item.file] &amp;&amp; svgs[$item.file].error}" color="$color-danger-500">
+              {svgs[$item.file].error}
+            </Text>
+            <!-- The playbook's structural check: labels without sections and
+                 sections without labels. Absent when they agree. -->
+            <Items items="{(svgs &amp;&amp; svgs[$item.file] &amp;&amp; svgs[$item.file].mismatches) || []}">
+              <Text color="$color-warn-700" fontSize="$fontSize-sm">{$item}</Text>
+            </Items>
+            <IFrame when="{svgs &amp;&amp; svgs[$item.file] &amp;&amp; svgs[$item.file].srcdoc}"
+              srcdoc="{svgs[$item.file].srcdoc}" title="{'Diagram: ' + $item.title}"
+              width="100%" height="{svgs[$item.file].height + 'px'}" />
+            <Text variant="caption">architecture/{$item.file}</Text>
+          </VStack>
+        </Items>
+      </VStack>
+    </TabItem>
+  </Tabs>
+</App>

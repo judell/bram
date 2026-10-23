@@ -1,4 +1,5 @@
 <Component name="Transcript"
+  var.orientSent="{false}"
   var.fullscreenImage="{null}"
   var.worklistOpen="{window.__bramRestoreTranscriptWorklistOpen()}">
   <!-- (#427: the List now sits at height="100%" inside the measured
@@ -228,6 +229,27 @@
       fontWeight="bold"
       color="$color-primary-600"
       value="{window.__bramSubagentHeaderLine(subagentTurns.value)}" />
+    <!-- new-repo-orientation: while the repo-startup greeting shows (the
+         same startupGreetingVisible the first-run landing keys on), offer
+         the guided orientation. The turn names the playbook Setup seeds, so
+         the agent is handed the procedure rather than recalling it. The
+         click also opens the Worklist pane below (#427's split), since the
+         playbook's first act is proposing the site as an item; toggling
+         from false opens it and persists the choice.
+         https://www.xmlui.org/docs/reference/components/DataSource
+         https://www.xmlui.org/docs/reference/components/Button -->
+    <DataSource id="orientStatus" url="/__enhance/status" />
+    <HStack
+      when="{!$props.agentId &amp;&amp; !orientSent &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.startupGreetingVisible}"
+      width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2">
+      <!-- width="*": the text takes the row's remainder and wraps, so the
+           button can't be pushed off the edge
+           (https://www.xmlui.org/docs/howto/keep-a-star-sized-element-from-collapsing). -->
+      <Text fontSize="$fontSize-sm" width="*"
+        value="New here? Get an overview and architecture diagrams of this repo, every claim cited to the code. It starts as a Worklist item, so nothing is written until you click Start. If Claude is new to this repo, open the terminal first and answer its trust prompt." />
+      <Button label="Orient me" size="sm"
+        onClick="toTurn('Orient in this repo: read and follow .claude/bram-reference/orientation.md'); orientSent = true; worklistOpen = worklistOpen || window.__bramToggleTranscriptWorklistOpen(false)" />
+    </HStack>
     <Text
       when="{events.length === 0}"
       color="$textColor-secondary"

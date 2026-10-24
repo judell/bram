@@ -10471,12 +10471,146 @@ fn pty_chunk_has_codex_working_status(chunk: &[u8]) -> bool {
     text.contains("Working (") && text.contains("esc to interrupt")
 }
 
+// codex-resume-false-working: which character tripped the activity-glyph
+// test, for the spinner-period trace. `codex resume` replays the session's
+// history, whose check marks and dingbats share the spinner's byte ranges,
+// and the false "working" never said which one fired.
+fn first_turn_activity_glyph(chunk: &[u8]) -> Option<char> {
+    let i = chunk
+        .windows(2)
+        .position(|w| w[0] == 0xE2 && (w[1] == 0x9C || w[1] == 0xA0))?;
+    std::str::from_utf8(chunk.get(i..i + 3)?)
+        .ok()?
+        .chars()
+        .next()
+}
+
+// codex-resume-false-working: whether Codex's idle composer has been on
+// screen since the latest launch. Until it has, a spinner reading from the
+// PTY is the resume replay or the boot paint, not a turn. Reset by every
+// launch (begin_agent_launch).
+static CODEX_COMPOSER_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn codex_composer_seen_since_launch() -> bool {
+    if CODEX_COMPOSER_SEEN.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let seen = codex_composer_ready(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS));
+    if seen {
+        CODEX_COMPOSER_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    seen
+}
+
+// codex-resume-false-working: the activity-stop clear is skipped below 10 s
+// of silence, and nothing checked again, so a false "working" stuck until
+// Codex's next real turn. One recheck after the window clears it when no
+// spinner has moved since and Codex's composer is idle on screen.
+fn should_clear_codex_on_recheck(
+    spinner_moved_since: bool,
+    phase_working: bool,
+    composer_idle: bool,
+) -> bool {
+    !spinner_moved_since && phase_working && composer_idle
+}
+
+fn schedule_codex_idle_recheck<R: tauri::Runtime>(app: &AppHandle<R>, silence_ms: u128) {
+    let snapshot = agent_turn_state_cell()
+        .lock()
+        .ok()
+        .and_then(|s| s.last_spinner_at);
+    let wait_ms = 10_000u128.saturating_sub(silence_ms) as u64 + 500;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        if !matches!(current_provider(&app), Some(SessionProvider::Codex)) {
+            return;
+        }
+        let spinner_moved_since = agent_turn_state_cell()
+            .lock()
+            .map(|s| s.is_active || s.last_spinner_at != snapshot)
+            .unwrap_or(true);
+        let phase_working = turn_state_cell()
+            .lock()
+            .map(|s| s.phase == "working")
+            .unwrap_or(false);
+        let composer_idle = codex_composer_ready(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS));
+        let clear =
+            should_clear_codex_on_recheck(spinner_moved_since, phase_working, composer_idle);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "agent-status",
+                &format!(
+                    "op={} reason=recheck-idle spinner_moved={} phase_working={} composer_idle={}",
+                    if clear { "clear" } else { "recheck-keep" },
+                    spinner_moved_since,
+                    phase_working,
+                    composer_idle
+                ),
+            );
+        }
+        if clear {
+            kill_current_claude_turn(&app);
+        }
+    });
+}
+
+#[cfg(test)]
+mod codex_false_working_tests {
+    use super::{first_turn_activity_glyph, should_clear_codex_on_recheck};
+
+    #[test]
+    fn names_the_glyph_that_tripped_the_detector() {
+        assert_eq!(
+            first_turn_activity_glyph("done \u{2714} ok".as_bytes()),
+            Some('\u{2714}')
+        );
+        assert_eq!(
+            first_turn_activity_glyph("\u{280b} Working".as_bytes()),
+            Some('\u{280b}')
+        );
+        assert_eq!(first_turn_activity_glyph(b"plain text"), None);
+    }
+
+    #[test]
+    fn recheck_clears_only_a_still_idle_codex() {
+        assert!(should_clear_codex_on_recheck(false, true, true));
+        assert!(
+            !should_clear_codex_on_recheck(true, true, true),
+            "spinner moved"
+        );
+        assert!(
+            !should_clear_codex_on_recheck(false, false, true),
+            "already not working"
+        );
+        assert!(
+            !should_clear_codex_on_recheck(false, true, false),
+            "composer not idle"
+        );
+    }
+}
+
 fn agent_status_set_codex_working<R: tauri::Runtime>(
     app: &AppHandle<R>,
     active_since: std::time::Instant,
     source: &str,
 ) {
     if !matches!(current_provider(app), Some(SessionProvider::Codex)) {
+        return;
+    }
+    if matches!(source, "pty-spinner" | "pty-status-text") && !codex_composer_seen_since_launch() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-status",
+                &format!(
+                    "op=skip-codex-working source={} reason=boot-before-composer",
+                    source
+                ),
+            );
+        }
         return;
     }
     if let Ok(state) = turn_state_cell().lock() {
@@ -10827,7 +10961,17 @@ fn pty_agent_turn_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             append_bram_trace_line(app, "agent-status", "op=codex-working-status-text");
         }
         if spinner_started {
-            append_bram_trace_line(app, "spinner-period", "state=started");
+            // codex-resume-false-working: name what started it.
+            let trigger = first_turn_activity_glyph(chunk)
+                .map(|c| format!("glyph=U+{:04X}", c as u32))
+                .unwrap_or_else(|| {
+                    if has_codex_working_status {
+                        "text=codex-working".to_string()
+                    } else {
+                        "glyph=none".to_string()
+                    }
+                });
+            append_bram_trace_line(app, "spinner-period", &format!("state=started {}", trigger));
         }
         if let Some(d) = spinner_ended_duration_ms {
             append_bram_trace_line(
@@ -10906,6 +11050,12 @@ fn pty_agent_turn_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         {
             kill_current_claude_turn(app);
         } else {
+            if !menu_pending
+                && !post_escape
+                && matches!(current_provider(app), Some(SessionProvider::Codex))
+            {
+                schedule_codex_idle_recheck(app, turn_end_silence_ms.unwrap_or(0));
+            }
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     app,
@@ -20472,6 +20622,8 @@ static AGENT_LAUNCH_PENDING_GEN: std::sync::atomic::AtomicU64 =
 static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn begin_agent_launch() -> u64 {
+    // codex-resume-false-working: a fresh launch hasn't shown its composer.
+    CODEX_COMPOSER_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
     AGENT_LAUNCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 

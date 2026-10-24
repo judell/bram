@@ -6086,6 +6086,20 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     const CODEX_UPDATE_MARKERS: &[&str] =
         &["update now", "skip until next version", "update available"];
     const CODEX_UPDATE_FOOTER: &str = "enter continue \u{b7} esc skip";
+    // terminal-attention-login-screen (#448): an agent that isn't logged in.
+    // Claude shows no login screen at startup: it opens its normal composer
+    // and the footer says "Not logged in · Run /login". Specimen: Claude Code
+    // 2.1.310 under a PTY with an empty CLAUDE_CONFIG_DIR, onboarding and
+    // folder trust pre-set, 2026-10-24. The footer is followed only by the
+    // effort line ("◐ medium · /effort"), hence a wider window than
+    // FOOTER_WINDOW; a reply quoting it is followed by the composer's ────
+    // borders, far longer than that. Codex shows a sign-in screen whose
+    // Enter starts the ChatGPT sign-in. Specimen: codex-cli 0.163.0 with an
+    // empty CODEX_HOME, same day.
+    const CLAUDE_LOGIN_FOOTER: &str = "not logged in \u{b7} run /login";
+    const CLAUDE_LOGIN_WINDOW: usize = 60;
+    const CODEX_LOGIN_MARKERS: &[&str] = &["sign in with chatgpt", "provide your own api key"];
+    const CODEX_LOGIN_FOOTER: &str = "press enter to continue";
     // All whitespace removed, on both sides of the match. The CLIs lay out
     // words with cursor-column moves (CSI n G), which strip_ansi drops
     // without leaving a space, so the tail reads "Esctocancel" and
@@ -6135,6 +6149,18 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
         || (CODEX_HOOKS_EVENT_FIELDS.iter().all(|m| has(m)) && ends_exactly("esc back"))
     {
         return Some("codex-hooks-manage");
+    }
+    if CODEX_LOGIN_MARKERS.iter().any(|m| has(m)) && ends_with_footer(CODEX_LOGIN_FOOTER) {
+        return Some("codex-login");
+    }
+    let login_end: String = {
+        let n = tail.chars().count();
+        tail.chars()
+            .skip(n.saturating_sub(CLAUDE_LOGIN_WINDOW))
+            .collect()
+    };
+    if login_end.contains(&squash(CLAUDE_LOGIN_FOOTER)) {
+        return Some("claude-login");
     }
     if SLASH_PANEL_MARKERS
         .iter()
@@ -6310,8 +6336,81 @@ fn emit_terminal_attention<R: tauri::Runtime>(
             "active": active,
             "shape": shape,
             "atMs": now_ms,
+            // terminal-attention-login-screen: the pane offers the other
+            // agent, but only when its CLI is on PATH.
+            "switchTo": if active { login_switch_target(shape) } else { None },
         }),
     );
+}
+
+fn login_switch_target(shape: Option<&str>) -> Option<&'static str> {
+    let other = match shape {
+        Some("claude-login") => "codex",
+        Some("codex-login") => "claude",
+        _ => return None,
+    };
+    agent_cli_on_path(other).then_some(other)
+}
+
+#[cfg(test)]
+mod terminal_attention_login_tests {
+    use super::{pane_input_blocking_prompt, terminal_attention_prompt_shape};
+
+    // Claude Code 2.1.310, logged out (empty CLAUDE_CONFIG_DIR), ANSI-stripped
+    // under a 120x40 PTY, 2026-10-24. Whitespace is irrelevant to matching.
+    const CLAUDE_LOGGED_OUT: &str = "Claude Code v2.1.310 Opus 5.5 · API Usage Billing \
+        /private/tmp/cap-cwd Auto mode is now Claude Code's default permission mode. \
+        ──────────────────────────────────────── ❯ \
+        ──────────────────────────────────────── \
+        ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents Not logged in · Run /login \
+        ◐ medium · /effort";
+    // codex-cli 0.163.0, logged out (empty CODEX_HOME), same capture.
+    const CODEX_SIGN_IN: &str = "Welcome to Codex, OpenAI's command-line coding agent \
+        Sign in with ChatGPT to use Codex as part of your paid plan or connect an API key \
+        for usage-based billing > 1. Sign in with ChatGPT Usage included with Plus, Pro, \
+        Business, and Enterprise plans 2. Sign in with Device Code Sign in from another \
+        device with a one-time code 3. Provide your own API key Pay for what you use \
+        Press enter to continue";
+
+    #[test]
+    fn specimens_classify() {
+        assert_eq!(
+            terminal_attention_prompt_shape(CLAUDE_LOGGED_OUT),
+            Some("claude-login")
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape(CODEX_SIGN_IN),
+            Some("codex-login")
+        );
+    }
+
+    #[test]
+    fn a_reply_quoting_the_footer_is_not_the_footer() {
+        // A logged-in Claude explaining the message: the composer's borders
+        // and its ordinary footer follow the quote.
+        let quoting = "If you see Not logged in · Run /login, run /login. \
+            ──────────────────────────────────────── ❯ \
+            ──────────────────────────────────────── \
+            ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents ◐ medium · /effort";
+        assert_eq!(terminal_attention_prompt_shape(quoting), None);
+        let codex_quoting = "Codex says Sign in with ChatGPT then Press enter to continue. \
+            › Ask Codex to do anything ? for shortcuts";
+        assert_eq!(terminal_attention_prompt_shape(codex_quoting), None);
+    }
+
+    #[test]
+    fn login_screens_hold_pane_sends() {
+        assert_eq!(
+            pane_input_blocking_prompt(CLAUDE_LOGGED_OUT, false),
+            Some("claude-login")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(CODEX_SIGN_IN, true),
+            Some("codex-login")
+        );
+        // Codex's screen counts only while Codex is the live agent.
+        assert_eq!(pane_input_blocking_prompt(CODEX_SIGN_IN, false), None);
+    }
 }
 
 #[cfg(test)]
@@ -42142,7 +42241,10 @@ const SUBMIT_NUDGE_AFTER_MS: i64 = 5_000;
 // requires (op=boot-prompt-expired reason=provider): a Claude reply quoting
 // one of these screens is not the screen.
 fn codex_only_prompt_shape(shape: &str) -> bool {
-    matches!(shape, "hooks-trust" | "codex-hooks-manage" | "codex-update")
+    matches!(
+        shape,
+        "hooks-trust" | "codex-hooks-manage" | "codex-update" | "codex-login"
+    )
 }
 
 fn prompt_shape_for_provider(stripped_tail: &str, codex_live: bool) -> Option<&'static str> {
@@ -42154,7 +42256,16 @@ fn pane_input_blocking_prompt(stripped_tail: &str, codex_live: bool) -> Option<&
     prompt_shape_for_provider(stripped_tail, codex_live).filter(|shape| {
         matches!(
             *shape,
-            "folder-trust" | "hooks-trust" | "codex-hooks-manage" | "codex-update"
+            // terminal-attention-login-screen: on Codex's sign-in screen an
+            // Enter starts the ChatGPT sign-in; at a logged-out Claude a
+            // message only draws "not logged in". Either way the message
+            // stays in the box.
+            "folder-trust"
+                | "hooks-trust"
+                | "codex-hooks-manage"
+                | "codex-update"
+                | "codex-login"
+                | "claude-login"
         )
     })
 }

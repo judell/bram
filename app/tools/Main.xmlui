@@ -1475,6 +1475,14 @@
             width="*"
             color="$color-warn-700"
             value="{window.__bramTerminalAttentionText(terminalAttentionEvt.value)}" />
+          <!-- terminal-attention-login-screen (#448): a logged-out agent can
+               be traded for the other one, when the host found its CLI. -->
+          <Button
+            when="{!!(terminalAttentionEvt.value &amp;&amp; terminalAttentionEvt.value.switchTo)}"
+            label="{window.__bramTerminalAttentionSwitchLabel(terminalAttentionEvt.value)}"
+            variant="outlined"
+            size="xs"
+            onClick="window.__bramTerminalAttentionSwitch(terminalAttentionEvt.value, toast)" />
           <Button
             label="Open terminal"
             variant="outlined"

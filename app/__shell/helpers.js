@@ -9642,7 +9642,28 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     if (value && value.shape === "slash-panel") {
       return "Claude has a panel open in the terminal. Press Esc there to close it.";
     }
+    // terminal-attention-login-screen (#448).
+    if (value && value.shape === "claude-login") {
+      return "Claude isn't logged in. Open the terminal and run /login there.";
+    }
+    if (value && value.shape === "codex-login") {
+      return "Codex is asking you to sign in. Open the terminal to sign in.";
+    }
     return "The terminal is waiting at a prompt Bram can't answer.";
+  };
+  // The host names the other agent only when its CLI is on PATH.
+  window.__bramTerminalAttentionSwitchLabel = function (value) {
+    var to = value && value.switchTo;
+    return to ? "Use " + (to === "codex" ? "Codex" : "Claude") + " instead" : "";
+  };
+  window.__bramTerminalAttentionSwitch = function (value, toastApi) {
+    var to = value && value.switchTo;
+    if (!to) return;
+    window.__bramSwitchAgent(to).catch(function (e) {
+      if (toastApi && typeof toastApi.error === "function") {
+        toastApi.error(String((e && e.message) || e));
+      }
+    });
   };
 })();
 

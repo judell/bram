@@ -867,6 +867,59 @@ know to script. The two feed each other — graduating a finding here
 into a `scenario/` branch or a harness assertion is how an exploratory
 discovery becomes a durable regression guard.
 
+## Capturing terminal specimens
+
+Bram reads agents' screens: terminal attention (`terminal_attention_prompt_shape`
+in `lib.rs`), the launch gate, the boot-prompt holds. Its markers must come
+from **captured specimens, never guesses** (the rule the trace vocabulary's
+`terminal-attention` row states). A specimen is what a CLI actually draws, at
+a known version, ANSI-stripped.
+
+There are two sources:
+
+- **The candidate inventory.** Unmatched idle screens are logged as
+  `[terminal-attention] op=candidate preview=…`. Grep every project's trace
+  archives for the screen you're after. Claude's "⚠ Your login expires in 3
+  days · run /login to renew" turned up this way (2.1.296).
+- **A deliberate capture.** `scripts/capture-terminal-specimen.py` runs a
+  command under a pseudo-terminal of fixed size (120×40 by default) and
+  writes the raw bytes and an ANSI-stripped `.txt`:
+
+  ```sh
+  python3 -I scripts/capture-terminal-specimen.py /tmp/spec/claude 15 -- claude
+  python3 -I scripts/capture-terminal-specimen.py --keys $'\r' --after 4 \
+      /tmp/spec/codex 12 -- codex
+  ```
+
+**Reach a state without touching a real account.** Point the CLI at a
+throwaway config directory and unset the API keys. Most states are a few
+fields of config away:
+
+| State | Setup |
+|---|---|
+| Claude logged out | `CLAUDE_CONFIG_DIR=$(mktemp -d)`, unset `ANTHROPIC_API_KEY`, and pre-set onboarding and folder trust in its `.claude.json` (`hasCompletedOnboarding`, `projects."<dir>".hasTrustDialogAccepted`). Otherwise the first-run theme picker and the folder-trust prompt come first. |
+| Codex logged out | `CODEX_HOME=$(mktemp -d)`, unset `OPENAI_API_KEY`, and pre-trust the folder in its `config.toml` (`[projects."<dir>"] trust_level = "trusted"`). |
+| A first-run prompt | the same throwaway directory with nothing pre-set |
+
+Capture from an empty working directory, so the Bram repo's own trust state
+doesn't interfere. The same environment works for a demo instance:
+`env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<dir> scripts/demo-instance.sh launch`.
+Set `shell.startupPolicy` to `newSession` in its `.bram.json`, because Bram
+resumes from the real session history, which the throwaway config doesn't
+have ("No conversation found to continue").
+
+**What the specimens taught the first time** (terminal-attention-login-screen,
+#448): a logged-out Claude 2.1.310 draws **no** login screen. It opens its
+normal composer, and only the footer says "Not logged in · Run /login", which
+is why the launch check reported success. Codex 0.163.0 draws a full sign-in
+screen whose Enter starts the sign-in. Guessing would have got Claude wrong.
+
+**Then pin it.** Write the markers against the stripped text, anchored to the
+end of the screen where a live prompt puts its footer. Pin the specimen
+whole in a test, along with a near-miss: a reply that merely quotes the text,
+followed by the composer's chrome, must not match. Record the CLI version in
+the comment beside the markers.
+
 ## Moved from the seeded conventions
 
 These sections lived in `app/__shell/conventions.md` until the

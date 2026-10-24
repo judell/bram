@@ -9549,6 +9549,9 @@ struct ClaudeTurnStats {
     // line so a later `skip-stale-jsonl-end` can be told apart from a genuine
     // one, which today's log cannot do.
     notifications_skipped: u32,
+    // notification-started-turn-shows-finished: the boundary is a
+    // notification the agent answered after its turn had ended.
+    boundary_is_notification: bool,
 }
 
 static CLAUDE_TURN_STATS_CACHE: OnceLock<Mutex<Option<ClaudeTurnStats>>> = OnceLock::new();
@@ -9994,6 +9997,26 @@ fn start_claude_turn_stats_poll<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     .as_ref()
                     .filter(|s| s.notifications_skipped > 0)
                     .map(|s| (s.user_ts_ms, s.notifications_skipped));
+                let opened = next
+                    .as_ref()
+                    .filter(|s| s.boundary_is_notification)
+                    .map(|s| s.user_ts_ms);
+                let had = guard
+                    .as_ref()
+                    .filter(|s| s.boundary_is_notification)
+                    .map(|s| s.user_ts_ms);
+                if let Some(turn) = opened {
+                    if had != opened {
+                        append_bram_trace_line(
+                            &app_handle,
+                            "claude-turn-boundary",
+                            &format!(
+                                "op=notification-boundary turn={} note=answered-after-turn-ended",
+                                turn
+                            ),
+                        );
+                    }
+                }
                 if let Some((turn, skipped)) = seen {
                     if was != seen {
                         append_bram_trace_line(
@@ -10064,7 +10087,13 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
     let mut latest_assistant_stop: Option<String> = None;
     let mut saw_assistant_after_user = false;
     let mut notifications_skipped: u32 = 0;
-    for line in lines.iter().rev() {
+    let mut boundary_is_notification = false;
+    // The CLI writes an `api-request` record as it sends the model a request,
+    // ~30 ms after delivering a notification and seconds before the first
+    // assistant record (2.1.310; demo 2026-10-24 06:47:12.158 -> .189, reply
+    // 06:47:14.284). It is the earliest sign the notification is answered.
+    let mut saw_api_request_after = false;
+    for (idx, line) in lines.iter().enumerate().rev() {
         let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -10086,6 +10115,25 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
                 // A completion report is not something the user said, so it is
                 // not where a turn starts. Keep scanning for the real boundary.
                 if claude_jsonl_record_is_notification(&rec) {
+                    // notification-started-turn-shows-finished: delivered
+                    // while the agent was idle (its turn had ended) and
+                    // answered, a notification starts a new turn. Without
+                    // this the new turn inherited the ended turn's
+                    // timestamp, which the host had already marked killed,
+                    // so every working signal was refused and the pane said
+                    // "finished" throughout (2026-10-24 05:22-05:26, 22
+                    // skip-jsonl-working reason=killed-turn). Mid-turn, or
+                    // unanswered, it stays a non-boundary (b72a29b).
+                    if (saw_assistant_after_user || saw_api_request_after)
+                        && claude_jsonl_turn_ended_before(&lines, idx)
+                    {
+                        user_ts_ms = rec
+                            .get("timestamp")
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_iso_to_ms);
+                        boundary_is_notification = true;
+                        break;
+                    }
                     notifications_skipped = notifications_skipped.saturating_add(1);
                     continue;
                 }
@@ -10106,6 +10154,7 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
                 }
                 saw_assistant_after_user = true;
             }
+            "api-request" => saw_api_request_after = true,
             _ => {} // sidecar metadata: ignore
         }
     }
@@ -10119,7 +10168,37 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
         user_ts_ms,
         is_working,
         notifications_skipped,
+        boundary_is_notification,
     })
+}
+
+// Whether the nearest user or assistant record before `idx` (passing over
+// metadata and other notifications) is an assistant record that ended its
+// turn. A tool result or a real user message there means the notification
+// arrived mid-turn.
+fn claude_jsonl_turn_ended_before(lines: &[&str], idx: usize) -> bool {
+    for line in lines[..idx].iter().rev() {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match rec.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "assistant" => {
+                return rec
+                    .get("message")
+                    .and_then(|m| m.get("stop_reason"))
+                    .and_then(|v| v.as_str())
+                    == Some("end_turn");
+            }
+            "user" => {
+                if claude_jsonl_record_is_notification(&rec) {
+                    continue;
+                }
+                return false;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 // Minimal ISO-8601 to unix-ms parser for Claude session timestamps
@@ -56354,6 +56433,82 @@ mod notification_turn_boundary_tests {
             stats.notifications_skipped, 0,
             "the scan stops at the boundary before reaching the notification"
         );
+    }
+
+    // notification-started-turn-shows-finished: the agent ended its turn, a
+    // background command's report arrived, and the agent answered it. That
+    // is a new turn, starting at the notification (CLI 2.1.310 shape, with
+    // the system and queue-operation records it writes in between).
+    #[test]
+    fn an_answered_notification_after_an_ended_turn_starts_a_turn() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"waiting on the build"}]}}"#,
+            r#"{"type":"system","timestamp":"2026-08-22T18:48:30.100Z"}"#,
+            r#"{"type":"queue-operation","timestamp":"2026-08-22T18:49:00.000Z"}"#,
+            notification_record("2026-08-22T18:49:00.100Z", COMPLETED),
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:49:05.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(
+            stats.user_ts_ms, 1787424540100,
+            "the turn starts at the notification"
+        );
+        assert!(stats.is_working, "the agent is answering it");
+        assert!(stats.boundary_is_notification);
+        assert_eq!(stats.notifications_skipped, 0);
+    }
+
+    #[test]
+    fn the_answered_notification_turn_ends_when_the_agent_does() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"waiting"}]}}"#,
+            notification_record("2026-08-22T18:49:00.000Z", COMPLETED),
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:49:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"build passed"}]}}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, 1787424540000);
+        assert!(!stats.is_working);
+    }
+
+    // While the model is still thinking, before any assistant record, the
+    // api-request the CLI writes already opens the turn as working (the demo
+    // run: the terminal showed "Nebulizing… (1s · thinking)" while the pane
+    // still said finished).
+    #[test]
+    fn an_api_request_after_the_notification_opens_the_turn_early() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"waiting"}]}}"#,
+            notification_record("2026-08-22T18:49:00.000Z", COMPLETED),
+            r#"{"type":"api-request","timestamp":"2026-08-22T18:49:00.030Z"}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, 1787424540000);
+        assert!(stats.is_working, "no reply yet, but the request is out");
+        assert!(stats.boundary_is_notification);
+    }
+
+    // b72a29b's case, unchanged: a report delivered mid-turn (after a tool
+    // result) is not a boundary even though the agent keeps going.
+    #[test]
+    fn a_notification_mid_turn_is_still_not_a_boundary() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:10.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:20.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            notification_record("2026-08-22T18:48:25.000Z", COMPLETED),
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, TURN_START_MS);
+        assert!(!stats.boundary_is_notification);
+        assert_eq!(stats.notifications_skipped, 1);
     }
 
     // The observe-only would-end evidence shares the predicate, so it stops

@@ -6687,6 +6687,19 @@ window.__bramProjectTooltip = function (info) {
   return info.repo ? info.project + " · " + info.repo : info.project || "";
 };
 
+// issue-448: /__enhance/status `projectFolder` says whether Bram was started
+// from a project folder (a git repo's root). Before status loads, or from an
+// older host without the field, treat the folder as fine so nothing flashes.
+window.__bramProjectFolderKind = function (status) {
+  return (status && status.projectFolder && status.projectFolder.kind) || "ok";
+};
+window.__bramProjectFolderIs = function (status, kind) {
+  return window.__bramProjectFolderKind(status) === kind;
+};
+window.__bramProjectFolderIsOk = function (status) {
+  return window.__bramProjectFolderKind(status) === "ok";
+};
+
 // Badge takes a dynamic background only through colorMap (value -> color),
 // so the chip's one-entry map is built here rather than as an inline
 // object literal in the markup.

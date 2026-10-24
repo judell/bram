@@ -536,6 +536,7 @@ instance binds its own loopback port and writes its own
 directory while your working session keeps going, untouched:
 
 ```sh
+git init /tmp/scratch-project   # issue-448: Bram starts only at a repo's root
 BRAM_TRACE=1 ./bram /tmp/scratch-project
 ```
 
@@ -598,9 +599,13 @@ BRAM_BIN=/path/to/bram scripts/setup-harness.sh
 
 Exit status is the number of failed assertions. Scenarios vary the
 *starting state* rather than the steps, because that is where the
-historical failures were: `pristine_nogit`, `pristine_git`,
+historical failures were: `pristine_nogit` (not a git repo, so refused:
+nothing written, autostart held, #448), `subfolder` (inside a repo but not
+its root, refused and named as such, #448), `pristine_git`,
 `already_setup` (the cross-machine re-run from #249), `legacy_hooks`
-(retired generic hook names, #173), and `nested` (a managed parent).
+(retired generic hook names, #173), and `nested` (a managed parent). The
+refused scenarios find the port from Bram's stderr (`[bram] loopback
+port=`), since a refused launch writes no port file.
 
 Every assertion traces to a bug the record actually caught, which is
 the standard for adding another one. Notably `already_setup` asserts

@@ -91,7 +91,10 @@ agent's goodwill.
 
 ## Prerequisites
 
-1. A local git repo in which you develop your app
+1. A local git repo in which you develop your app. Start Bram from that
+   repo's root folder: `cd` there in your terminal and run `bram`.
+   Anywhere else (your home directory, a folder that isn't a git repo, or
+   a subfolder of one), Bram starts nothing and says where to start from.
 
 2. **`git`** — usually preinstalled on macOS and Linux; install via
    your package manager if missing.

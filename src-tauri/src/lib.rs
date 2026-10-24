@@ -2297,7 +2297,8 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
     // would recreate the very ~/resources scaffold the startup refusal
     // exists to prevent. Returning None silences both the startup
     // prepare/archive pass and every append_bram_trace_line call.
-    if project_root_is_home() {
+    // issue-448: likewise anywhere that isn't a project folder.
+    if !project_folder().is_ok() {
         return None;
     }
     project_resource_path(app, "bram-traces/bram-trace.log")
@@ -16523,7 +16524,14 @@ fn shell_window_title_parts(project_root: Option<&Path>, repo_slug: Option<&str>
 
 fn shell_window_title<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
     let root = project_root(Some(app));
-    let repo_slug = repo_owner_name(app);
+    // issue-448: a home directory that is itself a git checkout (a dotfiles
+    // repo) would otherwise title the window with that repo, as though it
+    // were the project. At home the title is just "~".
+    let repo_slug = if project_root_is_home() {
+        None
+    } else {
+        repo_owner_name(app)
+    };
     shell_window_title_parts(root.as_deref(), repo_slug.as_deref())
 }
 
@@ -18146,6 +18154,19 @@ fn pty_spawn(
     // the provider's first TUI boot-evidence frame. An unseen unmanaged repo
     // gets one fresh session; once its greeting is delivered, later launches
     // go straight back to the user's configured/default resume policy.
+    // issue-448: not a project folder, so start nothing: no greeting, no
+    // Setup, no agent. The pane's banner says where to start from instead.
+    // Before the greeting is armed, so a later proper launch still greets.
+    let folder = project_folder();
+    if !folder.is_ok() {
+        // The trace file is refused here too, so this goes to stderr.
+        eprintln!(
+            "[bram] op=autostart-held reason={} root={}",
+            folder.kind(),
+            determine_project_root().display()
+        );
+        return Ok(());
+    }
     let first_unmanaged_launch = arm_repo_startup_greeting_if_needed(&app);
     // first-run-sequence-greeting-vs-setup: Setup runs here, AFTER the
     // greeting is armed (arming checks project_is_managed, which auto-setup
@@ -47730,6 +47751,12 @@ fn codex_hook_toml_block(guard_link: Option<&Path>) -> Option<String> {
 // managed project (one with resources/). Not removed on exit: a stale entry
 // still names this project's own build, which is the guard it should get.
 fn record_own_guard_target<R: tauri::Runtime>(app: &AppHandle<R>) {
+    // issue-448: nothing goes into a folder that isn't a project folder
+    // (#353's home rule, generalized). A home that already had a resources/
+    // folder got this file at startup and again from the throughput ticker.
+    if !project_folder().is_ok() {
+        return;
+    }
     let Some(root) = project_root(Some(app)) else {
         return;
     };
@@ -48297,6 +48324,16 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "nestedUnder": nested_under,
         "nestedUnderIgnoredHome": nested_under_ignored_home,
         "strayHomeScaffold": stray_home_scaffold,
+        // issue-448: whether the launch folder is a project folder (a git
+        // repo's root); anything else drives the pane's banner.
+        "projectFolder": {
+            "kind": project_folder().kind(),
+            "root": determine_project_root().to_string_lossy(),
+            "toplevel": match project_folder() {
+                ProjectFolder::Subfolder(top) => Some(top.to_string_lossy().to_string()),
+                _ => None,
+            },
+        },
         // issue-445: ancestor CLAUDE.md files still carrying a legacy
         // xmlui-desktop block (Setup names them; this shows them at startup).
         "legacyAncestorImports": root
@@ -48448,6 +48485,138 @@ fn project_root_is_home() -> bool {
             .map(|home| path_is_home_dir(&determine_project_root(), &home))
             .unwrap_or(false)
     })
+}
+
+// issue-448: is the launch folder a project folder? README prerequisite #1 is
+// "a local git repo in which you develop your app", and Bram starts from that
+// repository's root (`cd` there, run `bram`). Anything else gets a pane
+// banner saying what's wrong and where to start from, and nothing is written
+// or started: no startup files, no Setup, no agent. No quiet fallbacks: a
+// subfolder is named as one, not silently swapped for its repo root.
+//
+// Home is refused even when it is a git repository (a dotfiles checkout):
+// every other folder is inside it, so a managed home makes the worklist guard
+// resolve every unmanaged path under home to this project (#294) and makes
+// every project under home look nested (#353).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProjectFolder {
+    Ok,
+    Home,
+    NotGit,
+    Subfolder(PathBuf),
+}
+
+impl ProjectFolder {
+    fn is_ok(&self) -> bool {
+        *self == ProjectFolder::Ok
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            ProjectFolder::Ok => "ok",
+            ProjectFolder::Home => "home",
+            ProjectFolder::NotGit => "not-git",
+            ProjectFolder::Subfolder(_) => "subfolder",
+        }
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| strip_unc_prefix(p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+    canon(a) == canon(b)
+}
+
+fn project_folder_verdict(
+    root: &Path,
+    home: Option<&Path>,
+    toplevel: Option<&Path>,
+) -> ProjectFolder {
+    if home.map_or(false, |home| path_is_home_dir(root, home)) {
+        return ProjectFolder::Home;
+    }
+    match toplevel {
+        None => ProjectFolder::NotGit,
+        Some(top) if same_dir(top, root) => ProjectFolder::Ok,
+        Some(top) => ProjectFolder::Subfolder(top.to_path_buf()),
+    }
+}
+
+fn git_toplevel_of(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then(|| PathBuf::from(text))
+}
+
+// The launch folder is fixed for the life of the process, so this is too.
+fn project_folder() -> &'static ProjectFolder {
+    static FOLDER: std::sync::OnceLock<ProjectFolder> = std::sync::OnceLock::new();
+    FOLDER.get_or_init(|| {
+        let root = determine_project_root();
+        let home = home_dir();
+        project_folder_verdict(&root, home.as_deref(), git_toplevel_of(&root).as_deref())
+    })
+}
+
+#[cfg(test)]
+mod project_folder_tests {
+    use super::{project_folder_verdict, ProjectFolder};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-project-folder-{}-{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn home_is_refused_even_as_a_repo() {
+        let home = scratch("home");
+        assert_eq!(
+            project_folder_verdict(&home, Some(&home), Some(&home)),
+            ProjectFolder::Home
+        );
+        assert_eq!(
+            project_folder_verdict(&home, Some(&home), None),
+            ProjectFolder::Home
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_repo_root_is_ok_and_no_repo_is_not() {
+        let repo = scratch("repo");
+        assert_eq!(
+            project_folder_verdict(&repo, None, Some(&repo)),
+            ProjectFolder::Ok
+        );
+        assert_eq!(
+            project_folder_verdict(&repo, None, None),
+            ProjectFolder::NotGit
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_subfolder_names_its_repo_root() {
+        let repo = scratch("sub");
+        let sub = repo.join("sub");
+        assert_eq!(
+            project_folder_verdict(&sub, None, Some(&repo)),
+            ProjectFolder::Subfolder(repo.clone())
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }
 
 // issue-353: the nearest managed ancestor, excluding $HOME — a nesting
@@ -48631,6 +48800,26 @@ mod home_scaffold_tests {
 
 fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec<u8>, String> {
     let proj = project_root(Some(app)).ok_or("no project root")?;
+    // issue-448: Setup only in a project folder, the root of a git repo.
+    match project_folder() {
+        ProjectFolder::NotGit => {
+            return Err(format!(
+                "Setup refused: {} isn't in a git repository. Bram works from the root of the \
+                 local git repository for your app: cd there and run bram (issue #448).",
+                proj.display()
+            ));
+        }
+        ProjectFolder::Subfolder(top) => {
+            return Err(format!(
+                "Setup refused: {} is inside the git repository at {}. Start Bram from the \
+                 repository's root: cd {} and run bram (issue #448).",
+                proj.display(),
+                top.display(),
+                top.display()
+            ));
+        }
+        ProjectFolder::Ok | ProjectFolder::Home => {}
+    }
     if let Some(home) = home_dir() {
         if path_is_home_dir(&proj, &home) {
             return Err(format!(
@@ -79658,11 +79847,14 @@ pub fn run() {
                 // mis-launch, and everything under home then reads as
                 // nested. Stderr only — trace persistence is likewise
                 // refused at a home root (bram_trace_log_file).
-                if project_root_is_home() {
+                // issue-448: and never scaffold a folder that isn't a project
+                // folder (not a git repo, or a subfolder of one).
+                if !project_folder().is_ok() {
                     eprintln!(
-                        "[bram] op=refuse-home-scaffold root={} — project root is the home \
-                         directory; startup scaffold (port files, trace directory) not written \
-                         (issue #353)",
+                        "[bram] op=refuse-scaffold reason={} root={} — not a project folder; \
+                         startup scaffold (port files, trace directory) not written \
+                         (issues #353, #448)",
+                        project_folder().kind(),
                         proj.display()
                     );
                 } else if wait_for_loopback_http(port, 5000) {

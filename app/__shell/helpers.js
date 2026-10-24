@@ -1058,6 +1058,80 @@ window.__bramSwitchAgent = function (provider) {
     });
   };
 })();
+// issue-448: with no `shell.agent` and both CLIs installed, the host holds the
+// autostart and asks which agent this project uses. Driven by the host's
+// replayable `startup-agent-choice`; a click saves the answer and starts that
+// agent, and a header switch or Start fresh clears the card. Dismiss is
+// focus (sessionStorage, keyed by the ask's time) and starts nothing.
+(function () {
+  var DISMISS_KEY = "bram.startupAgentChoiceDismissedAt";
+  var subscribers = new Set();
+  var latest = null;
+  var dismissedAt = 0;
+  var lastValue = null;
+  var hooked = false;
+  try { dismissedAt = Number(window.sessionStorage.getItem(DISMISS_KEY)) || 0; } catch (e) {}
+
+  var derive = function () {
+    var p = latest;
+    if (!p || !p.pending) return null;
+    if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
+    return { atMs: p.atMs };
+  };
+  var notify = function (reason) {
+    var next = derive();
+    var was = !!lastValue;
+    lastValue = next;
+    if (was !== !!next) {
+      try {
+        window.__bramIframeTrace("startup-agent-choice", { op: next ? "shown" : "cleared", reason: reason });
+      } catch (e) {}
+    }
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bram] startup-agent-choice subscriber threw:", e); }
+    });
+  };
+  var ensureHooked = function () {
+    if (hooked) return;
+    hooked = true;
+    var source = window.bramSubscribeTauriEvent("startup-agent-choice");
+    source(function (snapshot) {
+      latest = (snapshot && snapshot.payload) || null;
+      notify(latest && latest.pending ? "ask" : "answered");
+    });
+  };
+
+  window.bramSubscribeStartupAgentChoice = (function () {
+    var factory;
+    return function () {
+      if (factory) return factory;
+      ensureHooked();
+      factory = function (emit) {
+        var fire = function () { emit(lastValue); };
+        subscribers.add(fire);
+        fire();
+        return function () { subscribers.delete(fire); };
+      };
+      return factory;
+    };
+  })();
+  window.__bramStartupAgentChoiceDismiss = function (value) {
+    if (!value) return;
+    dismissedAt = Number(value.atMs) || Date.now();
+    try { window.sessionStorage.setItem(DISMISS_KEY, String(dismissedAt)); } catch (e) {}
+    notify("dismiss-click");
+  };
+  window.__bramChooseStartupAgent = function (provider, toastApi) {
+    var invoke = getTauriInvoke();
+    if (!invoke) return;
+    window.__bramWithAgentCommandTimeout(invoke("choose_startup_agent", { provider: provider }), "agent choice")
+      .catch(function (e) {
+        if (toastApi && typeof toastApi.error === "function") {
+          toastApi.error(String((e && e.message) || e));
+        }
+      });
+  };
+})();
 // provider-session-pair-offer: after a header switch that found no partner
 // (the host resumed the target's pin or most recent session, and pairs only
 // on an explicit act), offer to keep the two sessions together or to start a

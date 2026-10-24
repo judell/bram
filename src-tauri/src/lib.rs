@@ -18179,6 +18179,57 @@ fn pty_spawn(
         }
         return Ok(());
     }
+    // issue-448: with no `shell.agent` and both CLIs installed, Claude is a
+    // guess. Use this project's session history when it names one agent;
+    // otherwise hold the autostart and ask in the pane.
+    let mut configured_provider = configured_provider;
+    match startup_agent_pick_for(&app, startup_policy) {
+        StartupAgentPick::Configured => {}
+        StartupAgentPick::Evidence(provider) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "agent-switch",
+                    &format!(
+                        "op=launch-pick reason=only-provider-with-sessions provider={}",
+                        session_provider_label(provider)
+                    ),
+                );
+            }
+            configured_provider = provider;
+        }
+        StartupAgentPick::Ask => {
+            hold_startup_autostart_for_choice(
+                &app,
+                PendingStartupAutostart {
+                    startup_policy,
+                    configured_startup_policy,
+                    first_unmanaged_launch,
+                },
+            );
+            return Ok(());
+        }
+    }
+    run_startup_autostart(
+        app,
+        startup_policy,
+        configured_startup_policy,
+        configured_provider,
+        first_unmanaged_launch,
+    );
+    Ok(())
+}
+
+// The autostart's launch half: resolve the session to resume, then type the
+// launch command. Split out of pty_spawn so issue-448's agent chooser can run
+// it later, once the user has picked.
+fn run_startup_autostart(
+    app: AppHandle,
+    startup_policy: AgentStartupPolicy,
+    configured_startup_policy: AgentStartupPolicy,
+    configured_provider: SessionProvider,
+    first_unmanaged_launch: bool,
+) {
     let last_active = if startup_policy == AgentStartupPolicy::LastActive {
         validated_last_active_session(&app)
     } else {
@@ -18323,7 +18374,232 @@ fn pty_spawn(
             }),
         });
     }
-    Ok(())
+}
+
+// issue-448: which agent to start when the project hasn't said. Claude was
+// the unconditional default, so a Codex user with both CLIs installed got
+// Claude first (Amber's report: an expired Claude login she couldn't pass).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupAgentPick {
+    // `shell.agent` is set, or only one CLI is installed, or a last-active
+    // session names the agent: the existing launch ladder decides.
+    Configured,
+    // Exactly one agent has sessions in this project.
+    Evidence(SessionProvider),
+    // Nothing to go on: hold the autostart and ask in the pane.
+    Ask,
+}
+
+fn startup_agent_pick(
+    agent_configured: bool,
+    claude_on_path: bool,
+    codex_on_path: bool,
+    claude_has_sessions: bool,
+    codex_has_sessions: bool,
+) -> StartupAgentPick {
+    if agent_configured || !(claude_on_path && codex_on_path) {
+        return StartupAgentPick::Configured;
+    }
+    match (claude_has_sessions, codex_has_sessions) {
+        (true, false) => StartupAgentPick::Evidence(SessionProvider::Claude),
+        (false, true) => StartupAgentPick::Evidence(SessionProvider::Codex),
+        _ => StartupAgentPick::Ask,
+    }
+}
+
+fn startup_agent_pick_for(app: &AppHandle, startup_policy: AgentStartupPolicy) -> StartupAgentPick {
+    // A home-directory root gets no Setup and no .bram.json (#294, #353), so
+    // there is nowhere to save an answer.
+    if project_root_is_home() {
+        return StartupAgentPick::Configured;
+    }
+    let agent_configured = project_root(Some(app))
+        .and_then(|root| load_project_config(&root))
+        .and_then(|cfg| cfg.shell)
+        .and_then(|shell| shell.agent)
+        .map_or(false, |agent| !agent.trim().is_empty());
+    if agent_configured {
+        return StartupAgentPick::Configured;
+    }
+    if startup_policy == AgentStartupPolicy::LastActive
+        && validated_last_active_session(app).is_some()
+    {
+        return StartupAgentPick::Configured;
+    }
+    let has_sessions = |provider| {
+        latest_session_path_for_provider(app, provider)
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    startup_agent_pick(
+        false,
+        agent_cli_on_path("claude"),
+        agent_cli_on_path("codex"),
+        has_sessions(SessionProvider::Claude),
+        has_sessions(SessionProvider::Codex),
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingStartupAutostart {
+    startup_policy: AgentStartupPolicy,
+    configured_startup_policy: AgentStartupPolicy,
+    first_unmanaged_launch: bool,
+}
+
+static PENDING_STARTUP_AUTOSTART: Mutex<Option<PendingStartupAutostart>> = Mutex::new(None);
+
+// Replayable, like launch-outcome: the pane may load after the ask.
+fn emit_startup_agent_choice(app: &AppHandle, pending: bool, chosen: Option<&str>) {
+    emit_replayable_payload(
+        app,
+        "startup-agent-choice",
+        serde_json::json!({
+            "pending": pending,
+            "chosen": chosen,
+            "atMs": unix_now_ms(),
+        }),
+    );
+}
+
+fn hold_startup_autostart_for_choice(app: &AppHandle, pending: PendingStartupAutostart) {
+    if let Ok(mut slot) = PENDING_STARTUP_AUTOSTART.lock() {
+        *slot = Some(pending);
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=launch-ask policy={} first_unmanaged={}",
+                pending.startup_policy.as_str(),
+                pending.first_unmanaged_launch
+            ),
+        );
+    }
+    emit_startup_agent_choice(app, true, None);
+}
+
+fn take_pending_startup_autostart() -> Option<PendingStartupAutostart> {
+    PENDING_STARTUP_AUTOSTART
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+// A launch from anywhere else (header switch, Start fresh) answers the
+// question, so the card goes away without saving anything.
+fn clear_pending_startup_agent_choice(app: &AppHandle, reason: &str) {
+    if take_pending_startup_autostart().is_none() {
+        return;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!("op=launch-ask-cleared reason={}", reason),
+        );
+    }
+    emit_startup_agent_choice(app, false, None);
+}
+
+// The pane's agent card: save the answer as `shell.agent`, then run the
+// autostart that was held for it, greeting and all. A failed save still
+// launches; the error comes back for the pane to show.
+#[tauri::command]
+fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> {
+    let chosen = match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" => SessionProvider::Codex,
+        "claude" => SessionProvider::Claude,
+        other => return Err(format!("unknown agent provider: {}", other)),
+    };
+    let pending = take_pending_startup_autostart()
+        .ok_or_else(|| "No launch is waiting for an agent choice.".to_string())?;
+    let label = session_provider_label(chosen);
+    let saved = project_root(Some(&app))
+        .ok_or_else(|| "project root unavailable".to_string())
+        .and_then(|root| {
+            write_settings_to_config(&root, &serde_json::json!({ "shell": { "agent": label } }))
+        });
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            &app,
+            "agent-switch",
+            &format!(
+                "op=launch-chosen provider={} saved={}{}",
+                label,
+                saved.is_ok(),
+                saved
+                    .as_ref()
+                    .err()
+                    .map(|e| format!(" error={}", e))
+                    .unwrap_or_default()
+            ),
+        );
+    }
+    emit_startup_agent_choice(&app, false, Some(label));
+    run_startup_autostart(
+        app,
+        pending.startup_policy,
+        pending.configured_startup_policy,
+        chosen,
+        pending.first_unmanaged_launch,
+    );
+    saved.map_err(|e| format!("Started {} but couldn't save the choice: {}", label, e))
+}
+
+#[cfg(test)]
+mod startup_agent_pick_tests {
+    use super::{startup_agent_pick, SessionProvider, StartupAgentPick};
+
+    #[test]
+    fn configured_agent_always_decides() {
+        assert_eq!(
+            startup_agent_pick(true, true, true, false, false),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(true, true, true, false, true),
+            StartupAgentPick::Configured
+        );
+    }
+
+    #[test]
+    fn one_cli_leaves_it_to_the_sole_cli_rung() {
+        assert_eq!(
+            startup_agent_pick(false, true, false, false, false),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(false, false, true, true, false),
+            StartupAgentPick::Configured
+        );
+    }
+
+    #[test]
+    fn sessions_for_one_agent_pick_it() {
+        assert_eq!(
+            startup_agent_pick(false, true, true, false, true),
+            StartupAgentPick::Evidence(SessionProvider::Codex)
+        );
+        assert_eq!(
+            startup_agent_pick(false, true, true, true, false),
+            StartupAgentPick::Evidence(SessionProvider::Claude)
+        );
+    }
+
+    #[test]
+    fn no_evidence_or_both_asks() {
+        assert_eq!(
+            startup_agent_pick(false, true, true, false, false),
+            StartupAgentPick::Ask
+        );
+        assert_eq!(
+            startup_agent_pick(false, true, true, true, true),
+            StartupAgentPick::Ask
+        );
+    }
 }
 
 // The #210 bounce-back detection (first_output_seen / last_toturn_submit
@@ -20486,6 +20762,7 @@ fn switch_agent(
     };
     refuse_agent_typing_if_policy_none(&app, "switch")?;
     cancel_agent_boot_hold(&app, "provider-switch");
+    clear_pending_startup_agent_choice(&app, "switch");
     // Header switching is always "return to that agent", independent of the
     // On Bram launch policy. A pinned codex session outranks `resume --last`:
     // after a cross-provider round-trip, codex must reopen the session Bram is
@@ -22235,6 +22512,7 @@ fn start_agent_fresh(
     };
     refuse_agent_typing_if_policy_none(&app, "start-fresh")?;
     cancel_agent_boot_hold(&app, "start-fresh");
+    clear_pending_startup_agent_choice(&app, "start-fresh");
     let command = agent_launch_command(provider_key)
         .ok_or("unknown agent provider")?
         .to_string();
@@ -79111,6 +79389,7 @@ pub fn run() {
             pty_write,
             switch_agent,
             start_agent_fresh,
+            choose_startup_agent,
             reload_agent_session,
             create_new_session,
             queue_pty_intent,

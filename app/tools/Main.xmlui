@@ -1010,7 +1010,49 @@
            Worklist-dock mount (AgentMenuView is self-gating on menu and
            owns its preview modal, so the footer mount is drop-in). -->
       <AgentMenuView menu="{footerAgentMenuEvt.value}" surface="footer" />
-      <!-- agent-launch-failure-in-pane: a launch that failed (the agent
+      <!-- issue-448: both agent CLIs are installed and the project names no
+           agent, so the host held the autostart to ask instead of guessing
+           Claude. Driven by the host's replayable `startup-agent-choice`;
+           a click saves shell.agent and starts that agent. Solid buttons for
+           the two answers, ghost for Dismiss, per
+           https://www.xmlui.org/docs/reference/components/Button#variant . -->
+      <PushSource
+        id="startupAgentChoice"
+        initial="{null}"
+        subscribe="{window.bramSubscribeStartupAgentChoice()}" />
+      <VStack
+        when="{!!startupAgentChoice.value}"
+        gap="$space-1"
+        paddingHorizontal="$space-2"
+        paddingVertical="$space-1"
+        backgroundColor="$color-primary-50"
+        border="1px solid $color-primary-100"
+        borderRadius="$borderRadius">
+        <HStack width="100%" gap="$space-2" verticalAlignment="center">
+          <Text
+            width="*"
+            fontSize="$fontSize-sm"
+            value="Which agent do you use in this project?" />
+          <Button
+            label="Claude"
+            size="xs"
+            onClick="window.__bramChooseStartupAgent('claude', toast)" />
+          <Button
+            label="Codex"
+            size="xs"
+            onClick="window.__bramChooseStartupAgent('codex', toast)" />
+          <Button
+            label="Dismiss"
+            variant="ghost"
+            size="xs"
+            onClick="window.__bramStartupAgentChoiceDismiss(startupAgentChoice.value)" />
+        </HStack>
+        <Text
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="Both are installed. Bram saves your answer for this project in .bram.json, and you can change it later in Settings." />
+      </VStack>
+      <!-- agent-launch-failure-in-pane:a launch that failed (the agent
            exited right after launch, or the terminal never came back to a
            prompt) is said here, above the message box, where the user is
            about to type into a terminal no agent is reading. Driven by the

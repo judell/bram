@@ -26,12 +26,16 @@ __bram_preexec() {
   __bram_at_prompt=
   printf '\033]7779;bram;exec\007'
 }
-# A launcher may hand us its own PROMPT_COMMAND (bram_herdr.py does, to run
-# `herdr agent attach` before the first prompt). Assigning ours outright would
-# discard it, so keep it and run it once from __bram_prompt. Such a command
-# usually starts with `unset PROMPT_COMMAND`, which would also switch our
-# reporting off, so put ours back afterwards.
-__bram_inherited_pc="$PROMPT_COMMAND"
+# A launcher may hand us one command to run before the first prompt, in
+# BRAM_LAUNCHER_PROMPT_COMMAND (bram_herdr.py does, to run `herdr agent attach
+# <pane>`). It is opt-in on purpose: a PROMPT_COMMAND exported by the user's
+# own environment (e.g. `history -a`) is still replaced below, as it always
+# was, since running it would report a started command while autostart may be
+# typing a launch (judell/bram#442). Take the value and unset it at once, so
+# nested shells and the agent's subprocesses never inherit it. Run it once from
+# __bram_prompt; if it unsets PROMPT_COMMAND, ours is put back afterwards.
+__bram_inherited_pc="$BRAM_LAUNCHER_PROMPT_COMMAND"
+unset BRAM_LAUNCHER_PROMPT_COMMAND
 __bram_prompt() {
   local s=$?
   if [ -n "$__bram_inherited_pc" ]; then

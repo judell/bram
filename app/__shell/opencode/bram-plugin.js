@@ -115,6 +115,9 @@ function askGuard(evt) {
 const FORWARDED = new Set([
   "session.execution.started",
   "session.inbox.delivered",
+  // opencode-sessions-browser: each completed step adds to the transcript
+  // Bram shows, so it refreshes as the turn goes rather than only at its end.
+  "session.step.ended",
   "session.execution.succeeded",
   "session.execution.failed",
   "session.execution.interrupted",

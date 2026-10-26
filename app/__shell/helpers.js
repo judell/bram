@@ -1203,6 +1203,29 @@ window.__bramSwitchAgent = function (provider) {
   window.__bramClearPairOfferForCreate = function () { forCreate = null; };
 })();
 
+// opencode-sessions-browser: the Sessions row's delete / rename buttons.
+// OpenCode rows are Bram's read-only exports of OpenCode's own database, so
+// those happen inside OpenCode; the other cases keep their existing text.
+window.__bramSessionEditEnabled = function (item, pendingDeletes, pendingRenames) {
+  if (!item || item.pending || item.provider === "opencode") return false;
+  return !((pendingDeletes || []).includes(item.id) || (pendingRenames || []).includes(item.id));
+};
+window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendingRenames) {
+  var del = action === "delete";
+  if (!item) return "";
+  if (item.pending) {
+    return del
+      ? "Available after the first message creates the Codex session"
+      : "Available after the next message creates the session";
+  }
+  if (item.provider === "opencode") {
+    return del ? "Delete OpenCode sessions inside OpenCode" : "Rename OpenCode sessions inside OpenCode";
+  }
+  if ((pendingDeletes || []).includes(item.id)) return "delete pending";
+  if ((pendingRenames || []).includes(item.id)) return "rename pending";
+  return del ? "Delete session" : "Rename session";
+};
+
 // provider-session-pair-offer: the Sessions row's "paired with" label.
 window.__bramPairedWithLabel = function (partner) {
   if (!partner) return "";

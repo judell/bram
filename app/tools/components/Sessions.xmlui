@@ -267,15 +267,15 @@
               label="✕"
               variant="ghost"
               size="xs"
-              enabled="{!$item.pending &amp;&amp; !(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-              tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Delete session'))}"
+              enabled="{window.__bramSessionEditEnabled($item, pendingDeletes, pendingRenames)}"
+              tooltip="{window.__bramSessionEditTooltip($item, 'delete', pendingDeletes, pendingRenames)}"
               onClick="lastDeleteId = $item.id; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
             <Button
               label="✎"
               variant="ghost"
               size="xs"
-              enabled="{!$item.pending &amp;&amp; !(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-              tooltip="{$item.pending ? 'Available after the next message creates the session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Rename session'))}"
+              enabled="{window.__bramSessionEditEnabled($item, pendingDeletes, pendingRenames)}"
+              tooltip="{window.__bramSessionEditTooltip($item, 'rename', pendingDeletes, pendingRenames)}"
               onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
             <Link
               when="{!$item.pending}"

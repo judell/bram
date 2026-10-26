@@ -19345,7 +19345,7 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
                 .get(&sid)
                 .cloned()
                 .or_else(|| codex_session_title(&path).ok().flatten()),
-            SessionProvider::Opencode => None,
+            SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
         };
         let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
         if let Some(obj) = item.as_object_mut() {
@@ -21026,7 +21026,8 @@ fn session_title_by_id<R: tauri::Runtime>(
             .ok()
             .and_then(|titles| titles.get(id).cloned())
             .or_else(|| codex_session_title(&path).ok().flatten()),
-        SessionProvider::Opencode => None,
+        // The export carries OpenCode's title as a custom-title record.
+        SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
     }
 }
 
@@ -21115,6 +21116,10 @@ fn emit_pair_offer<R: tauri::Runtime>(
     from: Option<&(SessionProvider, String)>,
     to: Option<(SessionProvider, String)>,
 ) {
+    // opencode-sessions-browser: OpenCode sessions have ids now, but pairs
+    // are Claude↔Codex until opencode-partner-handoff, so no offer names one.
+    let from = from.filter(|(p, _)| *p != SessionProvider::Opencode);
+    let to = to.filter(|(p, _)| *p != SessionProvider::Opencode);
     let payload = match (from, to) {
         (Some((fp, fid)), Some((tp, tid))) => serde_json::json!({
             "active": true,
@@ -21868,7 +21873,7 @@ fn session_path_for_id<R: tauri::Runtime>(
             path.exists().then_some(path)
         }
         SessionProvider::Codex => codex_session_path_for_id(app, id),
-        SessionProvider::Opencode => None,
+        SessionProvider::Opencode => opencode_session_path_for_id(app, id),
     }
 }
 
@@ -22160,6 +22165,13 @@ fn reload_agent_session(
     }
     if provider_key == "codex" && session_exists {
         pin_codex_reload_target(&app, &session)?;
+    }
+    // opencode-sessions-browser: the resumed session is current from now,
+    // before its next turn makes it the most recent.
+    if session_provider == SessionProvider::Opencode && session_exists {
+        if let Ok(mut live) = opencode_live_session_cell().lock() {
+            *live = Some(session.clone());
+        }
     }
     let generation = begin_agent_launch();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
@@ -23919,10 +23931,8 @@ fn schedule_agent_switch_refresh<R: tauri::Runtime>(
                 &format!("op=refresh provider={} source={}", provider, source),
             );
         }
-        let session_provider = match provider {
-            "codex" => Some(SessionProvider::Codex),
-            _ => Some(SessionProvider::Claude),
-        };
+        let session_provider =
+            SessionProvider::from_str(provider).or(Some(SessionProvider::Claude));
         emit_talk_session_changed_for_provider(&app, session_provider);
     });
 }
@@ -27366,7 +27376,11 @@ fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String>
             .and_then(|stem| stem.to_str())
             .map(str::to_string),
         SessionProvider::Codex => codex_session_meta(path).ok().flatten().map(|(id, _)| id),
-        SessionProvider::Opencode => None,
+        // An export is named for its session.
+        SessionProvider::Opencode => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string),
     }
 }
 
@@ -28426,6 +28440,494 @@ fn choose_session_provider(
     }
 }
 
+// --- opencode-sessions-browser ----------------------------------------------
+// OpenCode keeps sessions in SQLite (session_v2, session_message), not in
+// transcript files. Each of this project's top-level sessions is exported,
+// read-only, to a Claude-shaped JSONL file under Bram's cache, so the Sessions
+// list, the Transcript, titles and search read it through the paths they
+// already use for Claude. Only completed messages are written, in `seq`
+// order, so a re-export only ever appends (the title cache parses
+// incrementally and assumes as much). Unknown message types are skipped.
+
+fn opencode_db_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home_dir().map(|h| h.join(".local").join("share")))?;
+    Some(base.join("opencode").join("opencode.db"))
+}
+
+fn opencode_open_db() -> Option<rusqlite::Connection> {
+    let path = opencode_db_path().filter(|p| p.is_file())?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    // OpenCode writes while we read (WAL); wait briefly rather than fail.
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    Some(conn)
+}
+
+fn opencode_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join("opencode-sessions")
+        .join(encode_path_for_filename(&abs)))
+}
+
+// (id, title, time_updated ms), newest first: this project's top-level,
+// unarchived sessions. Subagent sessions (parent_id) belong to their parent.
+fn opencode_project_session_rows<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    limit: Option<usize>,
+) -> Vec<(String, String, i64)> {
+    let Some(project) = project_root(Some(app)) else {
+        return Vec::new();
+    };
+    let canonical = canonical_path_string(&project);
+    let raw = project.to_string_lossy().into_owned();
+    let limit = limit.map(|l| l as i64).unwrap_or(-1);
+    let rows = conn
+        .prepare(
+            "SELECT id, COALESCE(title, ''), time_updated FROM session_v2 \
+             WHERE parent_id IS NULL AND time_archived IS NULL AND directory IN (?1, ?2) \
+             ORDER BY time_updated DESC LIMIT ?3",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![canonical, raw, limit], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+        });
+    match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            // A schema OpenCode has since changed reads as "no sessions"
+            // rather than breaking the Sessions tab.
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "opencode-sessions",
+                    &format!("op=query-failed detail={}", e),
+                );
+            }
+            Vec::new()
+        }
+    }
+}
+
+// OpenCode tool names and arguments in the vocabulary the Transcript renders
+// (Read / Edit / Write / Bash …); anything else passes through as is.
+fn opencode_tool_as_claude(name: &str, input: &serde_json::Value) -> (String, serde_json::Value) {
+    let field = |k: &str| input.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let path = || input.get("path").or_else(|| input.get("filePath")).cloned();
+    match name {
+        "read" => (
+            "Read".into(),
+            serde_json::json!({ "file_path": path(), "offset": field("offset"), "limit": field("limit") }),
+        ),
+        "write" => (
+            "Write".into(),
+            serde_json::json!({ "file_path": path(), "content": field("content") }),
+        ),
+        "edit" => (
+            "Edit".into(),
+            serde_json::json!({
+                "file_path": path(),
+                "old_string": field("oldString"),
+                "new_string": field("newString"),
+                "replace_all": field("replaceAll"),
+            }),
+        ),
+        "shell" => (
+            "Bash".into(),
+            serde_json::json!({ "command": field("command"), "description": field("description") }),
+        ),
+        "glob" => (
+            "Glob".into(),
+            serde_json::json!({ "pattern": field("pattern"), "path": field("path") }),
+        ),
+        "grep" => (
+            "Grep".into(),
+            serde_json::json!({ "pattern": field("pattern"), "path": field("path"), "glob": field("include") }),
+        ),
+        other => (other.to_string(), input.clone()),
+    }
+}
+
+// One OpenCode session as Claude-shaped JSONL lines.
+fn opencode_session_jsonl(
+    conn: &rusqlite::Connection,
+    sid: &str,
+    title: &str,
+) -> Result<(String, usize), String> {
+    let mut stmt = conn
+        .prepare("SELECT id, type, data FROM session_message WHERE session_id = ?1 ORDER BY seq")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![sid], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut lines: Vec<serde_json::Value> = Vec::new();
+    let mut skipped = 0usize;
+    let mut last_assistant: Option<usize> = None;
+    for (id, kind, data) in rows {
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&data) else {
+            skipped += 1;
+            continue;
+        };
+        let created = d
+            .pointer("/time/created")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let timestamp = format_iso_utc_ms(created);
+        match kind.as_str() {
+            "user" => {
+                let text = d.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                lines.push(serde_json::json!({
+                    "type": "user", "uuid": id, "sessionId": sid, "timestamp": timestamp,
+                    "message": { "role": "user", "content": text },
+                }));
+                last_assistant = None;
+            }
+            "assistant" => {
+                // A step still streaming would change after it is written,
+                // and the export must only grow; it is picked up once done.
+                if d.pointer("/time/completed").is_none() {
+                    continue;
+                }
+                let mut content: Vec<serde_json::Value> = Vec::new();
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                for block in d
+                    .get("content")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let text = || block.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                        "text" => {
+                            content.push(serde_json::json!({ "type": "text", "text": text() }))
+                        }
+                        "reasoning" => content
+                            .push(serde_json::json!({ "type": "thinking", "thinking": text() })),
+                        "tool" => {
+                            let tool_id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let state = block.get("state").cloned().unwrap_or_default();
+                            let input = state.get("input").cloned().unwrap_or_default();
+                            let (name, input) = opencode_tool_as_claude(name, &input);
+                            content.push(serde_json::json!({
+                                "type": "tool_use", "id": tool_id, "name": name, "input": input,
+                            }));
+                            let errored =
+                                state.get("status").and_then(|v| v.as_str()) == Some("error");
+                            let output = if errored {
+                                state
+                                    .pointer("/error/message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string()
+                            } else {
+                                state
+                                    .get("content")
+                                    .and_then(|v| v.as_array())
+                                    .map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            results.push(serde_json::json!({
+                                "type": "tool_result", "tool_use_id": tool_id,
+                                "content": output, "is_error": errored,
+                            }));
+                        }
+                        _ => skipped += 1,
+                    }
+                }
+                let model = d.pointer("/model/id").cloned().unwrap_or_default();
+                last_assistant = Some(lines.len());
+                lines.push(serde_json::json!({
+                    "type": "assistant", "uuid": id, "sessionId": sid, "timestamp": timestamp,
+                    "message": { "role": "assistant", "model": model, "content": content },
+                }));
+                if !results.is_empty() {
+                    lines.push(serde_json::json!({
+                        "type": "user", "uuid": format!("{}-results", id), "sessionId": sid,
+                        "timestamp": timestamp,
+                        "message": { "role": "user", "content": results },
+                    }));
+                }
+            }
+            // The turn ended: mark its last step the way Claude marks a
+            // finished turn.
+            "idle" => {
+                if let Some(i) = last_assistant.take() {
+                    if let Some(msg) = lines[i].get_mut("message").and_then(|m| m.as_object_mut()) {
+                        msg.insert("stop_reason".into(), serde_json::json!("end_turn"));
+                    }
+                }
+            }
+            _ => skipped += 1,
+        }
+    }
+    let mut out = String::new();
+    for line in &lines {
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    if !title.trim().is_empty() {
+        out.push_str(
+            &serde_json::json!({ "type": "custom-title", "customTitle": title.trim() }).to_string(),
+        );
+        out.push('\n');
+    }
+    Ok((out, skipped))
+}
+
+// Write (or refresh) a session's export when OpenCode has changed it since.
+// The file's mtime is the session's time_updated, which is both the freshness
+// check and what the Sessions list shows as its date.
+fn opencode_export_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    dir: &Path,
+    sid: &str,
+    title: &str,
+    updated_ms: i64,
+) -> Option<PathBuf> {
+    if !session_id_is_safe(sid) {
+        return None;
+    }
+    let path = dir.join(format!("{}.jsonl", sid));
+    let updated =
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(updated_ms.max(0) as u64);
+    let current = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .map(|m| m >= updated)
+        .unwrap_or(false);
+    if current {
+        return Some(path);
+    }
+    let (text, skipped) = match opencode_session_jsonl(conn, sid, title) {
+        Ok(v) => v,
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "opencode-sessions",
+                    &format!("op=export-failed session={} detail={}", sid, e),
+                );
+            }
+            return None;
+        }
+    };
+    let _ = std::fs::create_dir_all(dir);
+    atomic_write_text(&path, &text).ok()?;
+    if let Ok(file) = std::fs::File::options().write(true).open(&path) {
+        let _ = file.set_modified(updated);
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "opencode-sessions",
+            &format!(
+                "op=export session={} bytes={} skipped={}",
+                sid,
+                text.len(),
+                skipped
+            ),
+        );
+    }
+    Some(path)
+}
+
+fn discover_opencode_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionRecord>, String> {
+    let Some(conn) = opencode_open_db() else {
+        return Ok(Vec::new());
+    };
+    let dir = opencode_export_dir(app)?;
+    let mut sessions = Vec::new();
+    for (sid, title, updated_ms) in opencode_project_session_rows(app, &conn, limit) {
+        let Some(path) = opencode_export_session(app, &conn, &dir, &sid, &title, updated_ms) else {
+            continue;
+        };
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let title = Some(title.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| claude_session_title(&path).ok().flatten());
+        sessions.push(SessionRecord {
+            provider: SessionProvider::Opencode,
+            id: sid,
+            path,
+            mtime: (updated_ms.max(0) / 1000) as u64,
+            size,
+            title,
+        });
+    }
+    Ok(sessions)
+}
+
+fn opencode_session_path_for_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Option<PathBuf> {
+    discover_opencode_sessions(app, None)
+        .ok()?
+        .into_iter()
+        .find(|s| s.id == id)
+        .map(|s| s.path)
+}
+
+#[cfg(test)]
+mod opencode_export_tests {
+    use super::{opencode_session_jsonl, session_id_is_safe, st_parse_lines_to_turns};
+
+    // Rows in the shapes OpenCode 2.1.4 writes (copied from a real session).
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT);",
+        )
+        .unwrap();
+        let rows = [
+            (
+                "m1",
+                "user",
+                1,
+                r#"{"time":{"created":1792788652541},"text":"Create notes.txt","files":[],"agents":[]}"#,
+            ),
+            (
+                "m2",
+                "assistant",
+                2,
+                r#"{"time":{"created":1792788652565,"completed":1792788656571},"model":{"id":"deepseek-v4.1-flash-free"},"content":[{"type":"reasoning","text":"Try the write."},{"type":"tool","id":"call_1","name":"write","state":{"status":"error","input":{"path":"/p/notes.txt","content":"hi"},"error":{"message":"Blocked: no item covers notes.txt"}}}]}"#,
+            ),
+            (
+                "m3",
+                "assistant",
+                3,
+                r#"{"time":{"created":1792788656584,"completed":1792788664666},"model":{"id":"deepseek-v4.1-flash-free"},"content":[{"type":"text","text":"The guard refused it."}]}"#,
+            ),
+            (
+                "m4",
+                "idle",
+                4,
+                r#"{"time":{"created":1792788683954},"outcome":"succeeded"}"#,
+            ),
+            (
+                "m5",
+                "user",
+                5,
+                r#"{"time":{"created":1792788706651},"text":"Edit it anyway"}"#,
+            ),
+            // Still streaming: no completed time, so not exported yet.
+            (
+                "m6",
+                "assistant",
+                6,
+                r#"{"time":{"created":1792788706671},"content":[{"type":"text","text":"partial"}]}"#,
+            ),
+            ("m7", "mystery", 7, r#"{"time":{"created":1}}"#),
+        ];
+        for (id, kind, seq, data) in rows {
+            conn.execute(
+                "INSERT INTO session_message VALUES (?1, 'ses_a', ?2, ?3, ?4)",
+                rusqlite::params![id, kind, seq, data],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn exports_a_session_in_claudes_record_shape() {
+        let (text, skipped) = opencode_session_jsonl(&db(), "ses_a", "Notes test").unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let types: Vec<&str> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+        // user, assistant(tool_use), user(tool_result), assistant(text), user,
+        // then the title; the streaming step and the unknown row are left out.
+        assert_eq!(
+            types,
+            vec![
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+                "user",
+                "custom-title"
+            ]
+        );
+        assert_eq!(skipped, 1, "the unknown row type is counted");
+        let tool = &lines[1]["message"]["content"][1];
+        assert_eq!(tool["type"], "tool_use");
+        assert_eq!(tool["name"], "Write");
+        assert_eq!(tool["input"]["file_path"], "/p/notes.txt");
+        let result = &lines[2]["message"]["content"][0];
+        assert_eq!(result["tool_use_id"], "call_1");
+        assert_eq!(result["is_error"], true);
+        assert_eq!(lines[3]["message"]["stop_reason"], "end_turn");
+        assert_eq!(lines[5]["customTitle"], "Notes test");
+        // And the Transcript's parser reads it as turns.
+        let turns = st_parse_lines_to_turns(&text);
+        let roles: Vec<&str> = turns.iter().filter_map(|t| t["role"].as_str()).collect();
+        assert!(
+            roles.contains(&"user") && roles.contains(&"assistant"),
+            "roles: {roles:?}"
+        );
+    }
+
+    #[test]
+    fn opencode_ids_are_safe_session_ids() {
+        assert!(session_id_is_safe("ses_e95798bfeffeG7veO4IaH54cSl"));
+        assert!(session_id_is_safe("0192aabb-ccdd-4eef-8899-001122334455"));
+        assert!(!session_id_is_safe("../etc"));
+        assert!(!session_id_is_safe("a/b"));
+        assert!(!session_id_is_safe(""));
+    }
+}
+
+fn latest_opencode_session_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<PathBuf>, String> {
+    Ok(discover_opencode_sessions(app, Some(1))?
+        .into_iter()
+        .next()
+        .map(|s| s.path))
+}
+
+// The session OpenCode's events last named (opencode-turn-lifecycle), so a
+// resumed older session reads as current before it is the most recent.
+fn opencode_live_session_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
 fn sessions_for_provider<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -28436,7 +28938,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
         let sessions = match provider {
             SessionProvider::Claude => discover_claude_sessions(app, limit)?,
             SessionProvider::Codex => discover_codex_sessions(app, limit)?,
-            SessionProvider::Opencode => Vec::new(),
+            SessionProvider::Opencode => discover_opencode_sessions(app, limit)?,
         };
         return Ok((provider, sessions));
     }
@@ -28512,7 +29014,7 @@ fn session_meta<R: tauri::Runtime>(
     let count = match provider {
         SessionProvider::Claude => count_claude_sessions(app)?,
         SessionProvider::Codex => count_codex_sessions(app)?,
-        SessionProvider::Opencode => 0,
+        SessionProvider::Opencode => discover_opencode_sessions(app, None)?.len(),
     };
     let discovery_notes = if provider == SessionProvider::Claude && count == 0 {
         claude_sessions_dir_lookup(app)
@@ -30024,7 +30526,19 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // actually index, since claude_session_title reads the whole file
     // (issue-230-indexer-lazy-claude-titles).
     let discover_started = std::time::Instant::now();
-    let files_vec = discover_claude_session_files(app)?;
+    let mut files_vec: Vec<(PathBuf, u64, u64, String, SessionProvider)> =
+        discover_claude_session_files(app)?
+            .into_iter()
+            .map(|(path, mtime, size, id)| (path, mtime, size, id, SessionProvider::Claude))
+            .collect();
+    // opencode-sessions-browser: OpenCode's exports are Claude-shaped, so the
+    // same extraction indexes them; only the provider label differs.
+    files_vec.extend(
+        discover_opencode_sessions(app, None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| (s.path, s.mtime, s.size, s.id, SessionProvider::Opencode)),
+    );
     stats.discover_ms = discover_started.elapsed().as_millis();
     stats.files = files_vec.len();
     let intent_started = std::time::Instant::now();
@@ -30044,8 +30558,8 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // from the extract/write work below means `report_progress` reflects
     // actual pending work, not the size of the whole corpus, so an ordinary
     // warm pass over hundreds of untouched sessions stays quiet.
-    let mut pending: Vec<(PathBuf, i64, i64, String, bool)> = Vec::new();
-    for (path, mtime_u, size_u, id) in files_vec {
+    let mut pending: Vec<(PathBuf, i64, i64, String, bool, SessionProvider)> = Vec::new();
+    for (path, mtime_u, size_u, id, provider) in files_vec {
         let path_str = path.to_string_lossy().to_string();
         let (mtime, size) = (mtime_u as i64, size_u as i64);
         let forced = force_all
@@ -30097,12 +30611,12 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             stats.skipped += 1;
             continue;
         }
-        pending.push((path, mtime, size, id, forced));
+        pending.push((path, mtime, size, id, forced, provider));
     }
     let total_pending = pending.len();
     let report_progress = total_pending > SESSION_PROGRESS_REPORT_THRESHOLD;
     let mut done = 0usize;
-    for (path, mtime, size, id, forced) in pending {
+    for (path, mtime, size, id, forced, provider) in pending {
         if forced {
             stats.forced += 1;
         }
@@ -30128,7 +30642,7 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             source: format!(
                 "{} · {} · {} KB",
                 title,
-                session_provider_label(SessionProvider::Claude),
+                session_provider_label(provider),
                 size / 1024
             ),
             date: mtime.to_string(),
@@ -32421,8 +32935,26 @@ fn live_session_id<R: tauri::Runtime>(
             .ok()
             .flatten()
             .and_then(|p| codex_session_meta(&p).ok().flatten().map(|(id, _)| id)),
-        SessionProvider::Opencode => None,
+        SessionProvider::Opencode => opencode_live_session_cell()
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .or_else(|| {
+                latest_opencode_session_path(app)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p))
+            }),
     }
+}
+
+// A session id safe to join into a filename: Claude's uuids, Codex's ids and
+// OpenCode's `ses_…` ids (opencode-sessions-browser added the underscore).
+fn session_id_is_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn read_session<R: tauri::Runtime>(
@@ -32430,7 +32962,7 @@ fn read_session<R: tauri::Runtime>(
     id: &str,
     preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !session_id_is_safe(id) {
         return Err("invalid session id".to_string());
     }
     let (_, sessions) = sessions_for_provider(app, preferred, None)?;
@@ -32450,10 +32982,15 @@ fn delete_session<R: tauri::Runtime>(
     id: &str,
     preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !session_id_is_safe(id) {
         return Err("invalid session id".to_string());
     }
-    let (_, sessions) = sessions_for_provider(app, preferred, None)?;
+    let (provider, sessions) = sessions_for_provider(app, preferred, None)?;
+    // opencode-sessions-browser: the file is Bram's export; the session itself
+    // lives in OpenCode's database and would come straight back.
+    if provider == SessionProvider::Opencode {
+        return Err("Delete OpenCode sessions from inside OpenCode.".to_string());
+    }
     let session = sessions
         .into_iter()
         .find(|session| session.id == id)
@@ -32548,7 +33085,7 @@ fn rename_session<R: tauri::Runtime>(
     preferred: Option<SessionProvider>,
     title: &str,
 ) -> Result<Vec<u8>, String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !session_id_is_safe(id) {
         return Err("invalid session id".to_string());
     }
     let trimmed = title.trim();
@@ -32783,7 +33320,7 @@ fn latest_session_path<R: tauri::Runtime>(
     let path = match provider {
         SessionProvider::Claude => latest_claude_session_path(app)?,
         SessionProvider::Codex => latest_codex_session_path(app)?,
-        SessionProvider::Opencode => None,
+        SessionProvider::Opencode => latest_opencode_session_path(app)?,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -32808,7 +33345,7 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
     match provider {
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
-        SessionProvider::Opencode => Ok(None),
+        SessionProvider::Opencode => latest_opencode_session_path(app),
     }
 }
 
@@ -44700,7 +45237,7 @@ fn read_projected_turns<R: tauri::Runtime>(
             None => active_session_path(app)?,
         }
     } else {
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if !session_id_is_safe(id) {
             return Err("invalid session id".to_string());
         }
         let (_, sessions) = sessions_for_provider(app, provider, None)?;
@@ -44783,6 +45320,12 @@ fn read_projected_turns<R: tauri::Runtime>(
         .unwrap_or_default();
     let provider_label = if path.components().any(|c| c.as_os_str() == ".codex") {
         "codex"
+    } else if path
+        .components()
+        .any(|c| c.as_os_str() == "opencode-sessions")
+    {
+        // opencode-sessions-browser: Bram's export of an OpenCode session.
+        "opencode"
     } else {
         "claude"
     };
@@ -78620,8 +79163,17 @@ fn handle_opencode_event<R: tauri::Runtime>(
         "session.execution.succeeded"
         | "session.execution.failed"
         | "session.execution.interrupted" => opencode_turn_ended(app, &sid, at_ms),
+        // opencode-sessions-browser: a completed step is a new export line.
+        "session.step.ended" => {}
         _ => return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec()),
     }
+    // opencode-sessions-browser: whichever session OpenCode's events name is
+    // the live one, and every boundary may have added export lines, so the
+    // Transcript refreshes as it does when a Claude transcript grows.
+    if let Ok(mut live) = opencode_live_session_cell().lock() {
+        *live = Some(sid.clone());
+    }
+    emit_talk_session_changed_for_provider(app, Some(SessionProvider::Opencode));
     (200, JSON, b"{\"ok\":true,\"handled\":true}".to_vec())
 }
 

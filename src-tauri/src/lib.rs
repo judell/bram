@@ -20145,6 +20145,23 @@ fn launch_confirm_state(fg: ShellForeground, written_from_ms: i64) -> LaunchConf
 // The terminal's last words before the prompt that ended the agent: the
 // ANSI-stripped PTY tail minus its final (prompt) line, last 3 lines, one
 // line of text for the trace and the pane.
+// switch-launch-eats-stray-cursor-report: what the launch types. An agent
+// that asks for the cursor position (CSI ? 6 n) as it exits can have the
+// terminal's reply (`ESC[?51;3R`) arrive after it has stopped reading. Bash's
+// readline then holds `51;3R` on the line, and the command ran as
+// `51;3Ropencode --continue` (status 127; twice in six switches, 2026-10-26).
+// Ctrl-U (unix-line-discard, also bound in readline's vi-insert map) clears
+// the line first, in the same write. Launches are gated on a shell prompt, so
+// it reaches readline, and on an empty line it does nothing. Windows keeps
+// the bare command: PowerShell's PSReadLine binds keys differently.
+fn launch_line(command: &str, clear_line: bool) -> String {
+    if clear_line {
+        format!("\u{15}{}\r", command)
+    } else {
+        format!("{}\r", command)
+    }
+}
+
 fn launch_exit_tail(raw: &[u8]) -> String {
     let stripped = strip_ansi(raw);
     let text = String::from_utf8_lossy(&stripped);
@@ -20257,8 +20274,12 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
     // the first command is typed first and they flush behind it.
     let _pending = LaunchPendingGuard::arm(l.generation);
     let written_from = unix_now_ms();
-    if let Err(error) = pty_write_internal(app, &state, &format!("{}\r", l.command), l.caller_hint)
-    {
+    if let Err(error) = pty_write_internal(
+        app,
+        &state,
+        &launch_line(&l.command, !cfg!(windows)),
+        l.caller_hint,
+    ) {
         trace(format!(
             "op=launch-error provider={} source={} error={}",
             l.provider, l.source, error
@@ -20345,9 +20366,20 @@ fn usable_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<C
 #[cfg(test)]
 mod agent_launch_tests {
     use super::{
-        codex_pin_usable, launch_confirm_state as confirm, launch_exit_tail, CodexReloadTarget,
-        LaunchConfirm, ShellForeground,
+        codex_pin_usable, launch_confirm_state as confirm, launch_exit_tail, launch_line,
+        CodexReloadTarget, LaunchConfirm, ShellForeground,
     };
+
+    #[test]
+    fn unix_launches_clear_the_shell_line_first() {
+        // switch-launch-eats-stray-cursor-report: "51;3R" left on the line by
+        // a late cursor-position reply ran as `51;3Ropencode --continue`.
+        assert_eq!(
+            launch_line("opencode --continue", true),
+            "\u{15}opencode --continue\r"
+        );
+        assert_eq!(launch_line("codex", false), "codex\r");
+    }
 
     fn fg(at_prompt: bool, status: i32, at_ms: i64, exec_ms: i64) -> ShellForeground {
         ShellForeground {

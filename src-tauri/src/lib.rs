@@ -78151,6 +78151,241 @@ fn handle_describe_command<R: tauri::Runtime>(
 // spawn-time BRAM_TRACE env (which desynced from the Settings toggle for
 // the lifetime of a running agent). append_bram_trace_line is gated on
 // the LIVE trace setting, so the toggle takes effect immediately.
+// --- opencode-turn-lifecycle ------------------------------------------------
+// OpenCode writes no transcript file, so its turns reach the host as events
+// the Bram plugin (.opencode/plugins/bram.js) forwards from OpenCode's own
+// bus, for this project's top-level sessions only. session.execution.started
+// opens a turn; .succeeded, .failed and .interrupted end it. They drive the
+// calls check_jsonl_for_turn_end makes for Codex: working status and claim
+// re-arm at the start, finished status and claim retirement at the end.
+
+// The open turn: (session, started at, latest input at). A message delivered
+// into a running execution (session.inbox.delivered) is new input to the same
+// turn, so a claim taken mid-turn still belongs to that turn's end.
+fn opencode_turn_cell() -> &'static Mutex<Option<(String, i64, i64)>> {
+    static CELL: OnceLock<Mutex<Option<(String, i64, i64)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+// Whether a turn end retires the claim. Input after the claim means this turn
+// is doing the claimed work. Input before it means the end belongs to an
+// earlier turn, and the claim waits for its own. With no recorded start (the
+// start event was missed), fall back to the JSONL detector's rule: the end
+// must not predate the claim, and a claim under 2 s old most likely belongs
+// to a turn that has produced nothing yet.
+fn opencode_end_retires_claim(
+    claimed_at: i64,
+    last_input_at: Option<i64>,
+    ended_at: i64,
+    now: i64,
+) -> Result<(), &'static str> {
+    match last_input_at {
+        Some(t) if t >= claimed_at => Ok(()),
+        Some(_) => Err("turn-predates-claim"),
+        None if ended_at < claimed_at => Err("stale-prior-turn"),
+        None if now.saturating_sub(claimed_at) < 2000 => Err("fresh-sentinel"),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod opencode_turn_tests {
+    use super::opencode_end_retires_claim;
+
+    #[test]
+    fn a_turn_retires_the_claim_it_received_input_after() {
+        // Start clicked at 1_000; the turn's start (or a message delivered
+        // into it) came later, so its end is the claimed work finishing.
+        assert_eq!(
+            opencode_end_retires_claim(1_000, Some(1_200), 9_000, 9_100),
+            Ok(())
+        );
+        assert_eq!(
+            opencode_end_retires_claim(1_000, Some(1_000), 1_500, 1_600),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_earlier_turn_leaves_the_claim_for_its_own_turn() {
+        assert_eq!(
+            opencode_end_retires_claim(1_000, Some(800), 5_000, 5_100),
+            Err("turn-predates-claim")
+        );
+    }
+
+    #[test]
+    fn a_missed_start_falls_back_to_the_jsonl_rule() {
+        assert_eq!(
+            opencode_end_retires_claim(1_000, None, 900, 5_000),
+            Err("stale-prior-turn")
+        );
+        assert_eq!(
+            opencode_end_retires_claim(1_000, None, 1_500, 2_500),
+            Err("fresh-sentinel")
+        );
+        assert_eq!(
+            opencode_end_retires_claim(1_000, None, 4_000, 4_100),
+            Ok(())
+        );
+    }
+}
+
+fn opencode_turn_started<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: i64) {
+    if let Ok(mut g) = opencode_turn_cell().lock() {
+        // Delivery and start can arrive in either order; keep the later input.
+        let input = g
+            .as_ref()
+            .filter(|(s, _, _)| s == sid)
+            .map_or(at_ms, |(_, _, input)| (*input).max(at_ms));
+        *g = Some((sid.to_string(), at_ms, input));
+    }
+    let next = AgentStatus {
+        provider: Some("opencode".to_string()),
+        state: "working".to_string(),
+        verb: Some("working".to_string()),
+        elapsed_text: None,
+        substate: None,
+        output_tokens_text: None,
+        updated_at_ms: unix_now_ms(),
+        source: Some("opencode-event".to_string()),
+    };
+    let mut emit_payload: Option<AgentStatus> = None;
+    if let Ok(mut cur) = agent_status_cell().lock() {
+        if cur.state != next.state || cur.provider != next.provider || cur.verb != next.verb {
+            *cur = next.clone();
+            emit_payload = Some(next);
+        }
+    }
+    if let Some(payload) = emit_payload {
+        maybe_emit_agent_status(app, &payload);
+    }
+    update_turn_state(app, "opencode-event", "execution-started", |s| {
+        s.provider = Some("opencode".to_string());
+        s.turn_stamp = Some(at_ms.to_string());
+        if s.pending_menu.is_none() {
+            s.phase = "working".to_string();
+        }
+    });
+    // A later turn of a multi-turn apply: the first turn's end retired the
+    // claim and the authorization is still live (no-op otherwise).
+    if inflight_claim_ids_and_claimed_at(app).is_none() {
+        rearm_claim_for_live_authorization(app);
+    }
+}
+
+fn opencode_input_delivered(sid: &str, at_ms: i64) {
+    if let Ok(mut g) = opencode_turn_cell().lock() {
+        match g.as_mut() {
+            Some((s, _, input)) if s == sid => *input = (*input).max(at_ms),
+            _ => *g = Some((sid.to_string(), at_ms, at_ms)),
+        }
+    }
+}
+
+fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: i64) {
+    let last_input = opencode_turn_cell()
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .filter(|(s, _, _)| s == sid)
+        .map(|(_, _, input)| input);
+    agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
+    clear_proposing_flag(app, "turn-finished");
+    end_turn_context_unless_fresh(app, "opencode-turn-end");
+    let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
+        return;
+    };
+    if claimed_ids.is_empty() {
+        return;
+    }
+    let ids_json = serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string());
+    match opencode_end_retires_claim(claimed_at, last_input, at_ms, unix_now_ms()) {
+        Ok(()) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=clear-at-turn-end source=opencode-event kind={} ids={}",
+                        inflight_claim_kind(app).as_deref().unwrap_or(""),
+                        ids_json
+                    ),
+                );
+            }
+            clear_inflight_claim_sentinel(app, &claimed_ids);
+        }
+        Err(reason) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=skip-clear source=opencode-event reason={} claimed={} ended={} ids={}",
+                        reason, claimed_at, at_ms, ids_json
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn handle_opencode_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (400, JSON, b"{\"ok\":false}".to_vec()),
+    };
+    // Ids and event names are token-shaped; anything else is dropped from the
+    // trace rather than written into it.
+    let token = |k: &str| -> String {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .take(80)
+            .collect()
+    };
+    let kind = token("type");
+    let sid = token("sessionID");
+    let at_ms = v
+        .get("at")
+        .and_then(|x| x.as_i64())
+        .unwrap_or_else(unix_now_ms);
+    // Another agent's session must not move this one's claim, the rule
+    // claim_handling_skipped_for_provider applies to transcripts.
+    let active = current_provider(app) == Some(SessionProvider::Opencode);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "opencode-event",
+            &format!(
+                "op={} session={} at={} active={}",
+                kind.trim_start_matches("session."),
+                sid,
+                at_ms,
+                active
+            ),
+        );
+    }
+    if !active || sid.is_empty() {
+        return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec());
+    }
+    match kind.as_str() {
+        "session.execution.started" => opencode_turn_started(app, &sid, at_ms),
+        "session.inbox.delivered" => opencode_input_delivered(&sid, at_ms),
+        "session.execution.succeeded"
+        | "session.execution.failed"
+        | "session.execution.interrupted" => opencode_turn_ended(app, &sid, at_ms),
+        _ => return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec()),
+    }
+    (200, JSON, b"{\"ok\":true,\"handled\":true}".to_vec())
+}
+
 fn handle_hook_trace<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -78620,6 +78855,15 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_hook_trace(app, &buf)
+        }
+    } else if path == "__opencode/event" {
+        // opencode-turn-lifecycle: turn boundaries from the OpenCode plugin.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_opencode_event(app, &buf)
         }
     } else if path == "__worklist/end" {
         // The last-action route agents may call to close approved/drop

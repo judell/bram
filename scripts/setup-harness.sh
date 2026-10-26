@@ -179,6 +179,14 @@ assert_setup_landed() {
     else
       bad "OpenCode plugin matches the bundle" "seeded copy differs from app/__shell/opencode/bram-plugin.js"
     fi
+    # opencode-signature-and-conventions: OpenCode loads the conventions
+    # through its `instructions` config, not the AGENTS.md pointer.
+    if jq -e '.instructions | index(".claude/bram-conventions.md")' \
+         "$dir/.opencode/opencode.json" > /dev/null 2>&1; then
+      ok "OpenCode instructions list the conventions"
+    else
+      bad "OpenCode instructions list the conventions" "$(cat "$dir/.opencode/opencode.json" 2>/dev/null | head -5)"
+    fi
   elif [ -e "$dir/.opencode" ]; then
     bad "no .opencode/ without OpenCode" "Setup created it with no opencode on PATH"
   else

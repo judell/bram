@@ -45382,6 +45382,11 @@ const ENHANCE_CODEX_HOOK_INSTALL_REL: &str = ".bram/codex-worklist-guard.py";
 const ENHANCE_OPENCODE_PLUGIN_REL: &str = ".opencode/plugins/bram.js";
 const ENHANCE_OPENCODE_PLUGIN_BUNDLE_REL: &str = "__shell/opencode/bram-plugin.js";
 const OPENCODE_PLUGIN_MARKER: &str = "bram-managed";
+// opencode-signature-and-conventions: OpenCode's instruction channel. Files
+// listed in a config document's `instructions` load every session; AGENTS.md
+// alone only points at the conventions (Codex gets them through
+// developer_instructions instead).
+const ENHANCE_OPENCODE_CONFIG_REL: &str = ".opencode/opencode.json";
 const ENHANCE_CODEX_CONFIG_REL: &str = ".codex/config.toml";
 const ENHANCE_CODEX_TRUST_ACK_LEGACY_REL: &str = ".bram/codex-trust-ack";
 // TOML-comment markers delimit the Bram block inside codex's
@@ -48042,12 +48047,14 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         || !codex_hook_block_current
         || !codex_instr_current
         || (!is_source_repo && !codex_docs_current);
-    // opencode-worklist-guard: OpenCode's whole install is the project plugin
-    // (its instructions arrive through AGENTS.md, seeded above for Codex).
-    // Only where OpenCode can run; elsewhere the plugin is never seeded.
+    // opencode-worklist-guard: OpenCode's install is the project plugin plus
+    // the `instructions` entry in .opencode/opencode.json
+    // (opencode-signature-and-conventions). Only where OpenCode can run;
+    // elsewhere neither is seeded.
     let opencode_plugin_current = opencode_plugin_current(app, &proj);
-    let opencode_needs_setup =
-        opencode_plugin_wanted(app, &proj) && (!core_installed || !opencode_plugin_current);
+    let opencode_instructions_current = opencode_instructions_current(&proj, is_source_repo);
+    let opencode_needs_setup = opencode_plugin_wanted(app, &proj)
+        && (!core_installed || !opencode_plugin_current || !opencode_instructions_current);
     let provider_needs_setup = provider_needs_setup_for(
         active_provider,
         claude_needs_setup,
@@ -48142,6 +48149,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "codexNeedsSetup": codex_needs_setup,
         "opencodeNeedsSetup": opencode_needs_setup,
         "opencodePluginCurrent": opencode_plugin_current,
+        "opencodeInstructionsCurrent": opencode_instructions_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
         "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
@@ -48710,6 +48718,9 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // opencode-worklist-guard: the OpenCode guard plugin. Runs on the source
     // repo too: it is the guard's registration, not a seeded doc.
     seed_opencode_plugin(app, &proj, &mut wrote, &mut skipped)?;
+    if opencode_plugin_wanted(app, &proj) {
+        seed_opencode_instructions(&proj, is_source_repo, &mut wrote, &mut skipped)?;
+    }
 
     // issue-227: surface stale legacy-hook references in user-global settings.
     // These block the #217 shim prune; Setup cannot fix them, only name them.
@@ -48816,6 +48827,194 @@ fn seed_opencode_plugin<R: tauri::Runtime>(
         Err(e) => return Err(format!("read {}: {}", dest.display(), e)),
     }
     Ok(())
+}
+
+// The files OpenCode should load, relative to the project. The source repo
+// has no seeded sidecar; there it gets what its AGENTS.md tells agents to
+// read.
+fn opencode_instruction_paths(is_source_repo: bool) -> &'static [&'static str] {
+    if is_source_repo {
+        &[ENHANCE_SOURCE_BUNDLE_REL, "docs/developing-bram.md"]
+    } else {
+        &[ENHANCE_SIDECAR_REL]
+    }
+}
+
+// A config Setup can't parse (OpenCode also accepts comments) counts as
+// current: Setup won't rewrite it, so flagging it would raise the banner and
+// re-run auto-Setup forever. Setup names it in `skipped` instead.
+fn opencode_instructions_current(proj: &Path, is_source_repo: bool) -> bool {
+    let Ok(text) = std::fs::read_to_string(proj.join(ENHANCE_OPENCODE_CONFIG_REL)) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return true;
+    };
+    let listed: Vec<&str> = value
+        .get("instructions")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|e| e.as_str()).collect())
+        .unwrap_or_default();
+    opencode_instruction_paths(is_source_repo)
+        .iter()
+        .all(|p| listed.contains(p))
+}
+
+// Adds Bram's entries to `.opencode/opencode.json`'s `instructions`, creating
+// the file when it is absent. A user's entries and keys are kept (keys may be
+// re-sorted on rewrite, as with .claude/settings.json); a file that isn't
+// plain JSON is left alone and reported in `skipped`.
+fn seed_opencode_instructions(
+    proj: &Path,
+    is_source_repo: bool,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let path = proj.join(ENHANCE_OPENCODE_CONFIG_REL);
+    let (mut value, existed) = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) if v.is_object() => (v, true),
+            _ => {
+                skipped.push(path.display().to_string());
+                return Ok(());
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            serde_json::json!({ "$schema": "https://opencode.ai/config.json" }),
+            false,
+        ),
+        Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+    };
+    let Some(root) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let list = root
+        .entry("instructions".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(entries) = list.as_array_mut() else {
+        skipped.push(path.display().to_string());
+        return Ok(());
+    };
+    let mut changed = !existed;
+    for wanted in opencode_instruction_paths(is_source_repo) {
+        if !entries.iter().any(|e| e.as_str() == Some(*wanted)) {
+            entries.push(serde_json::Value::String((*wanted).to_string()));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(&path, format!("{}\n", text))
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    wrote.push(path.display().to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+mod opencode_instructions_tests {
+    use super::{
+        opencode_instructions_current, seed_opencode_instructions, ENHANCE_OPENCODE_CONFIG_REL,
+    };
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-oc-instr-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn seed(dir: &std::path::Path, source: bool) -> (Vec<String>, Vec<String>) {
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_opencode_instructions(dir, source, &mut wrote, &mut skipped).unwrap();
+        (wrote, skipped)
+    }
+
+    fn instructions(dir: &std::path::Path) -> Vec<String> {
+        let text = std::fs::read_to_string(dir.join(ENHANCE_OPENCODE_CONFIG_REL)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn creates_the_config_then_leaves_it_alone() {
+        let dir = scratch("create");
+        assert!(!opencode_instructions_current(&dir, false));
+        let (wrote, _) = seed(&dir, false);
+        assert_eq!(wrote.len(), 1);
+        assert_eq!(instructions(&dir), vec![".claude/bram-conventions.md"]);
+        assert!(opencode_instructions_current(&dir, false));
+        let (wrote, skipped) = seed(&dir, false);
+        assert!(
+            wrote.is_empty() && skipped.is_empty(),
+            "second Setup writes nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merges_into_a_users_config_and_keeps_their_entries() {
+        let dir = scratch("merge");
+        std::fs::create_dir_all(dir.join(".opencode")).unwrap();
+        std::fs::write(
+            dir.join(ENHANCE_OPENCODE_CONFIG_REL),
+            r#"{"model":"opencode/free","instructions":["docs/style.md"]}"#,
+        )
+        .unwrap();
+        seed(&dir, false);
+        assert_eq!(
+            instructions(&dir),
+            vec!["docs/style.md", ".claude/bram-conventions.md"]
+        );
+        let text = std::fs::read_to_string(dir.join(ENHANCE_OPENCODE_CONFIG_REL)).unwrap();
+        assert!(
+            text.contains("opencode/free"),
+            "the user's other keys survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_commented_config_is_reported_not_rewritten() {
+        let dir = scratch("jsonc");
+        std::fs::create_dir_all(dir.join(".opencode")).unwrap();
+        let original = "// mine\n{\"model\":\"x\"}\n";
+        std::fs::write(dir.join(ENHANCE_OPENCODE_CONFIG_REL), original).unwrap();
+        let (wrote, skipped) = seed(&dir, false);
+        assert!(wrote.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(ENHANCE_OPENCODE_CONFIG_REL)).unwrap(),
+            original
+        );
+        assert!(
+            opencode_instructions_current(&dir, false),
+            "unmanageable counts as current, so no banner loop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_source_repo_gets_what_its_agents_md_names() {
+        let dir = scratch("source");
+        seed(&dir, true);
+        assert_eq!(
+            instructions(&dir),
+            vec!["app/__shell/conventions.md", "docs/developing-bram.md"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 fn remove_legacy_codex_trust_ack() {
@@ -64234,7 +64433,13 @@ fn iterate_feedback_draft_text<R: tauri::Runtime>(app: &AppHandle<R>, turn_text:
 }
 
 fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
-    if !matches!(current_provider(app), Some(SessionProvider::Codex)) {
+    // opencode-signature-and-conventions: OpenCode writes no transcript its
+    // guard could read the phrase from either, so it takes Codex's
+    // host-side record.
+    if !matches!(
+        current_provider(app),
+        Some(SessionProvider::Codex | SessionProvider::Opencode)
+    ) {
         return;
     }
     if !turn_text_has_direct_edit_opt_out(turn_text)

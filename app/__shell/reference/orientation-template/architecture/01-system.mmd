@@ -1,0 +1,12 @@
+flowchart LR
+  user[You]
+  app[The app]
+  store[(Where state lives)]
+
+  user -->|uses| app
+  app -->|reads and writes| store
+
+%% Hover text for boxes and arrow labels, keyed by the label exactly as drawn.
+%% Format: tip: <label> :: <short text>. Longer detail: ## <label> sections in 01-system.md.
+%% tip: You :: Who this is for. Replace every box and arrow in this example.
+%% tip: uses :: A solid arrow: something code does on its own. Dashed (-.->): something that happens only if a person or agent remembers to do it.

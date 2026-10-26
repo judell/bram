@@ -34,9 +34,10 @@ the xmlui_rules, and follow them.
 lives beside this file in `.claude/bram-reference/`:
 `worklist-mechanics.md` (transports, entangled commits, delegation,
 enforcement), `diagnostics.md` (stuck spinners, traces, logs, evidence,
-Bram's guards) and `environment.md` (target-app helpers, `/query`, forge
+Bram's guards), `environment.md` (target-app helpers, `/query`, forge
 CLI, test suites, Windows, voice input setup, cross-project work,
-fresh-session suggestions). Each section below says
+fresh-session suggestions) and `orientation.md` (orienting in a new
+repo). Each section below says
 when to read which. Setup refreshes these files and Bram-bundled skills
 (`.claude/skills/<name>/SKILL.md` carrying a `<!-- bram-managed` marker);
 don't make functional edits to installed copies, since the next Setup
@@ -74,9 +75,8 @@ Skip the worklist only in these contexts, never because the change is
 - **`skip-worklist:` structured prefix on this turn.** The turn begins
   literally with `skip-worklist: ` followed by the request. Same family
   as `approved:` / `drop:` / `iterate:`, but it authorizes a direct
-  edit rather than a lifecycle transition. The **skip worklist** button
-  that once prepended it is retired; today the user types the prefix,
-  or uses the "just do it" phrase. Unlike the other prefixes, the host forwards the **entire
+  edit rather than a lifecycle transition. The user types it (the
+  button that prepended it is retired). Unlike the other prefixes, the host forwards the **entire
   turn text including the prefix** so you can see it. On seeing it,
   skip propose-first, act on the rest of the message as a direct edit,
   and do not write a new worklist item; the PreToolUse hook allows the

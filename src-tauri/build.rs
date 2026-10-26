@@ -72,6 +72,35 @@ fn sync_reference_docs(manifest_dir: &str) {
             }
         }
     }
+    // new-repo-orientation: subfolders (the orientation template) mirror
+    // whole, so the same Setup-currency comparison holds here.
+    if let Ok(rd) = std::fs::read_dir(&src) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                let name = e.file_name();
+                let _ = std::fs::remove_dir_all(dst.join(&name));
+                mirror_dir(&e.path(), &dst.join(&name));
+            }
+        }
+    }
+}
+
+fn mirror_dir(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst)
+        .unwrap_or_else(|e| panic!("failed to create {}: {}", dst.display(), e));
+    let Ok(rd) = std::fs::read_dir(src) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let (from, to) = (e.path(), dst.join(e.file_name()));
+        if from.is_dir() {
+            mirror_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|err| panic!("failed to sync {}: {}", from.display(), err));
+            println!("cargo:rerun-if-changed={}", from.display());
+        }
+    }
 }
 
 fn main() {

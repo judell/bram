@@ -267,6 +267,11 @@ scenario_pristine_git() {
   # #249's real failure: Setup must not leave TRACKED files modified. Untracked
   # seeded files are expected on a fresh project, so this checks tracked only.
   check "no tracked files modified by Setup" git -C "$dir" diff --quiet
+  # new-repo-orientation: the playbook is seeded stamped; the template ships
+  # in a subfolder, verbatim (a stamp would break arch.js).
+  check "orientation playbook seeded" test -f "$dir/.claude/bram-reference/orientation.md"
+  check "orientation template seeded" test -f "$dir/.claude/bram-reference/orientation-template/architecture/01-system.mmd"
+  check "template copied unstamped" bash -c "! head -c 11 '$dir/.claude/bram-reference/orientation-template/arch.js' | grep -q 'bram v'"
   assert_idempotent "$dir"
   shutdown_bram
 }

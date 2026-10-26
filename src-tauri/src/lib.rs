@@ -31703,7 +31703,7 @@ fn project_is_managed(dir: &Path) -> bool {
     has_project_settings(dir) || dir.join(WORKLIST_AUTH_REL).exists()
 }
 
-const REPO_STARTUP_GREETING: &str = "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, assess what is here, and suggest what might need doing next.";
+const REPO_STARTUP_GREETING: &str = "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, or click Orient me for a guided tour: an overview and architecture diagrams of this repo, with every claim cited to the code.";
 // Schemas 1 and 2 meant "written to the PTY" and "landed as a provider user
 // turn" respectively. Neither represents the intended feature. Schema 3 is
 // written only after Bram has serialized the greeting into its own UI
@@ -41793,7 +41793,7 @@ mod repo_startup_greeting_tests {
     fn greeting_text_is_the_approved_copy() {
         assert_eq!(
             REPO_STARTUP_GREETING,
-            "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, assess what is here, and suggest what might need doing next."
+            "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, or click Orient me for a guided tour: an overview and architecture diagrams of this repo, with every claim cited to the code."
         );
     }
 
@@ -47072,32 +47072,57 @@ fn sidecar_matches_seeded<R: tauri::Runtime>(app: &AppHandle<R>, on_disk: &Path)
 const ENHANCE_REFERENCE_DIR_REL: &str = ".claude/bram-reference";
 const ENHANCE_REFERENCE_BUNDLE_DIR: &str = "__shell/reference";
 
+// new-repo-orientation: the set is the top-level *.md docs plus every file
+// in a subfolder (the orientation template: a static site the playbook has
+// the agent copy), as `/`-joined paths relative to the reference dir.
 fn bundled_reference_names<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<String> {
-    let is_md = |n: &str| n.ends_with(".md");
-    let mut v: Vec<String> = if let Some(root) = resolve_app_root(Some(app)) {
-        std::fs::read_dir(root.join(ENHANCE_REFERENCE_BUNDLE_DIR))
-            .map(|rd| {
-                rd.flatten()
-                    .filter(|e| e.path().is_file())
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .filter(|n| is_md(n))
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        EMBEDDED_APP
-            .get_dir(ENHANCE_REFERENCE_BUNDLE_DIR)
-            .map(|d| {
-                d.files()
-                    .filter_map(|f| f.path().file_name().and_then(|n| n.to_str()))
-                    .filter(|n| is_md(n))
-                    .map(|n| n.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+    let mut v: Vec<String> = Vec::new();
+    if let Some(root) = resolve_app_root(Some(app)) {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let Ok(name) = e.file_name().into_string() else {
+                    continue;
+                };
+                let rel = format!("{}{}", prefix, name);
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, &format!("{}/", rel), out);
+                } else if path.is_file() {
+                    out.push(rel);
+                }
+            }
+        }
+        walk(&root.join(ENHANCE_REFERENCE_BUNDLE_DIR), "", &mut v);
+    } else if let Some(d) = EMBEDDED_APP.get_dir(ENHANCE_REFERENCE_BUNDLE_DIR) {
+        fn walk(d: &include_dir::Dir, base: &Path, out: &mut Vec<String>) {
+            for f in d.files() {
+                if let Ok(rel) = f.path().strip_prefix(base) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            for sub in d.dirs() {
+                walk(sub, base, out);
+            }
+        }
+        walk(d, Path::new(ENHANCE_REFERENCE_BUNDLE_DIR), &mut v);
+    }
+    v.retain(|n| is_reference_entry(n));
     v.sort();
     v
+}
+
+// Top level: only the *.md reference docs. In a subfolder: everything.
+fn is_reference_entry(rel: &str) -> bool {
+    rel.contains('/') || rel.ends_with(".md")
+}
+
+// Only the top-level docs carry Setup's version stamp; template files are
+// copied verbatim (a leading HTML comment would break arch.js).
+fn reference_entry_is_stamped(rel: &str) -> bool {
+    !rel.contains('/') && rel.ends_with(".md")
 }
 
 fn stamp_seeded_doc(bundle: &[u8]) -> Vec<u8> {
@@ -47111,7 +47136,11 @@ fn seeded_reference_bytes<R: tauri::Runtime>(app: &AppHandle<R>, name: &str) -> 
         Some(app),
         &format!("{}/{}", ENHANCE_REFERENCE_BUNDLE_DIR, name),
     )?;
-    Some(stamp_seeded_doc(&bundle))
+    if reference_entry_is_stamped(name) {
+        Some(stamp_seeded_doc(&bundle))
+    } else {
+        Some(bundle)
+    }
 }
 
 // Every bundled reference file present and byte-identical to its stamped
@@ -47159,7 +47188,12 @@ fn seed_reference_docs<R: tauri::Runtime>(
             continue;
         };
         // Whole-file Setup-managed, like the core sidecar: always refreshed.
-        write_template_if_safe(&dir.join(name), &bytes, true, wrote, skipped)?;
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        }
+        write_template_if_safe(&path, &bytes, true, wrote, skipped)?;
     }
     let on_disk: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
         .map(|rd| {
@@ -82809,6 +82843,54 @@ mod conventions_split_tests {
             stray_seeded_reference_files(&on_disk, &bundled),
             vec!["renamed-old.md".to_string()]
         );
+    }
+
+    // new-repo-orientation: top-level docs are *.md only and stamped; a
+    // subfolder (the orientation template) ships whole and verbatim.
+    #[test]
+    fn reference_entries_and_stamping() {
+        use super::{is_reference_entry, reference_entry_is_stamped};
+        assert!(is_reference_entry("orientation.md"));
+        assert!(!is_reference_entry("notes.txt"));
+        assert!(is_reference_entry("orientation-template/arch.js"));
+        assert!(is_reference_entry(
+            "orientation-template/architecture/01-system.md"
+        ));
+        assert!(reference_entry_is_stamped("orientation.md"));
+        assert!(!reference_entry_is_stamped("orientation-template/arch.js"));
+        assert!(!reference_entry_is_stamped(
+            "orientation-template/OVERVIEW.md"
+        ));
+    }
+
+    // Every file the orientation playbook tells the agent to copy or edit is
+    // in the bundle.
+    #[test]
+    fn orientation_template_is_bundled() {
+        let base: std::path::PathBuf = [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "app",
+            "__shell",
+            "reference",
+        ]
+        .iter()
+        .collect();
+        assert!(base.join("orientation.md").is_file());
+        for f in [
+            "index.html",
+            "Main.xmlui",
+            "arch.js",
+            "OVERVIEW.md",
+            "architecture/01-system.mmd",
+            "architecture/01-system.md",
+        ] {
+            assert!(
+                base.join("orientation-template").join(f).is_file(),
+                "orientation-template/{} missing",
+                f
+            );
+        }
     }
 }
 

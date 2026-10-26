@@ -20563,9 +20563,14 @@ fn switch_agent(
         .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
     let partner = leaving.as_ref().and_then(|(p, sid)| {
         let conn = worklist_state_open(&app)?;
-        let id = worklist_state::session_partner(&conn, session_provider_label(*p), sid)
-            .ok()
-            .flatten()?;
+        let id = worklist_state::session_partner(
+            &conn,
+            session_provider_label(*p),
+            sid,
+            session_provider_label(target_provider),
+        )
+        .ok()
+        .flatten()?;
         if session_path_for_id(&app, target_provider, &id).is_some() {
             Some(id)
         } else {
@@ -20602,16 +20607,20 @@ fn switch_agent(
     // partner the switch could mean (tau-accounting 2026-10-08 20:40Z: an
     // unnamed, unpaired Codex session and no offer). Both reasons require the
     // leaving session never to have been paired or unpaired.
-    // opencode-provider-switch: an OpenCode partner would get a queued name
-    // that never binds and a typed catch-up; partners for it arrive with
-    // opencode-partner-handoff.
+    // opencode-partner-handoff: "never paired" is asked of the target side,
+    // so a session already paired with one provider can still start its
+    // first partner on another.
     let fresh_reason: Option<&'static str> = leaving.as_ref().and_then(|(p, sid)| {
-        if target_provider == SessionProvider::Opencode {
-            return None;
-        }
         let conn = worklist_state_open(&app)?;
         let label = session_provider_label(*p);
-        if !worklist_state::session_never_paired(&conn, label, sid).ok()? {
+        if !worklist_state::session_never_paired(
+            &conn,
+            label,
+            sid,
+            session_provider_label(target_provider),
+        )
+        .ok()?
+        {
             return None;
         }
         fresh_partner_reason(
@@ -20735,8 +20744,13 @@ fn switch_agent(
         && leaving.as_ref().is_some_and(|(p, sid)| {
             worklist_state_open(&app)
                 .and_then(|conn| {
-                    worklist_state::session_never_paired(&conn, session_provider_label(*p), sid)
-                        .ok()
+                    worklist_state::session_never_paired(
+                        &conn,
+                        session_provider_label(*p),
+                        sid,
+                        session_provider_label(target_provider),
+                    )
+                    .ok()
                 })
                 .unwrap_or(false)
         });
@@ -20762,7 +20776,12 @@ fn switch_agent(
         live_session_id(&app, target_provider)
     } else if resume_reason == "fresh-for-new-session" {
         let baseline = live_session_id(&app, target_provider);
-        if let Some((title, sid)) = fresh.as_ref() {
+        // opencode-partner-handoff: Bram can't rename an OpenCode session, so
+        // its fresh partner keeps OpenCode's own title; the pair still forms.
+        if let Some((title, sid)) = fresh
+            .as_ref()
+            .filter(|_| target_provider != SessionProvider::Opencode)
+        {
             write_pending_session_title(&app, provider_key, title, sid.clone(), "switch");
             if bram_trace_enabled() {
                 append_bram_trace_line(
@@ -20897,7 +20916,12 @@ fn switch_agent(
                 if resume_reason == "fresh-for-new-session" {
                     // issue-443: a Codex target is waited on, off the launch
                     // thread (which still has the first command to type).
-                    if target_provider == SessionProvider::Codex {
+                    // opencode-partner-handoff: OpenCode takes seconds to
+                    // show its prompt, so it is waited on like Codex.
+                    if matches!(
+                        target_provider,
+                        SessionProvider::Codex | SessionProvider::Opencode
+                    ) {
                         let (app2, from, d) = (app.clone(), pair_from.clone(), digest.clone());
                         std::thread::spawn(move || {
                             fresh_partner_catch_up(&app2, target_provider, from, d, true)
@@ -20962,16 +20986,12 @@ fn record_pair_for<R: tauri::Runtime>(
     if a.0 == b.0 {
         return;
     }
-    let (claude, codex) = match (a.0, b.0) {
-        (SessionProvider::Claude, SessionProvider::Codex) => (a.1.as_str(), b.1.as_str()),
-        (SessionProvider::Codex, SessionProvider::Claude) => (b.1.as_str(), a.1.as_str()),
-        // Pairs are Claude↔Codex until opencode-partner-handoff.
-        _ => return,
-    };
+    let (al, bl) = (session_provider_label(a.0), session_provider_label(b.0));
     let Some(conn) = worklist_state_open(app) else {
         return;
     };
-    let result = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms(), source);
+    let result =
+        worklist_state::record_session_pair(&conn, al, &a.1, bl, &b.1, unix_now_ms(), source);
     if bram_trace_enabled() {
         let outcome = match &result {
             Ok(true) => "ok".to_string(),
@@ -20982,8 +21002,8 @@ fn record_pair_for<R: tauri::Runtime>(
             app,
             "state-mirror",
             &format!(
-                "op=pair-stamp claude={} codex={} source={} result={}",
-                claude, codex, source, outcome
+                "op=pair-stamp {}={} {}={} source={} result={}",
+                al, a.1, bl, b.1, source, outcome
             ),
         );
     }
@@ -21003,35 +21023,38 @@ fn pair_sessions_route<R: tauri::Runtime>(
     app: &AppHandle<R>,
     query: &str,
 ) -> Result<Vec<u8>, String> {
-    let mut claude = String::new();
-    let mut codex = String::new();
+    // opencode-partner-handoff: the two sides arrive as `<provider>=<id>`,
+    // any two of claude / codex / opencode (the pane always sent claude and
+    // codex before).
+    let mut sides: Vec<(SessionProvider, String)> = Vec::new();
     // provider-session-digest-for-codex: the side the offer was about (the
     // session you switched away from), whose digest the other side reads.
     let mut from: Option<SessionProvider> = None;
     for pair in query.split('&') {
-        if let Some(v) = pair.strip_prefix("claude=") {
-            claude = percent_decode(v);
-        } else if let Some(v) = pair.strip_prefix("codex=") {
-            codex = percent_decode(v);
-        } else if let Some(v) = pair.strip_prefix("from=") {
-            from = SessionProvider::from_str(&percent_decode(v));
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == "from" {
+            from = SessionProvider::from_str(&percent_decode(value));
+        } else if let Some(p) = SessionProvider::from_str(key) {
+            let id = percent_decode(value);
+            if !id.is_empty() && !sides.iter().any(|(q, _)| *q == p) {
+                sides.push((p, id));
+            }
         }
     }
-    if claude.is_empty() || codex.is_empty() {
-        return Err("claude and codex ids required".to_string());
-    }
-    record_pair_for(
-        app,
-        &(SessionProvider::Claude, claude.clone()),
-        &(SessionProvider::Codex, codex.clone()),
-        "offer-keep",
-    );
+    let [a, b] = sides.as_slice() else {
+        return Err("two sessions of different providers required".to_string());
+    };
+    record_pair_for(app, a, b, "offer-keep");
     emit_pair_offer(app, None, None);
     if let Some(fp) = from {
-        let target = match fp {
-            SessionProvider::Claude => Some((claude.clone(), SessionProvider::Codex)),
-            SessionProvider::Codex => Some((codex.clone(), SessionProvider::Claude)),
-            SessionProvider::Opencode => None,
+        let target = if fp == a.0 {
+            Some((a.1.clone(), b.0))
+        } else if fp == b.0 {
+            Some((b.1.clone(), a.0))
+        } else {
+            None
         };
         if let Some((fid, tp)) = target {
             let digest = write_session_digest(app, fp, &fid, true);
@@ -21083,24 +21106,27 @@ fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut ser
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let other = match provider.as_str() {
-            "claude" => SessionProvider::Codex,
-            "codex" => SessionProvider::Claude,
-            _ => continue,
-        };
-        let Ok(Some(partner)) = worklist_state::session_partner(&conn, &provider, &id) else {
+        // opencode-partner-handoff: up to one partner per other provider.
+        let Ok(found) = worklist_state::session_partners(&conn, &provider, &id) else {
             continue;
         };
-        let title = session_title_by_id(app, other, &partner);
+        let partners: Vec<serde_json::Value> = found
+            .into_iter()
+            .filter_map(|(label, pid)| {
+                let other = SessionProvider::from_str(label)?;
+                Some(serde_json::json!({
+                    "provider": label,
+                    "id": pid,
+                    "title": session_title_by_id(app, other, &pid),
+                }))
+            })
+            .collect();
+        let Some(first) = partners.first().cloned() else {
+            continue;
+        };
         if let Some(obj) = row.as_object_mut() {
-            obj.insert(
-                "partner".to_string(),
-                serde_json::json!({
-                    "provider": session_provider_label(other),
-                    "id": partner,
-                    "title": title,
-                }),
-            );
+            obj.insert("partner".to_string(), first);
+            obj.insert("partners".to_string(), serde_json::Value::Array(partners));
         }
     }
 }
@@ -21114,26 +21140,35 @@ fn unpair_session<R: tauri::Runtime>(
 ) -> Result<Vec<u8>, String> {
     let provider = provider.ok_or("provider required")?;
     let conn = worklist_state_open(app).ok_or("state db unavailable")?;
-    let (claude, codex) = match provider {
-        SessionProvider::Claude => (session_id, ""),
-        SessionProvider::Codex => ("", session_id),
-        SessionProvider::Opencode => {
-            return Err("OpenCode sessions have no partners yet".to_string());
-        }
-    };
-    let wrote = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms(), "unpair")
+    let mine = session_provider_label(provider);
+    // opencode-partner-handoff: a session can have a partner on each other
+    // provider, and Unpair ends all of them.
+    let partners =
+        worklist_state::session_partners(&conn, mine, session_id).map_err(|e| e.to_string())?;
+    for (other, _) in partners {
+        let wrote = worklist_state::record_session_pair(
+            &conn,
+            mine,
+            session_id,
+            other,
+            "",
+            unix_now_ms(),
+            "unpair",
+        )
         .map_err(|e| e.to_string())?;
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "state-mirror",
-            &format!(
-                "op=pair-stamp claude={} codex={} source=unpair result={}",
-                claude,
-                codex,
-                if wrote { "ok" } else { "unchanged" }
-            ),
-        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "state-mirror",
+                &format!(
+                    "op=pair-stamp {}={} {}= source=unpair result={}",
+                    mine,
+                    session_id,
+                    other,
+                    if wrote { "ok" } else { "unchanged" }
+                ),
+            );
+        }
     }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
@@ -21148,10 +21183,6 @@ fn emit_pair_offer<R: tauri::Runtime>(
     from: Option<&(SessionProvider, String)>,
     to: Option<(SessionProvider, String)>,
 ) {
-    // opencode-sessions-browser: OpenCode sessions have ids now, but pairs
-    // are Claude↔Codex until opencode-partner-handoff, so no offer names one.
-    let from = from.filter(|(p, _)| *p != SessionProvider::Opencode);
-    let to = to.filter(|(p, _)| *p != SessionProvider::Opencode);
     let payload = match (from, to) {
         (Some((fp, fid)), Some((tp, tid))) => serde_json::json!({
             "active": true,
@@ -21220,10 +21251,14 @@ enum CatchUpReadiness {
     Waiting,
 }
 
-fn catch_up_readiness(tail: &str, codex: bool, wait_for_composer: bool) -> CatchUpReadiness {
-    if let Some(shape) = prompt_shape_for_provider(tail, codex) {
+fn catch_up_readiness(
+    tail: &str,
+    provider: SessionProvider,
+    wait_for_composer: bool,
+) -> CatchUpReadiness {
+    if let Some(shape) = prompt_shape_for_provider(tail, provider == SessionProvider::Codex) {
         CatchUpReadiness::Prompt(shape)
-    } else if !wait_for_composer || codex_composer_ready(tail) {
+    } else if !wait_for_composer || composer_ready(provider, tail) {
         CatchUpReadiness::Ready
     } else {
         CatchUpReadiness::Waiting
@@ -21241,6 +21276,25 @@ fn codex_composer_ready(tail: &str) -> bool {
         .collect::<String>()
         .to_lowercase();
     squashed.contains("openaicodex") && squashed.ends_with("?forshortcuts")
+}
+
+// opencode-partner-handoff: OpenCode's idle screen ends with its key-hint
+// footer (2.1.4 specimen: "shift+tab agents  ctrl+p commands").
+fn opencode_composer_ready(tail: &str) -> bool {
+    let squashed: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    squashed.contains("ctrl+pcommands")
+}
+
+fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
+    match provider {
+        SessionProvider::Codex => codex_composer_ready(tail),
+        SessionProvider::Opencode => opencode_composer_ready(tail),
+        SessionProvider::Claude => true,
+    }
 }
 
 const CATCH_UP_COMPOSER_WAIT_MS: i64 = 30_000;
@@ -21282,11 +21336,7 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
             return;
         }
         let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
-        let r = catch_up_readiness(
-            &tail,
-            target_provider == SessionProvider::Codex,
-            wait_for_composer,
-        );
+        let r = catch_up_readiness(&tail, target_provider, wait_for_composer);
         if r != CatchUpReadiness::Waiting
             || unix_now_ms().saturating_sub(started) >= CATCH_UP_COMPOSER_WAIT_MS
         {
@@ -21360,7 +21410,9 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod catch_up_readiness_tests {
-    use super::{catch_up_readiness as r, CatchUpReadiness::*};
+    use super::{catch_up_readiness as r, CatchUpReadiness::*, SessionProvider};
+    const CODEX: SessionProvider = SessionProvider::Codex;
+    const CLAUDE_P: SessionProvider = SessionProvider::Claude;
     // Codex 0.162.1 captures, 2026-10-16 (stripped tails).
     const COMPOSER: &str = ">_ OpenAI Codex (v0.162.1)~/bram \u{203a}Ask Codex to do anything GPT-6-Astra high\u{b7}~/bram\u{2190} for agents \u{b7} ? for shortcuts";
     const UPDATE: &str = "Update available \u{b7} 0.162.1 \u{2192} 0.163.0Release notes: https://github.com/openai/codex/releases/latest\u{203a} 1. Update now (runs `npm install -g @openai/codex`) 2.Skip3.Skipuntilnextversionenter continue \u{b7} esc skip";
@@ -21371,14 +21423,14 @@ mod catch_up_readiness_tests {
 
     #[test]
     fn codex_waits_for_its_composer() {
-        assert_eq!(r(SHELL, true, true), Waiting);
-        assert_eq!(r(CLAUDE, true, true), Waiting);
-        assert_eq!(r(COMPOSER, true, true), Ready);
+        assert_eq!(r(SHELL, CODEX, true), Waiting);
+        assert_eq!(r(CLAUDE, CODEX, true), Waiting);
+        assert_eq!(r(COMPOSER, CODEX, true), Ready);
     }
 
     #[test]
     fn a_prompt_holds_the_turn() {
-        assert_eq!(r(UPDATE, true, true), Prompt("codex-update"));
+        assert_eq!(r(UPDATE, CODEX, true), Prompt("codex-update"));
     }
 
     // Codex 0.162.1's update prompt from live bytes through strip_ansi
@@ -21388,15 +21440,26 @@ mod catch_up_readiness_tests {
 
     #[test]
     fn live_update_paint_holds_and_its_composer_is_not_ready() {
-        assert_eq!(r(LIVE_UPDATE, true, true), Prompt("codex-update"));
+        assert_eq!(r(LIVE_UPDATE, CODEX, true), Prompt("codex-update"));
         assert!(!super::codex_composer_ready(LIVE_UPDATE));
     }
 
     #[test]
     fn without_waiting_only_a_prompt_holds() {
-        assert_eq!(r(SHELL, false, false), Ready);
+        assert_eq!(r(SHELL, CLAUDE_P, false), Ready);
         // A Codex-only shape doesn't hold a Claude target.
-        assert_eq!(r(UPDATE, false, false), Ready);
+        assert_eq!(r(UPDATE, CLAUDE_P, false), Ready);
+    }
+
+    // opencode-partner-handoff: OpenCode 2.1.4's idle screen (2026-10-23
+    // capture, stripped), and the shell before it is up.
+    const OPENCODE: &str = "\u{2503} Ask anything\u{2026} \"What is the tech stack of this project?\" \u{2503} shift+tab agents ctrl+p commands 2.1.4";
+
+    #[test]
+    fn opencode_waits_for_its_prompt() {
+        let oc = SessionProvider::Opencode;
+        assert_eq!(r("bash-3.2$ opencode", oc, true), Waiting);
+        assert_eq!(r(OPENCODE, oc, true), Ready);
     }
 }
 
@@ -21559,11 +21622,7 @@ fn render_session_digest(
     total: usize,
     turns: &[serde_json::Value],
 ) -> String {
-    let who = if provider == SessionProvider::Codex {
-        "Codex"
-    } else {
-        "Claude"
-    };
+    let who = session_provider_display(provider);
     let mut out = format!(
         "# {} session digest\n\n- Title: {}\n- Session id: {}\n- Full transcript: {}\n- Turns in the session: {}; shown here: the last {}\n\nWritten by Bram for the partner session on the other provider. The full transcript is JSONL; read it only if this digest isn't enough.\n",
         who,
@@ -21685,11 +21744,7 @@ fn write_session_digest<R: tauri::Runtime>(
 // reloads the pane); any switch without a digest clears it.
 // "Claude session '<title>'", or the id's first 8 characters when untitled.
 fn catch_up_from_label(provider: SessionProvider, id: &str, title: Option<&str>) -> String {
-    let who = if provider == SessionProvider::Codex {
-        "Codex"
-    } else {
-        "Claude"
-    };
+    let who = session_provider_display(provider);
     match title {
         Some(t) => format!("{} session '{}'", who, t),
         None => format!("{} session {}", who, id.chars().take(8).collect::<String>()),
@@ -21805,13 +21860,18 @@ fn fresh_partner_title(from_title: &str, to: SessionProvider) -> String {
     let base = base
         .strip_suffix(" (Claude)")
         .or_else(|| base.strip_suffix(" (Codex)"))
+        .or_else(|| base.strip_suffix(" (OpenCode)"))
         .unwrap_or(base);
-    let tag = if to == SessionProvider::Codex {
-        "Codex"
-    } else {
-        "Claude"
-    };
-    format!("{} ({})", base, tag)
+    format!("{} ({})", base, session_provider_display(to))
+}
+
+// The provider's name as people write it.
+fn session_provider_display(provider: SessionProvider) -> &'static str {
+    match provider {
+        SessionProvider::Claude => "Claude",
+        SessionProvider::Codex => "Codex",
+        SessionProvider::Opencode => "OpenCode",
+    }
 }
 
 fn provider_switch_launch(
@@ -23134,15 +23194,10 @@ fn create_new_session(
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
-    // opencode-provider-switch: the queued name binds when the new session's
-    // file surfaces, and Bram can't see OpenCode's sessions yet
-    // (opencode-sessions-browser), so the name would never be applied.
-    if provider_key == "opencode" {
-        return Err(
-            "Named new sessions aren't available for OpenCode yet. Start a new session from inside OpenCode."
-                .to_string(),
-        );
-    }
+    // opencode-partner-handoff: OpenCode titles its own sessions and Bram
+    // can't rename them, so no name is queued for one; the session still
+    // starts, and a pair asked for still forms once its id surfaces.
+    let names_session = provider_key != "opencode";
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
@@ -23159,18 +23214,23 @@ fn create_new_session(
     };
     // Queue the title so the new session is renamed to the exact name when its
     // session file surfaces. The title is metadata, never a user turn.
-    write_pending_session_title(
-        &app,
-        provider_key,
-        &trimmed,
-        session_id.clone(),
-        "new-session",
-    );
+    if names_session {
+        write_pending_session_title(
+            &app,
+            provider_key,
+            &trimmed,
+            session_id.clone(),
+            "new-session",
+        );
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             &app,
             "session-new",
-            &format!("op=create provider={}", provider_key),
+            &format!(
+                "op=create provider={} named={}",
+                provider_key, names_session
+            ),
         );
     }
     // Same kill sequence as reload_agent_session. The FRESH launch is NOT

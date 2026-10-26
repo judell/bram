@@ -228,18 +228,32 @@ pub fn record_item_session(
 
 // --- session pairs (provider-session-counterparts) --------------------------
 //
-// A Claude session and a Codex session that go together: switching providers
-// from one resumes the other. Stored as `kind='pair'` transitions rows with
-// detail {"claude": <id>, "codex": <id>}; append-only, so the history stays
-// queryable. One partner per side: a session's partner is the other side of
-// the latest row naming it, and only while that partner's own latest row
-// names it back. An unpair is a row with the other side empty.
+// Two sessions of different providers that go together: switching providers
+// from one resumes the other. Stored as `kind='pair'` transitions rows whose
+// detail names the two sides, e.g. {"claude": <id>, "codex": <id>};
+// append-only, so the history stays queryable. One partner per other
+// provider: a session's partner on a side is that side of the latest row
+// naming it with that side, and only while the partner's own latest row with
+// this side names it back. An unpair is a row with the other side empty.
+//
+// opencode-partner-handoff: a row pairs any two of PAIR_PROVIDERS, so a
+// Claude session can go with a Codex session and an OpenCode one at once.
+// Rows from before OpenCode were all {"claude", "codex"} and read the same.
 
+const PAIR_PROVIDERS: [&str; 3] = ["claude", "codex", "opencode"];
+
+fn is_pair_provider(p: &str) -> bool {
+    PAIR_PROVIDERS.contains(&p)
+}
+
+// The `other` side of the latest row naming (`side`, `sid`) together with
+// `other`: Some("") for an unpair, None when no such row exists.
 fn latest_pair_row_for(
     conn: &Connection,
     side: &str,
     sid: &str,
-) -> Result<Option<(String, String)>> {
+    other: &str,
+) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
         "SELECT detail FROM transitions WHERE kind = 'pair' AND item_id IS NULL ORDER BY id DESC",
     )?;
@@ -249,70 +263,99 @@ fn latest_pair_row_for(
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&detail) else {
             continue;
         };
-        let claude = v
-            .get("claude")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        let codex = v
-            .get("codex")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        let mine = if side == "claude" { &claude } else { &codex };
-        if mine == sid {
-            return Ok(Some((claude, codex)));
+        if v.get(side).and_then(|x| x.as_str()) != Some(sid) {
+            continue;
+        }
+        if let Some(theirs) = v.get(other) {
+            return Ok(Some(theirs.as_str().unwrap_or("").to_string()));
         }
     }
     Ok(None)
 }
 
-/// The session paired with (`provider`, `sid`), if the pairing still holds
-/// from both sides. `provider` is "claude" or "codex".
-pub fn session_partner(conn: &Connection, provider: &str, sid: &str) -> Result<Option<String>> {
-    if !session_id_is_plain(sid) || !matches!(provider, "claude" | "codex") {
+/// The `other`-provider session paired with (`provider`, `sid`), if the
+/// pairing still holds from both sides.
+pub fn session_partner(
+    conn: &Connection,
+    provider: &str,
+    sid: &str,
+    other: &str,
+) -> Result<Option<String>> {
+    if !session_id_is_plain(sid)
+        || !is_pair_provider(provider)
+        || !is_pair_provider(other)
+        || provider == other
+    {
         return Ok(None);
     }
-    let other_side = if provider == "claude" {
-        "codex"
-    } else {
-        "claude"
-    };
-    let Some((claude, codex)) = latest_pair_row_for(conn, provider, sid)? else {
+    let Some(partner) = latest_pair_row_for(conn, provider, sid, other)? else {
         return Ok(None);
     };
-    let partner = if provider == "claude" { codex } else { claude };
     if partner.is_empty() {
         return Ok(None);
     }
-    // The partner's own latest row must name this session back.
-    match latest_pair_row_for(conn, other_side, &partner)? {
-        Some((c, x)) if (if provider == "claude" { &c } else { &x }) == sid => Ok(Some(partner)),
+    // The partner's own latest row with this side must name this session back.
+    match latest_pair_row_for(conn, other, &partner, provider)? {
+        Some(back) if back == sid => Ok(Some(partner)),
         _ => Ok(None),
     }
 }
 
-/// Pair a Claude session with a Codex session. Ok(false) when they are
-/// already paired (no row written) or an id isn't plain. Either id may be
-/// empty, which records an unpair of the other side.
+/// Every partner (provider, id) of (`provider`, `sid`), at most one per other
+/// provider, in PAIR_PROVIDERS order.
+pub fn session_partners(
+    conn: &Connection,
+    provider: &str,
+    sid: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let mut out = Vec::new();
+    for other in PAIR_PROVIDERS {
+        if other == provider {
+            continue;
+        }
+        if let Some(id) = session_partner(conn, provider, sid, other)? {
+            out.push((other, id));
+        }
+    }
+    Ok(out)
+}
+
+/// Pair (`a`, `a_id`) with (`b`, `b_id`), two different providers. Ok(false)
+/// when they are already paired (no row written) or a provider or id isn't
+/// plain. Either id may be empty, which records an unpair of the other side.
 pub fn record_session_pair(
     conn: &Connection,
-    claude: &str,
-    codex: &str,
+    a: &str,
+    a_id: &str,
+    b: &str,
+    b_id: &str,
     at_ms: i64,
     source: &str,
 ) -> Result<bool> {
+    if !is_pair_provider(a) || !is_pair_provider(b) || a == b {
+        return Ok(false);
+    }
     let plain_or_empty = |s: &str| s.is_empty() || session_id_is_plain(s);
-    if !plain_or_empty(claude) || !plain_or_empty(codex) || (claude.is_empty() && codex.is_empty())
+    if !plain_or_empty(a_id) || !plain_or_empty(b_id) || (a_id.is_empty() && b_id.is_empty()) {
+        return Ok(false);
+    }
+    if !a_id.is_empty()
+        && !b_id.is_empty()
+        && session_partner(conn, a, a_id, b)?.as_deref() == Some(b_id)
     {
         return Ok(false);
     }
-    if !claude.is_empty() && !codex.is_empty() {
-        if session_partner(conn, "claude", claude)?.as_deref() == Some(codex) {
-            return Ok(false);
-        }
-    }
-    let detail = format!("{{\"claude\":\"{}\",\"codex\":\"{}\"}}", claude, codex);
+    // In PAIR_PROVIDERS order, so a Claude/Codex row reads as it always has.
+    let rank = |p: &str| PAIR_PROVIDERS.iter().position(|q| *q == p).unwrap_or(0);
+    let ((first, first_id), (second, second_id)) = if rank(a) <= rank(b) {
+        ((a, a_id), (b, b_id))
+    } else {
+        ((b, b_id), (a, a_id))
+    };
+    let detail = format!(
+        "{{\"{}\":\"{}\",\"{}\":\"{}\"}}",
+        first, first_id, second, second_id
+    );
     // The row's `source` says how the pair came about (offer-keep,
     // offer-create, explicit-resume, unpair, …), so the ledger alone can
     // explain a pairing; it was hard-coded to "switch" before.
@@ -334,7 +377,7 @@ pub fn record_session_born(
     at_ms: i64,
     source: &str,
 ) -> Result<bool> {
-    if !session_id_is_plain(sid) || !matches!(provider, "claude" | "codex") {
+    if !session_id_is_plain(sid) || !is_pair_provider(provider) {
         return Ok(false);
     }
     if session_born_from_new_session(conn, provider, sid)? {
@@ -345,19 +388,26 @@ pub fn record_session_born(
     Ok(true)
 }
 
-/// Whether no pair row names (`provider`, `sid`): never paired, and so never
-/// unpaired either. first-switch-to-unused-provider-starts-named-partner
-/// gates its fresh partner on this alone.
-pub fn session_never_paired(conn: &Connection, provider: &str, sid: &str) -> Result<bool> {
-    if !session_id_is_plain(sid) || !matches!(provider, "claude" | "codex") {
+/// Whether no pair row names (`provider`, `sid`) with `other`: never paired
+/// with that provider, and so never unpaired from it either.
+/// first-switch-to-unused-provider-starts-named-partner gates its fresh
+/// partner on this alone; with a third provider the question is per side (a
+/// Claude session paired with Codex can still get its first OpenCode partner).
+pub fn session_never_paired(
+    conn: &Connection,
+    provider: &str,
+    sid: &str,
+    other: &str,
+) -> Result<bool> {
+    if !session_id_is_plain(sid) || !is_pair_provider(provider) || !is_pair_provider(other) {
         return Ok(false);
     }
-    Ok(latest_pair_row_for(conn, provider, sid)?.is_none())
+    Ok(latest_pair_row_for(conn, provider, sid, other)?.is_none())
 }
 
 /// Whether (`provider`, `sid`) was started with New session.
 pub fn session_born_from_new_session(conn: &Connection, provider: &str, sid: &str) -> Result<bool> {
-    if !session_id_is_plain(sid) || !matches!(provider, "claude" | "codex") {
+    if !session_id_is_plain(sid) || !is_pair_provider(provider) {
         return Ok(false);
     }
     let detail = format!("{{\"provider\":\"{}\",\"id\":\"{}\"}}", provider, sid);
@@ -1705,37 +1755,102 @@ mod tests {
     #[test]
     fn session_pairs_follow_the_latest_row_on_both_sides() {
         let conn = open_in_memory().unwrap();
-        assert_eq!(session_partner(&conn, "claude", "c1").unwrap(), None);
-        assert!(record_session_pair(&conn, "c1", "x1", 1, "test").unwrap());
+        let cx =
+            |c: &str, x: &str, at| record_session_pair(&conn, "claude", c, "codex", x, at, "test");
         assert_eq!(
-            session_partner(&conn, "claude", "c1").unwrap().as_deref(),
+            session_partner(&conn, "claude", "c1", "codex").unwrap(),
+            None
+        );
+        assert!(cx("c1", "x1", 1).unwrap());
+        assert_eq!(
+            session_partner(&conn, "claude", "c1", "codex")
+                .unwrap()
+                .as_deref(),
             Some("x1")
         );
         assert_eq!(
-            session_partner(&conn, "codex", "x1").unwrap().as_deref(),
+            session_partner(&conn, "codex", "x1", "claude")
+                .unwrap()
+                .as_deref(),
             Some("c1")
         );
         // Re-recording the same pair writes nothing.
-        assert!(!record_session_pair(&conn, "c1", "x1", 2, "test").unwrap());
+        assert!(!cx("c1", "x1", 2).unwrap());
         // x1 re-pairs with c2: c1 no longer has a partner (one per side).
-        assert!(record_session_pair(&conn, "c2", "x1", 3, "test").unwrap());
-        assert_eq!(session_partner(&conn, "claude", "c1").unwrap(), None);
+        assert!(cx("c2", "x1", 3).unwrap());
         assert_eq!(
-            session_partner(&conn, "codex", "x1").unwrap().as_deref(),
+            session_partner(&conn, "claude", "c1", "codex").unwrap(),
+            None
+        );
+        assert_eq!(
+            session_partner(&conn, "codex", "x1", "claude")
+                .unwrap()
+                .as_deref(),
             Some("c2")
         );
         // Unpair c2.
-        assert!(record_session_pair(&conn, "c2", "", 4, "test").unwrap());
-        assert_eq!(session_partner(&conn, "claude", "c2").unwrap(), None);
-        assert_eq!(session_partner(&conn, "codex", "x1").unwrap(), None);
+        assert!(cx("c2", "", 4).unwrap());
+        assert_eq!(
+            session_partner(&conn, "claude", "c2", "codex").unwrap(),
+            None
+        );
+        assert_eq!(
+            session_partner(&conn, "codex", "x1", "claude").unwrap(),
+            None
+        );
+    }
+
+    // opencode-partner-handoff
+    #[test]
+    fn a_session_keeps_one_partner_per_other_provider() {
+        let conn = open_in_memory().unwrap();
+        record_session_pair(&conn, "claude", "c1", "codex", "x1", 1, "test").unwrap();
+        // Argument order doesn't matter; the row is written claude-first.
+        assert!(
+            record_session_pair(&conn, "opencode", "ses_o1", "claude", "c1", 2, "test").unwrap()
+        );
+        assert_eq!(
+            session_partners(&conn, "claude", "c1").unwrap(),
+            vec![
+                ("codex", "x1".to_string()),
+                ("opencode", "ses_o1".to_string())
+            ]
+        );
+        assert_eq!(
+            session_partner(&conn, "opencode", "ses_o1", "claude")
+                .unwrap()
+                .as_deref(),
+            Some("c1")
+        );
+        // The OpenCode pair leaves Claude<->Codex alone, and vice versa.
+        assert_eq!(
+            session_partner(&conn, "codex", "x1", "claude")
+                .unwrap()
+                .as_deref(),
+            Some("c1")
+        );
+        record_session_pair(&conn, "claude", "c1", "opencode", "", 3, "test").unwrap();
+        assert_eq!(
+            session_partners(&conn, "claude", "c1").unwrap(),
+            vec![("codex", "x1".to_string())]
+        );
+        // Never paired is per side.
+        assert!(!session_never_paired(&conn, "claude", "c1", "codex").unwrap());
+        assert!(session_never_paired(&conn, "codex", "x1", "opencode").unwrap());
+        // Same-provider and unknown-provider pairs are refused.
+        assert!(!record_session_pair(&conn, "claude", "c1", "claude", "c2", 4, "test").unwrap());
+        assert!(!record_session_pair(&conn, "claude", "c1", "other", "z", 4, "test").unwrap());
     }
 
     #[test]
     fn session_pairs_refuse_ids_they_would_have_to_escape() {
         let conn = open_in_memory().unwrap();
-        assert!(!record_session_pair(&conn, "a\"b", "x1", 1, "test").unwrap());
-        assert!(!record_session_pair(&conn, "", "", 1, "test").unwrap());
-        assert_eq!(session_partner(&conn, "claude", "a\"b").unwrap(), None);
+        assert!(!record_session_pair(&conn, "claude", "a\"b", "codex", "x1", 1, "test").unwrap());
+        assert!(!record_session_pair(&conn, "claude", "", "codex", "", 1, "test").unwrap());
+        assert_eq!(
+            session_partner(&conn, "claude", "a\"b", "codex").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1748,6 +1863,8 @@ mod tests {
         assert!(!session_born_from_new_session(&conn, "codex", "c1").unwrap());
         assert!(!record_session_born(&conn, "claude", "a\"b", 3, "test").unwrap());
         assert!(!record_session_born(&conn, "other", "c2", 3, "test").unwrap());
+        // opencode-partner-handoff: OpenCode sessions can be born too.
+        assert!(record_session_born(&conn, "opencode", "ses_o1", 4, "test").unwrap());
     }
 
     #[test]
@@ -1756,7 +1873,8 @@ mod tests {
         // What switch_agent requires for the new-session reason.
         let session_wants_fresh_partner = |conn: &Connection, p: &str, sid: &str| {
             Ok::<bool, rusqlite::Error>(
-                session_born_from_new_session(conn, p, sid)? && session_never_paired(conn, p, sid)?,
+                session_born_from_new_session(conn, p, sid)?
+                    && session_never_paired(conn, p, sid, "codex")?,
             )
         };
         // Not started with New session.
@@ -1765,16 +1883,16 @@ mod tests {
         record_session_born(&conn, "claude", "c1", 1, "test").unwrap();
         assert!(session_wants_fresh_partner(&conn, "claude", "c1").unwrap());
         // Paired, then unpaired: an Unpair must survive the next switch.
-        record_session_pair(&conn, "c1", "x1", 2, "test").unwrap();
+        record_session_pair(&conn, "claude", "c1", "codex", "x1", 2, "test").unwrap();
         assert!(!session_wants_fresh_partner(&conn, "claude", "c1").unwrap());
-        record_session_pair(&conn, "c1", "", 3, "test").unwrap();
+        record_session_pair(&conn, "claude", "c1", "codex", "", 3, "test").unwrap();
         assert!(!session_wants_fresh_partner(&conn, "claude", "c1").unwrap());
-        assert!(session_never_paired(&conn, "claude", "c0").unwrap());
-        assert!(!session_never_paired(&conn, "claude", "c1").unwrap());
+        assert!(session_never_paired(&conn, "claude", "c0", "codex").unwrap());
+        assert!(!session_never_paired(&conn, "claude", "c1", "codex").unwrap());
         // Unpaired from the other side leaves the earlier row naming it.
         record_session_born(&conn, "claude", "c2", 4, "test").unwrap();
-        record_session_pair(&conn, "c2", "x2", 5, "test").unwrap();
-        record_session_pair(&conn, "", "x2", 6, "test").unwrap();
+        record_session_pair(&conn, "claude", "c2", "codex", "x2", 5, "test").unwrap();
+        record_session_pair(&conn, "claude", "", "codex", "x2", 6, "test").unwrap();
         assert!(!session_wants_fresh_partner(&conn, "claude", "c2").unwrap());
     }
 

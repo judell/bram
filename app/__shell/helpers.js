@@ -1107,7 +1107,8 @@ window.__bramSwitchAgent = function (provider) {
       message: "No " + name(p.toProvider) + " session goes with " + name(p.fromProvider) + " session " +
         quoted(p.fromTitle, p.fromSessionId) + ". " + name(p.toProvider) + " resumed its most recent, " +
         quoted(p.toTitle, p.toSessionId) + ".",
-      keepTooltip: "Pair these two, so switching between Claude and Codex moves between them.",
+      keepTooltip: "Pair these two, so switching between " + name(p.fromProvider) + " and " +
+        name(p.toProvider) + " moves between them.",
       actionLabel: "Start a new " + name(p.toProvider) + " session",
       actionTooltip: "Opens New session to start a " + name(p.toProvider) + " session that goes with " +
         quoted(p.fromTitle, p.fromSessionId) + "; switching back and forth will then move between those two.",
@@ -1159,14 +1160,16 @@ window.__bramSwitchAgent = function (provider) {
     notify(reason);
   };
   window.__bramPairOfferDismiss = function (value) { dismiss(value, "dismiss-click"); };
+  // opencode-partner-handoff: the two sides as `<provider>=<id>`, any two of
+  // claude / codex / opencode.
   window.__bramPairOfferKeep = function (value, toastApi) {
     if (!value) return;
-    var claude = value.fromProvider === "claude" ? value.fromSessionId : value.toSessionId;
-    var codex = value.fromProvider === "codex" ? value.fromSessionId : value.toSessionId;
+    var from = window.__bramProviderKey(value.fromProvider);
+    var to = window.__bramProviderKey(value.toProvider);
     dismiss(value, "keep-click");
-    window.fetch("/__sessions/pair?claude=" + encodeURIComponent(claude || "") +
-      "&codex=" + encodeURIComponent(codex || "") +
-      "&from=" + encodeURIComponent(value.fromProvider || ""), { cache: "no-store" }).then(function (r) {
+    window.fetch("/__sessions/pair?" + from + "=" + encodeURIComponent(value.fromSessionId || "") +
+      "&" + to + "=" + encodeURIComponent(value.toSessionId || "") +
+      "&from=" + encodeURIComponent(from), { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
     }).catch(function (e) {
       if (toastApi && typeof toastApi.error === "function") {
@@ -1242,7 +1245,7 @@ window.__bramPairMatchTitle = function (item) {
   var p = item && item.partner;
   if (!p || !p.title) return "";
   var mine = window.__bramProviderLabel(item.provider);
-  var strip = function (t) { return String(t || "").replace(/ \((Claude|Codex)\)$/, ""); };
+  var strip = function (t) { return String(t || "").replace(/ \((Claude|Codex|OpenCode)\)$/, ""); };
   var base = strip(p.title);
   // Already matching, suffix aside: nothing to offer on either row.
   if (strip(item.title) === base) return "";
@@ -1560,7 +1563,7 @@ window.__bramGateLastSessionLine = function (items, sel, sessions) {
   var prov = String(b.provider || "").toLowerCase();
   var provName = window.__bramProviderKey(prov) ? window.__bramProviderLabel(prov) : String(b.provider || "");
   var otherAgent = !!(cur && cur.provider && String(cur.provider).toLowerCase() !== prov);
-  var title = String(b.title || "").replace(/\s*\((?:Codex|Claude)\)\s*$/i, "").trim();
+  var title = String(b.title || "").replace(/\s*\((?:Codex|Claude|OpenCode)\)\s*$/i, "").trim();
   if (otherAgent) {
     return title
       ? "Last worked on by " + provName + " in '" + title + "'."

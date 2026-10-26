@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" persistTheme="true" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -592,6 +592,14 @@
              message moved to the footer status line (Jon: it belongs there,
              not in the app header) — see the footer HStack below. -->
         <SpaceFiller />
+        <!-- dark-mode-tone-switch: XMLUI's own tone switch, beside the other
+             pane-level display controls. Tone rescales every $color-* scale,
+             so the pane needs no dark palette of its own; `persistTheme` on
+             App (the value at the top of this file) remembers the choice
+             across pane reloads and relaunches.
+             https://www.xmlui.org/docs/reference/components/ToneSwitch -->
+        <ToneSwitch
+          tooltip="Switch between light and dark tone" />
         <!-- issue-414: opening the target app in a browser was three clicks
              deep (ⓘ, then Open in browser). The usual case, since the
              target pane is off by default. Tooltip shows the address. -->

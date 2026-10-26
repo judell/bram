@@ -6336,20 +6336,177 @@ fn emit_terminal_attention<R: tauri::Runtime>(
             "active": active,
             "shape": shape,
             "atMs": now_ms,
-            // terminal-attention-login-screen: the pane offers the other
+            // terminal-attention-login-screen: the pane offers one other
             // agent, but only when its CLI is on PATH.
-            "switchTo": if active { login_switch_target(shape) } else { None },
+            "switchTo": if active { login_switch_target(app, shape) } else { None },
         }),
     );
 }
 
-fn login_switch_target(shape: Option<&str>) -> Option<&'static str> {
-    let other = match shape {
-        Some("claude-login") => "codex",
-        Some("codex-login") => "claude",
+// Three agents, one slot order: Claude, Codex, OpenCode. Index into every
+// per-agent flag array here, so the picker, the login offer and their tests
+// can't drift apart. issue-448's picker and terminal-attention-login-screen's
+// offer were written for two agents; catch-up-with-main-after-v0.7.8 widened
+// both.
+const STARTUP_AGENTS: [SessionProvider; 3] = [
+    SessionProvider::Claude,
+    SessionProvider::Codex,
+    SessionProvider::Opencode,
+];
+
+// The login offer's preference order when no installed agent has sessions in
+// this project: Codex, Claude, OpenCode. Codex first keeps the two-agent
+// behaviour — a logged-out Claude was always traded for Codex.
+const LOGIN_SWITCH_ORDER: [SessionProvider; 3] = [
+    SessionProvider::Codex,
+    SessionProvider::Claude,
+    SessionProvider::Opencode,
+];
+
+fn provider_slot(provider: SessionProvider) -> usize {
+    match provider {
+        SessionProvider::Claude => 0,
+        SessionProvider::Codex => 1,
+        SessionProvider::Opencode => 2,
+    }
+}
+
+fn installed_agent_flags() -> [bool; 3] {
+    STARTUP_AGENTS.map(|provider| agent_cli_on_path(session_provider_label(provider)))
+}
+
+fn installed_agent_labels() -> Vec<&'static str> {
+    let installed = installed_agent_flags();
+    STARTUP_AGENTS
+        .iter()
+        .copied()
+        .filter(|provider| installed[provider_slot(*provider)])
+        .map(session_provider_label)
+        .collect()
+}
+
+fn provider_has_sessions<R: tauri::Runtime>(app: &AppHandle<R>, provider: SessionProvider) -> bool {
+    latest_session_path_for_provider(app, provider)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn session_flags<R: tauri::Runtime>(app: &AppHandle<R>) -> [bool; 3] {
+    STARTUP_AGENTS.map(|provider| provider_has_sessions(app, provider))
+}
+
+// terminal-attention-login-screen (#448): the pane offers one other agent, but
+// only when its CLI is on PATH. With three agents "the other one" isn't
+// defined, so the offer is the installed agent with sessions in this project,
+// else the first installed one in LOGIN_SWITCH_ORDER — never the agent that
+// isn't logged in.
+fn login_switch_target<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    shape: Option<&str>,
+) -> Option<&'static str> {
+    let blocked = match shape {
+        Some("claude-login") => SessionProvider::Claude,
+        Some("codex-login") => SessionProvider::Codex,
         _ => return None,
     };
-    agent_cli_on_path(other).then_some(other)
+    login_switch_choice(blocked, installed_agent_flags(), session_flags(app))
+        .map(session_provider_label)
+}
+
+// The pure half, so the three-agent rule is testable without an AppHandle.
+fn login_switch_choice(
+    blocked: SessionProvider,
+    installed: [bool; 3],
+    has_sessions: [bool; 3],
+) -> Option<SessionProvider> {
+    let eligible =
+        |provider: SessionProvider| provider != blocked && installed[provider_slot(provider)];
+    LOGIN_SWITCH_ORDER
+        .iter()
+        .copied()
+        .filter(|provider| eligible(*provider))
+        .find(|provider| has_sessions[provider_slot(*provider)])
+        .or_else(|| {
+            LOGIN_SWITCH_ORDER
+                .iter()
+                .copied()
+                .find(|provider| eligible(*provider))
+        })
+}
+
+#[cfg(test)]
+mod login_switch_offer_tests {
+    use super::{login_switch_choice, SessionProvider};
+
+    // Slots: Claude, Codex, OpenCode.
+    const ALL_INSTALLED: [bool; 3] = [true, true, true];
+    const NO_SESSIONS: [bool; 3] = [false, false, false];
+
+    #[test]
+    fn a_logged_out_claude_is_traded_for_codex_as_before() {
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, NO_SESSIONS),
+            Some(SessionProvider::Codex)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Codex, ALL_INSTALLED, NO_SESSIONS),
+            Some(SessionProvider::Claude)
+        );
+    }
+
+    #[test]
+    fn opencode_is_offered_when_it_is_the_installed_alternative() {
+        // The only other CLI on this machine.
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, [true, false, true], NO_SESSIONS),
+            Some(SessionProvider::Opencode)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Codex, [false, true, true], NO_SESSIONS),
+            Some(SessionProvider::Opencode)
+        );
+    }
+
+    #[test]
+    fn sessions_in_this_project_outrank_the_fixed_order() {
+        // Codex is installed, but this project has only ever run OpenCode:
+        // offer the agent that already has context here.
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [false, false, true]),
+            Some(SessionProvider::Opencode)
+        );
+    }
+
+    #[test]
+    fn the_logged_out_agent_is_never_offered() {
+        // Codex has sessions here, but Codex is the one that isn't logged in.
+        assert_eq!(
+            login_switch_choice(SessionProvider::Codex, ALL_INSTALLED, [false, true, false]),
+            Some(SessionProvider::Claude)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [true, false, false]),
+            Some(SessionProvider::Codex)
+        );
+    }
+
+    #[test]
+    fn no_installed_alternative_offers_nothing() {
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, [true, false, false], NO_SESSIONS),
+            None
+        );
+        // Sessions of an uninstalled agent don't make it offerable.
+        assert_eq!(
+            login_switch_choice(
+                SessionProvider::Claude,
+                [true, false, false],
+                [false, false, true]
+            ),
+            None
+        );
+    }
 }
 
 #[cfg(test)]
@@ -18595,12 +18752,14 @@ fn run_startup_autostart(
     {
         let picked = session_provider_label(launch.provider);
         if !agent_cli_on_path(picked) {
-            let other = match launch.provider {
-                SessionProvider::Claude => SessionProvider::Codex,
-                SessionProvider::Codex => SessionProvider::Claude,
-                SessionProvider::Opencode => SessionProvider::Claude,
-            };
-            if agent_cli_on_path(session_provider_label(other)) {
+            // The other two, in STARTUP_AGENTS order: the first installed one
+            // wins. With Claude and Codex installed this is exactly the old
+            // pair; OpenCode is the last resort rather than unreachable.
+            let fallback = STARTUP_AGENTS.iter().copied().find(|candidate| {
+                *candidate != launch.provider
+                    && agent_cli_on_path(session_provider_label(*candidate))
+            });
+            if let Some(other) = fallback {
                 append_bram_trace_line(
                     &app,
                     "agent-switch",
@@ -18743,17 +18902,22 @@ enum StartupAgentPick {
 
 fn startup_agent_pick(
     agent_configured: bool,
-    claude_on_path: bool,
-    codex_on_path: bool,
-    claude_has_sessions: bool,
-    codex_has_sessions: bool,
+    installed: [bool; 3],
+    has_sessions: [bool; 3],
 ) -> StartupAgentPick {
-    if agent_configured || !(claude_on_path && codex_on_path) {
+    // The launch ladder already decides when the project named an agent, and
+    // its sole-CLI rung covers a machine with one agent installed. With two or
+    // more installed and nothing named, starting one is a guess unless this
+    // project's own history names exactly one of them.
+    if agent_configured || installed.iter().filter(|on_path| **on_path).count() < 2 {
         return StartupAgentPick::Configured;
     }
-    match (claude_has_sessions, codex_has_sessions) {
-        (true, false) => StartupAgentPick::Evidence(SessionProvider::Claude),
-        (false, true) => StartupAgentPick::Evidence(SessionProvider::Codex),
+    let mut evidenced = STARTUP_AGENTS.iter().copied().filter(|provider| {
+        let slot = provider_slot(*provider);
+        installed[slot] && has_sessions[slot]
+    });
+    match (evidenced.next(), evidenced.next()) {
+        (Some(provider), None) => StartupAgentPick::Evidence(provider),
         _ => StartupAgentPick::Ask,
     }
 }
@@ -18777,19 +18941,7 @@ fn startup_agent_pick_for(app: &AppHandle, startup_policy: AgentStartupPolicy) -
     {
         return StartupAgentPick::Configured;
     }
-    let has_sessions = |provider| {
-        latest_session_path_for_provider(app, provider)
-            .ok()
-            .flatten()
-            .is_some()
-    };
-    startup_agent_pick(
-        false,
-        agent_cli_on_path("claude"),
-        agent_cli_on_path("codex"),
-        has_sessions(SessionProvider::Claude),
-        has_sessions(SessionProvider::Codex),
-    )
+    startup_agent_pick(false, installed_agent_flags(), session_flags(app))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -18810,6 +18962,10 @@ fn emit_startup_agent_choice(app: &AppHandle, pending: bool, chosen: Option<&str
             "pending": pending,
             "chosen": chosen,
             "atMs": unix_now_ms(),
+            // The answers the card may offer: every agent installed on this
+            // machine, not the two the two-agent picker assumed. Empty once
+            // the question is answered, so nothing reads a stale list.
+            "installed": if pending { installed_agent_labels() } else { Vec::new() },
         }),
     );
 }
@@ -18823,9 +18979,10 @@ fn hold_startup_autostart_for_choice(app: &AppHandle, pending: PendingStartupAut
             app,
             "agent-switch",
             &format!(
-                "op=launch-ask policy={} first_unmanaged={}",
+                "op=launch-ask policy={} first_unmanaged={} installed={}",
                 pending.startup_policy.as_str(),
-                pending.first_unmanaged_launch
+                pending.first_unmanaged_launch,
+                installed_agent_labels().join(",")
             ),
         );
     }
@@ -18860,11 +19017,9 @@ fn clear_pending_startup_agent_choice(app: &AppHandle, reason: &str) {
 // launches; the error comes back for the pane to show.
 #[tauri::command]
 fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> {
-    let chosen = match provider.trim().to_ascii_lowercase().as_str() {
-        "codex" => SessionProvider::Codex,
-        "claude" => SessionProvider::Claude,
-        other => return Err(format!("unknown agent provider: {}", other)),
-    };
+    let requested = provider.trim().to_ascii_lowercase();
+    let chosen = SessionProvider::from_str(&requested)
+        .ok_or_else(|| format!("unknown agent provider: {}", requested))?;
     let pending = take_pending_startup_autostart()
         .ok_or_else(|| "No launch is waiting for an agent choice.".to_string())?;
     let label = session_provider_label(chosen);
@@ -18904,14 +19059,18 @@ fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> 
 mod startup_agent_pick_tests {
     use super::{startup_agent_pick, SessionProvider, StartupAgentPick};
 
+    // Slots: Claude, Codex, OpenCode.
+    const ALL_INSTALLED: [bool; 3] = [true, true, true];
+    const NO_SESSIONS: [bool; 3] = [false, false, false];
+
     #[test]
     fn configured_agent_always_decides() {
         assert_eq!(
-            startup_agent_pick(true, true, true, false, false),
+            startup_agent_pick(true, ALL_INSTALLED, NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(true, true, true, false, true),
+            startup_agent_pick(true, ALL_INSTALLED, [true, true, true]),
             StartupAgentPick::Configured
         );
     }
@@ -18919,11 +19078,15 @@ mod startup_agent_pick_tests {
     #[test]
     fn one_cli_leaves_it_to_the_sole_cli_rung() {
         assert_eq!(
-            startup_agent_pick(false, true, false, false, false),
+            startup_agent_pick(false, [true, false, false], NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(false, false, true, true, false),
+            startup_agent_pick(false, [false, true, false], NO_SESSIONS),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(false, [false, false, true], NO_SESSIONS),
             StartupAgentPick::Configured
         );
     }
@@ -18931,23 +19094,54 @@ mod startup_agent_pick_tests {
     #[test]
     fn sessions_for_one_agent_pick_it() {
         assert_eq!(
-            startup_agent_pick(false, true, true, false, true),
+            startup_agent_pick(false, ALL_INSTALLED, [false, true, false]),
             StartupAgentPick::Evidence(SessionProvider::Codex)
         );
         assert_eq!(
-            startup_agent_pick(false, true, true, true, false),
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, false]),
             StartupAgentPick::Evidence(SessionProvider::Claude)
+        );
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, [false, false, true]),
+            StartupAgentPick::Evidence(SessionProvider::Opencode)
         );
     }
 
     #[test]
-    fn no_evidence_or_both_asks() {
+    fn two_installed_agents_can_still_use_evidence() {
+        // Claude and OpenCode installed, OpenCode the only one with sessions.
         assert_eq!(
-            startup_agent_pick(false, true, true, false, false),
+            startup_agent_pick(false, [true, false, true], [false, false, true]),
+            StartupAgentPick::Evidence(SessionProvider::Opencode)
+        );
+        // ... and with no sessions anywhere, the card asks.
+        assert_eq!(
+            startup_agent_pick(false, [true, false, true], NO_SESSIONS),
+            StartupAgentPick::Ask
+        );
+    }
+
+    #[test]
+    fn sessions_for_an_uninstalled_agent_do_not_pick_it() {
+        // OpenCode ran here once but its CLI is gone: starting it would fail.
+        assert_eq!(
+            startup_agent_pick(false, [true, true, false], [false, false, true]),
+            StartupAgentPick::Ask
+        );
+    }
+
+    #[test]
+    fn no_evidence_or_two_agents_with_sessions_asks() {
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, NO_SESSIONS),
             StartupAgentPick::Ask
         );
         assert_eq!(
-            startup_agent_pick(false, true, true, true, true),
+            startup_agent_pick(false, ALL_INSTALLED, [true, true, true]),
+            StartupAgentPick::Ask
+        );
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, true]),
             StartupAgentPick::Ask
         );
     }

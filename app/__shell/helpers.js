@@ -1087,7 +1087,13 @@ window.__bramSwitchAgent = function (provider) {
     var p = latest;
     if (!p || !p.pending) return null;
     if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
-    return { atMs: p.atMs };
+    // The host names the agents installed on this machine, so the card offers
+    // every one of them — three, since OpenCode joined Claude and Codex. An
+    // older host sends no list; the two-agent pair is then the honest answer.
+    var installed = Array.isArray(p.installed) && p.installed.length
+      ? p.installed.filter(function (key) { return window.__bramProviderKey(key); })
+      : ["claude", "codex"];
+    return { atMs: p.atMs, installed: installed };
   };
   var notify = function (reason) {
     var next = derive();
@@ -9688,10 +9694,12 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     }
     return "The terminal is waiting at a prompt Bram can't answer.";
   };
-  // The host names the other agent only when its CLI is on PATH.
+  // The host names the alternative only when its CLI is on PATH, and with
+  // three agents it is never simply "the other one" — so the label comes from
+  // the provider key, never a two-way ternary.
   window.__bramTerminalAttentionSwitchLabel = function (value) {
     var to = value && value.switchTo;
-    return to ? "Use " + (to === "codex" ? "Codex" : "Claude") + " instead" : "";
+    return to ? "Use " + window.__bramProviderLabel(to) + " instead" : "";
   };
   window.__bramTerminalAttentionSwitch = function (value, toastApi) {
     var to = value && value.switchTo;

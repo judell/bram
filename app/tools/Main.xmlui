@@ -1080,11 +1080,12 @@
            Worklist-dock mount (AgentMenuView is self-gating on menu and
            owns its preview modal, so the footer mount is drop-in). -->
       <AgentMenuView menu="{footerAgentMenuEvt.value}" surface="footer" />
-      <!-- issue-448: both agent CLIs are installed and the project names no
-           agent, so the host held the autostart to ask instead of guessing
-           Claude. Driven by the host's replayable `startup-agent-choice`;
-           a click saves shell.agent and starts that agent. Solid buttons for
-           the two answers, ghost for Dismiss, per
+      <!-- issue-448: two or more agent CLIs are installed and the project names
+           no agent, so the host held the autostart to ask instead of guessing
+           Claude. Driven by the host's replayable `startup-agent-choice`, which
+           names the agents installed on this machine; a click saves shell.agent
+           and starts that agent. Solid buttons for the answers, ghost for
+           Dismiss, per
            https://www.xmlui.org/docs/reference/components/Button#variant . -->
       <PushSource
         id="startupAgentChoice"
@@ -1103,14 +1104,12 @@
             width="*"
             fontSize="$fontSize-sm"
             value="Which agent do you use in this project?" />
-          <Button
-            label="Claude"
-            size="xs"
-            onClick="window.__bramChooseStartupAgent('claude', toast)" />
-          <Button
-            label="Codex"
-            size="xs"
-            onClick="window.__bramChooseStartupAgent('codex', toast)" />
+          <Items data="{startupAgentChoice.value ? startupAgentChoice.value.installed : []}">
+            <Button
+              label="{window.__bramProviderLabel($item)}"
+              size="xs"
+              onClick="window.__bramChooseStartupAgent($item, toast)" />
+          </Items>
           <Button
             label="Dismiss"
             variant="ghost"
@@ -1120,7 +1119,7 @@
         <Text
           fontSize="$fontSize-sm"
           color="$textColor-secondary"
-          value="Both are installed. Bram saves your answer for this project in .bram.json, and you can change it later in Settings." />
+          value="These are the agents installed on this machine. Bram saves your answer for this project in .bram.json, and you can change it later in Settings." />
       </VStack>
       <!-- agent-launch-failure-in-pane:a launch that failed (the agent
            exited right after launch, or the terminal never came back to a

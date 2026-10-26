@@ -49,7 +49,9 @@ class LauncherPromptCommandTests(unittest.TestCase):
         self.assertEqual(MARKER.findall(out), MAIN_MARKERS)
 
     def test_set_runs_once_as_a_started_command(self):
-        out = run_shell({"BRAM_LAUNCHER_PROMPT_COMMAND": "echo LAUNCHED"})
+        # The command unsets PROMPT_COMMAND, as a launcher's may; the later
+        # prompts still being reported proves the shellrc restores its own.
+        out = run_shell({"BRAM_LAUNCHER_PROMPT_COMMAND": "unset PROMPT_COMMAND; echo LAUNCHED"})
         markers = MARKER.findall(out)
         # exec, its output, then the first prompt with its status; after that,
         # the same as main. No prompt is reported before the command returns.
@@ -60,9 +62,16 @@ class LauncherPromptCommandTests(unittest.TestCase):
         self.assertEqual(out.count("LAUNCHED"), 1)
 
     def test_set_is_not_visible_to_a_child_process(self):
-        commands = 'printenv BRAM_LAUNCHER_PROMPT_COMMAND || echo CHILD-SEES-NOTHING\necho "SHELL-VAR=[${BRAM_LAUNCHER_PROMPT_COMMAND-unset}]"\n'
-        out = run_shell({"BRAM_LAUNCHER_PROMPT_COMMAND": "true"}, commands)
+        # The child that matters most is the launcher's own command (e.g.
+        # `herdr agent attach`), so check from inside it, not only afterwards.
+        probe = (
+            f"{BASH} -c '[ -n \"${{BRAM_LAUNCHER_PROMPT_COMMAND+x}}\" ]"
+            " && echo CHILD-SEES-IT || echo CHILD-SEES-NOTHING'"
+        )
+        commands = 'echo "SHELL-VAR=[${BRAM_LAUNCHER_PROMPT_COMMAND-unset}]"\n'
+        out = run_shell({"BRAM_LAUNCHER_PROMPT_COMMAND": probe}, commands)
         self.assertIn("CHILD-SEES-NOTHING", out)
+        self.assertNotIn("CHILD-SEES-IT", out)
         self.assertIn("SHELL-VAR=[unset]", out)
 
     def test_exported_prompt_command_never_runs(self):

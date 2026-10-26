@@ -8,7 +8,7 @@
 // claims/clears and stay deliberately fail-open, exit 0 always — a menu hook
 // must never gate or delay a tool call. Every invocation appends one
 // breadcrumb to resources/bram-traces/hook-events.log, tagged `claude-rs` /
-// `codex-rs`, written only when <root>/resources already exists — outside
+// `codex-rs` / `opencode-rs`, written only when <root>/resources already exists — outside
 // that, guard mode creates nothing (`guard_mode_is_inert_without_
 // resources_dir` holds the line).
 
@@ -56,6 +56,15 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
         "codex-worklist" => authority_guarded_dispatch(
             "codex-rs",
             &payload,
+            stdin_error,
+            started,
+            authority_worklist_hook,
+        ),
+        // opencode-worklist-guard: called by the Bram OpenCode plugin's
+        // `execute.before` hook with OpenCode's own tool event.
+        "opencode-worklist" => authority_guarded_dispatch(
+            "opencode-rs",
+            &opencode_policy_payload(&payload),
             stdin_error,
             started,
             authority_worklist_hook,
@@ -137,6 +146,8 @@ fn route_to_project_guard(
     }
     let provider = if hook.starts_with("codex-") {
         "codex-rs"
+    } else if hook.starts_with("opencode-") {
+        "opencode-rs"
     } else {
         "claude-rs"
     };
@@ -267,6 +278,74 @@ fn post_hook_trace(root: &Path, tool: &str, target: &str, decision: &str, reason
     post_json_fail_silent(port, "/__hook-trace", &body.to_string());
 }
 
+// opencode-worklist-guard: OpenCode's tool events in the vocabulary the
+// policy already judges, so OpenCode gets the same gate rather than a third
+// copy of it. `edit` / `write` / `shell` take Claude's shapes; `patch` carries
+// the same `*** Begin Patch` text as Codex's apply_patch, so it takes Codex's.
+// Any other tool passes through by name, which the policy allows. Both
+// flavors read coverage from the same worklist_covered_files.
+fn opencode_policy_payload(payload: &serde_json::Value) -> serde_json::Value {
+    let input = payload
+        .get("input")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let cwd = str_field(payload, "cwd");
+    let field = |k: &str| input.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    // The plugin sends absolute paths today; a relative one is resolved the
+    // way OpenCode resolves it, against the project directory.
+    let path = input
+        .get("path")
+        .or_else(|| input.get("filePath"))
+        .and_then(|v| v.as_str())
+        .map(|p| {
+            if Path::new(p).is_absolute() || cwd.is_empty() {
+                p.to_string()
+            } else {
+                Path::new(&cwd).join(p).to_string_lossy().into_owned()
+            }
+        });
+    let (tool_name, tool_input) = match str_field(payload, "tool").as_str() {
+        "edit" => (
+            "Edit".to_string(),
+            serde_json::json!({
+                "file_path": path,
+                "old_string": field("oldString"),
+                "new_string": field("newString"),
+                "replace_all": field("replaceAll"),
+            }),
+        ),
+        "write" => (
+            "Write".to_string(),
+            serde_json::json!({ "file_path": path, "content": field("content") }),
+        ),
+        "shell" => (
+            "Bash".to_string(),
+            serde_json::json!({ "command": field("command") }),
+        ),
+        "patch" => (
+            "apply_patch".to_string(),
+            serde_json::json!({ "input": field("patchText") }),
+        ),
+        other => (other.to_string(), input.clone()),
+    };
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "cwd": cwd,
+    })
+}
+
+// The OpenCode plugin reads one JSON line from stdout; anything else, it
+// treats as a deny.
+fn opencode_answer(decision: &str, message: &str) -> i32 {
+    println!(
+        "{}",
+        serde_json::json!({ "decision": decision, "message": message })
+    );
+    0
+}
+
 fn authority_worklist_hook(
     provider: &str,
     payload: &serde_json::Value,
@@ -274,8 +353,17 @@ fn authority_worklist_hook(
 ) -> i32 {
     let tool = str_field(payload, "tool_name");
     let root = resolve_project_root(provider, payload);
-    let Some(v) = crate::guard_policy::shadow_worklist_decision(provider, payload) else {
-        return 0;
+    let policy_provider = match provider {
+        "opencode-rs" if tool == "apply_patch" => "codex-rs",
+        "opencode-rs" => "claude-rs",
+        other => other,
+    };
+    let Some(v) = crate::guard_policy::shadow_worklist_decision(policy_provider, payload) else {
+        return if provider == "opencode-rs" {
+            opencode_answer("allow", "")
+        } else {
+            0
+        };
     };
     post_hook_trace(&root, &tool, &v.target, &v.decision, &v.reason);
     append_breadcrumb(
@@ -316,12 +404,15 @@ fn authority_worklist_hook(
         if let Some(turn_key) = &v.audit_turn_key {
             if let Some(port) = find_port_upward(&root) {
                 let body = serde_json::json!({
-                    "provider": if provider == "codex-rs" { "codex" } else { "claude" },
+                    "provider": provider.trim_end_matches("-rs"),
                     "source": "bram-guard-opt-out",
                     "turnKey": turn_key,
                 });
                 post_json_fail_silent(port, "/__audit/direct-edit", &body.to_string());
             }
+        }
+        if provider == "opencode-rs" {
+            return opencode_answer("allow", "");
         }
         return 0;
     }
@@ -343,6 +434,16 @@ fn authority_worklist_hook(
         });
         println!("{}", out);
         return 0;
+    }
+    if provider == "opencode-rs" {
+        return opencode_answer(
+            "deny",
+            if message.is_empty() {
+                "blocked"
+            } else {
+                &message
+            },
+        );
     }
     eprintln!("{}", message);
     2
@@ -466,6 +567,10 @@ fn authority_fail_closed(
         println!("{}", out);
         eprintln!("{}", message);
         return 0;
+    }
+    if provider == "opencode-rs" {
+        eprintln!("{}", message);
+        return opencode_answer("deny", &message);
     }
     eprintln!("{}", message);
     2
@@ -1140,6 +1245,137 @@ mod guard_mode_tests {
             log.contains("codex-rs PreToolUse apply_patch"),
             "log: {log}"
         );
+        assert!(log.contains("decided=error target=- ms="), "log: {log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // opencode-worklist-guard: the shapes the 2026-10-23 spike captured from
+    // OpenCode 2.1.4's execute.before (`path`, not `filePath`).
+    #[test]
+    fn opencode_events_translate_to_the_policy_vocabulary() {
+        let t = |v: serde_json::Value| opencode_policy_payload(&v);
+        let edit = t(serde_json::json!({
+            "tool": "edit", "cwd": "/p",
+            "input": { "path": "/p/a.txt", "oldString": "x", "newString": "y" }
+        }));
+        assert_eq!(edit["hook_event_name"], "PreToolUse");
+        assert_eq!(edit["tool_name"], "Edit");
+        assert_eq!(edit["tool_input"]["file_path"], "/p/a.txt");
+        assert_eq!(edit["tool_input"]["old_string"], "x");
+        assert_eq!(edit["tool_input"]["new_string"], "y");
+        assert_eq!(edit["cwd"], "/p");
+        let write = t(serde_json::json!({
+            "tool": "write", "cwd": "/p", "input": { "path": "b.txt", "content": "hi" }
+        }));
+        assert_eq!(write["tool_name"], "Write");
+        assert_eq!(
+            write["tool_input"]["file_path"],
+            Path::new("/p").join("b.txt").to_string_lossy().as_ref()
+        );
+        assert_eq!(write["tool_input"]["content"], "hi");
+        let shell = t(serde_json::json!({
+            "tool": "shell", "cwd": "/p", "input": { "command": "echo done" }
+        }));
+        assert_eq!(shell["tool_name"], "Bash");
+        assert_eq!(shell["tool_input"]["command"], "echo done");
+        let patch = t(serde_json::json!({
+            "tool": "patch", "cwd": "/p", "input": { "patchText": "*** Begin Patch" }
+        }));
+        assert_eq!(patch["tool_name"], "apply_patch");
+        assert_eq!(patch["tool_input"]["input"], "*** Begin Patch");
+        let read = t(serde_json::json!({
+            "tool": "read", "cwd": "/p", "input": { "path": "/p/a.txt" }
+        }));
+        assert_eq!(read["tool_name"], "read");
+        assert_eq!(read["tool_input"]["path"], "/p/a.txt");
+    }
+
+    #[test]
+    fn opencode_decisions_follow_worklist_coverage() {
+        let root = scratch("opencode-coverage");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("resources/worklist.json"),
+            r#"{"version":1,"items":[{"id":"x","status":"proposed","files":["covered.txt"]}]}"#,
+        )
+        .unwrap();
+        let decide = |tool: &str, input: serde_json::Value| {
+            let p = opencode_policy_payload(&serde_json::json!({
+                "tool": tool, "cwd": root.to_string_lossy(), "input": input
+            }));
+            let flavor = if p["tool_name"] == "apply_patch" {
+                "codex-rs"
+            } else {
+                "claude-rs"
+            };
+            crate::guard_policy::shadow_worklist_decision(flavor, &p)
+                .unwrap()
+                .decision
+        };
+        let at = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let patch = |name: &str| {
+            format!(
+                "*** Begin Patch\n*** Update File: {}\n@@\n-a\n+b\n*** End Patch",
+                name
+            )
+        };
+        assert_eq!(
+            decide(
+                "write",
+                serde_json::json!({ "path": at("covered.txt"), "content": "ok" })
+            ),
+            "allow"
+        );
+        assert_eq!(
+            decide(
+                "write",
+                serde_json::json!({ "path": at("other.txt"), "content": "no" })
+            ),
+            "deny"
+        );
+        assert_eq!(
+            decide(
+                "edit",
+                serde_json::json!({ "path": at("other.txt"), "oldString": "a", "newString": "b" })
+            ),
+            "deny"
+        );
+        assert_eq!(
+            decide(
+                "patch",
+                serde_json::json!({ "patchText": patch("covered.txt") })
+            ),
+            "allow"
+        );
+        assert_eq!(
+            decide(
+                "patch",
+                serde_json::json!({ "patchText": patch("other.txt") })
+            ),
+            "deny"
+        );
+        assert_eq!(
+            decide("read", serde_json::json!({ "path": at("other.txt") })),
+            "allow"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn opencode_authority_fails_closed_on_unparseable_stdin() {
+        let root = scratch("fault-opencode-stdin");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let code = authority_fail_closed(
+            &root,
+            "opencode-rs",
+            "Write",
+            GuardFault::UnparseableStdin("EOF while parsing".into()),
+            std::time::Instant::now(),
+        );
+        assert_eq!(code, 0, "OpenCode denies via its stdout JSON line, exit 0");
+        let log = read_crumbs(&root);
+        assert!(log.contains("opencode-rs PreToolUse Write"), "log: {log}");
         assert!(log.contains("decided=error target=- ms="), "log: {log}");
         let _ = std::fs::remove_dir_all(&root);
     }

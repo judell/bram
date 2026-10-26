@@ -2006,7 +2006,7 @@ pub(crate) fn parse_agent_signature(line: &str) -> Option<AgentSignature<'_>> {
         return None;
     }
     let (agent, rest) = rest.split_once(" (")?;
-    if !matches!(agent, "Claude" | "Codex") {
+    if !matches!(agent, "Claude" | "Codex" | "OpenCode") {
         return None;
     }
     let (standing, rest) = rest.split_once(") speaking from the ")?;
@@ -6299,6 +6299,20 @@ mod guard_policy_tests {
         // validation, and the whole parse fails.
         assert!(parse_agent_signature(
             "Jon's Claude (Bramble 5, main thread, Fable 5) speaking from the Bram project (github.com/judell/bram):",
+        )
+        .is_none());
+
+        // (e) opencode-signature-and-conventions: OpenCode signs as itself,
+        // with the model it is actually running in the model slot.
+        let sig = parse_agent_signature(
+            "Asish's OpenCode (Bram 0.7.7, main thread, deepseek-v4.1-flash, macOS, Mac) speaking from the Bram project (github.com/judell/bram):",
+        )
+        .expect("OpenCode signature should parse");
+        assert_eq!(sig.model, "deepseek-v4.1-flash");
+        assert_eq!(sig.locator, "github.com/judell/bram");
+        // Any other agent name still fails, so a typo can't pass as signed.
+        assert!(parse_agent_signature(
+            "Asish's Opencode (Bram 0.7.7, main thread, x, macOS, Mac) speaking from the Bram project (github.com/judell/bram):",
         )
         .is_none());
     }

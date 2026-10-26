@@ -6336,20 +6336,177 @@ fn emit_terminal_attention<R: tauri::Runtime>(
             "active": active,
             "shape": shape,
             "atMs": now_ms,
-            // terminal-attention-login-screen: the pane offers the other
+            // terminal-attention-login-screen: the pane offers one other
             // agent, but only when its CLI is on PATH.
-            "switchTo": if active { login_switch_target(shape) } else { None },
+            "switchTo": if active { login_switch_target(app, shape) } else { None },
         }),
     );
 }
 
-fn login_switch_target(shape: Option<&str>) -> Option<&'static str> {
-    let other = match shape {
-        Some("claude-login") => "codex",
-        Some("codex-login") => "claude",
+// Three agents, one slot order: Claude, Codex, OpenCode. Index into every
+// per-agent flag array here, so the picker, the login offer and their tests
+// can't drift apart. issue-448's picker and terminal-attention-login-screen's
+// offer were written for two agents; catch-up-with-main-after-v0.7.8 widened
+// both.
+const STARTUP_AGENTS: [SessionProvider; 3] = [
+    SessionProvider::Claude,
+    SessionProvider::Codex,
+    SessionProvider::Opencode,
+];
+
+// The login offer's preference order when no installed agent has sessions in
+// this project: Codex, Claude, OpenCode. Codex first keeps the two-agent
+// behaviour — a logged-out Claude was always traded for Codex.
+const LOGIN_SWITCH_ORDER: [SessionProvider; 3] = [
+    SessionProvider::Codex,
+    SessionProvider::Claude,
+    SessionProvider::Opencode,
+];
+
+fn provider_slot(provider: SessionProvider) -> usize {
+    match provider {
+        SessionProvider::Claude => 0,
+        SessionProvider::Codex => 1,
+        SessionProvider::Opencode => 2,
+    }
+}
+
+fn installed_agent_flags() -> [bool; 3] {
+    STARTUP_AGENTS.map(|provider| agent_cli_on_path(session_provider_label(provider)))
+}
+
+fn installed_agent_labels() -> Vec<&'static str> {
+    let installed = installed_agent_flags();
+    STARTUP_AGENTS
+        .iter()
+        .copied()
+        .filter(|provider| installed[provider_slot(*provider)])
+        .map(session_provider_label)
+        .collect()
+}
+
+fn provider_has_sessions<R: tauri::Runtime>(app: &AppHandle<R>, provider: SessionProvider) -> bool {
+    latest_session_path_for_provider(app, provider)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn session_flags<R: tauri::Runtime>(app: &AppHandle<R>) -> [bool; 3] {
+    STARTUP_AGENTS.map(|provider| provider_has_sessions(app, provider))
+}
+
+// terminal-attention-login-screen (#448): the pane offers one other agent, but
+// only when its CLI is on PATH. With three agents "the other one" isn't
+// defined, so the offer is the installed agent with sessions in this project,
+// else the first installed one in LOGIN_SWITCH_ORDER — never the agent that
+// isn't logged in.
+fn login_switch_target<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    shape: Option<&str>,
+) -> Option<&'static str> {
+    let blocked = match shape {
+        Some("claude-login") => SessionProvider::Claude,
+        Some("codex-login") => SessionProvider::Codex,
         _ => return None,
     };
-    agent_cli_on_path(other).then_some(other)
+    login_switch_choice(blocked, installed_agent_flags(), session_flags(app))
+        .map(session_provider_label)
+}
+
+// The pure half, so the three-agent rule is testable without an AppHandle.
+fn login_switch_choice(
+    blocked: SessionProvider,
+    installed: [bool; 3],
+    has_sessions: [bool; 3],
+) -> Option<SessionProvider> {
+    let eligible =
+        |provider: SessionProvider| provider != blocked && installed[provider_slot(provider)];
+    LOGIN_SWITCH_ORDER
+        .iter()
+        .copied()
+        .filter(|provider| eligible(*provider))
+        .find(|provider| has_sessions[provider_slot(*provider)])
+        .or_else(|| {
+            LOGIN_SWITCH_ORDER
+                .iter()
+                .copied()
+                .find(|provider| eligible(*provider))
+        })
+}
+
+#[cfg(test)]
+mod login_switch_offer_tests {
+    use super::{login_switch_choice, SessionProvider};
+
+    // Slots: Claude, Codex, OpenCode.
+    const ALL_INSTALLED: [bool; 3] = [true, true, true];
+    const NO_SESSIONS: [bool; 3] = [false, false, false];
+
+    #[test]
+    fn a_logged_out_claude_is_traded_for_codex_as_before() {
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, NO_SESSIONS),
+            Some(SessionProvider::Codex)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Codex, ALL_INSTALLED, NO_SESSIONS),
+            Some(SessionProvider::Claude)
+        );
+    }
+
+    #[test]
+    fn opencode_is_offered_when_it_is_the_installed_alternative() {
+        // The only other CLI on this machine.
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, [true, false, true], NO_SESSIONS),
+            Some(SessionProvider::Opencode)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Codex, [false, true, true], NO_SESSIONS),
+            Some(SessionProvider::Opencode)
+        );
+    }
+
+    #[test]
+    fn sessions_in_this_project_outrank_the_fixed_order() {
+        // Codex is installed, but this project has only ever run OpenCode:
+        // offer the agent that already has context here.
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [false, false, true]),
+            Some(SessionProvider::Opencode)
+        );
+    }
+
+    #[test]
+    fn the_logged_out_agent_is_never_offered() {
+        // Codex has sessions here, but Codex is the one that isn't logged in.
+        assert_eq!(
+            login_switch_choice(SessionProvider::Codex, ALL_INSTALLED, [false, true, false]),
+            Some(SessionProvider::Claude)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [true, false, false]),
+            Some(SessionProvider::Codex)
+        );
+    }
+
+    #[test]
+    fn no_installed_alternative_offers_nothing() {
+        assert_eq!(
+            login_switch_choice(SessionProvider::Claude, [true, false, false], NO_SESSIONS),
+            None
+        );
+        // Sessions of an uninstalled agent don't make it offerable.
+        assert_eq!(
+            login_switch_choice(
+                SessionProvider::Claude,
+                [true, false, false],
+                [false, false, true]
+            ),
+            None
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8367,6 +8524,7 @@ fn session_provider_label(provider: SessionProvider) -> &'static str {
     match provider {
         SessionProvider::Claude => "claude",
         SessionProvider::Codex => "codex",
+        SessionProvider::Opencode => "opencode",
     }
 }
 
@@ -18594,11 +18752,14 @@ fn run_startup_autostart(
     {
         let picked = session_provider_label(launch.provider);
         if !agent_cli_on_path(picked) {
-            let other = match launch.provider {
-                SessionProvider::Claude => SessionProvider::Codex,
-                SessionProvider::Codex => SessionProvider::Claude,
-            };
-            if agent_cli_on_path(session_provider_label(other)) {
+            // The other two, in STARTUP_AGENTS order: the first installed one
+            // wins. With Claude and Codex installed this is exactly the old
+            // pair; OpenCode is the last resort rather than unreachable.
+            let fallback = STARTUP_AGENTS.iter().copied().find(|candidate| {
+                *candidate != launch.provider
+                    && agent_cli_on_path(session_provider_label(*candidate))
+            });
+            if let Some(other) = fallback {
                 append_bram_trace_line(
                     &app,
                     "agent-switch",
@@ -18741,17 +18902,22 @@ enum StartupAgentPick {
 
 fn startup_agent_pick(
     agent_configured: bool,
-    claude_on_path: bool,
-    codex_on_path: bool,
-    claude_has_sessions: bool,
-    codex_has_sessions: bool,
+    installed: [bool; 3],
+    has_sessions: [bool; 3],
 ) -> StartupAgentPick {
-    if agent_configured || !(claude_on_path && codex_on_path) {
+    // The launch ladder already decides when the project named an agent, and
+    // its sole-CLI rung covers a machine with one agent installed. With two or
+    // more installed and nothing named, starting one is a guess unless this
+    // project's own history names exactly one of them.
+    if agent_configured || installed.iter().filter(|on_path| **on_path).count() < 2 {
         return StartupAgentPick::Configured;
     }
-    match (claude_has_sessions, codex_has_sessions) {
-        (true, false) => StartupAgentPick::Evidence(SessionProvider::Claude),
-        (false, true) => StartupAgentPick::Evidence(SessionProvider::Codex),
+    let mut evidenced = STARTUP_AGENTS.iter().copied().filter(|provider| {
+        let slot = provider_slot(*provider);
+        installed[slot] && has_sessions[slot]
+    });
+    match (evidenced.next(), evidenced.next()) {
+        (Some(provider), None) => StartupAgentPick::Evidence(provider),
         _ => StartupAgentPick::Ask,
     }
 }
@@ -18775,19 +18941,7 @@ fn startup_agent_pick_for(app: &AppHandle, startup_policy: AgentStartupPolicy) -
     {
         return StartupAgentPick::Configured;
     }
-    let has_sessions = |provider| {
-        latest_session_path_for_provider(app, provider)
-            .ok()
-            .flatten()
-            .is_some()
-    };
-    startup_agent_pick(
-        false,
-        agent_cli_on_path("claude"),
-        agent_cli_on_path("codex"),
-        has_sessions(SessionProvider::Claude),
-        has_sessions(SessionProvider::Codex),
-    )
+    startup_agent_pick(false, installed_agent_flags(), session_flags(app))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -18808,6 +18962,10 @@ fn emit_startup_agent_choice(app: &AppHandle, pending: bool, chosen: Option<&str
             "pending": pending,
             "chosen": chosen,
             "atMs": unix_now_ms(),
+            // The answers the card may offer: every agent installed on this
+            // machine, not the two the two-agent picker assumed. Empty once
+            // the question is answered, so nothing reads a stale list.
+            "installed": if pending { installed_agent_labels() } else { Vec::new() },
         }),
     );
 }
@@ -18821,9 +18979,10 @@ fn hold_startup_autostart_for_choice(app: &AppHandle, pending: PendingStartupAut
             app,
             "agent-switch",
             &format!(
-                "op=launch-ask policy={} first_unmanaged={}",
+                "op=launch-ask policy={} first_unmanaged={} installed={}",
                 pending.startup_policy.as_str(),
-                pending.first_unmanaged_launch
+                pending.first_unmanaged_launch,
+                installed_agent_labels().join(",")
             ),
         );
     }
@@ -18858,11 +19017,9 @@ fn clear_pending_startup_agent_choice(app: &AppHandle, reason: &str) {
 // launches; the error comes back for the pane to show.
 #[tauri::command]
 fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> {
-    let chosen = match provider.trim().to_ascii_lowercase().as_str() {
-        "codex" => SessionProvider::Codex,
-        "claude" => SessionProvider::Claude,
-        other => return Err(format!("unknown agent provider: {}", other)),
-    };
+    let requested = provider.trim().to_ascii_lowercase();
+    let chosen = SessionProvider::from_str(&requested)
+        .ok_or_else(|| format!("unknown agent provider: {}", requested))?;
     let pending = take_pending_startup_autostart()
         .ok_or_else(|| "No launch is waiting for an agent choice.".to_string())?;
     let label = session_provider_label(chosen);
@@ -18902,14 +19059,18 @@ fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> 
 mod startup_agent_pick_tests {
     use super::{startup_agent_pick, SessionProvider, StartupAgentPick};
 
+    // Slots: Claude, Codex, OpenCode.
+    const ALL_INSTALLED: [bool; 3] = [true, true, true];
+    const NO_SESSIONS: [bool; 3] = [false, false, false];
+
     #[test]
     fn configured_agent_always_decides() {
         assert_eq!(
-            startup_agent_pick(true, true, true, false, false),
+            startup_agent_pick(true, ALL_INSTALLED, NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(true, true, true, false, true),
+            startup_agent_pick(true, ALL_INSTALLED, [true, true, true]),
             StartupAgentPick::Configured
         );
     }
@@ -18917,11 +19078,15 @@ mod startup_agent_pick_tests {
     #[test]
     fn one_cli_leaves_it_to_the_sole_cli_rung() {
         assert_eq!(
-            startup_agent_pick(false, true, false, false, false),
+            startup_agent_pick(false, [true, false, false], NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(false, false, true, true, false),
+            startup_agent_pick(false, [false, true, false], NO_SESSIONS),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(false, [false, false, true], NO_SESSIONS),
             StartupAgentPick::Configured
         );
     }
@@ -18929,23 +19094,54 @@ mod startup_agent_pick_tests {
     #[test]
     fn sessions_for_one_agent_pick_it() {
         assert_eq!(
-            startup_agent_pick(false, true, true, false, true),
+            startup_agent_pick(false, ALL_INSTALLED, [false, true, false]),
             StartupAgentPick::Evidence(SessionProvider::Codex)
         );
         assert_eq!(
-            startup_agent_pick(false, true, true, true, false),
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, false]),
             StartupAgentPick::Evidence(SessionProvider::Claude)
+        );
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, [false, false, true]),
+            StartupAgentPick::Evidence(SessionProvider::Opencode)
         );
     }
 
     #[test]
-    fn no_evidence_or_both_asks() {
+    fn two_installed_agents_can_still_use_evidence() {
+        // Claude and OpenCode installed, OpenCode the only one with sessions.
         assert_eq!(
-            startup_agent_pick(false, true, true, false, false),
+            startup_agent_pick(false, [true, false, true], [false, false, true]),
+            StartupAgentPick::Evidence(SessionProvider::Opencode)
+        );
+        // ... and with no sessions anywhere, the card asks.
+        assert_eq!(
+            startup_agent_pick(false, [true, false, true], NO_SESSIONS),
+            StartupAgentPick::Ask
+        );
+    }
+
+    #[test]
+    fn sessions_for_an_uninstalled_agent_do_not_pick_it() {
+        // OpenCode ran here once but its CLI is gone: starting it would fail.
+        assert_eq!(
+            startup_agent_pick(false, [true, true, false], [false, false, true]),
+            StartupAgentPick::Ask
+        );
+    }
+
+    #[test]
+    fn no_evidence_or_two_agents_with_sessions_asks() {
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, NO_SESSIONS),
             StartupAgentPick::Ask
         );
         assert_eq!(
-            startup_agent_pick(false, true, true, true, true),
+            startup_agent_pick(false, ALL_INSTALLED, [true, true, true]),
+            StartupAgentPick::Ask
+        );
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, true]),
             StartupAgentPick::Ask
         );
     }
@@ -19968,6 +20164,7 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
                 .get(&sid)
                 .cloned()
                 .or_else(|| codex_session_title(&path).ok().flatten()),
+            SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
         };
         let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
         if let Some(obj) = item.as_object_mut() {
@@ -20769,6 +20966,23 @@ fn launch_confirm_state(fg: ShellForeground, written_from_ms: i64) -> LaunchConf
 // The terminal's last words before the prompt that ended the agent: the
 // ANSI-stripped PTY tail minus its final (prompt) line, last 3 lines, one
 // line of text for the trace and the pane.
+// switch-launch-eats-stray-cursor-report: what the launch types. An agent
+// that asks for the cursor position (CSI ? 6 n) as it exits can have the
+// terminal's reply (`ESC[?51;3R`) arrive after it has stopped reading. Bash's
+// readline then holds `51;3R` on the line, and the command ran as
+// `51;3Ropencode --continue` (status 127; twice in six switches, 2026-10-26).
+// Ctrl-U (unix-line-discard, also bound in readline's vi-insert map) clears
+// the line first, in the same write. Launches are gated on a shell prompt, so
+// it reaches readline, and on an empty line it does nothing. Windows keeps
+// the bare command: PowerShell's PSReadLine binds keys differently.
+fn launch_line(command: &str, clear_line: bool) -> String {
+    if clear_line {
+        format!("\u{15}{}\r", command)
+    } else {
+        format!("{}\r", command)
+    }
+}
+
 fn launch_exit_tail(raw: &[u8]) -> String {
     let stripped = strip_ansi(raw);
     let text = String::from_utf8_lossy(&stripped);
@@ -20881,8 +21095,12 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
     // the first command is typed first and they flush behind it.
     let _pending = LaunchPendingGuard::arm(l.generation);
     let written_from = unix_now_ms();
-    if let Err(error) = pty_write_internal(app, &state, &format!("{}\r", l.command), l.caller_hint)
-    {
+    if let Err(error) = pty_write_internal(
+        app,
+        &state,
+        &launch_line(&l.command, !cfg!(windows)),
+        l.caller_hint,
+    ) {
         trace(format!(
             "op=launch-error provider={} source={} error={}",
             l.provider, l.source, error
@@ -20969,9 +21187,20 @@ fn usable_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<C
 #[cfg(test)]
 mod agent_launch_tests {
     use super::{
-        codex_pin_usable, launch_confirm_state as confirm, launch_exit_tail, CodexReloadTarget,
-        LaunchConfirm, ShellForeground,
+        codex_pin_usable, launch_confirm_state as confirm, launch_exit_tail, launch_line,
+        CodexReloadTarget, LaunchConfirm, ShellForeground,
     };
+
+    #[test]
+    fn unix_launches_clear_the_shell_line_first() {
+        // switch-launch-eats-stray-cursor-report: "51;3R" left on the line by
+        // a late cursor-position reply ran as `51;3Ropencode --continue`.
+        assert_eq!(
+            launch_line("opencode --continue", true),
+            "\u{15}opencode --continue\r"
+        );
+        assert_eq!(launch_line("codex", false), "codex\r");
+    }
 
     fn fg(at_prompt: bool, status: i32, at_ms: i64, exec_ms: i64) -> ShellForeground {
         ShellForeground {
@@ -21109,6 +21338,7 @@ fn switch_agent(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "switch")?;
@@ -21148,19 +21378,21 @@ fn switch_agent(
     // provider-session-counterparts: the session being left, and its partner
     // on the target side. A partner whose file is gone is skipped, and the
     // switch falls back to today's order.
-    let target_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let target_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     let leaving = current_provider(&app)
         .filter(|p| *p != target_provider)
         .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
     let partner = leaving.as_ref().and_then(|(p, sid)| {
         let conn = worklist_state_open(&app)?;
-        let id = worklist_state::session_partner(&conn, session_provider_label(*p), sid)
-            .ok()
-            .flatten()?;
+        let id = worklist_state::session_partner(
+            &conn,
+            session_provider_label(*p),
+            sid,
+            session_provider_label(target_provider),
+        )
+        .ok()
+        .flatten()?;
         if session_path_for_id(&app, target_provider, &id).is_some() {
             Some(id)
         } else {
@@ -21197,10 +21429,20 @@ fn switch_agent(
     // partner the switch could mean (tau-accounting 2026-10-08 20:40Z: an
     // unnamed, unpaired Codex session and no offer). Both reasons require the
     // leaving session never to have been paired or unpaired.
+    // opencode-partner-handoff: "never paired" is asked of the target side,
+    // so a session already paired with one provider can still start its
+    // first partner on another.
     let fresh_reason: Option<&'static str> = leaving.as_ref().and_then(|(p, sid)| {
         let conn = worklist_state_open(&app)?;
         let label = session_provider_label(*p);
-        if !worklist_state::session_never_paired(&conn, label, sid).ok()? {
+        if !worklist_state::session_never_paired(
+            &conn,
+            label,
+            sid,
+            session_provider_label(target_provider),
+        )
+        .ok()?
+        {
             return None;
         }
         fresh_partner_reason(
@@ -21324,8 +21566,13 @@ fn switch_agent(
         && leaving.as_ref().is_some_and(|(p, sid)| {
             worklist_state_open(&app)
                 .and_then(|conn| {
-                    worklist_state::session_never_paired(&conn, session_provider_label(*p), sid)
-                        .ok()
+                    worklist_state::session_never_paired(
+                        &conn,
+                        session_provider_label(*p),
+                        sid,
+                        session_provider_label(target_provider),
+                    )
+                    .ok()
                 })
                 .unwrap_or(false)
         });
@@ -21351,7 +21598,12 @@ fn switch_agent(
         live_session_id(&app, target_provider)
     } else if resume_reason == "fresh-for-new-session" {
         let baseline = live_session_id(&app, target_provider);
-        if let Some((title, sid)) = fresh.as_ref() {
+        // opencode-partner-handoff: Bram can't rename an OpenCode session, so
+        // its fresh partner keeps OpenCode's own title; the pair still forms.
+        if let Some((title, sid)) = fresh
+            .as_ref()
+            .filter(|_| target_provider != SessionProvider::Opencode)
+        {
             write_pending_session_title(&app, provider_key, title, sid.clone(), "switch");
             if bram_trace_enabled() {
                 append_bram_trace_line(
@@ -21402,11 +21654,8 @@ fn switch_agent(
     // swallowed it and stranded the session at bare PowerShell. The shared
     // launch routine gates on the shell's prompt, confirms the agent came up,
     // and on timeout types nothing.
-    let session_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let session_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     launch_agent_command(AgentLaunch {
         app: app.clone(),
         generation,
@@ -21489,7 +21738,12 @@ fn switch_agent(
                 if resume_reason == "fresh-for-new-session" {
                     // issue-443: a Codex target is waited on, off the launch
                     // thread (which still has the first command to type).
-                    if target_provider == SessionProvider::Codex {
+                    // opencode-partner-handoff: OpenCode takes seconds to
+                    // show its prompt, so it is waited on like Codex.
+                    if matches!(
+                        target_provider,
+                        SessionProvider::Codex | SessionProvider::Opencode
+                    ) {
                         let (app2, from, d) = (app.clone(), pair_from.clone(), digest.clone());
                         std::thread::spawn(move || {
                             fresh_partner_catch_up(&app2, target_provider, from, d, true)
@@ -21554,14 +21808,12 @@ fn record_pair_for<R: tauri::Runtime>(
     if a.0 == b.0 {
         return;
     }
-    let (claude, codex) = match a.0 {
-        SessionProvider::Claude => (a.1.as_str(), b.1.as_str()),
-        SessionProvider::Codex => (b.1.as_str(), a.1.as_str()),
-    };
+    let (al, bl) = (session_provider_label(a.0), session_provider_label(b.0));
     let Some(conn) = worklist_state_open(app) else {
         return;
     };
-    let result = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms(), source);
+    let result =
+        worklist_state::record_session_pair(&conn, al, &a.1, bl, &b.1, unix_now_ms(), source);
     if bram_trace_enabled() {
         let outcome = match &result {
             Ok(true) => "ok".to_string(),
@@ -21572,8 +21824,8 @@ fn record_pair_for<R: tauri::Runtime>(
             app,
             "state-mirror",
             &format!(
-                "op=pair-stamp claude={} codex={} source={} result={}",
-                claude, codex, source, outcome
+                "op=pair-stamp {}={} {}={} source={} result={}",
+                al, a.1, bl, b.1, source, outcome
             ),
         );
     }
@@ -21593,37 +21845,43 @@ fn pair_sessions_route<R: tauri::Runtime>(
     app: &AppHandle<R>,
     query: &str,
 ) -> Result<Vec<u8>, String> {
-    let mut claude = String::new();
-    let mut codex = String::new();
+    // opencode-partner-handoff: the two sides arrive as `<provider>=<id>`,
+    // any two of claude / codex / opencode (the pane always sent claude and
+    // codex before).
+    let mut sides: Vec<(SessionProvider, String)> = Vec::new();
     // provider-session-digest-for-codex: the side the offer was about (the
     // session you switched away from), whose digest the other side reads.
     let mut from: Option<SessionProvider> = None;
     for pair in query.split('&') {
-        if let Some(v) = pair.strip_prefix("claude=") {
-            claude = percent_decode(v);
-        } else if let Some(v) = pair.strip_prefix("codex=") {
-            codex = percent_decode(v);
-        } else if let Some(v) = pair.strip_prefix("from=") {
-            from = SessionProvider::from_str(&percent_decode(v));
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == "from" {
+            from = SessionProvider::from_str(&percent_decode(value));
+        } else if let Some(p) = SessionProvider::from_str(key) {
+            let id = percent_decode(value);
+            if !id.is_empty() && !sides.iter().any(|(q, _)| *q == p) {
+                sides.push((p, id));
+            }
         }
     }
-    if claude.is_empty() || codex.is_empty() {
-        return Err("claude and codex ids required".to_string());
-    }
-    record_pair_for(
-        app,
-        &(SessionProvider::Claude, claude.clone()),
-        &(SessionProvider::Codex, codex.clone()),
-        "offer-keep",
-    );
+    let [a, b] = sides.as_slice() else {
+        return Err("two sessions of different providers required".to_string());
+    };
+    record_pair_for(app, a, b, "offer-keep");
     emit_pair_offer(app, None, None);
     if let Some(fp) = from {
-        let (fid, tp) = match fp {
-            SessionProvider::Claude => (claude.clone(), SessionProvider::Codex),
-            SessionProvider::Codex => (codex.clone(), SessionProvider::Claude),
+        let target = if fp == a.0 {
+            Some((a.1.clone(), b.0))
+        } else if fp == b.0 {
+            Some((b.1.clone(), a.0))
+        } else {
+            None
         };
-        let digest = write_session_digest(app, fp, &fid, true);
-        emit_catch_up_offer(app, Some(&(fp, fid)), Some(tp), digest);
+        if let Some((fid, tp)) = target {
+            let digest = write_session_digest(app, fp, &fid, true);
+            emit_catch_up_offer(app, Some(&(fp, fid)), Some(tp), digest);
+        }
     }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
@@ -21645,6 +21903,8 @@ fn session_title_by_id<R: tauri::Runtime>(
             .ok()
             .and_then(|titles| titles.get(id).cloned())
             .or_else(|| codex_session_title(&path).ok().flatten()),
+        // The export carries OpenCode's title as a custom-title record.
+        SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
     }
 }
 
@@ -21668,24 +21928,27 @@ fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut ser
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let other = match provider.as_str() {
-            "claude" => SessionProvider::Codex,
-            "codex" => SessionProvider::Claude,
-            _ => continue,
-        };
-        let Ok(Some(partner)) = worklist_state::session_partner(&conn, &provider, &id) else {
+        // opencode-partner-handoff: up to one partner per other provider.
+        let Ok(found) = worklist_state::session_partners(&conn, &provider, &id) else {
             continue;
         };
-        let title = session_title_by_id(app, other, &partner);
+        let partners: Vec<serde_json::Value> = found
+            .into_iter()
+            .filter_map(|(label, pid)| {
+                let other = SessionProvider::from_str(label)?;
+                Some(serde_json::json!({
+                    "provider": label,
+                    "id": pid,
+                    "title": session_title_by_id(app, other, &pid),
+                }))
+            })
+            .collect();
+        let Some(first) = partners.first().cloned() else {
+            continue;
+        };
         if let Some(obj) = row.as_object_mut() {
-            obj.insert(
-                "partner".to_string(),
-                serde_json::json!({
-                    "provider": session_provider_label(other),
-                    "id": partner,
-                    "title": title,
-                }),
-            );
+            obj.insert("partner".to_string(), first);
+            obj.insert("partners".to_string(), serde_json::Value::Array(partners));
         }
     }
 }
@@ -21699,23 +21962,35 @@ fn unpair_session<R: tauri::Runtime>(
 ) -> Result<Vec<u8>, String> {
     let provider = provider.ok_or("provider required")?;
     let conn = worklist_state_open(app).ok_or("state db unavailable")?;
-    let (claude, codex) = match provider {
-        SessionProvider::Claude => (session_id, ""),
-        SessionProvider::Codex => ("", session_id),
-    };
-    let wrote = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms(), "unpair")
+    let mine = session_provider_label(provider);
+    // opencode-partner-handoff: a session can have a partner on each other
+    // provider, and Unpair ends all of them.
+    let partners =
+        worklist_state::session_partners(&conn, mine, session_id).map_err(|e| e.to_string())?;
+    for (other, _) in partners {
+        let wrote = worklist_state::record_session_pair(
+            &conn,
+            mine,
+            session_id,
+            other,
+            "",
+            unix_now_ms(),
+            "unpair",
+        )
         .map_err(|e| e.to_string())?;
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "state-mirror",
-            &format!(
-                "op=pair-stamp claude={} codex={} source=unpair result={}",
-                claude,
-                codex,
-                if wrote { "ok" } else { "unchanged" }
-            ),
-        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "state-mirror",
+                &format!(
+                    "op=pair-stamp {}={} {}= source=unpair result={}",
+                    mine,
+                    session_id,
+                    other,
+                    if wrote { "ok" } else { "unchanged" }
+                ),
+            );
+        }
     }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
@@ -21798,10 +22073,14 @@ enum CatchUpReadiness {
     Waiting,
 }
 
-fn catch_up_readiness(tail: &str, codex: bool, wait_for_composer: bool) -> CatchUpReadiness {
-    if let Some(shape) = prompt_shape_for_provider(tail, codex) {
+fn catch_up_readiness(
+    tail: &str,
+    provider: SessionProvider,
+    wait_for_composer: bool,
+) -> CatchUpReadiness {
+    if let Some(shape) = prompt_shape_for_provider(tail, provider == SessionProvider::Codex) {
         CatchUpReadiness::Prompt(shape)
-    } else if !wait_for_composer || codex_composer_ready(tail) {
+    } else if !wait_for_composer || composer_ready(provider, tail) {
         CatchUpReadiness::Ready
     } else {
         CatchUpReadiness::Waiting
@@ -21819,6 +22098,25 @@ fn codex_composer_ready(tail: &str) -> bool {
         .collect::<String>()
         .to_lowercase();
     squashed.contains("openaicodex") && squashed.ends_with("?forshortcuts")
+}
+
+// opencode-partner-handoff: OpenCode's idle screen ends with its key-hint
+// footer (2.1.4 specimen: "shift+tab agents  ctrl+p commands").
+fn opencode_composer_ready(tail: &str) -> bool {
+    let squashed: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    squashed.contains("ctrl+pcommands")
+}
+
+fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
+    match provider {
+        SessionProvider::Codex => codex_composer_ready(tail),
+        SessionProvider::Opencode => opencode_composer_ready(tail),
+        SessionProvider::Claude => true,
+    }
 }
 
 const CATCH_UP_COMPOSER_WAIT_MS: i64 = 30_000;
@@ -21860,11 +22158,7 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
             return;
         }
         let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
-        let r = catch_up_readiness(
-            &tail,
-            target_provider == SessionProvider::Codex,
-            wait_for_composer,
-        );
+        let r = catch_up_readiness(&tail, target_provider, wait_for_composer);
         if r != CatchUpReadiness::Waiting
             || unix_now_ms().saturating_sub(started) >= CATCH_UP_COMPOSER_WAIT_MS
         {
@@ -21938,7 +22232,9 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod catch_up_readiness_tests {
-    use super::{catch_up_readiness as r, CatchUpReadiness::*};
+    use super::{catch_up_readiness as r, CatchUpReadiness::*, SessionProvider};
+    const CODEX: SessionProvider = SessionProvider::Codex;
+    const CLAUDE_P: SessionProvider = SessionProvider::Claude;
     // Codex 0.162.1 captures, 2026-10-16 (stripped tails).
     const COMPOSER: &str = ">_ OpenAI Codex (v0.162.1)~/bram \u{203a}Ask Codex to do anything GPT-6-Astra high\u{b7}~/bram\u{2190} for agents \u{b7} ? for shortcuts";
     const UPDATE: &str = "Update available \u{b7} 0.162.1 \u{2192} 0.163.0Release notes: https://github.com/openai/codex/releases/latest\u{203a} 1. Update now (runs `npm install -g @openai/codex`) 2.Skip3.Skipuntilnextversionenter continue \u{b7} esc skip";
@@ -21949,14 +22245,14 @@ mod catch_up_readiness_tests {
 
     #[test]
     fn codex_waits_for_its_composer() {
-        assert_eq!(r(SHELL, true, true), Waiting);
-        assert_eq!(r(CLAUDE, true, true), Waiting);
-        assert_eq!(r(COMPOSER, true, true), Ready);
+        assert_eq!(r(SHELL, CODEX, true), Waiting);
+        assert_eq!(r(CLAUDE, CODEX, true), Waiting);
+        assert_eq!(r(COMPOSER, CODEX, true), Ready);
     }
 
     #[test]
     fn a_prompt_holds_the_turn() {
-        assert_eq!(r(UPDATE, true, true), Prompt("codex-update"));
+        assert_eq!(r(UPDATE, CODEX, true), Prompt("codex-update"));
     }
 
     // Codex 0.162.1's update prompt from live bytes through strip_ansi
@@ -21966,15 +22262,26 @@ mod catch_up_readiness_tests {
 
     #[test]
     fn live_update_paint_holds_and_its_composer_is_not_ready() {
-        assert_eq!(r(LIVE_UPDATE, true, true), Prompt("codex-update"));
+        assert_eq!(r(LIVE_UPDATE, CODEX, true), Prompt("codex-update"));
         assert!(!super::codex_composer_ready(LIVE_UPDATE));
     }
 
     #[test]
     fn without_waiting_only_a_prompt_holds() {
-        assert_eq!(r(SHELL, false, false), Ready);
+        assert_eq!(r(SHELL, CLAUDE_P, false), Ready);
         // A Codex-only shape doesn't hold a Claude target.
-        assert_eq!(r(UPDATE, false, false), Ready);
+        assert_eq!(r(UPDATE, CLAUDE_P, false), Ready);
+    }
+
+    // opencode-partner-handoff: OpenCode 2.1.4's idle screen (2026-10-23
+    // capture, stripped), and the shell before it is up.
+    const OPENCODE: &str = "\u{2503} Ask anything\u{2026} \"What is the tech stack of this project?\" \u{2503} shift+tab agents ctrl+p commands 2.1.4";
+
+    #[test]
+    fn opencode_waits_for_its_prompt() {
+        let oc = SessionProvider::Opencode;
+        assert_eq!(r("bash-3.2$ opencode", oc, true), Waiting);
+        assert_eq!(r(OPENCODE, oc, true), Ready);
     }
 }
 
@@ -22137,11 +22444,7 @@ fn render_session_digest(
     total: usize,
     turns: &[serde_json::Value],
 ) -> String {
-    let who = if provider == SessionProvider::Codex {
-        "Codex"
-    } else {
-        "Claude"
-    };
+    let who = session_provider_display(provider);
     let mut out = format!(
         "# {} session digest\n\n- Title: {}\n- Session id: {}\n- Full transcript: {}\n- Turns in the session: {}; shown here: the last {}\n\nWritten by Bram for the partner session on the other provider. The full transcript is JSONL; read it only if this digest isn't enough.\n",
         who,
@@ -22263,11 +22566,7 @@ fn write_session_digest<R: tauri::Runtime>(
 // reloads the pane); any switch without a digest clears it.
 // "Claude session '<title>'", or the id's first 8 characters when untitled.
 fn catch_up_from_label(provider: SessionProvider, id: &str, title: Option<&str>) -> String {
-    let who = if provider == SessionProvider::Codex {
-        "Codex"
-    } else {
-        "Claude"
-    };
+    let who = session_provider_display(provider);
     match title {
         Some(t) => format!("{} session '{}'", who, t),
         None => format!("{} session {}", who, id.chars().take(8).collect::<String>()),
@@ -22383,13 +22682,18 @@ fn fresh_partner_title(from_title: &str, to: SessionProvider) -> String {
     let base = base
         .strip_suffix(" (Claude)")
         .or_else(|| base.strip_suffix(" (Codex)"))
+        .or_else(|| base.strip_suffix(" (OpenCode)"))
         .unwrap_or(base);
-    let tag = if to == SessionProvider::Codex {
-        "Codex"
-    } else {
-        "Claude"
-    };
-    format!("{} ({})", base, tag)
+    format!("{} ({})", base, session_provider_display(to))
+}
+
+// The provider's name as people write it.
+fn session_provider_display(provider: SessionProvider) -> &'static str {
+    match provider {
+        SessionProvider::Claude => "Claude",
+        SessionProvider::Codex => "Codex",
+        SessionProvider::Opencode => "OpenCode",
+    }
 }
 
 fn provider_switch_launch(
@@ -22483,6 +22787,7 @@ fn session_path_for_id<R: tauri::Runtime>(
             path.exists().then_some(path)
         }
         SessionProvider::Codex => codex_session_path_for_id(app, id),
+        SessionProvider::Opencode => opencode_session_path_for_id(app, id),
     }
 }
 
@@ -22727,14 +23032,12 @@ fn reload_agent_session(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "session-reload")?;
-    let session_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let session_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     clear_pending_session_title_for_resume(&app, session_provider, &session, "session-reload");
     cancel_agent_boot_hold(&app, "session-reload");
     // provider-session-counterparts: an explicit resume always wins over a
@@ -22776,6 +23079,13 @@ fn reload_agent_session(
     }
     if provider_key == "codex" && session_exists {
         pin_codex_reload_target(&app, &session)?;
+    }
+    // opencode-sessions-browser: the resumed session is current from now,
+    // before its next turn makes it the most recent.
+    if session_provider == SessionProvider::Opencode && session_exists {
+        if let Ok(mut live) = opencode_live_session_cell().lock() {
+            *live = Some(session.clone());
+        }
     }
     let generation = begin_agent_launch();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
@@ -22859,6 +23169,7 @@ fn start_agent_fresh(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "start-fresh")?;
@@ -22884,11 +23195,8 @@ fn start_agent_fresh(
     pty_write_internal(&app, &state, "\x03", "agent-fresh-interrupt-1")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-fresh-interrupt-2")?;
-    let session_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let session_provider =
+        SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     launch_agent_command(AgentLaunch {
         app: app.clone(),
         generation,
@@ -23177,6 +23485,7 @@ fn apply_pending_session_title<R: tauri::Runtime>(
             SessionProvider::Claude => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
             }
+            SessionProvider::Opencode => Err("OpenCode sessions can't be renamed yet".to_string()),
         };
         match rename_result {
             Ok(_) => {
@@ -23231,8 +23540,9 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        claim_pending_session_title, codex_session_is_visible, fresh_partner_reason,
-        fresh_partner_title, merge_pending_session_entry, new_session_launch_command,
+        agent_provider_from_command, agent_resume_command, claim_pending_session_title,
+        codex_session_is_visible, fresh_partner_reason, fresh_partner_title,
+        merge_pending_session_entry, new_session_launch_command,
         pending_session_title_abandoned_by_resume, pending_session_title_can_claim,
         pending_title_marks_new_session, provider_switch_launch, session_change_snapshot,
         switch_starts_fresh_partner, PendingSessionTitle, SessionEntry, SessionProvider,
@@ -23408,6 +23718,7 @@ mod pending_session_title_tests {
         for (provider, expected) in [
             ("claude", "claude --continue"),
             ("codex", "codex resume --last"),
+            ("opencode", "opencode --continue"),
         ] {
             assert_eq!(
                 provider_switch_launch(provider, true, None, None, None, None, None).0,
@@ -23421,6 +23732,17 @@ mod pending_session_title_tests {
         assert_eq!(
             provider_switch_launch("codex", true, Some("pinned"), None, None, None, None).0,
             "codex resume pinned"
+        );
+        // opencode-provider-switch: an explicit session uses --session, and
+        // `shell.agent: "opencode"` no longer falls through to Claude.
+        assert_eq!(
+            agent_resume_command("opencode", "ses_abc").as_deref(),
+            Some("opencode --session ses_abc")
+        );
+        assert_eq!(agent_provider_from_command(Some("opencode")), "opencode");
+        assert_eq!(
+            SessionProvider::from_str("opencode"),
+            Some(SessionProvider::Opencode)
         );
         let rec = PendingSessionTitle {
             provider: "claude".into(),
@@ -23691,9 +24013,14 @@ fn create_new_session(
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
+        "opencode" => "opencode",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
+    // opencode-partner-handoff: OpenCode titles its own sessions and Bram
+    // can't rename them, so no name is queued for one; the session still
+    // starts, and a pair asked for still forms once its id surfaces.
+    let names_session = provider_key != "opencode";
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
@@ -23710,18 +24037,23 @@ fn create_new_session(
     };
     // Queue the title so the new session is renamed to the exact name when its
     // session file surfaces. The title is metadata, never a user turn.
-    write_pending_session_title(
-        &app,
-        provider_key,
-        &trimmed,
-        session_id.clone(),
-        "new-session",
-    );
+    if names_session {
+        write_pending_session_title(
+            &app,
+            provider_key,
+            &trimmed,
+            session_id.clone(),
+            "new-session",
+        );
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             &app,
             "session-new",
-            &format!("op=create provider={}", provider_key),
+            &format!(
+                "op=create provider={} named={}",
+                provider_key, names_session
+            ),
         );
     }
     // Same kill sequence as reload_agent_session. The FRESH launch is NOT
@@ -23730,11 +24062,7 @@ fn create_new_session(
     // command itself on shell-prompt evidence in a spawned waiter below.
     // provider-session-pair-offer: Create from the pane's pair offer pairs
     // the new session with the session it was offered for (another provider's).
-    let new_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
+    let new_provider = SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
     let pair_with: Option<(SessionProvider, String)> = pair_with_provider
         .as_deref()
         .and_then(SessionProvider::from_str)
@@ -23910,7 +24238,9 @@ fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfi
 
 fn agent_provider_from_command(command: Option<&str>) -> &'static str {
     let lower = command.unwrap_or("").to_ascii_lowercase();
-    if lower.contains("codex") {
+    if lower.contains("opencode") {
+        "opencode"
+    } else if lower.contains("codex") {
         "codex"
     } else {
         // Covers claude/claud and the empty/unknown setting default.
@@ -23951,6 +24281,7 @@ fn agent_launch_command(provider: &str) -> Option<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => Some("codex"),
         "claude" | "claud" => Some("claude"),
+        "opencode" => Some("opencode"),
         _ => None,
     }
 }
@@ -23971,6 +24302,9 @@ fn new_session_launch_command(provider: &str, title: &str, session_id: Option<&s
             launch
         }
         "codex" => "codex".to_string(),
+        // No naming flag, and New session refuses OpenCode until its
+        // sessions are visible (opencode-sessions-browser).
+        "opencode" => "opencode".to_string(),
         _ => "".to_string(),
     }
 }
@@ -23990,6 +24324,14 @@ fn agent_resume_command(provider: &str, session_id: &str) -> Option<String> {
             "claude --continue".to_string()
         } else {
             format!("claude --resume {}", id)
+        }),
+        // opencode-provider-switch: `--continue` with nothing to continue
+        // opens the TUI over a sessionID validation error, so callers reach
+        // the empty-id form only once a session is known to exist.
+        "opencode" => Some(if id.is_empty() {
+            "opencode --continue".to_string()
+        } else {
+            format!("opencode --session {}", id)
         }),
         _ => None,
     }
@@ -24504,10 +24846,8 @@ fn schedule_agent_switch_refresh<R: tauri::Runtime>(
                 &format!("op=refresh provider={} source={}", provider, source),
             );
         }
-        let session_provider = match provider {
-            "codex" => Some(SessionProvider::Codex),
-            _ => Some(SessionProvider::Claude),
-        };
+        let session_provider =
+            SessionProvider::from_str(provider).or(Some(SessionProvider::Claude));
         emit_talk_session_changed_for_provider(&app, session_provider);
     });
 }
@@ -24595,7 +24935,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             let mirror_worklist_lifecycle_to_issue =
                 c.mirror_worklist_lifecycle_to_issue.unwrap_or(false);
             (
-                // Normalize to the launched provider (`claude` / `codex`) so the
+                // Normalize to the launched provider (`claude` / `codex` / `opencode`) so the
                 // box always shows what actually starts, mapping legacy/blank
                 // values (e.g. "agent") to `claude`. Matches the autostart path.
                 agent_provider_from_command(shell.as_ref().and_then(|s| s.agent.as_deref()))
@@ -27757,6 +28097,10 @@ struct SessionEntry {
 enum SessionProvider {
     Claude,
     Codex,
+    // opencode-provider-switch: launch, resume and the header switcher only.
+    // Its sessions live in SQLite, not transcript files, so every
+    // file-discovery site answers "none" for it until opencode-sessions-browser.
+    Opencode,
 }
 
 impl SessionProvider {
@@ -27764,6 +28108,7 @@ impl SessionProvider {
         match value {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "opencode" => Some(Self::Opencode),
             _ => None,
         }
     }
@@ -27778,11 +28123,15 @@ fn provider_needs_setup_for(
     active: Option<SessionProvider>,
     claude_needs: bool,
     codex_needs: bool,
+    opencode_needs: bool,
 ) -> bool {
     match active {
         Some(SessionProvider::Claude) => claude_needs,
         Some(SessionProvider::Codex) => codex_needs,
-        None => claude_needs || codex_needs,
+        Some(SessionProvider::Opencode) => opencode_needs,
+        // opencode_needs is already false wherever OpenCode isn't installed
+        // (opencode_plugin_wanted), so it raises no banner for non-users.
+        None => claude_needs || codex_needs || opencode_needs,
     }
 }
 
@@ -27942,6 +28291,11 @@ fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String>
             .and_then(|stem| stem.to_str())
             .map(str::to_string),
         SessionProvider::Codex => codex_session_meta(path).ok().flatten().map(|(id, _)| id),
+        // An export is named for its session.
+        SessionProvider::Opencode => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string),
     }
 }
 
@@ -29001,6 +29355,494 @@ fn choose_session_provider(
     }
 }
 
+// --- opencode-sessions-browser ----------------------------------------------
+// OpenCode keeps sessions in SQLite (session_v2, session_message), not in
+// transcript files. Each of this project's top-level sessions is exported,
+// read-only, to a Claude-shaped JSONL file under Bram's cache, so the Sessions
+// list, the Transcript, titles and search read it through the paths they
+// already use for Claude. Only completed messages are written, in `seq`
+// order, so a re-export only ever appends (the title cache parses
+// incrementally and assumes as much). Unknown message types are skipped.
+
+fn opencode_db_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home_dir().map(|h| h.join(".local").join("share")))?;
+    Some(base.join("opencode").join("opencode.db"))
+}
+
+fn opencode_open_db() -> Option<rusqlite::Connection> {
+    let path = opencode_db_path().filter(|p| p.is_file())?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    // OpenCode writes while we read (WAL); wait briefly rather than fail.
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    Some(conn)
+}
+
+fn opencode_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join("opencode-sessions")
+        .join(encode_path_for_filename(&abs)))
+}
+
+// (id, title, time_updated ms), newest first: this project's top-level,
+// unarchived sessions. Subagent sessions (parent_id) belong to their parent.
+fn opencode_project_session_rows<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    limit: Option<usize>,
+) -> Vec<(String, String, i64)> {
+    let Some(project) = project_root(Some(app)) else {
+        return Vec::new();
+    };
+    let canonical = canonical_path_string(&project);
+    let raw = project.to_string_lossy().into_owned();
+    let limit = limit.map(|l| l as i64).unwrap_or(-1);
+    let rows = conn
+        .prepare(
+            "SELECT id, COALESCE(title, ''), time_updated FROM session_v2 \
+             WHERE parent_id IS NULL AND time_archived IS NULL AND directory IN (?1, ?2) \
+             ORDER BY time_updated DESC LIMIT ?3",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![canonical, raw, limit], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+        });
+    match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            // A schema OpenCode has since changed reads as "no sessions"
+            // rather than breaking the Sessions tab.
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "opencode-sessions",
+                    &format!("op=query-failed detail={}", e),
+                );
+            }
+            Vec::new()
+        }
+    }
+}
+
+// OpenCode tool names and arguments in the vocabulary the Transcript renders
+// (Read / Edit / Write / Bash …); anything else passes through as is.
+fn opencode_tool_as_claude(name: &str, input: &serde_json::Value) -> (String, serde_json::Value) {
+    let field = |k: &str| input.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let path = || input.get("path").or_else(|| input.get("filePath")).cloned();
+    match name {
+        "read" => (
+            "Read".into(),
+            serde_json::json!({ "file_path": path(), "offset": field("offset"), "limit": field("limit") }),
+        ),
+        "write" => (
+            "Write".into(),
+            serde_json::json!({ "file_path": path(), "content": field("content") }),
+        ),
+        "edit" => (
+            "Edit".into(),
+            serde_json::json!({
+                "file_path": path(),
+                "old_string": field("oldString"),
+                "new_string": field("newString"),
+                "replace_all": field("replaceAll"),
+            }),
+        ),
+        "shell" => (
+            "Bash".into(),
+            serde_json::json!({ "command": field("command"), "description": field("description") }),
+        ),
+        "glob" => (
+            "Glob".into(),
+            serde_json::json!({ "pattern": field("pattern"), "path": field("path") }),
+        ),
+        "grep" => (
+            "Grep".into(),
+            serde_json::json!({ "pattern": field("pattern"), "path": field("path"), "glob": field("include") }),
+        ),
+        other => (other.to_string(), input.clone()),
+    }
+}
+
+// One OpenCode session as Claude-shaped JSONL lines.
+fn opencode_session_jsonl(
+    conn: &rusqlite::Connection,
+    sid: &str,
+    title: &str,
+) -> Result<(String, usize), String> {
+    let mut stmt = conn
+        .prepare("SELECT id, type, data FROM session_message WHERE session_id = ?1 ORDER BY seq")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![sid], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut lines: Vec<serde_json::Value> = Vec::new();
+    let mut skipped = 0usize;
+    let mut last_assistant: Option<usize> = None;
+    for (id, kind, data) in rows {
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&data) else {
+            skipped += 1;
+            continue;
+        };
+        let created = d
+            .pointer("/time/created")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let timestamp = format_iso_utc_ms(created);
+        match kind.as_str() {
+            "user" => {
+                let text = d.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                lines.push(serde_json::json!({
+                    "type": "user", "uuid": id, "sessionId": sid, "timestamp": timestamp,
+                    "message": { "role": "user", "content": text },
+                }));
+                last_assistant = None;
+            }
+            "assistant" => {
+                // A step still streaming would change after it is written,
+                // and the export must only grow; it is picked up once done.
+                if d.pointer("/time/completed").is_none() {
+                    continue;
+                }
+                let mut content: Vec<serde_json::Value> = Vec::new();
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                for block in d
+                    .get("content")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let text = || block.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                        "text" => {
+                            content.push(serde_json::json!({ "type": "text", "text": text() }))
+                        }
+                        "reasoning" => content
+                            .push(serde_json::json!({ "type": "thinking", "thinking": text() })),
+                        "tool" => {
+                            let tool_id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let state = block.get("state").cloned().unwrap_or_default();
+                            let input = state.get("input").cloned().unwrap_or_default();
+                            let (name, input) = opencode_tool_as_claude(name, &input);
+                            content.push(serde_json::json!({
+                                "type": "tool_use", "id": tool_id, "name": name, "input": input,
+                            }));
+                            let errored =
+                                state.get("status").and_then(|v| v.as_str()) == Some("error");
+                            let output = if errored {
+                                state
+                                    .pointer("/error/message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string()
+                            } else {
+                                state
+                                    .get("content")
+                                    .and_then(|v| v.as_array())
+                                    .map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            results.push(serde_json::json!({
+                                "type": "tool_result", "tool_use_id": tool_id,
+                                "content": output, "is_error": errored,
+                            }));
+                        }
+                        _ => skipped += 1,
+                    }
+                }
+                let model = d.pointer("/model/id").cloned().unwrap_or_default();
+                last_assistant = Some(lines.len());
+                lines.push(serde_json::json!({
+                    "type": "assistant", "uuid": id, "sessionId": sid, "timestamp": timestamp,
+                    "message": { "role": "assistant", "model": model, "content": content },
+                }));
+                if !results.is_empty() {
+                    lines.push(serde_json::json!({
+                        "type": "user", "uuid": format!("{}-results", id), "sessionId": sid,
+                        "timestamp": timestamp,
+                        "message": { "role": "user", "content": results },
+                    }));
+                }
+            }
+            // The turn ended: mark its last step the way Claude marks a
+            // finished turn.
+            "idle" => {
+                if let Some(i) = last_assistant.take() {
+                    if let Some(msg) = lines[i].get_mut("message").and_then(|m| m.as_object_mut()) {
+                        msg.insert("stop_reason".into(), serde_json::json!("end_turn"));
+                    }
+                }
+            }
+            _ => skipped += 1,
+        }
+    }
+    let mut out = String::new();
+    for line in &lines {
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    if !title.trim().is_empty() {
+        out.push_str(
+            &serde_json::json!({ "type": "custom-title", "customTitle": title.trim() }).to_string(),
+        );
+        out.push('\n');
+    }
+    Ok((out, skipped))
+}
+
+// Write (or refresh) a session's export when OpenCode has changed it since.
+// The file's mtime is the session's time_updated, which is both the freshness
+// check and what the Sessions list shows as its date.
+fn opencode_export_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    dir: &Path,
+    sid: &str,
+    title: &str,
+    updated_ms: i64,
+) -> Option<PathBuf> {
+    if !session_id_is_safe(sid) {
+        return None;
+    }
+    let path = dir.join(format!("{}.jsonl", sid));
+    let updated =
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(updated_ms.max(0) as u64);
+    let current = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .map(|m| m >= updated)
+        .unwrap_or(false);
+    if current {
+        return Some(path);
+    }
+    let (text, skipped) = match opencode_session_jsonl(conn, sid, title) {
+        Ok(v) => v,
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "opencode-sessions",
+                    &format!("op=export-failed session={} detail={}", sid, e),
+                );
+            }
+            return None;
+        }
+    };
+    let _ = std::fs::create_dir_all(dir);
+    atomic_write_text(&path, &text).ok()?;
+    if let Ok(file) = std::fs::File::options().write(true).open(&path) {
+        let _ = file.set_modified(updated);
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "opencode-sessions",
+            &format!(
+                "op=export session={} bytes={} skipped={}",
+                sid,
+                text.len(),
+                skipped
+            ),
+        );
+    }
+    Some(path)
+}
+
+fn discover_opencode_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionRecord>, String> {
+    let Some(conn) = opencode_open_db() else {
+        return Ok(Vec::new());
+    };
+    let dir = opencode_export_dir(app)?;
+    let mut sessions = Vec::new();
+    for (sid, title, updated_ms) in opencode_project_session_rows(app, &conn, limit) {
+        let Some(path) = opencode_export_session(app, &conn, &dir, &sid, &title, updated_ms) else {
+            continue;
+        };
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let title = Some(title.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| claude_session_title(&path).ok().flatten());
+        sessions.push(SessionRecord {
+            provider: SessionProvider::Opencode,
+            id: sid,
+            path,
+            mtime: (updated_ms.max(0) / 1000) as u64,
+            size,
+            title,
+        });
+    }
+    Ok(sessions)
+}
+
+fn opencode_session_path_for_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Option<PathBuf> {
+    discover_opencode_sessions(app, None)
+        .ok()?
+        .into_iter()
+        .find(|s| s.id == id)
+        .map(|s| s.path)
+}
+
+#[cfg(test)]
+mod opencode_export_tests {
+    use super::{opencode_session_jsonl, session_id_is_safe, st_parse_lines_to_turns};
+
+    // Rows in the shapes OpenCode 2.1.4 writes (copied from a real session).
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT);",
+        )
+        .unwrap();
+        let rows = [
+            (
+                "m1",
+                "user",
+                1,
+                r#"{"time":{"created":1792788652541},"text":"Create notes.txt","files":[],"agents":[]}"#,
+            ),
+            (
+                "m2",
+                "assistant",
+                2,
+                r#"{"time":{"created":1792788652565,"completed":1792788656571},"model":{"id":"deepseek-v4.1-flash-free"},"content":[{"type":"reasoning","text":"Try the write."},{"type":"tool","id":"call_1","name":"write","state":{"status":"error","input":{"path":"/p/notes.txt","content":"hi"},"error":{"message":"Blocked: no item covers notes.txt"}}}]}"#,
+            ),
+            (
+                "m3",
+                "assistant",
+                3,
+                r#"{"time":{"created":1792788656584,"completed":1792788664666},"model":{"id":"deepseek-v4.1-flash-free"},"content":[{"type":"text","text":"The guard refused it."}]}"#,
+            ),
+            (
+                "m4",
+                "idle",
+                4,
+                r#"{"time":{"created":1792788683954},"outcome":"succeeded"}"#,
+            ),
+            (
+                "m5",
+                "user",
+                5,
+                r#"{"time":{"created":1792788706651},"text":"Edit it anyway"}"#,
+            ),
+            // Still streaming: no completed time, so not exported yet.
+            (
+                "m6",
+                "assistant",
+                6,
+                r#"{"time":{"created":1792788706671},"content":[{"type":"text","text":"partial"}]}"#,
+            ),
+            ("m7", "mystery", 7, r#"{"time":{"created":1}}"#),
+        ];
+        for (id, kind, seq, data) in rows {
+            conn.execute(
+                "INSERT INTO session_message VALUES (?1, 'ses_a', ?2, ?3, ?4)",
+                rusqlite::params![id, kind, seq, data],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn exports_a_session_in_claudes_record_shape() {
+        let (text, skipped) = opencode_session_jsonl(&db(), "ses_a", "Notes test").unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let types: Vec<&str> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+        // user, assistant(tool_use), user(tool_result), assistant(text), user,
+        // then the title; the streaming step and the unknown row are left out.
+        assert_eq!(
+            types,
+            vec![
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+                "user",
+                "custom-title"
+            ]
+        );
+        assert_eq!(skipped, 1, "the unknown row type is counted");
+        let tool = &lines[1]["message"]["content"][1];
+        assert_eq!(tool["type"], "tool_use");
+        assert_eq!(tool["name"], "Write");
+        assert_eq!(tool["input"]["file_path"], "/p/notes.txt");
+        let result = &lines[2]["message"]["content"][0];
+        assert_eq!(result["tool_use_id"], "call_1");
+        assert_eq!(result["is_error"], true);
+        assert_eq!(lines[3]["message"]["stop_reason"], "end_turn");
+        assert_eq!(lines[5]["customTitle"], "Notes test");
+        // And the Transcript's parser reads it as turns.
+        let turns = st_parse_lines_to_turns(&text);
+        let roles: Vec<&str> = turns.iter().filter_map(|t| t["role"].as_str()).collect();
+        assert!(
+            roles.contains(&"user") && roles.contains(&"assistant"),
+            "roles: {roles:?}"
+        );
+    }
+
+    #[test]
+    fn opencode_ids_are_safe_session_ids() {
+        assert!(session_id_is_safe("ses_e95798bfeffeG7veO4IaH54cSl"));
+        assert!(session_id_is_safe("0192aabb-ccdd-4eef-8899-001122334455"));
+        assert!(!session_id_is_safe("../etc"));
+        assert!(!session_id_is_safe("a/b"));
+        assert!(!session_id_is_safe(""));
+    }
+}
+
+fn latest_opencode_session_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<PathBuf>, String> {
+    Ok(discover_opencode_sessions(app, Some(1))?
+        .into_iter()
+        .next()
+        .map(|s| s.path))
+}
+
+// The session OpenCode's events last named (opencode-turn-lifecycle), so a
+// resumed older session reads as current before it is the most recent.
+fn opencode_live_session_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
 fn sessions_for_provider<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -29011,6 +29853,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
         let sessions = match provider {
             SessionProvider::Claude => discover_claude_sessions(app, limit)?,
             SessionProvider::Codex => discover_codex_sessions(app, limit)?,
+            SessionProvider::Opencode => discover_opencode_sessions(app, limit)?,
         };
         return Ok((provider, sessions));
     }
@@ -29020,6 +29863,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
     let sessions = match provider {
         SessionProvider::Claude => claude,
         SessionProvider::Codex => codex,
+        SessionProvider::Opencode => Vec::new(),
     };
     Ok((provider, sessions))
 }
@@ -29085,6 +29929,7 @@ fn session_meta<R: tauri::Runtime>(
     let count = match provider {
         SessionProvider::Claude => count_claude_sessions(app)?,
         SessionProvider::Codex => count_codex_sessions(app)?,
+        SessionProvider::Opencode => discover_opencode_sessions(app, None)?.len(),
     };
     let discovery_notes = if provider == SessionProvider::Claude && count == 0 {
         claude_sessions_dir_lookup(app)
@@ -30596,7 +31441,19 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // actually index, since claude_session_title reads the whole file
     // (issue-230-indexer-lazy-claude-titles).
     let discover_started = std::time::Instant::now();
-    let files_vec = discover_claude_session_files(app)?;
+    let mut files_vec: Vec<(PathBuf, u64, u64, String, SessionProvider)> =
+        discover_claude_session_files(app)?
+            .into_iter()
+            .map(|(path, mtime, size, id)| (path, mtime, size, id, SessionProvider::Claude))
+            .collect();
+    // opencode-sessions-browser: OpenCode's exports are Claude-shaped, so the
+    // same extraction indexes them; only the provider label differs.
+    files_vec.extend(
+        discover_opencode_sessions(app, None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| (s.path, s.mtime, s.size, s.id, SessionProvider::Opencode)),
+    );
     stats.discover_ms = discover_started.elapsed().as_millis();
     stats.files = files_vec.len();
     let intent_started = std::time::Instant::now();
@@ -30616,8 +31473,8 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // from the extract/write work below means `report_progress` reflects
     // actual pending work, not the size of the whole corpus, so an ordinary
     // warm pass over hundreds of untouched sessions stays quiet.
-    let mut pending: Vec<(PathBuf, i64, i64, String, bool)> = Vec::new();
-    for (path, mtime_u, size_u, id) in files_vec {
+    let mut pending: Vec<(PathBuf, i64, i64, String, bool, SessionProvider)> = Vec::new();
+    for (path, mtime_u, size_u, id, provider) in files_vec {
         let path_str = path.to_string_lossy().to_string();
         let (mtime, size) = (mtime_u as i64, size_u as i64);
         let forced = force_all
@@ -30669,12 +31526,12 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             stats.skipped += 1;
             continue;
         }
-        pending.push((path, mtime, size, id, forced));
+        pending.push((path, mtime, size, id, forced, provider));
     }
     let total_pending = pending.len();
     let report_progress = total_pending > SESSION_PROGRESS_REPORT_THRESHOLD;
     let mut done = 0usize;
-    for (path, mtime, size, id, forced) in pending {
+    for (path, mtime, size, id, forced, provider) in pending {
         if forced {
             stats.forced += 1;
         }
@@ -30700,7 +31557,7 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             source: format!(
                 "{} · {} · {} KB",
                 title,
-                session_provider_label(SessionProvider::Claude),
+                session_provider_label(provider),
                 size / 1024
             ),
             date: mtime.to_string(),
@@ -32573,7 +33430,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
     let claude_needs = status["claudeNeedsSetup"].as_bool().unwrap_or(false);
     let codex_needs = status["codexNeedsSetup"].as_bool().unwrap_or(false);
-    if !claude_needs && !codex_needs {
+    let opencode_needs = status["opencodeNeedsSetup"].as_bool().unwrap_or(false);
+    if !claude_needs && !codex_needs && !opencode_needs {
         append_bram_trace_line(app, "auto-setup", "op=skip reason=current");
         return;
     }
@@ -32587,8 +33445,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
                 app,
                 "auto-setup",
                 &format!(
-                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} wrote={} skipped={}",
-                    first_run, claude_needs, codex_needs, wrote, skipped
+                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} wrote={} skipped={}",
+                    first_run, claude_needs, codex_needs, opencode_needs, wrote, skipped
                 ),
             );
             if first_run && wrote > 0 {
@@ -32992,7 +33850,26 @@ fn live_session_id<R: tauri::Runtime>(
             .ok()
             .flatten()
             .and_then(|p| codex_session_meta(&p).ok().flatten().map(|(id, _)| id)),
+        SessionProvider::Opencode => opencode_live_session_cell()
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .or_else(|| {
+                latest_opencode_session_path(app)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p))
+            }),
     }
+}
+
+// A session id safe to join into a filename: Claude's uuids, Codex's ids and
+// OpenCode's `ses_…` ids (opencode-sessions-browser added the underscore).
+fn session_id_is_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn read_session<R: tauri::Runtime>(
@@ -33000,7 +33877,7 @@ fn read_session<R: tauri::Runtime>(
     id: &str,
     preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !session_id_is_safe(id) {
         return Err("invalid session id".to_string());
     }
     let (_, sessions) = sessions_for_provider(app, preferred, None)?;
@@ -33020,10 +33897,15 @@ fn delete_session<R: tauri::Runtime>(
     id: &str,
     preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !session_id_is_safe(id) {
         return Err("invalid session id".to_string());
     }
-    let (_, sessions) = sessions_for_provider(app, preferred, None)?;
+    let (provider, sessions) = sessions_for_provider(app, preferred, None)?;
+    // opencode-sessions-browser: the file is Bram's export; the session itself
+    // lives in OpenCode's database and would come straight back.
+    if provider == SessionProvider::Opencode {
+        return Err("Delete OpenCode sessions from inside OpenCode.".to_string());
+    }
     let session = sessions
         .into_iter()
         .find(|session| session.id == id)
@@ -33118,7 +34000,7 @@ fn rename_session<R: tauri::Runtime>(
     preferred: Option<SessionProvider>,
     title: &str,
 ) -> Result<Vec<u8>, String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !session_id_is_safe(id) {
         return Err("invalid session id".to_string());
     }
     let trimmed = title.trim();
@@ -33144,6 +34026,9 @@ fn rename_session<R: tauri::Runtime>(
         }
         SessionProvider::Codex => {
             append_codex_session_title(&session.id, trimmed)?;
+        }
+        SessionProvider::Opencode => {
+            return Err("OpenCode sessions can't be renamed yet".to_string());
         }
     }
     Ok(b"{\"ok\":true}".to_vec())
@@ -33350,6 +34235,7 @@ fn latest_session_path<R: tauri::Runtime>(
     let path = match provider {
         SessionProvider::Claude => latest_claude_session_path(app)?,
         SessionProvider::Codex => latest_codex_session_path(app)?,
+        SessionProvider::Opencode => latest_opencode_session_path(app)?,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -33374,6 +34260,7 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
     match provider {
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
+        SessionProvider::Opencode => latest_opencode_session_path(app),
     }
 }
 
@@ -34450,6 +35337,7 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
     let provider_str = match provider {
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
+        Some(SessionProvider::Opencode) => "opencode",
         None => "",
     };
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -34815,6 +35703,7 @@ fn read_conversation_state<R: tauri::Runtime>(
     let provider_str = match provider {
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
+        Some(SessionProvider::Opencode) => "opencode",
         None => "",
     };
     let Some((path, mtime_ms, len)) = resolve_conversation_path_meta(app, preferred)? else {
@@ -39587,6 +40476,7 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
     let provider_label = match current_provider(app) {
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Claude) => "claude",
+        Some(SessionProvider::Opencode) => "opencode",
         None => "unknown",
     };
     // session-size-note-not-warning (Jon, 2026-10-04): size is information,
@@ -45274,7 +46164,7 @@ fn read_projected_turns<R: tauri::Runtime>(
             None => active_session_path(app)?,
         }
     } else {
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if !session_id_is_safe(id) {
             return Err("invalid session id".to_string());
         }
         let (_, sessions) = sessions_for_provider(app, provider, None)?;
@@ -45357,6 +46247,12 @@ fn read_projected_turns<R: tauri::Runtime>(
         .unwrap_or_default();
     let provider_label = if path.components().any(|c| c.as_os_str() == ".codex") {
         "codex"
+    } else if path
+        .components()
+        .any(|c| c.as_os_str() == "opencode-sessions")
+    {
+        // opencode-sessions-browser: Bram's export of an OpenCode session.
+        "opencode"
     } else {
         "claude"
     };
@@ -45951,6 +46847,16 @@ const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";
 const ENHANCE_SETTINGS_REL: &str = ".claude/settings.json";
 const ENHANCE_SETTINGS_LOCAL_REL: &str = ".claude/settings.local.json";
 const ENHANCE_CODEX_HOOK_INSTALL_REL: &str = ".bram/codex-worklist-guard.py";
+// opencode-worklist-guard: OpenCode's guard registration is a project plugin
+// it discovers on its own; the seeded copy is owned by its marker, as skills are.
+const ENHANCE_OPENCODE_PLUGIN_REL: &str = ".opencode/plugins/bram.js";
+const ENHANCE_OPENCODE_PLUGIN_BUNDLE_REL: &str = "__shell/opencode/bram-plugin.js";
+const OPENCODE_PLUGIN_MARKER: &str = "bram-managed";
+// opencode-signature-and-conventions: OpenCode's instruction channel. Files
+// listed in a config document's `instructions` load every session; AGENTS.md
+// alone only points at the conventions (Codex gets them through
+// developer_instructions instead).
+const ENHANCE_OPENCODE_CONFIG_REL: &str = ".opencode/opencode.json";
 const ENHANCE_CODEX_CONFIG_REL: &str = ".codex/config.toml";
 const ENHANCE_CODEX_TRUST_ACK_LEGACY_REL: &str = ".bram/codex-trust-ack";
 // TOML-comment markers delimit the Bram block inside codex's
@@ -47300,6 +48206,58 @@ fn collect_codex_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<Con
     out
 }
 
+// opencode-provider-switch: the files OpenCode loads as instructions and
+// config. It reads AGENTS.md from the project and from its config dir
+// (`$XDG_CONFIG_HOME/opencode`, default `~/.config/opencode`).
+fn collect_opencode_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<ContextFile> {
+    let mut out: Vec<ContextFile> = Vec::new();
+    let Some(proj_root) = project_root(Some(app)) else {
+        return out;
+    };
+    let mut push = |category: &'static str, path: PathBuf, display: String| {
+        if path.is_file() {
+            out.push(ContextFile {
+                category,
+                path,
+                display,
+                kind: Some("opencode"),
+            });
+        }
+    };
+    for name in ["AGENTS.md", "opencode.json", "opencode.jsonc"] {
+        push("project", proj_root.join(name), name.to_string());
+    }
+    let mut dot_opencode: Vec<PathBuf> = std::fs::read_dir(proj_root.join(".opencode"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    dot_opencode.sort();
+    for path in dot_opencode {
+        let display = format!(
+            ".opencode/{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+        );
+        push("project", path, display);
+    }
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home_dir().map(|h| h.join(".config")))
+        .map(|base| base.join("opencode"));
+    if let Some(dir) = config_dir {
+        for name in ["AGENTS.md", "opencode.json", "opencode.jsonc"] {
+            push(
+                "settings",
+                dir.join(name),
+                format!("~/.config/opencode/{}", name),
+            );
+        }
+    }
+    out
+}
+
 fn collect_context_files<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -47307,6 +48265,7 @@ fn collect_context_files<R: tauri::Runtime>(
     match context_provider(app, preferred) {
         SessionProvider::Claude => collect_claude_context_files(app),
         SessionProvider::Codex => collect_codex_context_files(app),
+        SessionProvider::Opencode => collect_opencode_context_files(app),
     }
 }
 
@@ -47469,6 +48428,14 @@ fn context_list<R: tauri::Runtime>(
                 json!({ "key": "rules", "label": "Rules", "items": rules }),
             ],
         ),
+        SessionProvider::Opencode => (
+            "opencode",
+            "OpenCode Context shows the `AGENTS.md` instructions and `opencode.json` config OpenCode loads for this project, plus its global config under `~/.config/opencode/`.",
+            vec![
+                json!({ "key": "project", "label": "Project", "items": project }),
+                json!({ "key": "settings", "label": "Settings", "items": settings }),
+            ],
+        ),
     };
     json!({ "provider": provider_name, "summary": summary, "sections": sections })
 }
@@ -47486,10 +48453,7 @@ fn context_search<R: tauri::Runtime>(
     let needle = q.trim().to_lowercase();
     if needle.is_empty() {
         return json!({
-            "provider": match provider {
-                SessionProvider::Claude => "claude",
-                SessionProvider::Codex => "codex",
-            },
+            "provider": session_provider_label(provider),
             "results": []
         });
     }
@@ -47528,10 +48492,7 @@ fn context_search<R: tauri::Runtime>(
         }
     }
     json!({
-        "provider": match provider {
-            SessionProvider::Claude => "claude",
-            SessionProvider::Codex => "codex",
-        },
+        "provider": session_provider_label(provider),
         "results": results,
         "truncated": total_hits >= MAX_HITS
     })
@@ -48596,11 +49557,24 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         || !codex_hook_block_current
         || !codex_instr_current
         || (!is_source_repo && !codex_docs_current);
-    let provider_needs_setup =
-        provider_needs_setup_for(active_provider, claude_needs_setup, codex_needs_setup);
+    // opencode-worklist-guard: OpenCode's install is the project plugin plus
+    // the `instructions` entry in .opencode/opencode.json
+    // (opencode-signature-and-conventions). Only where OpenCode can run;
+    // elsewhere neither is seeded.
+    let opencode_plugin_current = opencode_plugin_current(app, &proj);
+    let opencode_instructions_current = opencode_instructions_current(&proj, is_source_repo);
+    let opencode_needs_setup = opencode_plugin_wanted(app, &proj)
+        && (!core_installed || !opencode_plugin_current || !opencode_instructions_current);
+    let provider_needs_setup = provider_needs_setup_for(
+        active_provider,
+        claude_needs_setup,
+        codex_needs_setup,
+        opencode_needs_setup,
+    );
     let active_provider_json = match active_provider {
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
+        Some(SessionProvider::Opencode) => json!("opencode"),
         None => serde_json::Value::Null,
     };
     // Mis-launch signals. Bram manages whatever directory it is started from,
@@ -48693,6 +49667,9 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "codexInstalled": codex_installed,
         "claudeNeedsSetup": claude_needs_setup,
         "codexNeedsSetup": codex_needs_setup,
+        "opencodeNeedsSetup": opencode_needs_setup,
+        "opencodePluginCurrent": opencode_plugin_current,
+        "opencodeInstructionsCurrent": opencode_instructions_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
         "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
@@ -49410,6 +50387,12 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // the gate prose. Replaced the per-turn UserPromptSubmit injection after
     // verifying developer-role context is salient enough on its own.
     install_codex_developer_instructions()?;
+    // opencode-worklist-guard: the OpenCode guard plugin. Runs on the source
+    // repo too: it is the guard's registration, not a seeded doc.
+    seed_opencode_plugin(app, &proj, &mut wrote, &mut skipped)?;
+    if opencode_plugin_wanted(app, &proj) {
+        seed_opencode_instructions(&proj, is_source_repo, &mut wrote, &mut skipped)?;
+    }
 
     // issue-227: surface stale legacy-hook references in user-global settings.
     // These block the #217 shim prune; Setup cannot fix them, only name them.
@@ -49451,6 +50434,259 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         "codexHookNeedsTrust": codex_hook_install.installed,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+// opencode-worklist-guard: seed the plugin only where OpenCode can run (its
+// CLI is on PATH, it is the active agent) or where it is already installed
+// and so kept current. Projects whose users never run OpenCode get no
+// `.opencode/` directory. The PATH probe is the host's, which can be poorer
+// than the terminal's; the active-agent case covers that, with the banner.
+fn opencode_plugin_wanted<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    proj.join(ENHANCE_OPENCODE_PLUGIN_REL).exists()
+        || current_provider(app) == Some(SessionProvider::Opencode)
+        || agent_cli_on_path("opencode")
+}
+
+fn opencode_plugin_bundle<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Vec<u8>> {
+    serve_app_file(Some(app), ENHANCE_OPENCODE_PLUGIN_BUNDLE_REL).map(|(bytes, _mime)| bytes)
+}
+
+fn opencode_plugin_current<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    match (
+        std::fs::read(proj.join(ENHANCE_OPENCODE_PLUGIN_REL)),
+        opencode_plugin_bundle(app),
+    ) {
+        (Ok(disk), Some(bundle)) => disk == bundle,
+        _ => false,
+    }
+}
+
+// Ownership as for bundled skills: Setup writes or refreshes only a file
+// carrying its marker, and a user's own `.opencode/plugins/bram.js` is kept
+// and reported in `skipped`.
+fn seed_opencode_plugin<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    if !opencode_plugin_wanted(app, proj) {
+        return Ok(());
+    }
+    let bytes = opencode_plugin_bundle(app)
+        .ok_or_else(|| "OpenCode plugin bundle not found".to_string())?;
+    let dest = proj.join(ENHANCE_OPENCODE_PLUGIN_REL);
+    match std::fs::read(&dest) {
+        Ok(existing) if existing == bytes => {}
+        Ok(existing) => {
+            if String::from_utf8_lossy(&existing).contains(OPENCODE_PLUGIN_MARKER) {
+                std::fs::write(&dest, &bytes)
+                    .map_err(|e| format!("write {}: {}", dest.display(), e))?;
+                wrote.push(dest.display().to_string());
+            } else {
+                skipped.push(dest.display().to_string());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e2| format!("create {}: {}", parent.display(), e2))?;
+            }
+            std::fs::write(&dest, &bytes)
+                .map_err(|e2| format!("write {}: {}", dest.display(), e2))?;
+            wrote.push(dest.display().to_string());
+        }
+        Err(e) => return Err(format!("read {}: {}", dest.display(), e)),
+    }
+    Ok(())
+}
+
+// The files OpenCode should load, relative to the project. The source repo
+// has no seeded sidecar; there it gets what its AGENTS.md tells agents to
+// read.
+fn opencode_instruction_paths(is_source_repo: bool) -> &'static [&'static str] {
+    if is_source_repo {
+        &[ENHANCE_SOURCE_BUNDLE_REL, "docs/developing-bram.md"]
+    } else {
+        &[ENHANCE_SIDECAR_REL]
+    }
+}
+
+// A config Setup can't parse (OpenCode also accepts comments) counts as
+// current: Setup won't rewrite it, so flagging it would raise the banner and
+// re-run auto-Setup forever. Setup names it in `skipped` instead.
+fn opencode_instructions_current(proj: &Path, is_source_repo: bool) -> bool {
+    let Ok(text) = std::fs::read_to_string(proj.join(ENHANCE_OPENCODE_CONFIG_REL)) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return true;
+    };
+    let listed: Vec<&str> = value
+        .get("instructions")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|e| e.as_str()).collect())
+        .unwrap_or_default();
+    opencode_instruction_paths(is_source_repo)
+        .iter()
+        .all(|p| listed.contains(p))
+}
+
+// Adds Bram's entries to `.opencode/opencode.json`'s `instructions`, creating
+// the file when it is absent. A user's entries and keys are kept (keys may be
+// re-sorted on rewrite, as with .claude/settings.json); a file that isn't
+// plain JSON is left alone and reported in `skipped`.
+fn seed_opencode_instructions(
+    proj: &Path,
+    is_source_repo: bool,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let path = proj.join(ENHANCE_OPENCODE_CONFIG_REL);
+    let (mut value, existed) = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) if v.is_object() => (v, true),
+            _ => {
+                skipped.push(path.display().to_string());
+                return Ok(());
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            serde_json::json!({ "$schema": "https://opencode.ai/config.json" }),
+            false,
+        ),
+        Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+    };
+    let Some(root) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let list = root
+        .entry("instructions".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(entries) = list.as_array_mut() else {
+        skipped.push(path.display().to_string());
+        return Ok(());
+    };
+    let mut changed = !existed;
+    for wanted in opencode_instruction_paths(is_source_repo) {
+        if !entries.iter().any(|e| e.as_str() == Some(*wanted)) {
+            entries.push(serde_json::Value::String((*wanted).to_string()));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(&path, format!("{}\n", text))
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    wrote.push(path.display().to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+mod opencode_instructions_tests {
+    use super::{
+        opencode_instructions_current, seed_opencode_instructions, ENHANCE_OPENCODE_CONFIG_REL,
+    };
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-oc-instr-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn seed(dir: &std::path::Path, source: bool) -> (Vec<String>, Vec<String>) {
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_opencode_instructions(dir, source, &mut wrote, &mut skipped).unwrap();
+        (wrote, skipped)
+    }
+
+    fn instructions(dir: &std::path::Path) -> Vec<String> {
+        let text = std::fs::read_to_string(dir.join(ENHANCE_OPENCODE_CONFIG_REL)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn creates_the_config_then_leaves_it_alone() {
+        let dir = scratch("create");
+        assert!(!opencode_instructions_current(&dir, false));
+        let (wrote, _) = seed(&dir, false);
+        assert_eq!(wrote.len(), 1);
+        assert_eq!(instructions(&dir), vec![".claude/bram-conventions.md"]);
+        assert!(opencode_instructions_current(&dir, false));
+        let (wrote, skipped) = seed(&dir, false);
+        assert!(
+            wrote.is_empty() && skipped.is_empty(),
+            "second Setup writes nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merges_into_a_users_config_and_keeps_their_entries() {
+        let dir = scratch("merge");
+        std::fs::create_dir_all(dir.join(".opencode")).unwrap();
+        std::fs::write(
+            dir.join(ENHANCE_OPENCODE_CONFIG_REL),
+            r#"{"model":"opencode/free","instructions":["docs/style.md"]}"#,
+        )
+        .unwrap();
+        seed(&dir, false);
+        assert_eq!(
+            instructions(&dir),
+            vec!["docs/style.md", ".claude/bram-conventions.md"]
+        );
+        let text = std::fs::read_to_string(dir.join(ENHANCE_OPENCODE_CONFIG_REL)).unwrap();
+        assert!(
+            text.contains("opencode/free"),
+            "the user's other keys survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_commented_config_is_reported_not_rewritten() {
+        let dir = scratch("jsonc");
+        std::fs::create_dir_all(dir.join(".opencode")).unwrap();
+        let original = "// mine\n{\"model\":\"x\"}\n";
+        std::fs::write(dir.join(ENHANCE_OPENCODE_CONFIG_REL), original).unwrap();
+        let (wrote, skipped) = seed(&dir, false);
+        assert!(wrote.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(ENHANCE_OPENCODE_CONFIG_REL)).unwrap(),
+            original
+        );
+        assert!(
+            opencode_instructions_current(&dir, false),
+            "unmanageable counts as current, so no banner loop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_source_repo_gets_what_its_agents_md_names() {
+        let dir = scratch("source");
+        seed(&dir, true);
+        assert_eq!(
+            instructions(&dir),
+            vec!["app/__shell/conventions.md", "docs/developing-bram.md"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 fn remove_legacy_codex_trust_ack() {
@@ -56843,6 +58079,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
         let active = match current_provider(app) {
             Some(SessionProvider::Claude) => "claude",
             Some(SessionProvider::Codex) => "codex",
+            Some(SessionProvider::Opencode) => "opencode",
             None => "none",
         };
         if active != provider_label {
@@ -63704,36 +64941,58 @@ mod needs_you_tests {
     fn provider_needs_setup_none_falls_back_to_project_level() {
         // No provider active — the fresh/failure-path launch #320 is about.
         assert!(
-            provider_needs_setup_for(None, true, false),
+            provider_needs_setup_for(None, true, false, false),
             "claude needs → banner"
         );
         assert!(
-            provider_needs_setup_for(None, false, true),
+            provider_needs_setup_for(None, false, true, false),
             "codex needs → banner"
         );
-        assert!(provider_needs_setup_for(None, true, true));
         assert!(
-            !provider_needs_setup_for(None, false, false),
-            "neither needs → no banner"
+            provider_needs_setup_for(None, false, false, true),
+            "opencode needs (only ever true where it's installed) → banner"
+        );
+        assert!(provider_needs_setup_for(None, true, true, false));
+        assert!(
+            !provider_needs_setup_for(None, false, false, false),
+            "none needs → no banner"
         );
         // Provider active — unchanged: exactly that provider's need.
         assert!(provider_needs_setup_for(
             Some(SessionProvider::Claude),
             true,
+            false,
             false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Claude),
             false,
+            true,
             true
         ));
         assert!(provider_needs_setup_for(
             Some(SessionProvider::Codex),
             false,
-            true
+            true,
+            false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Codex),
+            true,
+            false,
+            true
+        ));
+        // opencode-worklist-guard: an OpenCode session answers for its plugin
+        // alone.
+        assert!(provider_needs_setup_for(
+            Some(SessionProvider::Opencode),
+            false,
+            false,
+            true
+        ));
+        assert!(!provider_needs_setup_for(
+            Some(SessionProvider::Opencode),
+            true,
             true,
             false
         ));
@@ -64922,7 +66181,13 @@ fn iterate_feedback_draft_text<R: tauri::Runtime>(app: &AppHandle<R>, turn_text:
 }
 
 fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
-    if !matches!(current_provider(app), Some(SessionProvider::Codex)) {
+    // opencode-signature-and-conventions: OpenCode writes no transcript its
+    // guard could read the phrase from either, so it takes Codex's
+    // host-side record.
+    if !matches!(
+        current_provider(app),
+        Some(SessionProvider::Codex | SessionProvider::Opencode)
+    ) {
         return;
     }
     if !turn_text_has_direct_edit_opt_out(turn_text)
@@ -78839,6 +80104,250 @@ fn handle_describe_command<R: tauri::Runtime>(
 // spawn-time BRAM_TRACE env (which desynced from the Settings toggle for
 // the lifetime of a running agent). append_bram_trace_line is gated on
 // the LIVE trace setting, so the toggle takes effect immediately.
+// --- opencode-turn-lifecycle ------------------------------------------------
+// OpenCode writes no transcript file, so its turns reach the host as events
+// the Bram plugin (.opencode/plugins/bram.js) forwards from OpenCode's own
+// bus, for this project's top-level sessions only. session.execution.started
+// opens a turn; .succeeded, .failed and .interrupted end it. They drive the
+// calls check_jsonl_for_turn_end makes for Codex: working status and claim
+// re-arm at the start, finished status and claim retirement at the end.
+
+// The open turn: (session, started at, latest input at). A message delivered
+// into a running execution (session.inbox.delivered) is new input to the same
+// turn, so a claim taken mid-turn still belongs to that turn's end.
+fn opencode_turn_cell() -> &'static Mutex<Option<(String, i64, i64)>> {
+    static CELL: OnceLock<Mutex<Option<(String, i64, i64)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+// Whether a turn end retires the claim. Input after the claim means this turn
+// is doing the claimed work. Input before it means the end belongs to an
+// earlier turn, and the claim waits for its own. With no recorded start (the
+// start event was missed), fall back to the JSONL detector's rule: the end
+// must not predate the claim, and a claim under 2 s old most likely belongs
+// to a turn that has produced nothing yet.
+fn opencode_end_retires_claim(
+    claimed_at: i64,
+    last_input_at: Option<i64>,
+    ended_at: i64,
+    now: i64,
+) -> Result<(), &'static str> {
+    match last_input_at {
+        Some(t) if t >= claimed_at => Ok(()),
+        Some(_) => Err("turn-predates-claim"),
+        None if ended_at < claimed_at => Err("stale-prior-turn"),
+        None if now.saturating_sub(claimed_at) < 2000 => Err("fresh-sentinel"),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod opencode_turn_tests {
+    use super::opencode_end_retires_claim;
+
+    #[test]
+    fn a_turn_retires_the_claim_it_received_input_after() {
+        // Start clicked at 1_000; the turn's start (or a message delivered
+        // into it) came later, so its end is the claimed work finishing.
+        assert_eq!(
+            opencode_end_retires_claim(1_000, Some(1_200), 9_000, 9_100),
+            Ok(())
+        );
+        assert_eq!(
+            opencode_end_retires_claim(1_000, Some(1_000), 1_500, 1_600),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_earlier_turn_leaves_the_claim_for_its_own_turn() {
+        assert_eq!(
+            opencode_end_retires_claim(1_000, Some(800), 5_000, 5_100),
+            Err("turn-predates-claim")
+        );
+    }
+
+    #[test]
+    fn a_missed_start_falls_back_to_the_jsonl_rule() {
+        assert_eq!(
+            opencode_end_retires_claim(1_000, None, 900, 5_000),
+            Err("stale-prior-turn")
+        );
+        assert_eq!(
+            opencode_end_retires_claim(1_000, None, 1_500, 2_500),
+            Err("fresh-sentinel")
+        );
+        assert_eq!(
+            opencode_end_retires_claim(1_000, None, 4_000, 4_100),
+            Ok(())
+        );
+    }
+}
+
+fn opencode_turn_started<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: i64) {
+    if let Ok(mut g) = opencode_turn_cell().lock() {
+        // Delivery and start can arrive in either order; keep the later input.
+        let input = g
+            .as_ref()
+            .filter(|(s, _, _)| s == sid)
+            .map_or(at_ms, |(_, _, input)| (*input).max(at_ms));
+        *g = Some((sid.to_string(), at_ms, input));
+    }
+    let next = AgentStatus {
+        provider: Some("opencode".to_string()),
+        state: "working".to_string(),
+        verb: Some("working".to_string()),
+        elapsed_text: None,
+        substate: None,
+        output_tokens_text: None,
+        updated_at_ms: unix_now_ms(),
+        source: Some("opencode-event".to_string()),
+    };
+    let mut emit_payload: Option<AgentStatus> = None;
+    if let Ok(mut cur) = agent_status_cell().lock() {
+        if cur.state != next.state || cur.provider != next.provider || cur.verb != next.verb {
+            *cur = next.clone();
+            emit_payload = Some(next);
+        }
+    }
+    if let Some(payload) = emit_payload {
+        maybe_emit_agent_status(app, &payload);
+    }
+    update_turn_state(app, "opencode-event", "execution-started", |s| {
+        s.provider = Some("opencode".to_string());
+        s.turn_stamp = Some(at_ms.to_string());
+        if s.pending_menu.is_none() {
+            s.phase = "working".to_string();
+        }
+    });
+    // A later turn of a multi-turn apply: the first turn's end retired the
+    // claim and the authorization is still live (no-op otherwise).
+    if inflight_claim_ids_and_claimed_at(app).is_none() {
+        rearm_claim_for_live_authorization(app);
+    }
+}
+
+fn opencode_input_delivered(sid: &str, at_ms: i64) {
+    if let Ok(mut g) = opencode_turn_cell().lock() {
+        match g.as_mut() {
+            Some((s, _, input)) if s == sid => *input = (*input).max(at_ms),
+            _ => *g = Some((sid.to_string(), at_ms, at_ms)),
+        }
+    }
+}
+
+fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: i64) {
+    let last_input = opencode_turn_cell()
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .filter(|(s, _, _)| s == sid)
+        .map(|(_, _, input)| input);
+    agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
+    clear_proposing_flag(app, "turn-finished");
+    end_turn_context_unless_fresh(app, "opencode-turn-end");
+    let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
+        return;
+    };
+    if claimed_ids.is_empty() {
+        return;
+    }
+    let ids_json = serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string());
+    match opencode_end_retires_claim(claimed_at, last_input, at_ms, unix_now_ms()) {
+        Ok(()) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=clear-at-turn-end source=opencode-event kind={} ids={}",
+                        inflight_claim_kind(app).as_deref().unwrap_or(""),
+                        ids_json
+                    ),
+                );
+            }
+            clear_inflight_claim_sentinel(app, &claimed_ids);
+        }
+        Err(reason) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=skip-clear source=opencode-event reason={} claimed={} ended={} ids={}",
+                        reason, claimed_at, at_ms, ids_json
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn handle_opencode_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (400, JSON, b"{\"ok\":false}".to_vec()),
+    };
+    // Ids and event names are token-shaped; anything else is dropped from the
+    // trace rather than written into it.
+    let token = |k: &str| -> String {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .take(80)
+            .collect()
+    };
+    let kind = token("type");
+    let sid = token("sessionID");
+    let at_ms = v
+        .get("at")
+        .and_then(|x| x.as_i64())
+        .unwrap_or_else(unix_now_ms);
+    // Another agent's session must not move this one's claim, the rule
+    // claim_handling_skipped_for_provider applies to transcripts.
+    let active = current_provider(app) == Some(SessionProvider::Opencode);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "opencode-event",
+            &format!(
+                "op={} session={} at={} active={}",
+                kind.trim_start_matches("session."),
+                sid,
+                at_ms,
+                active
+            ),
+        );
+    }
+    if !active || sid.is_empty() {
+        return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec());
+    }
+    match kind.as_str() {
+        "session.execution.started" => opencode_turn_started(app, &sid, at_ms),
+        "session.inbox.delivered" => opencode_input_delivered(&sid, at_ms),
+        "session.execution.succeeded"
+        | "session.execution.failed"
+        | "session.execution.interrupted" => opencode_turn_ended(app, &sid, at_ms),
+        // opencode-sessions-browser: a completed step is a new export line.
+        "session.step.ended" => {}
+        _ => return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec()),
+    }
+    // opencode-sessions-browser: whichever session OpenCode's events name is
+    // the live one, and every boundary may have added export lines, so the
+    // Transcript refreshes as it does when a Claude transcript grows.
+    if let Ok(mut live) = opencode_live_session_cell().lock() {
+        *live = Some(sid.clone());
+    }
+    emit_talk_session_changed_for_provider(app, Some(SessionProvider::Opencode));
+    (200, JSON, b"{\"ok\":true,\"handled\":true}".to_vec())
+}
+
 fn handle_hook_trace<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -79308,6 +80817,15 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_hook_trace(app, &buf)
+        }
+    } else if path == "__opencode/event" {
+        // opencode-turn-lifecycle: turn boundaries from the OpenCode plugin.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_opencode_event(app, &buf)
         }
     } else if path == "__worklist/end" {
         // The last-action route agents may call to close approved/drop

@@ -891,8 +891,19 @@ window.__bramShowAgentSwitcher = function (pushedEvt, fetchedSettings, mainStatu
   var provider = (mainStatus && mainStatus.provider) || (enhance && enhance.activeProvider);
   return !!provider;
 };
+// opencode-provider-switch: the one place a provider string is recognized.
+// Key is "" for anything unknown, so each caller picks its own default;
+// the label defaults to Claude, as the binary checks it replaces did.
+window.__bramProviderKey = function (provider) {
+  var p = String(provider || "").toLowerCase();
+  return p === "claude" || p === "codex" || p === "opencode" ? p : "";
+};
+window.__bramProviderLabel = function (provider) {
+  var key = window.__bramProviderKey(provider);
+  return key === "codex" ? "Codex" : key === "opencode" ? "OpenCode" : "Claude";
+};
 window.__bramAgentSwitcherLabel = function (provider) {
-  return String(provider || "").toLowerCase() === "codex" ? "Codex" : "Claude";
+  return window.__bramProviderLabel(provider);
 };
 var __bramAgentSwitcherBusy = false;
 var __bramAgentSwitcherBusySubscribers = new Set();
@@ -927,7 +938,7 @@ window.__bramWithAgentCommandTimeout = function (promise, label) {
   return Promise.race([promise, timeout]);
 };
 window.__bramSwitchAgent = function (provider) {
-  var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
+  var key = window.__bramProviderKey(provider) || "claude";
   var invoke = getTauriInvoke();
   if (!invoke) return Promise.reject(new Error("Tauri IPC unavailable"));
   window.__bramAgentSwitcherTrace("invoke", { provider: key });
@@ -959,7 +970,7 @@ window.__bramSwitchAgent = function (provider) {
   var hooked = false;
   try { dismissedAt = Number(window.sessionStorage.getItem(DISMISS_KEY)) || 0; } catch (e) {}
 
-  var providerName = function (p) { return p === "codex" ? "Codex" : "Claude"; };
+  var providerName = function (p) { return window.__bramProviderLabel(p); };
   var derive = function () {
     var p = latest;
     if (!p || (p.outcome !== "exited" && p.outcome !== "timeout")) return null;
@@ -1076,7 +1087,13 @@ window.__bramSwitchAgent = function (provider) {
     var p = latest;
     if (!p || !p.pending) return null;
     if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
-    return { atMs: p.atMs };
+    // The host names the agents installed on this machine, so the card offers
+    // every one of them — three, since OpenCode joined Claude and Codex. An
+    // older host sends no list; the two-agent pair is then the honest answer.
+    var installed = Array.isArray(p.installed) && p.installed.length
+      ? p.installed.filter(function (key) { return window.__bramProviderKey(key); })
+      : ["claude", "codex"];
+    return { atMs: p.atMs, installed: installed };
   };
   var notify = function (reason) {
     var next = derive();
@@ -1152,7 +1169,7 @@ window.__bramSwitchAgent = function (provider) {
   var forCreate = null;
   try { dismissedAt = Number(window.sessionStorage.getItem(DISMISS_KEY)) || 0; } catch (e) {}
 
-  var name = function (p) { return p === "codex" ? "Codex" : "Claude"; };
+  var name = function (p) { return window.__bramProviderLabel(p); };
   // A session with no title is named by its short id, which the Sessions
   // tab can find, never "(untitled)".
   var quoted = function (t, id) { return t ? "'" + t + "'" : String(id || "").slice(0, 8); };
@@ -1170,7 +1187,8 @@ window.__bramSwitchAgent = function (provider) {
       message: "No " + name(p.toProvider) + " session goes with " + name(p.fromProvider) + " session " +
         quoted(p.fromTitle, p.fromSessionId) + ". " + name(p.toProvider) + " resumed its most recent, " +
         quoted(p.toTitle, p.toSessionId) + ".",
-      keepTooltip: "Pair these two, so switching between Claude and Codex moves between them.",
+      keepTooltip: "Pair these two, so switching between " + name(p.fromProvider) + " and " +
+        name(p.toProvider) + " moves between them.",
       actionLabel: "Start a new " + name(p.toProvider) + " session",
       actionTooltip: "Opens New session to start a " + name(p.toProvider) + " session that goes with " +
         quoted(p.fromTitle, p.fromSessionId) + "; switching back and forth will then move between those two.",
@@ -1222,14 +1240,16 @@ window.__bramSwitchAgent = function (provider) {
     notify(reason);
   };
   window.__bramPairOfferDismiss = function (value) { dismiss(value, "dismiss-click"); };
+  // opencode-partner-handoff: the two sides as `<provider>=<id>`, any two of
+  // claude / codex / opencode.
   window.__bramPairOfferKeep = function (value, toastApi) {
     if (!value) return;
-    var claude = value.fromProvider === "claude" ? value.fromSessionId : value.toSessionId;
-    var codex = value.fromProvider === "codex" ? value.fromSessionId : value.toSessionId;
+    var from = window.__bramProviderKey(value.fromProvider);
+    var to = window.__bramProviderKey(value.toProvider);
     dismiss(value, "keep-click");
-    window.fetch("/__sessions/pair?claude=" + encodeURIComponent(claude || "") +
-      "&codex=" + encodeURIComponent(codex || "") +
-      "&from=" + encodeURIComponent(value.fromProvider || ""), { cache: "no-store" }).then(function (r) {
+    window.fetch("/__sessions/pair?" + from + "=" + encodeURIComponent(value.fromSessionId || "") +
+      "&" + to + "=" + encodeURIComponent(value.toSessionId || "") +
+      "&from=" + encodeURIComponent(from), { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
     }).catch(function (e) {
       if (toastApi && typeof toastApi.error === "function") {
@@ -1266,10 +1286,33 @@ window.__bramSwitchAgent = function (provider) {
   window.__bramClearPairOfferForCreate = function () { forCreate = null; };
 })();
 
+// opencode-sessions-browser: the Sessions row's delete / rename buttons.
+// OpenCode rows are Bram's read-only exports of OpenCode's own database, so
+// those happen inside OpenCode; the other cases keep their existing text.
+window.__bramSessionEditEnabled = function (item, pendingDeletes, pendingRenames) {
+  if (!item || item.pending || item.provider === "opencode") return false;
+  return !((pendingDeletes || []).includes(item.id) || (pendingRenames || []).includes(item.id));
+};
+window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendingRenames) {
+  var del = action === "delete";
+  if (!item) return "";
+  if (item.pending) {
+    return del
+      ? "Available after the first message creates the Codex session"
+      : "Available after the next message creates the session";
+  }
+  if (item.provider === "opencode") {
+    return del ? "Delete OpenCode sessions inside OpenCode" : "Rename OpenCode sessions inside OpenCode";
+  }
+  if ((pendingDeletes || []).includes(item.id)) return "delete pending";
+  if ((pendingRenames || []).includes(item.id)) return "rename pending";
+  return del ? "Delete session" : "Rename session";
+};
+
 // provider-session-pair-offer: the Sessions row's "paired with" label.
 window.__bramPairedWithLabel = function (partner) {
   if (!partner) return "";
-  var who = partner.provider === "codex" ? "Codex" : "Claude";
+  var who = window.__bramProviderLabel(partner.provider);
   return "Paired with " + who + " session " +
     (partner.title ? "'" + partner.title + "'" : String(partner.id || "").slice(0, 8));
 };
@@ -1281,8 +1324,8 @@ window.__bramPairedWithLabel = function (partner) {
 window.__bramPairMatchTitle = function (item) {
   var p = item && item.partner;
   if (!p || !p.title) return "";
-  var mine = item.provider === "codex" ? "Codex" : "Claude";
-  var strip = function (t) { return String(t || "").replace(/ \((Claude|Codex)\)$/, ""); };
+  var mine = window.__bramProviderLabel(item.provider);
+  var strip = function (t) { return String(t || "").replace(/ \((Claude|Codex|OpenCode)\)$/, ""); };
   var base = strip(p.title);
   // Already matching, suffix aside: nothing to offer on either row.
   if (strip(item.title) === base) return "";
@@ -1336,7 +1379,7 @@ window.__bramUnpairSession = function (provider, id, toastApi) {
   var dismissedAt = 0;
   var hooked = false;
   try { dismissedAt = Number(window.sessionStorage.getItem(DISMISS_KEY)) || 0; } catch (e) {}
-  var name = function (p) { return p === "codex" ? "Codex" : "Claude"; };
+  var name = function (p) { return window.__bramProviderLabel(p); };
   var label = function (title, id) { return title ? "'" + title + "'" : String(id || "").slice(0, 8); };
   var derive = function () {
     var p = latest;
@@ -1407,8 +1450,8 @@ window.__bramUnpairSession = function (provider, id, toastApi) {
 })();
 
 window.__bramHandleAgentSwitcherChange = function (next, previous, select, toastApi) {
-  var key = String(next || "").toLowerCase() === "codex" ? "codex" : (String(next || "").toLowerCase() === "claude" ? "claude" : "");
-  var prev = String(previous || "").toLowerCase() === "codex" ? "codex" : "claude";
+  var key = window.__bramProviderKey(next);
+  var prev = window.__bramProviderKey(previous) || "claude";
   window.__bramAgentSwitcherTrace("change", { next: key, previous: prev, hasSelect: !!select });
   if (!key || key === prev) return;
   __bramPublishAgentSwitcherBusy(true);
@@ -1431,7 +1474,7 @@ window.__bramHandleAgentSwitcherChange = function (next, previous, select, toast
   });
 };
 window.__bramReloadAgentSession = function (provider, sessionId) {
-  var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
+  var key = window.__bramProviderKey(provider) || "claude";
   var id = String(sessionId || "");
   var invoke = getTauriInvoke();
   if (!invoke) return Promise.reject(new Error("Tauri IPC unavailable"));
@@ -1470,7 +1513,7 @@ window.__bramReloadAgentSession = function (provider, sessionId) {
 // optionally naming it. The host kills+relaunches the agent without --continue
 // and applies the name when the new session's JSONL surfaces.
 window.__bramCreateNewSession = function (provider, title, pairWith) {
-  var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
+  var key = window.__bramProviderKey(provider) || "claude";
   var invoke = getTauriInvoke();
   // dismiss-click-evidence-before-guard audit: __bramCreateNewSessionClick
   // (the only caller) has no trace of its own — unlike
@@ -1598,9 +1641,9 @@ window.__bramGateLastSessionLine = function (items, sel, sessions) {
   // name reads the same from both sides.
   var cur = Array.isArray(sessions) && sessions.length ? window.__bramCurrentSessionOf(sessions) : null;
   var prov = String(b.provider || "").toLowerCase();
-  var provName = prov === "codex" ? "Codex" : prov === "claude" ? "Claude" : String(b.provider || "");
+  var provName = window.__bramProviderKey(prov) ? window.__bramProviderLabel(prov) : String(b.provider || "");
   var otherAgent = !!(cur && cur.provider && String(cur.provider).toLowerCase() !== prov);
-  var title = String(b.title || "").replace(/\s*\((?:Codex|Claude)\)\s*$/i, "").trim();
+  var title = String(b.title || "").replace(/\s*\((?:Codex|Claude|OpenCode)\)\s*$/i, "").trim();
   if (otherAgent) {
     return title
       ? "Last worked on by " + provName + " in '" + title + "'."
@@ -1617,7 +1660,7 @@ window.__bramGateSwitchToLastSession = function (items, sel, sessions, toastApi)
   window.__bramReloadAgentSessionClick(b.provider, b.sessionId, toastApi);
 };
 window.__bramReloadAgentSessionClick = function (provider, sessionId, toastApi) {
-  var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
+  var key = window.__bramProviderKey(provider) || "claude";
   var id = String(sessionId || "");
   try {
     window.__bramIframeTrace("agent-reload", {
@@ -2527,11 +2570,10 @@ window.__bramComposerEnterSubmit = function (box, toChat) {
   return window.__bramSubmitMessageAgentComposer(box, "");
 };
 // The addressee line's text. `provider` is the active agent ("claude" |
-// "codex"); `toChat` the per-message override.
+// "codex" | "opencode"); `toChat` the per-message override.
 window.__bramComposerAddressee = function (sel, toChat, provider) {
   var ids = Array.isArray(sel) ? sel : [];
-  var p = String(provider || "").toLowerCase();
-  var agent = p === "codex" ? "Codex" : "Claude";
+  var agent = window.__bramProviderLabel(provider);
   if (!ids.length || toChat) return "To: " + agent + " (chat)";
   return "To: " + (ids.length === 1 ? ids[0] : ids.length + " items") + " (feedback)";
 };
@@ -3260,7 +3302,7 @@ window.__bramSettingsFormData = function (settings, section) {
       policy = shell.continueLast === false ? "newSession" : "agentRecent";
     }
     return {
-      agent: shell.agent === "codex" ? "codex" : "claude",
+      agent: window.__bramProviderKey(shell.agent) || "claude",
       startupPolicy: policy,
       args: shell.args == null ? "" : String(shell.args),
       firstCommand: shell.firstCommand == null ? "" : String(shell.firstCommand),
@@ -3308,6 +3350,7 @@ window.providerDisplayName = function (mainAgentStatus, enhanceStatusValue) {
     (enhanceStatusValue && enhanceStatusValue.activeProvider) ||
     "";
   if (p === "claude") return "Claude Code";
+  if (p === "opencode") return "OpenCode";
   return p ? p.charAt(0).toUpperCase() + p.slice(1) : p;
 };
 
@@ -9651,10 +9694,12 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     }
     return "The terminal is waiting at a prompt Bram can't answer.";
   };
-  // The host names the other agent only when its CLI is on PATH.
+  // The host names the alternative only when its CLI is on PATH, and with
+  // three agents it is never simply "the other one" — so the label comes from
+  // the provider key, never a two-way ternary.
   window.__bramTerminalAttentionSwitchLabel = function (value) {
     var to = value && value.switchTo;
-    return to ? "Use " + (to === "codex" ? "Codex" : "Claude") + " instead" : "";
+    return to ? "Use " + window.__bramProviderLabel(to) + " instead" : "";
   };
   window.__bramTerminalAttentionSwitch = function (value, toastApi) {
     var to = value && value.switchTo;
@@ -15392,7 +15437,7 @@ window.__bramApplySendRestore = function (snapshot, box, toastApi) {
   // pane-send-refuses-into-trust-prompt: an Enter would have answered the
   // prompt (its default trusts the folder), so the send came back.
   if (p && p.reason === "prompt-on-screen" && typeof toastApi === "function") {
-    var who = p.provider === "codex" ? "Codex" : (p.provider === "claude" ? "Claude" : "The agent");
+    var who = window.__bramProviderKey(p.provider) ? window.__bramProviderLabel(p.provider) : "The agent";
     toastApi(who + " is waiting on a trust prompt in the terminal, so your message wasn't sent. Answer the prompt there, then send again. Your message is back in the message box.");
   }
 };

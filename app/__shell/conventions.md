@@ -17,7 +17,7 @@ assume an iframe is present — detect before you rely on it.
 > save project-related memories** — worklist preferences, helper APIs,
 > release quirks, conventions you discover. Per-user memory is private
 > to one agent on one machine; shared files reach everyone running Bram
-> (Claude and Codex alike). Route by audience: knowledge that would
+> (every agent alike). Route by audience: knowledge that would
 > change an agent's behavior in a project that is NOT the Bram source
 > repo belongs in these conventions; knowledge that matters only when
 > editing Bram's own source belongs in Bram's source-repo developer
@@ -70,9 +70,8 @@ Skip the worklist only in these contexts, never because the change is
   the same turn as the change request — don't carry it forward across
   turns or infer it from past patterns. Retired phrases ("skip the
   worklist", "commit this directly", "inline the fix", "no worklist for
-  this", "don't bother with the worklist") no longer opt out. Claude
-  and Codex honor the same phrase, so the user-facing contract is the
-  same regardless of agent.
+  this", "don't bother with the worklist") no longer opt out. Every
+  agent honors the same phrase.
 - **`skip-worklist:` structured prefix on this turn.** The turn begins
   literally with `skip-worklist: ` followed by the request. Same family
   as `approved:` / `drop:` / `iterate:`, but it authorizes a direct
@@ -210,7 +209,7 @@ agent edits. An instruction to edit it is stale.
 
 **The `version` rule.** `worklist.json` carries a top-level `version`
 integer. Every write MUST set `version: N+1`, where `N` is the value on
-disk when you read it; both agents' PreToolUse hooks deny any other
+disk when you read it; every agent's guard denies any other
 bump (`/__worklist/mutate` bumps on its own path under a mutex). So:
 read and capture `version`; write with `version: <captured + 1>`; on a
 `reason=stale-worklist-version` denial, re-read, rebase your change on
@@ -415,7 +414,7 @@ response saying the commit "ALREADY RAN" is success.
 
 ### Transports
 
-**Claude: loopback curl.** Bram writes its port to `resources/.bram-port`
+**Claude and OpenCode: loopback curl.** Bram writes its port to `resources/.bram-port`
 (plain decimal). Read it once and substitute the literal number
 (`$BRAM_PORT` won't match the permission allowlist):
 
@@ -601,8 +600,8 @@ For example:
   `Bram unknown`, never a guess. Prefer the live `/__app-info` value: a
   long-running session's imported copy can be stale, and a present but
   wrong version is denied.
-- `<thread>` — `main thread` or `subagent`. `<model>` — the model
-  producing the words.
+- `<Agent>` — `Claude`, `Codex` or `OpenCode`. `<thread>` — `main
+  thread` or `subagent`. `<model>` — the model producing the words.
 - `<os>` — `macOS`, `Windows` or `Linux`. `<machine>` — short hostname
   (`hostname -s`; `COMPUTERNAME` on Windows).
 - The locator is the checkout's `origin` normalized to `host/path`: no
@@ -626,7 +625,7 @@ Rules:
   field), but a commit message another session will read should still
   say who wrote it and from which build.
 
-Both provider guards **deny** unsigned forge writes; sign by default and
+Every agent's guard **denies** unsigned forge writes; sign by default and
 you never meet them.
 
 - **A signature denial you don't understand** → read `.claude/bram-reference/worklist-mechanics.md` (§Signature deny reasons).

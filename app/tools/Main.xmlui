@@ -686,7 +686,7 @@
   </VStack>
 
   <VStack
-    when="{enhanceStatus.value && enhanceStatus.value.firstRun && !enhanceStatus.value.nestedUnder}"
+    when="{enhanceStatus.value && enhanceStatus.value.firstRun && !enhanceStatus.value.nestedUnder && window.__bramProjectFolderIsOk(enhanceStatus.value)}"
     padding="$space-4"
     gap="$space-2"
     backgroundColor="$color-info-50"
@@ -739,6 +739,75 @@
       onClick="toplevelBannerDismissed = true" />
   </HStack>
 
+  <!-- issue-448: Bram wasn't started from a project folder, the root of a
+       local git repository (README prerequisite #1). A Bram's folder is fixed
+       at launch and the only way in is to cd to the repo's root and run bram,
+       so these say what's wrong, why, and exactly where to start from. The
+       host started nothing (no startup files, no Setup, no agent), and the
+       first-run and Setup blocks are hidden. Amber launched at $HOME, cd'd to
+       her project in Bram's terminal, and expected Bram to follow. -->
+  <VStack
+    when="{window.__bramProjectFolderIs(enhanceStatus.value, 'home')}"
+    backgroundColor="$color-warn-100"
+    padding="$space-3"
+    gap="$space-2">
+    <Text fontWeight="$fontWeight-bold" value="This isn't a project folder" />
+    <Text fontSize="$fontSize-sm">
+      Bram is running in your home directory. Bram works in a project folder:
+      the root of the local git repository for the app you want to work on,
+      such as
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="~/code/my-app" />.
+      Your home directory can't be one, even if it's a git repository: every
+      other folder is inside it, so Bram would treat all of them as part of
+      this project.
+    </Text>
+    <Text fontSize="$fontSize-sm">
+      Quit Bram. Then, in your terminal,
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="cd" /> to your
+      project folder and run
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="bram" />.
+    </Text>
+  </VStack>
+  <VStack
+    when="{window.__bramProjectFolderIs(enhanceStatus.value, 'not-git')}"
+    backgroundColor="$color-warn-100"
+    padding="$space-3"
+    gap="$space-2">
+    <Text fontWeight="$fontWeight-bold" value="This isn't a project folder" />
+    <Text fontSize="$fontSize-sm">
+      Bram is running in
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="{enhanceStatus.value.projectFolder.root}" />,
+      which isn't in a git repository. Bram works in a project folder: the
+      root of the local git repository for the app you want to work on, such as
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="~/code/my-app" />.
+    </Text>
+    <Text fontSize="$fontSize-sm">
+      Quit Bram. Then, in your terminal,
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="cd" /> to your
+      project folder and run
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="bram" />.
+    </Text>
+  </VStack>
+  <VStack
+    when="{window.__bramProjectFolderIs(enhanceStatus.value, 'subfolder')}"
+    backgroundColor="$color-warn-100"
+    padding="$space-3"
+    gap="$space-2">
+    <Text fontWeight="$fontWeight-bold" value="Start Bram from the root of this repository" />
+    <Text fontSize="$fontSize-sm">
+      Bram is running in
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="{enhanceStatus.value.projectFolder.root}" />,
+      a folder inside the git repository at
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="{enhanceStatus.value.projectFolder.toplevel}" />.
+      Bram works from a repository's root folder.
+    </Text>
+    <Text fontSize="$fontSize-sm">
+      Quit Bram. Then, in your terminal, run
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="{'cd ' + enhanceStatus.value.projectFolder.toplevel}" />
+      and then
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="bram" />.
+    </Text>
+  </VStack>
   <!-- issue-353: a stray Setup scaffold in the home directory (from an
        earlier mis-launch at $HOME). The host computes strayHomeScaffold
        at startup but until now nothing in the pane used it — Walt's
@@ -804,7 +873,7 @@
        already provider-neutral; the codex-hook-refresh variant only appears
        when Codex is the active provider. -->
   <VStack
-    when="{enhanceStatus.value && enhanceStatus.value.providerNeedsSetup && !setupCompleteProvider}"
+    when="{enhanceStatus.value && enhanceStatus.value.providerNeedsSetup && !setupCompleteProvider && window.__bramProjectFolderIsOk(enhanceStatus.value)}"
     padding="$space-4"
     gap="$space-3"
     backgroundColor="$color-info-50"
@@ -1011,7 +1080,49 @@
            Worklist-dock mount (AgentMenuView is self-gating on menu and
            owns its preview modal, so the footer mount is drop-in). -->
       <AgentMenuView menu="{footerAgentMenuEvt.value}" surface="footer" />
-      <!-- agent-launch-failure-in-pane: a launch that failed (the agent
+      <!-- issue-448: both agent CLIs are installed and the project names no
+           agent, so the host held the autostart to ask instead of guessing
+           Claude. Driven by the host's replayable `startup-agent-choice`;
+           a click saves shell.agent and starts that agent. Solid buttons for
+           the two answers, ghost for Dismiss, per
+           https://www.xmlui.org/docs/reference/components/Button#variant . -->
+      <PushSource
+        id="startupAgentChoice"
+        initial="{null}"
+        subscribe="{window.bramSubscribeStartupAgentChoice()}" />
+      <VStack
+        when="{!!startupAgentChoice.value}"
+        gap="$space-1"
+        paddingHorizontal="$space-2"
+        paddingVertical="$space-1"
+        backgroundColor="$color-primary-50"
+        border="1px solid $color-primary-100"
+        borderRadius="$borderRadius">
+        <HStack width="100%" gap="$space-2" verticalAlignment="center">
+          <Text
+            width="*"
+            fontSize="$fontSize-sm"
+            value="Which agent do you use in this project?" />
+          <Button
+            label="Claude"
+            size="xs"
+            onClick="window.__bramChooseStartupAgent('claude', toast)" />
+          <Button
+            label="Codex"
+            size="xs"
+            onClick="window.__bramChooseStartupAgent('codex', toast)" />
+          <Button
+            label="Dismiss"
+            variant="ghost"
+            size="xs"
+            onClick="window.__bramStartupAgentChoiceDismiss(startupAgentChoice.value)" />
+        </HStack>
+        <Text
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="Both are installed. Bram saves your answer for this project in .bram.json, and you can change it later in Settings." />
+      </VStack>
+      <!-- agent-launch-failure-in-pane:a launch that failed (the agent
            exited right after launch, or the terminal never came back to a
            prompt) is said here, above the message box, where the user is
            about to type into a terminal no agent is reading. Driven by the
@@ -1365,6 +1476,14 @@
             width="*"
             color="$color-warn-700"
             value="{window.__bramTerminalAttentionText(terminalAttentionEvt.value)}" />
+          <!-- terminal-attention-login-screen (#448): a logged-out agent can
+               be traded for the other one, when the host found its CLI. -->
+          <Button
+            when="{!!(terminalAttentionEvt.value &amp;&amp; terminalAttentionEvt.value.switchTo)}"
+            label="{window.__bramTerminalAttentionSwitchLabel(terminalAttentionEvt.value)}"
+            variant="outlined"
+            size="xs"
+            onClick="window.__bramTerminalAttentionSwitch(terminalAttentionEvt.value, toast)" />
           <Button
             label="Open terminal"
             variant="outlined"

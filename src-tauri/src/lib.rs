@@ -2297,7 +2297,8 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
     // would recreate the very ~/resources scaffold the startup refusal
     // exists to prevent. Returning None silences both the startup
     // prepare/archive pass and every append_bram_trace_line call.
-    if project_root_is_home() {
+    // issue-448: likewise anywhere that isn't a project folder.
+    if !project_folder().is_ok() {
         return None;
     }
     project_resource_path(app, "bram-traces/bram-trace.log")
@@ -6085,6 +6086,20 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     const CODEX_UPDATE_MARKERS: &[&str] =
         &["update now", "skip until next version", "update available"];
     const CODEX_UPDATE_FOOTER: &str = "enter continue \u{b7} esc skip";
+    // terminal-attention-login-screen (#448): an agent that isn't logged in.
+    // Claude shows no login screen at startup: it opens its normal composer
+    // and the footer says "Not logged in · Run /login". Specimen: Claude Code
+    // 2.1.310 under a PTY with an empty CLAUDE_CONFIG_DIR, onboarding and
+    // folder trust pre-set, 2026-10-24. The footer is followed only by the
+    // effort line ("◐ medium · /effort"), hence a wider window than
+    // FOOTER_WINDOW; a reply quoting it is followed by the composer's ────
+    // borders, far longer than that. Codex shows a sign-in screen whose
+    // Enter starts the ChatGPT sign-in. Specimen: codex-cli 0.163.0 with an
+    // empty CODEX_HOME, same day.
+    const CLAUDE_LOGIN_FOOTER: &str = "not logged in \u{b7} run /login";
+    const CLAUDE_LOGIN_WINDOW: usize = 60;
+    const CODEX_LOGIN_MARKERS: &[&str] = &["sign in with chatgpt", "provide your own api key"];
+    const CODEX_LOGIN_FOOTER: &str = "press enter to continue";
     // All whitespace removed, on both sides of the match. The CLIs lay out
     // words with cursor-column moves (CSI n G), which strip_ansi drops
     // without leaving a space, so the tail reads "Esctocancel" and
@@ -6134,6 +6149,18 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
         || (CODEX_HOOKS_EVENT_FIELDS.iter().all(|m| has(m)) && ends_exactly("esc back"))
     {
         return Some("codex-hooks-manage");
+    }
+    if CODEX_LOGIN_MARKERS.iter().any(|m| has(m)) && ends_with_footer(CODEX_LOGIN_FOOTER) {
+        return Some("codex-login");
+    }
+    let login_end: String = {
+        let n = tail.chars().count();
+        tail.chars()
+            .skip(n.saturating_sub(CLAUDE_LOGIN_WINDOW))
+            .collect()
+    };
+    if login_end.contains(&squash(CLAUDE_LOGIN_FOOTER)) {
+        return Some("claude-login");
     }
     if SLASH_PANEL_MARKERS
         .iter()
@@ -6309,8 +6336,81 @@ fn emit_terminal_attention<R: tauri::Runtime>(
             "active": active,
             "shape": shape,
             "atMs": now_ms,
+            // terminal-attention-login-screen: the pane offers the other
+            // agent, but only when its CLI is on PATH.
+            "switchTo": if active { login_switch_target(shape) } else { None },
         }),
     );
+}
+
+fn login_switch_target(shape: Option<&str>) -> Option<&'static str> {
+    let other = match shape {
+        Some("claude-login") => "codex",
+        Some("codex-login") => "claude",
+        _ => return None,
+    };
+    agent_cli_on_path(other).then_some(other)
+}
+
+#[cfg(test)]
+mod terminal_attention_login_tests {
+    use super::{pane_input_blocking_prompt, terminal_attention_prompt_shape};
+
+    // Claude Code 2.1.310, logged out (empty CLAUDE_CONFIG_DIR), ANSI-stripped
+    // under a 120x40 PTY, 2026-10-24. Whitespace is irrelevant to matching.
+    const CLAUDE_LOGGED_OUT: &str = "Claude Code v2.1.310 Opus 5.5 · API Usage Billing \
+        /private/tmp/cap-cwd Auto mode is now Claude Code's default permission mode. \
+        ──────────────────────────────────────── ❯ \
+        ──────────────────────────────────────── \
+        ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents Not logged in · Run /login \
+        ◐ medium · /effort";
+    // codex-cli 0.163.0, logged out (empty CODEX_HOME), same capture.
+    const CODEX_SIGN_IN: &str = "Welcome to Codex, OpenAI's command-line coding agent \
+        Sign in with ChatGPT to use Codex as part of your paid plan or connect an API key \
+        for usage-based billing > 1. Sign in with ChatGPT Usage included with Plus, Pro, \
+        Business, and Enterprise plans 2. Sign in with Device Code Sign in from another \
+        device with a one-time code 3. Provide your own API key Pay for what you use \
+        Press enter to continue";
+
+    #[test]
+    fn specimens_classify() {
+        assert_eq!(
+            terminal_attention_prompt_shape(CLAUDE_LOGGED_OUT),
+            Some("claude-login")
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape(CODEX_SIGN_IN),
+            Some("codex-login")
+        );
+    }
+
+    #[test]
+    fn a_reply_quoting_the_footer_is_not_the_footer() {
+        // A logged-in Claude explaining the message: the composer's borders
+        // and its ordinary footer follow the quote.
+        let quoting = "If you see Not logged in · Run /login, run /login. \
+            ──────────────────────────────────────── ❯ \
+            ──────────────────────────────────────── \
+            ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents ◐ medium · /effort";
+        assert_eq!(terminal_attention_prompt_shape(quoting), None);
+        let codex_quoting = "Codex says Sign in with ChatGPT then Press enter to continue. \
+            › Ask Codex to do anything ? for shortcuts";
+        assert_eq!(terminal_attention_prompt_shape(codex_quoting), None);
+    }
+
+    #[test]
+    fn login_screens_hold_pane_sends() {
+        assert_eq!(
+            pane_input_blocking_prompt(CLAUDE_LOGGED_OUT, false),
+            Some("claude-login")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(CODEX_SIGN_IN, true),
+            Some("codex-login")
+        );
+        // Codex's screen counts only while Codex is the live agent.
+        assert_eq!(pane_input_blocking_prompt(CODEX_SIGN_IN, false), None);
+    }
 }
 
 #[cfg(test)]
@@ -9450,6 +9550,9 @@ struct ClaudeTurnStats {
     // line so a later `skip-stale-jsonl-end` can be told apart from a genuine
     // one, which today's log cannot do.
     notifications_skipped: u32,
+    // notification-started-turn-shows-finished: the boundary is a
+    // notification the agent answered after its turn had ended.
+    boundary_is_notification: bool,
 }
 
 static CLAUDE_TURN_STATS_CACHE: OnceLock<Mutex<Option<ClaudeTurnStats>>> = OnceLock::new();
@@ -9895,6 +9998,26 @@ fn start_claude_turn_stats_poll<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     .as_ref()
                     .filter(|s| s.notifications_skipped > 0)
                     .map(|s| (s.user_ts_ms, s.notifications_skipped));
+                let opened = next
+                    .as_ref()
+                    .filter(|s| s.boundary_is_notification)
+                    .map(|s| s.user_ts_ms);
+                let had = guard
+                    .as_ref()
+                    .filter(|s| s.boundary_is_notification)
+                    .map(|s| s.user_ts_ms);
+                if let Some(turn) = opened {
+                    if had != opened {
+                        append_bram_trace_line(
+                            &app_handle,
+                            "claude-turn-boundary",
+                            &format!(
+                                "op=notification-boundary turn={} note=answered-after-turn-ended",
+                                turn
+                            ),
+                        );
+                    }
+                }
                 if let Some((turn, skipped)) = seen {
                     if was != seen {
                         append_bram_trace_line(
@@ -9965,7 +10088,13 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
     let mut latest_assistant_stop: Option<String> = None;
     let mut saw_assistant_after_user = false;
     let mut notifications_skipped: u32 = 0;
-    for line in lines.iter().rev() {
+    let mut boundary_is_notification = false;
+    // The CLI writes an `api-request` record as it sends the model a request,
+    // ~30 ms after delivering a notification and seconds before the first
+    // assistant record (2.1.310; demo 2026-10-24 06:47:12.158 -> .189, reply
+    // 06:47:14.284). It is the earliest sign the notification is answered.
+    let mut saw_api_request_after = false;
+    for (idx, line) in lines.iter().enumerate().rev() {
         let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -9987,6 +10116,25 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
                 // A completion report is not something the user said, so it is
                 // not where a turn starts. Keep scanning for the real boundary.
                 if claude_jsonl_record_is_notification(&rec) {
+                    // notification-started-turn-shows-finished: delivered
+                    // while the agent was idle (its turn had ended) and
+                    // answered, a notification starts a new turn. Without
+                    // this the new turn inherited the ended turn's
+                    // timestamp, which the host had already marked killed,
+                    // so every working signal was refused and the pane said
+                    // "finished" throughout (2026-10-24 05:22-05:26, 22
+                    // skip-jsonl-working reason=killed-turn). Mid-turn, or
+                    // unanswered, it stays a non-boundary (b72a29b).
+                    if (saw_assistant_after_user || saw_api_request_after)
+                        && claude_jsonl_turn_ended_before(&lines, idx)
+                    {
+                        user_ts_ms = rec
+                            .get("timestamp")
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_iso_to_ms);
+                        boundary_is_notification = true;
+                        break;
+                    }
                     notifications_skipped = notifications_skipped.saturating_add(1);
                     continue;
                 }
@@ -10007,6 +10155,7 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
                 }
                 saw_assistant_after_user = true;
             }
+            "api-request" => saw_api_request_after = true,
             _ => {} // sidecar metadata: ignore
         }
     }
@@ -10020,7 +10169,37 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
         user_ts_ms,
         is_working,
         notifications_skipped,
+        boundary_is_notification,
     })
+}
+
+// Whether the nearest user or assistant record before `idx` (passing over
+// metadata and other notifications) is an assistant record that ended its
+// turn. A tool result or a real user message there means the notification
+// arrived mid-turn.
+fn claude_jsonl_turn_ended_before(lines: &[&str], idx: usize) -> bool {
+    for line in lines[..idx].iter().rev() {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match rec.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "assistant" => {
+                return rec
+                    .get("message")
+                    .and_then(|m| m.get("stop_reason"))
+                    .and_then(|v| v.as_str())
+                    == Some("end_turn");
+            }
+            "user" => {
+                if claude_jsonl_record_is_notification(&rec) {
+                    continue;
+                }
+                return false;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 // Minimal ISO-8601 to unix-ms parser for Claude session timestamps
@@ -10372,12 +10551,146 @@ fn pty_chunk_has_codex_working_status(chunk: &[u8]) -> bool {
     text.contains("Working (") && text.contains("esc to interrupt")
 }
 
+// codex-resume-false-working: which character tripped the activity-glyph
+// test, for the spinner-period trace. `codex resume` replays the session's
+// history, whose check marks and dingbats share the spinner's byte ranges,
+// and the false "working" never said which one fired.
+fn first_turn_activity_glyph(chunk: &[u8]) -> Option<char> {
+    let i = chunk
+        .windows(2)
+        .position(|w| w[0] == 0xE2 && (w[1] == 0x9C || w[1] == 0xA0))?;
+    std::str::from_utf8(chunk.get(i..i + 3)?)
+        .ok()?
+        .chars()
+        .next()
+}
+
+// codex-resume-false-working: whether Codex's idle composer has been on
+// screen since the latest launch. Until it has, a spinner reading from the
+// PTY is the resume replay or the boot paint, not a turn. Reset by every
+// launch (begin_agent_launch).
+static CODEX_COMPOSER_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn codex_composer_seen_since_launch() -> bool {
+    if CODEX_COMPOSER_SEEN.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let seen = codex_composer_ready(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS));
+    if seen {
+        CODEX_COMPOSER_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    seen
+}
+
+// codex-resume-false-working: the activity-stop clear is skipped below 10 s
+// of silence, and nothing checked again, so a false "working" stuck until
+// Codex's next real turn. One recheck after the window clears it when no
+// spinner has moved since and Codex's composer is idle on screen.
+fn should_clear_codex_on_recheck(
+    spinner_moved_since: bool,
+    phase_working: bool,
+    composer_idle: bool,
+) -> bool {
+    !spinner_moved_since && phase_working && composer_idle
+}
+
+fn schedule_codex_idle_recheck<R: tauri::Runtime>(app: &AppHandle<R>, silence_ms: u128) {
+    let snapshot = agent_turn_state_cell()
+        .lock()
+        .ok()
+        .and_then(|s| s.last_spinner_at);
+    let wait_ms = 10_000u128.saturating_sub(silence_ms) as u64 + 500;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        if !matches!(current_provider(&app), Some(SessionProvider::Codex)) {
+            return;
+        }
+        let spinner_moved_since = agent_turn_state_cell()
+            .lock()
+            .map(|s| s.is_active || s.last_spinner_at != snapshot)
+            .unwrap_or(true);
+        let phase_working = turn_state_cell()
+            .lock()
+            .map(|s| s.phase == "working")
+            .unwrap_or(false);
+        let composer_idle = codex_composer_ready(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS));
+        let clear =
+            should_clear_codex_on_recheck(spinner_moved_since, phase_working, composer_idle);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "agent-status",
+                &format!(
+                    "op={} reason=recheck-idle spinner_moved={} phase_working={} composer_idle={}",
+                    if clear { "clear" } else { "recheck-keep" },
+                    spinner_moved_since,
+                    phase_working,
+                    composer_idle
+                ),
+            );
+        }
+        if clear {
+            kill_current_claude_turn(&app);
+        }
+    });
+}
+
+#[cfg(test)]
+mod codex_false_working_tests {
+    use super::{first_turn_activity_glyph, should_clear_codex_on_recheck};
+
+    #[test]
+    fn names_the_glyph_that_tripped_the_detector() {
+        assert_eq!(
+            first_turn_activity_glyph("done \u{2714} ok".as_bytes()),
+            Some('\u{2714}')
+        );
+        assert_eq!(
+            first_turn_activity_glyph("\u{280b} Working".as_bytes()),
+            Some('\u{280b}')
+        );
+        assert_eq!(first_turn_activity_glyph(b"plain text"), None);
+    }
+
+    #[test]
+    fn recheck_clears_only_a_still_idle_codex() {
+        assert!(should_clear_codex_on_recheck(false, true, true));
+        assert!(
+            !should_clear_codex_on_recheck(true, true, true),
+            "spinner moved"
+        );
+        assert!(
+            !should_clear_codex_on_recheck(false, false, true),
+            "already not working"
+        );
+        assert!(
+            !should_clear_codex_on_recheck(false, true, false),
+            "composer not idle"
+        );
+    }
+}
+
 fn agent_status_set_codex_working<R: tauri::Runtime>(
     app: &AppHandle<R>,
     active_since: std::time::Instant,
     source: &str,
 ) {
     if !matches!(current_provider(app), Some(SessionProvider::Codex)) {
+        return;
+    }
+    if matches!(source, "pty-spinner" | "pty-status-text") && !codex_composer_seen_since_launch() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-status",
+                &format!(
+                    "op=skip-codex-working source={} reason=boot-before-composer",
+                    source
+                ),
+            );
+        }
         return;
     }
     if let Ok(state) = turn_state_cell().lock() {
@@ -10728,7 +11041,17 @@ fn pty_agent_turn_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             append_bram_trace_line(app, "agent-status", "op=codex-working-status-text");
         }
         if spinner_started {
-            append_bram_trace_line(app, "spinner-period", "state=started");
+            // codex-resume-false-working: name what started it.
+            let trigger = first_turn_activity_glyph(chunk)
+                .map(|c| format!("glyph=U+{:04X}", c as u32))
+                .unwrap_or_else(|| {
+                    if has_codex_working_status {
+                        "text=codex-working".to_string()
+                    } else {
+                        "glyph=none".to_string()
+                    }
+                });
+            append_bram_trace_line(app, "spinner-period", &format!("state=started {}", trigger));
         }
         if let Some(d) = spinner_ended_duration_ms {
             append_bram_trace_line(
@@ -10807,6 +11130,12 @@ fn pty_agent_turn_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         {
             kill_current_claude_turn(app);
         } else {
+            if !menu_pending
+                && !post_escape
+                && matches!(current_provider(app), Some(SessionProvider::Codex))
+            {
+                schedule_codex_idle_recheck(app, turn_end_silence_ms.unwrap_or(0));
+            }
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     app,
@@ -16524,7 +16853,14 @@ fn shell_window_title_parts(project_root: Option<&Path>, repo_slug: Option<&str>
 
 fn shell_window_title<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
     let root = project_root(Some(app));
-    let repo_slug = repo_owner_name(app);
+    // issue-448: a home directory that is itself a git checkout (a dotfiles
+    // repo) would otherwise title the window with that repo, as though it
+    // were the project. At home the title is just "~".
+    let repo_slug = if project_root_is_home() {
+        None
+    } else {
+        repo_owner_name(app)
+    };
     shell_window_title_parts(root.as_deref(), repo_slug.as_deref())
 }
 
@@ -18147,6 +18483,19 @@ fn pty_spawn(
     // the provider's first TUI boot-evidence frame. An unseen unmanaged repo
     // gets one fresh session; once its greeting is delivered, later launches
     // go straight back to the user's configured/default resume policy.
+    // issue-448: not a project folder, so start nothing: no greeting, no
+    // Setup, no agent. The pane's banner says where to start from instead.
+    // Before the greeting is armed, so a later proper launch still greets.
+    let folder = project_folder();
+    if !folder.is_ok() {
+        // The trace file is refused here too, so this goes to stderr.
+        eprintln!(
+            "[bram] op=autostart-held reason={} root={}",
+            folder.kind(),
+            determine_project_root().display()
+        );
+        return Ok(());
+    }
     let first_unmanaged_launch = arm_repo_startup_greeting_if_needed(&app);
     // first-run-sequence-greeting-vs-setup: Setup runs here, AFTER the
     // greeting is armed (arming checks project_is_managed, which auto-setup
@@ -18180,6 +18529,57 @@ fn pty_spawn(
         }
         return Ok(());
     }
+    // issue-448: with no `shell.agent` and both CLIs installed, Claude is a
+    // guess. Use this project's session history when it names one agent;
+    // otherwise hold the autostart and ask in the pane.
+    let mut configured_provider = configured_provider;
+    match startup_agent_pick_for(&app, startup_policy) {
+        StartupAgentPick::Configured => {}
+        StartupAgentPick::Evidence(provider) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "agent-switch",
+                    &format!(
+                        "op=launch-pick reason=only-provider-with-sessions provider={}",
+                        session_provider_label(provider)
+                    ),
+                );
+            }
+            configured_provider = provider;
+        }
+        StartupAgentPick::Ask => {
+            hold_startup_autostart_for_choice(
+                &app,
+                PendingStartupAutostart {
+                    startup_policy,
+                    configured_startup_policy,
+                    first_unmanaged_launch,
+                },
+            );
+            return Ok(());
+        }
+    }
+    run_startup_autostart(
+        app,
+        startup_policy,
+        configured_startup_policy,
+        configured_provider,
+        first_unmanaged_launch,
+    );
+    Ok(())
+}
+
+// The autostart's launch half: resolve the session to resume, then type the
+// launch command. Split out of pty_spawn so issue-448's agent chooser can run
+// it later, once the user has picked.
+fn run_startup_autostart(
+    app: AppHandle,
+    startup_policy: AgentStartupPolicy,
+    configured_startup_policy: AgentStartupPolicy,
+    configured_provider: SessionProvider,
+    first_unmanaged_launch: bool,
+) {
     let last_active = if startup_policy == AgentStartupPolicy::LastActive {
         validated_last_active_session(&app)
     } else {
@@ -18325,7 +18725,232 @@ fn pty_spawn(
             }),
         });
     }
-    Ok(())
+}
+
+// issue-448: which agent to start when the project hasn't said. Claude was
+// the unconditional default, so a Codex user with both CLIs installed got
+// Claude first (Amber's report: an expired Claude login she couldn't pass).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupAgentPick {
+    // `shell.agent` is set, or only one CLI is installed, or a last-active
+    // session names the agent: the existing launch ladder decides.
+    Configured,
+    // Exactly one agent has sessions in this project.
+    Evidence(SessionProvider),
+    // Nothing to go on: hold the autostart and ask in the pane.
+    Ask,
+}
+
+fn startup_agent_pick(
+    agent_configured: bool,
+    claude_on_path: bool,
+    codex_on_path: bool,
+    claude_has_sessions: bool,
+    codex_has_sessions: bool,
+) -> StartupAgentPick {
+    if agent_configured || !(claude_on_path && codex_on_path) {
+        return StartupAgentPick::Configured;
+    }
+    match (claude_has_sessions, codex_has_sessions) {
+        (true, false) => StartupAgentPick::Evidence(SessionProvider::Claude),
+        (false, true) => StartupAgentPick::Evidence(SessionProvider::Codex),
+        _ => StartupAgentPick::Ask,
+    }
+}
+
+fn startup_agent_pick_for(app: &AppHandle, startup_policy: AgentStartupPolicy) -> StartupAgentPick {
+    // A home-directory root gets no Setup and no .bram.json (#294, #353), so
+    // there is nowhere to save an answer.
+    if project_root_is_home() {
+        return StartupAgentPick::Configured;
+    }
+    let agent_configured = project_root(Some(app))
+        .and_then(|root| load_project_config(&root))
+        .and_then(|cfg| cfg.shell)
+        .and_then(|shell| shell.agent)
+        .map_or(false, |agent| !agent.trim().is_empty());
+    if agent_configured {
+        return StartupAgentPick::Configured;
+    }
+    if startup_policy == AgentStartupPolicy::LastActive
+        && validated_last_active_session(app).is_some()
+    {
+        return StartupAgentPick::Configured;
+    }
+    let has_sessions = |provider| {
+        latest_session_path_for_provider(app, provider)
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    startup_agent_pick(
+        false,
+        agent_cli_on_path("claude"),
+        agent_cli_on_path("codex"),
+        has_sessions(SessionProvider::Claude),
+        has_sessions(SessionProvider::Codex),
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingStartupAutostart {
+    startup_policy: AgentStartupPolicy,
+    configured_startup_policy: AgentStartupPolicy,
+    first_unmanaged_launch: bool,
+}
+
+static PENDING_STARTUP_AUTOSTART: Mutex<Option<PendingStartupAutostart>> = Mutex::new(None);
+
+// Replayable, like launch-outcome: the pane may load after the ask.
+fn emit_startup_agent_choice(app: &AppHandle, pending: bool, chosen: Option<&str>) {
+    emit_replayable_payload(
+        app,
+        "startup-agent-choice",
+        serde_json::json!({
+            "pending": pending,
+            "chosen": chosen,
+            "atMs": unix_now_ms(),
+        }),
+    );
+}
+
+fn hold_startup_autostart_for_choice(app: &AppHandle, pending: PendingStartupAutostart) {
+    if let Ok(mut slot) = PENDING_STARTUP_AUTOSTART.lock() {
+        *slot = Some(pending);
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=launch-ask policy={} first_unmanaged={}",
+                pending.startup_policy.as_str(),
+                pending.first_unmanaged_launch
+            ),
+        );
+    }
+    emit_startup_agent_choice(app, true, None);
+}
+
+fn take_pending_startup_autostart() -> Option<PendingStartupAutostart> {
+    PENDING_STARTUP_AUTOSTART
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+// A launch from anywhere else (header switch, Start fresh) answers the
+// question, so the card goes away without saving anything.
+fn clear_pending_startup_agent_choice(app: &AppHandle, reason: &str) {
+    if take_pending_startup_autostart().is_none() {
+        return;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!("op=launch-ask-cleared reason={}", reason),
+        );
+    }
+    emit_startup_agent_choice(app, false, None);
+}
+
+// The pane's agent card: save the answer as `shell.agent`, then run the
+// autostart that was held for it, greeting and all. A failed save still
+// launches; the error comes back for the pane to show.
+#[tauri::command]
+fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> {
+    let chosen = match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" => SessionProvider::Codex,
+        "claude" => SessionProvider::Claude,
+        other => return Err(format!("unknown agent provider: {}", other)),
+    };
+    let pending = take_pending_startup_autostart()
+        .ok_or_else(|| "No launch is waiting for an agent choice.".to_string())?;
+    let label = session_provider_label(chosen);
+    let saved = project_root(Some(&app))
+        .ok_or_else(|| "project root unavailable".to_string())
+        .and_then(|root| {
+            write_settings_to_config(&root, &serde_json::json!({ "shell": { "agent": label } }))
+        });
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            &app,
+            "agent-switch",
+            &format!(
+                "op=launch-chosen provider={} saved={}{}",
+                label,
+                saved.is_ok(),
+                saved
+                    .as_ref()
+                    .err()
+                    .map(|e| format!(" error={}", e))
+                    .unwrap_or_default()
+            ),
+        );
+    }
+    emit_startup_agent_choice(&app, false, Some(label));
+    run_startup_autostart(
+        app,
+        pending.startup_policy,
+        pending.configured_startup_policy,
+        chosen,
+        pending.first_unmanaged_launch,
+    );
+    saved.map_err(|e| format!("Started {} but couldn't save the choice: {}", label, e))
+}
+
+#[cfg(test)]
+mod startup_agent_pick_tests {
+    use super::{startup_agent_pick, SessionProvider, StartupAgentPick};
+
+    #[test]
+    fn configured_agent_always_decides() {
+        assert_eq!(
+            startup_agent_pick(true, true, true, false, false),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(true, true, true, false, true),
+            StartupAgentPick::Configured
+        );
+    }
+
+    #[test]
+    fn one_cli_leaves_it_to_the_sole_cli_rung() {
+        assert_eq!(
+            startup_agent_pick(false, true, false, false, false),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(false, false, true, true, false),
+            StartupAgentPick::Configured
+        );
+    }
+
+    #[test]
+    fn sessions_for_one_agent_pick_it() {
+        assert_eq!(
+            startup_agent_pick(false, true, true, false, true),
+            StartupAgentPick::Evidence(SessionProvider::Codex)
+        );
+        assert_eq!(
+            startup_agent_pick(false, true, true, true, false),
+            StartupAgentPick::Evidence(SessionProvider::Claude)
+        );
+    }
+
+    #[test]
+    fn no_evidence_or_both_asks() {
+        assert_eq!(
+            startup_agent_pick(false, true, true, false, false),
+            StartupAgentPick::Ask
+        );
+        assert_eq!(
+            startup_agent_pick(false, true, true, true, true),
+            StartupAgentPick::Ask
+        );
+    }
 }
 
 // The #210 bounce-back detection (first_output_seen / last_toturn_submit
@@ -20079,6 +20704,8 @@ static AGENT_LAUNCH_PENDING_GEN: std::sync::atomic::AtomicU64 =
 static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn begin_agent_launch() -> u64 {
+    // codex-resume-false-working: a fresh launch hasn't shown its composer.
+    CODEX_COMPOSER_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
     AGENT_LAUNCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
@@ -20522,6 +21149,7 @@ fn switch_agent(
     };
     refuse_agent_typing_if_policy_none(&app, "switch")?;
     cancel_agent_boot_hold(&app, "provider-switch");
+    clear_pending_startup_agent_choice(&app, "switch");
     // Header switching is always "return to that agent", independent of the
     // On Bram launch policy. A pinned codex session outranks `resume --last`:
     // after a cross-provider round-trip, codex must reopen the session Bram is
@@ -22352,6 +22980,7 @@ fn start_agent_fresh(
     };
     refuse_agent_typing_if_policy_none(&app, "start-fresh")?;
     cancel_agent_boot_hold(&app, "start-fresh");
+    clear_pending_startup_agent_choice(&app, "start-fresh");
     let command = agent_launch_command(provider_key)
         .ok_or("unknown agent provider")?
         .to_string();
@@ -42539,7 +43168,10 @@ const SUBMIT_NUDGE_AFTER_MS: i64 = 5_000;
 // requires (op=boot-prompt-expired reason=provider): a Claude reply quoting
 // one of these screens is not the screen.
 fn codex_only_prompt_shape(shape: &str) -> bool {
-    matches!(shape, "hooks-trust" | "codex-hooks-manage" | "codex-update")
+    matches!(
+        shape,
+        "hooks-trust" | "codex-hooks-manage" | "codex-update" | "codex-login"
+    )
 }
 
 fn prompt_shape_for_provider(stripped_tail: &str, codex_live: bool) -> Option<&'static str> {
@@ -42551,7 +43183,16 @@ fn pane_input_blocking_prompt(stripped_tail: &str, codex_live: bool) -> Option<&
     prompt_shape_for_provider(stripped_tail, codex_live).filter(|shape| {
         matches!(
             *shape,
-            "folder-trust" | "hooks-trust" | "codex-hooks-manage" | "codex-update"
+            // terminal-attention-login-screen: on Codex's sign-in screen an
+            // Enter starts the ChatGPT sign-in; at a logged-out Claude a
+            // message only draws "not logged in". Either way the message
+            // stays in the box.
+            "folder-trust"
+                | "hooks-trust"
+                | "codex-hooks-manage"
+                | "codex-update"
+                | "codex-login"
+                | "claude-login"
         )
     })
 }
@@ -48219,6 +48860,12 @@ fn codex_hook_toml_block(guard_link: Option<&Path>) -> Option<String> {
 // managed project (one with resources/). Not removed on exit: a stale entry
 // still names this project's own build, which is the guard it should get.
 fn record_own_guard_target<R: tauri::Runtime>(app: &AppHandle<R>) {
+    // issue-448: nothing goes into a folder that isn't a project folder
+    // (#353's home rule, generalized). A home that already had a resources/
+    // folder got this file at startup and again from the throughput ticker.
+    if !project_folder().is_ok() {
+        return;
+    }
     let Some(root) = project_root(Some(app)) else {
         return;
     };
@@ -48799,6 +49446,16 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "nestedUnder": nested_under,
         "nestedUnderIgnoredHome": nested_under_ignored_home,
         "strayHomeScaffold": stray_home_scaffold,
+        // issue-448: whether the launch folder is a project folder (a git
+        // repo's root); anything else drives the pane's banner.
+        "projectFolder": {
+            "kind": project_folder().kind(),
+            "root": determine_project_root().to_string_lossy(),
+            "toplevel": match project_folder() {
+                ProjectFolder::Subfolder(top) => Some(top.to_string_lossy().to_string()),
+                _ => None,
+            },
+        },
         // issue-445: ancestor CLAUDE.md files still carrying a legacy
         // xmlui-desktop block (Setup names them; this shows them at startup).
         "legacyAncestorImports": root
@@ -48953,6 +49610,138 @@ fn project_root_is_home() -> bool {
             .map(|home| path_is_home_dir(&determine_project_root(), &home))
             .unwrap_or(false)
     })
+}
+
+// issue-448: is the launch folder a project folder? README prerequisite #1 is
+// "a local git repo in which you develop your app", and Bram starts from that
+// repository's root (`cd` there, run `bram`). Anything else gets a pane
+// banner saying what's wrong and where to start from, and nothing is written
+// or started: no startup files, no Setup, no agent. No quiet fallbacks: a
+// subfolder is named as one, not silently swapped for its repo root.
+//
+// Home is refused even when it is a git repository (a dotfiles checkout):
+// every other folder is inside it, so a managed home makes the worklist guard
+// resolve every unmanaged path under home to this project (#294) and makes
+// every project under home look nested (#353).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProjectFolder {
+    Ok,
+    Home,
+    NotGit,
+    Subfolder(PathBuf),
+}
+
+impl ProjectFolder {
+    fn is_ok(&self) -> bool {
+        *self == ProjectFolder::Ok
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            ProjectFolder::Ok => "ok",
+            ProjectFolder::Home => "home",
+            ProjectFolder::NotGit => "not-git",
+            ProjectFolder::Subfolder(_) => "subfolder",
+        }
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| strip_unc_prefix(p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+    canon(a) == canon(b)
+}
+
+fn project_folder_verdict(
+    root: &Path,
+    home: Option<&Path>,
+    toplevel: Option<&Path>,
+) -> ProjectFolder {
+    if home.map_or(false, |home| path_is_home_dir(root, home)) {
+        return ProjectFolder::Home;
+    }
+    match toplevel {
+        None => ProjectFolder::NotGit,
+        Some(top) if same_dir(top, root) => ProjectFolder::Ok,
+        Some(top) => ProjectFolder::Subfolder(top.to_path_buf()),
+    }
+}
+
+fn git_toplevel_of(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then(|| PathBuf::from(text))
+}
+
+// The launch folder is fixed for the life of the process, so this is too.
+fn project_folder() -> &'static ProjectFolder {
+    static FOLDER: std::sync::OnceLock<ProjectFolder> = std::sync::OnceLock::new();
+    FOLDER.get_or_init(|| {
+        let root = determine_project_root();
+        let home = home_dir();
+        project_folder_verdict(&root, home.as_deref(), git_toplevel_of(&root).as_deref())
+    })
+}
+
+#[cfg(test)]
+mod project_folder_tests {
+    use super::{project_folder_verdict, ProjectFolder};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-project-folder-{}-{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn home_is_refused_even_as_a_repo() {
+        let home = scratch("home");
+        assert_eq!(
+            project_folder_verdict(&home, Some(&home), Some(&home)),
+            ProjectFolder::Home
+        );
+        assert_eq!(
+            project_folder_verdict(&home, Some(&home), None),
+            ProjectFolder::Home
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_repo_root_is_ok_and_no_repo_is_not() {
+        let repo = scratch("repo");
+        assert_eq!(
+            project_folder_verdict(&repo, None, Some(&repo)),
+            ProjectFolder::Ok
+        );
+        assert_eq!(
+            project_folder_verdict(&repo, None, None),
+            ProjectFolder::NotGit
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_subfolder_names_its_repo_root() {
+        let repo = scratch("sub");
+        let sub = repo.join("sub");
+        assert_eq!(
+            project_folder_verdict(&sub, None, Some(&repo)),
+            ProjectFolder::Subfolder(repo.clone())
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }
 
 // issue-353: the nearest managed ancestor, excluding $HOME — a nesting
@@ -49136,6 +49925,26 @@ mod home_scaffold_tests {
 
 fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec<u8>, String> {
     let proj = project_root(Some(app)).ok_or("no project root")?;
+    // issue-448: Setup only in a project folder, the root of a git repo.
+    match project_folder() {
+        ProjectFolder::NotGit => {
+            return Err(format!(
+                "Setup refused: {} isn't in a git repository. Bram works from the root of the \
+                 local git repository for your app: cd there and run bram (issue #448).",
+                proj.display()
+            ));
+        }
+        ProjectFolder::Subfolder(top) => {
+            return Err(format!(
+                "Setup refused: {} is inside the git repository at {}. Start Bram from the \
+                 repository's root: cd {} and run bram (issue #448).",
+                proj.display(),
+                top.display(),
+                top.display()
+            ));
+        }
+        ProjectFolder::Ok | ProjectFolder::Home => {}
+    }
     if let Some(home) = home_dir() {
         if path_is_home_dir(&proj, &home) {
             return Err(format!(
@@ -56666,6 +57475,82 @@ mod notification_turn_boundary_tests {
             stats.notifications_skipped, 0,
             "the scan stops at the boundary before reaching the notification"
         );
+    }
+
+    // notification-started-turn-shows-finished: the agent ended its turn, a
+    // background command's report arrived, and the agent answered it. That
+    // is a new turn, starting at the notification (CLI 2.1.310 shape, with
+    // the system and queue-operation records it writes in between).
+    #[test]
+    fn an_answered_notification_after_an_ended_turn_starts_a_turn() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"waiting on the build"}]}}"#,
+            r#"{"type":"system","timestamp":"2026-08-22T18:48:30.100Z"}"#,
+            r#"{"type":"queue-operation","timestamp":"2026-08-22T18:49:00.000Z"}"#,
+            notification_record("2026-08-22T18:49:00.100Z", COMPLETED),
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:49:05.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(
+            stats.user_ts_ms, 1787424540100,
+            "the turn starts at the notification"
+        );
+        assert!(stats.is_working, "the agent is answering it");
+        assert!(stats.boundary_is_notification);
+        assert_eq!(stats.notifications_skipped, 0);
+    }
+
+    #[test]
+    fn the_answered_notification_turn_ends_when_the_agent_does() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"waiting"}]}}"#,
+            notification_record("2026-08-22T18:49:00.000Z", COMPLETED),
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:49:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"build passed"}]}}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, 1787424540000);
+        assert!(!stats.is_working);
+    }
+
+    // While the model is still thinking, before any assistant record, the
+    // api-request the CLI writes already opens the turn as working (the demo
+    // run: the terminal showed "Nebulizing… (1s · thinking)" while the pane
+    // still said finished).
+    #[test]
+    fn an_api_request_after_the_notification_opens_the_turn_early() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"waiting"}]}}"#,
+            notification_record("2026-08-22T18:49:00.000Z", COMPLETED),
+            r#"{"type":"api-request","timestamp":"2026-08-22T18:49:00.030Z"}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, 1787424540000);
+        assert!(stats.is_working, "no reply yet, but the request is out");
+        assert!(stats.boundary_is_notification);
+    }
+
+    // b72a29b's case, unchanged: a report delivered mid-turn (after a tool
+    // result) is not a boundary even though the agent keeps going.
+    #[test]
+    fn a_notification_mid_turn_is_still_not_a_boundary() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:10.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:20.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            notification_record("2026-08-22T18:48:25.000Z", COMPLETED),
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, TURN_START_MS);
+        assert!(!stats.boundary_is_notification);
+        assert_eq!(stats.notifications_skipped, 1);
     }
 
     // The observe-only would-end evidence shares the predicate, so it stops
@@ -80435,6 +81320,7 @@ pub fn run() {
             pty_write,
             switch_agent,
             start_agent_fresh,
+            choose_startup_agent,
             reload_agent_session,
             create_new_session,
             queue_pty_intent,
@@ -80703,11 +81589,14 @@ pub fn run() {
                 // mis-launch, and everything under home then reads as
                 // nested. Stderr only — trace persistence is likewise
                 // refused at a home root (bram_trace_log_file).
-                if project_root_is_home() {
+                // issue-448: and never scaffold a folder that isn't a project
+                // folder (not a git repo, or a subfolder of one).
+                if !project_folder().is_ok() {
                     eprintln!(
-                        "[bram] op=refuse-home-scaffold root={} — project root is the home \
-                         directory; startup scaffold (port files, trace directory) not written \
-                         (issue #353)",
+                        "[bram] op=refuse-scaffold reason={} root={} — not a project folder; \
+                         startup scaffold (port files, trace directory) not written \
+                         (issues #353, #448)",
+                        project_folder().kind(),
                         proj.display()
                     );
                 } else if wait_for_loopback_http(port, 5000) {

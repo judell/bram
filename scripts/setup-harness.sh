@@ -74,6 +74,52 @@ launch() {
   return 1
 }
 
+# issue-448: a launch outside a project folder (not a git repo's root) writes
+# no port file, so its port comes from the "[bram] loopback port=" line Bram
+# prints on stderr. Ready once /__enhance/status answers.
+launch_refused() {
+  local dir="$1"
+  BRAM_TRACE=1 "$BRAM_BIN" "$dir" > "$WORK_ROOT/$SCENARIO.log" 2>&1 &
+  BRAM_PID=$!
+  local i
+  for i in $(seq 1 80); do
+    BRAM_PORT="$(sed -n 's/^\[bram\] loopback port=\([0-9]*\).*/\1/p' "$WORK_ROOT/$SCENARIO.log" | head -1)"
+    if [ -n "$BRAM_PORT" ] && api "__enhance/status" > /dev/null 2>&1; then
+      sleep 2
+      return 0
+    fi
+    kill -0 "$BRAM_PID" 2>/dev/null || { bad "launch" "process exited; see $WORK_ROOT/$SCENARIO.log"; return 1; }
+    sleep 0.5
+  done
+  bad "launch" "no loopback port after 40s; see $WORK_ROOT/$SCENARIO.log"
+  return 1
+}
+
+# A refused launch starts and writes nothing: no Setup files, no startup
+# scaffold, no agent.
+assert_refused() {
+  local dir="$1" kind="$2" got p written=""
+  got="$(status_field projectFolder.kind)"
+  if [ "$got" = "$kind" ]; then
+    ok "projectFolder.kind is $kind"
+  else
+    bad "projectFolder.kind is $kind" "got: $got"
+  fi
+  if grep -q "op=autostart-held reason=$kind" "$WORK_ROOT/$SCENARIO.log"; then
+    ok "autostart held ($kind)"
+  else
+    bad "autostart held ($kind)" "no op=autostart-held line in $WORK_ROOT/$SCENARIO.log"
+  fi
+  for p in resources .claude AGENTS.md CLAUDE.md .bram.json; do
+    [ -e "$dir/$p" ] && written="$written $p"
+  done
+  if [ -z "$written" ]; then
+    ok "nothing written in $(basename "$dir")"
+  else
+    bad "nothing written in $(basename "$dir")" "found:$written"
+  fi
+}
+
 # Kill only the PID we spawned -- never pkill, which would take down the
 # developer's own Bram.
 shutdown_bram() {
@@ -240,16 +286,36 @@ assert_idempotent() {
 # ---------------------------------------------------------------------------
 
 scenario_pristine_nogit() {
+  # issue-448: a folder that isn't in a git repository is not a project
+  # folder (README prerequisite #1). Before, Setup seeded it on first launch.
   local dir="$WORK_ROOT/pristine_nogit"; mkdir -p "$dir"
   printf '# scratch\n' > "$dir/README.md"
-  launch "$dir" || return
-  # Auto-setup replaced the old post-launch "firstRun true" observation: by
-  # the time the API answers, Setup has already run. The trace records what
-  # firstRun was at the moment of decision.
-  assert_trace "$dir" "\[auto-setup\] op=ran firstRun=true" "auto-setup ran on first launch"
-  sleep 1
-  assert_setup_landed "$dir"
-  assert_idempotent "$dir"
+  launch_refused "$dir" || return
+  assert_refused "$dir" "not-git"
+  shutdown_bram
+}
+
+scenario_subfolder() {
+  # issue-448: a folder inside a repo is named as a subfolder, never silently
+  # swapped for the repo root, and nothing is written in either.
+  local repo="$WORK_ROOT/subfolder_repo"
+  local dir="$repo/src"
+  mkdir -p "$dir"
+  git -C "$repo" init -q
+  printf '# repo\n' > "$repo/README.md"
+  launch_refused "$dir" || return
+  assert_refused "$dir" "subfolder"
+  local top; top="$(status_field projectFolder.toplevel)"
+  if [ "$top" = "$(cd "$repo" && pwd -P)" ]; then
+    ok "toplevel names the repo root"
+  else
+    bad "toplevel names the repo root" "got: $top"
+  fi
+  local p written=""
+  for p in resources .claude AGENTS.md .bram.json; do
+    [ -e "$repo/$p" ] && written="$written $p"
+  done
+  if [ -z "$written" ]; then ok "nothing written at the repo root"; else bad "nothing written at the repo root" "found:$written"; fi
   shutdown_bram
 }
 
@@ -302,6 +368,8 @@ scenario_already_setup() {
 scenario_legacy_hooks() {
   # #173: a project carrying the retired generic hook names.
   local dir="$WORK_ROOT/legacy_hooks"; mkdir -p "$dir/.claude/hooks"
+  # issue-448: Setup runs only at a git repo's root.
+  git -C "$dir" init -q
   printf '# scratch\n' > "$dir/README.md"
   printf '#!/usr/bin/env python3\n# legacy\n' > "$dir/.claude/hooks/worklist-guard.py"
   printf '#!/usr/bin/env python3\n# legacy\n' > "$dir/.claude/hooks/permission-menu-hook.py"
@@ -317,6 +385,9 @@ scenario_nested() {
   local parent="$WORK_ROOT/nested_parent"
   local dir="$parent/child"
   mkdir -p "$dir"
+  # issue-448: the child must be a project folder (a repo root) for nesting
+  # to be the question; a non-repo child is refused before nesting is asked.
+  git -C "$dir" init -q
   printf '{}\n' > "$parent/.bram.json"
   printf '# child\n' > "$dir/README.md"
   launch "$dir" || return
@@ -344,7 +415,7 @@ require_bin
 command -v jq >/dev/null || { echo "jq required"; exit 127; }
 printf 'workdir: %s\n' "$WORK_ROOT"
 
-SCENARIOS=(pristine_nogit pristine_git already_setup legacy_hooks nested)
+SCENARIOS=(pristine_nogit subfolder pristine_git already_setup legacy_hooks nested)
 [ $# -gt 0 ] && SCENARIOS=("$@")
 
 for s in "${SCENARIOS[@]}"; do

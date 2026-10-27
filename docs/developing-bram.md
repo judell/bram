@@ -438,6 +438,16 @@ either. And always launch the `./bram` symlink at the repo root, not
 an installed/older app — both for fresh code and because the symlink
 is what makes disk serving resolve at all.
 
+**Build through `scripts/build.sh`**, the same debug build with a
+record: output and exit status pass through, and each build appends a
+line to `resources/build-log.jsonl` (gitignored). The line has its
+duration, HEAD and whether it moved, `src-tauri/` lines changed since
+the last logged build, other `cargo`/`rustc` processes running, load,
+and the caller. `scripts/build-timings.sh` times synthetic edits on a
+quiet tree; this log catches the slow real builds it can't (#452:
+2m55s and 1m38s builds the same day the synthetic rows read 25–34 s).
+Read it by sorting on `seconds` and looking at the slow rows' context.
+
 ### Formatting is enforced, so run `cargo fmt`
 
 `src-tauri/` was normalized in `d94a3b9`, and `.github/workflows/fmt.yml`

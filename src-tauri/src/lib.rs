@@ -9217,6 +9217,177 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
     })
 }
 
+// opencode-permission-menu: build the menu from OpenCode 2.1.4's
+// permission.asked payload, as Bram's plugin forwards it (spike, 2026-10-26):
+// {id: "per_…", sessionID, action: "shell" | "edit" | …, resources: [command
+// or path], save?: [patterns "Always allow" stores], metadata?: {files:
+// [{file, patch, …}]} on edits, source: {type: "tool", messageID, id}}.
+// OpenCode's prompt shows Allow once, Always allow (only when `save` is
+// non-empty) and Reject on one row. The selection starts on the first, Right
+// moves it and Enter confirms, so an option's keys are Right times its index,
+// then Enter. The spike confirmed each as a single write.
+fn opencode_permission_request_to_menu(data: &serde_json::Value) -> Option<PtyMenu> {
+    let action = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    if action.is_empty() {
+        return None;
+    }
+    let strings = |key: &str| -> Vec<&str> {
+        data.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+            .unwrap_or_default()
+    };
+    let resources = strings("resources");
+    let save = strings("save");
+    let tool = match action {
+        "shell" => "Shell",
+        "edit" => "Edit",
+        other => other,
+    }
+    .to_string();
+    let detail = resources.join(", ");
+    let text = if detail.is_empty() {
+        format!("{} requires approval", tool)
+    } else {
+        format!("{}: {}", tool, detail)
+    };
+    // The labels are OpenCode's own; "Always allow" carries the scope its
+    // prompt states under the option ("This will always allow …").
+    let mut labels = vec!["Allow once".to_string()];
+    if !save.is_empty() {
+        let scope = if save.as_slice() == ["*"] {
+            action.to_string()
+        } else {
+            save.join(", ")
+        };
+        labels.push(format!("Always allow {} for this project", scope));
+    }
+    labels.push("Reject".to_string());
+    let options = labels
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| MenuOption {
+            key: (i + 1).to_string(),
+            label,
+            answer_keys: Some(format!("{}\r", "\x1b[C".repeat(i))),
+            description: None,
+        })
+        .collect();
+    // An edit's patches, minus the Index/==== header OpenCode puts above each.
+    let patches: Vec<String> = data
+        .pointer("/metadata/files")
+        .and_then(|v| v.as_array())
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|f| f.get("patch").and_then(|p| p.as_str()))
+                .map(|p| {
+                    p.lines()
+                        .filter(|l| !l.starts_with("Index: ") && !l.chars().all(|c| c == '='))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(PtyMenu {
+        tool_call_signature: (!detail.is_empty()).then(|| format!("{}({})", tool, detail)),
+        tool,
+        text,
+        options,
+        prompt_id: None,
+        tool_call_diff: (!patches.is_empty()).then(|| patches.join("\n")),
+        tool_call_content: None,
+        cache_source: None,
+        at_host_ms: None,
+        signature_source: Some("hook"),
+    })
+}
+
+#[cfg(test)]
+mod opencode_permission_menu_tests {
+    use super::opencode_permission_request_to_menu as menu;
+
+    // permission.asked data, verbatim from the 2026-10-26 spike (OpenCode
+    // 2.1.4, a project whose opencode.json asks before bash and edit).
+    fn shell() -> serde_json::Value {
+        serde_json::json!({
+            "id": "per_17befb629001hqHD2a5zjCXWfX",
+            "sessionID": "ses_e84105209ffeKzQ0HqCUupIRwb",
+            "action": "shell",
+            "resources": ["echo bram-perm-once"],
+            "save": ["echo *"],
+            "source": {"type": "tool", "messageID": "msg_17befae4b001iO4b1LtRNLgwr8", "id": "call_00_rueipky6s57mnhzwujclzun8"}
+        })
+    }
+
+    fn edit() -> serde_json::Value {
+        serde_json::json!({
+            "id": "per_17bf099bb001KyL1vCdLvNG2io",
+            "sessionID": "ses_e84105209ffeKzQ0HqCUupIRwb",
+            "action": "edit",
+            "resources": ["spike.txt"],
+            "save": ["*"],
+            "metadata": {"files": [{"file": "spike.txt", "patch": "Index: spike.txt\n===================================================================\n--- spike.txt\n+++ spike.txt\n@@ -0,0 +1,1 @@\n+hi\n", "status": "added", "additions": 1, "deletions": 0}]},
+            "source": {"type": "tool", "messageID": "msg_17bf0927f001o5lOhn6SumgzXO", "id": "call_00_mlyh10mia3k960sks2nf8fqt"}
+        })
+    }
+
+    fn options(m: &super::PtyMenu) -> Vec<(&str, &str)> {
+        m.options
+            .iter()
+            .map(|o| (o.label.as_str(), o.answer_keys.as_deref().unwrap_or("")))
+            .collect()
+    }
+
+    #[test]
+    fn a_shell_request_offers_opencodes_three_answers_with_their_keys() {
+        let m = menu(&shell()).unwrap();
+        assert_eq!(m.tool, "Shell");
+        assert_eq!(m.text, "Shell: echo bram-perm-once");
+        assert_eq!(
+            m.tool_call_signature.as_deref(),
+            Some("Shell(echo bram-perm-once)")
+        );
+        assert_eq!(
+            options(&m),
+            vec![
+                ("Allow once", "\r"),
+                ("Always allow echo * for this project", "\x1b[C\r"),
+                ("Reject", "\x1b[C\x1b[C\r"),
+            ]
+        );
+        assert_eq!(m.tool_call_diff, None);
+    }
+
+    #[test]
+    fn an_edit_names_its_scope_and_carries_the_patch() {
+        let m = menu(&edit()).unwrap();
+        assert_eq!(m.tool, "Edit");
+        assert_eq!(options(&m)[1].0, "Always allow edit for this project");
+        assert_eq!(
+            m.tool_call_diff.as_deref(),
+            Some("--- spike.txt\n+++ spike.txt\n@@ -0,0 +1,1 @@\n+hi")
+        );
+    }
+
+    #[test]
+    fn without_save_patterns_there_is_no_always_and_reject_moves_up() {
+        let mut v = shell();
+        v.as_object_mut().unwrap().remove("save");
+        let m = menu(&v).unwrap();
+        assert_eq!(
+            options(&m),
+            vec![("Allow once", "\r"), ("Reject", "\x1b[C\r")]
+        );
+    }
+
+    #[test]
+    fn a_payload_without_an_action_builds_no_menu() {
+        assert!(menu(&serde_json::json!({"id": "per_x", "resources": ["ls"]})).is_none());
+    }
+}
+
 // Build a canonical permission menu from a Claude Code PermissionRequest
 // payload. The on-screen option LABELS are CLI-rendered (and prone to wrap
 // corruption); we synthesize clean ones from structured fields instead, keying
@@ -43764,6 +43935,15 @@ mod opencode_prompt_tests {
             pane_input_blocking_prompt(PERMISSION, OPENCODE),
             Some("opencode-permission")
         );
+    }
+
+    // opencode-permission-menu: the pane's card waits for this screen.
+    #[test]
+    fn the_permission_card_needs_the_prompt_on_screen() {
+        assert!(super::opencode_permission_on_screen(PERMISSION));
+        for not_asking in [PALETTE_OPEN, PALETTE_CLOSED, STATUS_VIEW_OPEN, ""] {
+            assert!(!super::opencode_permission_on_screen(not_asking));
+        }
     }
 
     #[test]
@@ -80729,6 +80909,7 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
         .filter(|(s, _, _)| s == sid)
         .map(|(_, _, input)| input);
     agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
+    clear_opencode_permission_claims(app, "opencode-turn-ended", None);
     clear_proposing_flag(app, "turn-finished");
     end_turn_context_unless_fresh(app, "opencode-turn-end");
     let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
@@ -80768,6 +80949,218 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
     }
 }
 
+// opencode-permission-menu: OpenCode asks in its own prompt, and Bram's plugin
+// reports it as permission.asked, then permission.replied once it is answered
+// (in the terminal, or by the pane's keys). Each request becomes a claim in the
+// queue Claude's and Codex's hook menus use, keyed by OpenCode's request id.
+//
+// The plugin runs in OpenCode's shared background service (`opencode serve
+// --service`, started by whichever OpenCode ran first, ppid 1), so it can't
+// carry the BRAM_MENU_TOKEN Bram gives the agent it launches (#113). The
+// evidence instead is Bram's own terminal: the card shows only once the
+// terminal draws OpenCode's permission prompt. That also keeps a prompt from
+// another OpenCode window on the same project out of this pane.
+const OPENCODE_PERMISSION_CLAIM_PREFIX: &str = "opencode:";
+// OpenCode draws the prompt as it publishes the event; seen in well under a
+// second in the spike. Past this the claim is dropped and the terminal alone
+// asks.
+const OPENCODE_PERMISSION_SEEN_WAIT_MS: u128 = 5_000;
+const OPENCODE_PERMISSION_SEEN_POLL_MS: u64 = 100;
+
+fn opencode_event_token(v: &serde_json::Value, k: &str) -> String {
+    v.get(k)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .take(80)
+        .collect()
+}
+
+fn opencode_permission_on_screen(tail: &str) -> bool {
+    prompt_shape_for_provider(tail, Some(SessionProvider::Opencode)) == Some("opencode-permission")
+}
+
+fn opencode_permission_asked<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde_json::Value) {
+    if !bram_menus_hook_driven_enabled() {
+        return;
+    }
+    let id = opencode_event_token(data, "id");
+    let Some(menu) = opencode_permission_request_to_menu(data).filter(|_| !id.is_empty()) else {
+        return;
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=permission provider=opencode tool={} options={}",
+                menu.tool,
+                menu.options.len()
+            ),
+        );
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=payload tool={} body={}",
+                menu.tool,
+                bram_trace_preview(&data.to_string(), 4000),
+            ),
+        );
+    }
+    let id_key = format!("{}{}", OPENCODE_PERMISSION_CLAIM_PREFIX, id);
+    let at_ms = unix_now_ms();
+    let (depth, dropped) = {
+        let Ok(mut q) = menu_hook_claims_cell().lock() else {
+            return;
+        };
+        // The terminal is OpenCode's, so another agent's leftover claims can't
+        // be what it shows.
+        let before = q.len();
+        q.retain(|c| c.id_key.starts_with(OPENCODE_PERMISSION_CLAIM_PREFIX));
+        let dropped = before - q.len();
+        q.retain(|c| c.id_key != id_key);
+        q.push(HookMenuClaim {
+            id_key: id_key.clone(),
+            tool_use_id: Some(id),
+            signature: None,
+            menu,
+            at_ms,
+            answered: false,
+            answered_label: None,
+            answered_at_ms: None,
+        });
+        (q.len(), dropped)
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=claim-queue-add id_key={} resolved_id=from-event depth={} dropped_other={}",
+                id_key, depth, dropped
+            ),
+        );
+    }
+    schedule_opencode_permission_display(app, id_key, at_ms);
+}
+
+// Show the claim once the terminal shows the prompt, if it is the only open
+// request. With several, OpenCode shows one at a time and nothing here says
+// which, so a card already up comes down (its keys could answer the other
+// request); the next reply re-runs this for whichever is left.
+fn schedule_opencode_permission_display<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id_key: String,
+    at_ms: i64,
+) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = loop {
+            let (queued, sole) = menu_hook_claims_cell()
+                .lock()
+                .map(|q| {
+                    (
+                        q.iter()
+                            .any(|c| c.id_key == id_key && c.at_ms == at_ms && !c.answered),
+                        claim_remained_sole(&q, &id_key, at_ms),
+                    )
+                })
+                .unwrap_or((false, false));
+            if !queued {
+                break "gone";
+            }
+            if opencode_permission_on_screen(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS)) {
+                break if sole { "shown" } else { "not-sole" };
+            }
+            if started.elapsed().as_millis() >= OPENCODE_PERMISSION_SEEN_WAIT_MS {
+                if let Ok(mut q) = menu_hook_claims_cell().lock() {
+                    q.retain(|c| c.id_key != id_key);
+                }
+                break "unseen";
+            }
+            std::thread::sleep(std::time::Duration::from_millis(
+                OPENCODE_PERMISSION_SEEN_POLL_MS,
+            ));
+        };
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "hook-menu",
+                &format!(
+                    "op=opencode-permission-display result={} id_key={} waited_ms={}",
+                    result,
+                    id_key,
+                    started.elapsed().as_millis()
+                ),
+            );
+        }
+        match result {
+            "shown" => select_hook_claim_display(&app, "claim-coalesced"),
+            // Not "claim-coalesced", so selection shows nothing and dismisses
+            // any card up.
+            "not-sole" => select_hook_claim_display(&app, "opencode-ambiguous"),
+            _ => {}
+        }
+    });
+}
+
+fn opencode_permission_replied<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde_json::Value) {
+    let id = opencode_event_token(data, "requestID");
+    if id.is_empty() {
+        return;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=opencode-permission-replied id={} reply={}",
+                id,
+                opencode_event_token(data, "reply")
+            ),
+        );
+    }
+    clear_opencode_permission_claims(app, "opencode-replied", Some(&id));
+    // A request that waited behind this one may now be the only one open.
+    let next = menu_hook_claims_cell().lock().ok().and_then(|q| {
+        let mut open = q
+            .iter()
+            .filter(|c| c.id_key.starts_with(OPENCODE_PERMISSION_CLAIM_PREFIX) && !c.answered);
+        match (open.next(), open.next()) {
+            (Some(c), None) => Some((c.id_key.clone(), c.at_ms)),
+            _ => None,
+        }
+    });
+    if let Some((id_key, at_ms)) = next {
+        schedule_opencode_permission_display(app, id_key, at_ms);
+    }
+}
+
+// Remove OpenCode's claims: the one a reply names, or all of them when its turn
+// ends, since a request can't outlive the turn that asked it.
+fn clear_opencode_permission_claims<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    reason: &str,
+    only_id: Option<&str>,
+) {
+    let claims: Vec<(String, String)> = menu_hook_claims_cell()
+        .lock()
+        .map(|q| {
+            q.iter()
+                .filter(|c| c.id_key.starts_with(OPENCODE_PERMISSION_CLAIM_PREFIX))
+                .filter_map(|c| Some((c.tool_use_id.clone()?, c.menu.tool.clone())))
+                .filter(|(id, _)| only_id.map_or(true, |only| only == id))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (id, tool) in claims {
+        clear_hook_permission_menu(app, "opencode", &tool, reason, Some(&id), None);
+    }
+}
+
 fn handle_opencode_event<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -80779,15 +81172,7 @@ fn handle_opencode_event<R: tauri::Runtime>(
     };
     // Ids and event names are token-shaped; anything else is dropped from the
     // trace rather than written into it.
-    let token = |k: &str| -> String {
-        v.get(k)
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-            .take(80)
-            .collect()
-    };
+    let token = |k: &str| opencode_event_token(&v, k);
     let kind = token("type");
     let sid = token("sessionID");
     let at_ms = v
@@ -80825,6 +81210,15 @@ fn handle_opencode_event<R: tauri::Runtime>(
         }
         // opencode-sessions-browser: a completed step is a new export line.
         "session.step.ended" => {}
+        "permission.asked" | "permission.replied" => {
+            let data = v.get("permission").unwrap_or(&serde_json::Value::Null);
+            if kind == "permission.asked" {
+                opencode_permission_asked(app, data);
+            } else {
+                opencode_permission_replied(app, data);
+            }
+            return (200, JSON, b"{\"ok\":true,\"handled\":true}".to_vec());
+        }
         _ => return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec()),
     }
     // opencode-sessions-browser: whichever session OpenCode's events name is

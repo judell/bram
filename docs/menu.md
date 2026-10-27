@@ -80,6 +80,35 @@ can't land in the menu as an answer (`:37152`). The current menu is
 `pendingMenu` on `/__turn-state` (`:64071`); `/__prompt-lifecycle`
 (`:64590`) keeps the ledger of prompts shown and answered.
 
+### OpenCode: the plugin poses, the terminal corroborates
+
+OpenCode has no hook for its permission prompt. Its event bus does:
+`permission.asked`, then `permission.replied` once the prompt is answered.
+Bram's seeded plugin (`app/__shell/opencode/bram-plugin.js`) forwards both
+for this project's top-level sessions to `/__opencode/event`
+(opencode-permission-menu). The host builds the menu
+(`opencode_permission_request_to_menu`) and queues it as a claim keyed by
+OpenCode's `per_…` request id. A reply removes the claim, and so does the
+end of the turn.
+
+Two things differ from the hook path:
+
+- **No token.** The plugin runs in OpenCode's shared background service
+  (`opencode serve --service`), started by whichever OpenCode ran first, so it
+  can't carry this launch's `BRAM_MENU_TOKEN`. Instead the card waits until
+  Bram's own terminal draws OpenCode's permission prompt (the
+  `opencode-permission` shape) and is dropped if that doesn't happen within
+  5 s. This also keeps a prompt from another OpenCode window on the same
+  project out of the pane. Same-user loopback access remains the residual that
+  [security.md](security.md) accepts under #113.
+- **No grid.** OpenCode draws its options in one row (Allow once, Always
+  allow, Reject) with no numbered cursor for the grid to join, so the claim's
+  own options are shown. Each option's keys are Right × its position, then
+  Enter, which OpenCode 2.1.4 accepts as one write. With two requests open,
+  nothing says which one the terminal shows, and a card's keys answer
+  whichever it is. So a second request takes the card down, and the one left
+  shows once the other is answered.
+
 ### `menus.parseAndDisplay` is off by default
 
 `BRAM_MENUS_PARSE_ENABLED` defaults to off: "menu parsing is unreliable,

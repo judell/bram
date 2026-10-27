@@ -11,7 +11,9 @@
 //
 // opencode-turn-lifecycle: it also forwards this project's turn boundaries
 // from OpenCode's event bus to Bram (POST /__opencode/event), since OpenCode
-// writes no transcript file Bram can watch for them.
+// writes no transcript file Bram can watch for them. opencode-permission-menu
+// added its permission prompts and their answers, so the pane can show the
+// question OpenCode is asking in the terminal.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -121,6 +123,10 @@ const FORWARDED = new Set([
   "session.execution.succeeded",
   "session.execution.failed",
   "session.execution.interrupted",
+  // opencode-permission-menu: the request (sent whole, as Bram builds the
+  // pane's menu from it) and its answer, which clears that menu.
+  "permission.asked",
+  "permission.replied",
 ]);
 
 // Read per event: Bram writes a new port each time it starts.
@@ -171,6 +177,7 @@ async function forwardTurns(api) {
     // Chained so the host sees boundaries in order; never awaited here, so
     // a slow or absent Bram can't hold up OpenCode's event stream.
     const body = { type: evt.type, sessionID: sid, at: evt.created };
+    if (evt.type.startsWith("permission.")) body.permission = data;
     chain = chain.then(() => postEvent(body));
   }
 }

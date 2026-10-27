@@ -505,7 +505,32 @@ needs, as a markdown table:
 | no-op | cargo's freshness scan. If this already costs seconds, the complaint is not compilation |
 | incremental (one line appended to `lib.rs`) | the ordinary edit loop — the cost that actually gets felt |
 | relink only | link time in isolation, which matters because the debug binary is ~70 MB |
+| check only (same one-line probe) | type-checking and metadata, with no codegen and no link |
 | clean (`--clean`) | everything, dependencies included — the only number comparable across machines and toolchains |
+
+**The rows do not add up, and the script does not pretend they do.** The
+obvious derived figure — `incremental − check − relink` as "codegen" — was
+tried and came out **negative**, twice: cold (`260.59s` of check against a
+`25.48s` build) and warm (`19.66s` check plus `9.91s` relink against a
+`23.95s` build). The legs share work: relink recompiles the bin's trivial
+`main.rs`, and check runs its own analysis pass. So read `check` and `relink`
+as independent scales for type-checking and for linking, and don't subtract
+one from another.
+
+The `check` leg needs warming to be a scale at all: `cargo check` keeps
+separate fingerprints, so a check issued right after a build type-checks the
+whole crate from nothing. The script warms that cache first, which is why the
+cold `260.59s` above is not the number it reports.
+
+**What these rows settle, and what they don't.** `check` is the row that
+decides whether crate size is worth attacking, because it is the cost that
+does **not** shrink when files are split *within* one crate: `lib.rs` →
+`lib/*.rs` stays a single compilation unit, and rustc type-checks and
+codegens the whole of it either way. A module split buys readability and
+nothing in build time. Only separate crates — a workspace — shrink the unit,
+which is a much larger change and should be taken on a number, not a hunch.
+The debug profile (`codegen-units`, `debug = "line-tables-only"`) is the other
+lever, and it wants the same treatment: measured, not guessed.
 
 The incremental leg restores `lib.rs`'s exact bytes from a saved copy via
 a trap, so an interrupted run still leaves the tree as it found it, and a

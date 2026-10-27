@@ -66,21 +66,38 @@ trap on_exit EXIT INT TERM
 now() { python3 -c 'import time; print("%.3f" % time.time())'; }
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
 
-build() {  # build <logfile> [extra cargo args...]
-  local log="$1"; shift
-  cargo build --manifest-path "$MANIFEST" "$@" > "$log" 2>&1 || {
-    echo "build failed; last 20 lines of $log:" >&2
+cargo_run() {  # cargo_run <logfile> <subcommand> [extra cargo args...]
+  local log="$1" sub="$2"; shift 2
+  cargo "$sub" --manifest-path "$MANIFEST" "$@" > "$log" 2>&1 || {
+    echo "cargo $sub failed; last 20 lines of $log:" >&2
     tail -20 "$log" >&2
     exit 1
   }
 }
 
-timed_build() {  # timed_build <logfile> -> prints seconds
+timed_cargo() {  # timed_cargo <logfile> <subcommand> -> prints seconds
   local t0 t1
   t0="$(now)"
-  build "$1"
+  cargo_run "$1" "$2"
   t1="$(now)"
   elapsed "$t0" "$t1"
+}
+
+# The probe: append one line to lib.rs, measure, restore the original bytes.
+# Used twice (incremental and check), so it is a pair rather than inline code;
+# the exit trap restores from $BACKUP if a run dies between them.
+probe_edit() {
+  cp -p "$LIB" "$WORK/lib.rs.orig"
+  BACKUP="$WORK/lib.rs.orig"
+  printf '\n// build-timings probe\n' >> "$LIB"
+}
+probe_restore() {
+  [ -n "$BACKUP" ] || return 0
+  cp -p "$BACKUP" "$LIB"
+  if ! cmp -s "$BACKUP" "$LIB"; then
+    echo "warning: lib.rs differs from its saved copy; check git status" >&2
+  fi
+  BACKUP=""   # restored; the exit trap need not repeat it
 }
 
 rows=()
@@ -90,26 +107,20 @@ row() { rows+=("$1|$2|$3"); }
 # Untimed, and required: a cold or half-built tree would make the "no-op"
 # measurement below a lie.
 printf 'warming up …\n' >&2
-build "$WORK/warmup.log"
+cargo_run "$WORK/warmup.log" build
 
 # --- 1. no-op --------------------------------------------------------------
 # The floor. Every other number is read against it: if a no-op already costs
 # seconds, cargo's own freshness scan is part of the complaint.
-row "no-op build (nothing to do)" "$(timed_build "$WORK/noop.log")" "the floor"
+row "no-op build (nothing to do)" "$(timed_cargo "$WORK/noop.log" build)" "the floor"
 
 # --- 2. incremental --------------------------------------------------------
 # One line appended to lib.rs: the shape of an ordinary edit while working.
-cp -p "$LIB" "$WORK/lib.rs.orig"
-BACKUP="$WORK/lib.rs.orig"
-printf '\n// build-timings probe\n' >> "$LIB"
-inc_s="$(timed_build "$WORK/incremental.log")"
-cp -p "$BACKUP" "$LIB"
-if cmp -s "$BACKUP" "$LIB"; then
-  BACKUP=""   # restored; the exit trap need not repeat it
-else
-  echo "warning: lib.rs differs from its saved copy; check git status" >&2
-  BACKUP=""
-fi
+# Measured before the check leg, so this row stays comparable with the #451
+# baseline recorded in 84ab36e.
+probe_edit
+inc_s="$(timed_cargo "$WORK/incremental.log" build)"
+probe_restore
 row "incremental (one line added to lib.rs)" "$inc_s" "$(wc -l < "$LIB" | tr -d ' ') lines rechecked"
 
 # --- 3. relink -------------------------------------------------------------
@@ -126,14 +137,45 @@ if [ -d "$TARGET/debug/deps" ]; then
     relink_victims+=("$f")
   done
 fi
+relink_s=""
 if [ "${#relink_victims[@]}" -gt 0 ]; then
   rm -f "${relink_victims[@]}"
-  row "relink only (bin artifacts removed)" "$(timed_build "$WORK/relink.log")" "link cost in isolation"
+  relink_s="$(timed_cargo "$WORK/relink.log" build)"
+  row "relink only (bin artifacts removed)" "$relink_s" "link cost in isolation"
 else
   row "relink only (bin artifacts removed)" "n/a" "no bram-* artifact in target/debug/deps"
 fi
 
-# --- 4. clean --------------------------------------------------------------
+# --- 4. check --------------------------------------------------------------
+# cargo check type-checks and emits metadata but runs no codegen and no link.
+# This is the row that decides whether crate size is worth attacking: it does
+# NOT shrink when files are split inside one crate, because modules are still
+# one compilation unit. Only separate crates shrink it.
+#
+# It must be warmed first. check keeps its own fingerprints, so a check issued
+# after a build runs COLD -- it type-checks the whole crate from nothing, and
+# that number is not a share of anything. Measured on this repo 2026-10-26:
+# 260.59s cold against 25.48s for the full incremental build, which made the
+# subtraction below clamp to 0.00 and mean nothing. The untimed warm-up makes
+# the timed row one edit against a warm cache, comparable with the row above.
+printf 'warming the check cache … (minutes on a cold cache)\n' >&2
+cargo_run "$WORK/check-warm.log" check
+probe_edit
+check_s="$(timed_cargo "$WORK/check.log" check)"
+probe_restore
+row "check only (one line added to lib.rs)" "$check_s" "type-check, no codegen, no link"
+
+# --- 5. no derived row -----------------------------------------------------
+# There is deliberately no "codegen ≈" row. The obvious one,
+# incremental − check − relink, was measured on this repo (2026-10-26) and
+# came out NEGATIVE twice: once cold (260.59s check against a 25.48s build),
+# once warm (19.66s check + 9.91s relink against a 23.95s build). The legs are
+# not additive -- relink recompiles the bin's trivial main.rs and check runs
+# its own analysis pass, so each includes work the incremental leg shares.
+# Read check and relink as independent scales for type-checking and linking;
+# do not subtract them.
+
+# --- 6. clean --------------------------------------------------------------
 # Opt-in: minutes, and it needs its own target dir so it cannot disturb the
 # one you actually build into. This is the number to compare across machines
 # and toolchains.
@@ -141,7 +183,7 @@ if [ "$CLEAN" = 1 ]; then
   SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/bram-clean-build.XXXXXX")"
   printf 'clean build into %s … (minutes)\n' "$SCRATCH" >&2
   t0="$(now)"
-  CARGO_TARGET_DIR="$SCRATCH" build "$WORK/clean.log"
+  CARGO_TARGET_DIR="$SCRATCH" cargo_run "$WORK/clean.log" build
   t1="$(now)"
   row "clean build (empty target dir)" "$(elapsed "$t0" "$t1")" "all dependencies included"
 fi

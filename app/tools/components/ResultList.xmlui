@@ -117,6 +117,20 @@
       when="{!!selectedHit}"
       onClose="selectedHit = null"
       title="{selectedHit ? selectedHit.source : ''}">
+      <!-- search-session-hit-switch-to: a session's switch button beside the
+           title. titleTemplate renders inside the same <header> as `title`
+           (https://www.xmlui.org/docs/reference/components/ModalDialog#titletemplate),
+           so the Text inherits the heading's size and weight. Switching lands
+           on the Transcript, which unmounts this modal. -->
+      <property name="titleTemplate">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Text value="{selectedHit ? selectedHit.source : ''}" fontSize="inherit" fontWeight="inherit" />
+          <Button when="{selectedHit &amp;&amp; selectedHit.type === 'session'}"
+            icon="swap" variant="ghost" size="xs"
+            tooltip="Switch to this session (restarts the agent on it)"
+            onClick="window.__bramReloadAgentSessionClick(selectedHit.provider, selectedHit.id, toast)" />
+        </HStack>
+      </property>
       <VStack when="{selectedHit.type === 'session'}">
         <SessionDetail sessionId="{selectedHit.id}" provider="{selectedHit.provider || 'claude'}"
           query="{$props.query}" height="70vh" />

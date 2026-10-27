@@ -495,6 +495,36 @@ id. That is what normalizing bought: the rule stopped depending on
 anyone remembering it. The cross-machine coordination that landing it
 required is on judell/bram#322.
 
+### Measuring build time, not guessing at it
+
+`scripts/build-timings.sh` prints the four numbers a build-time claim
+needs, as a markdown table:
+
+| measurement | what it isolates |
+|---|---|
+| no-op | cargo's freshness scan. If this already costs seconds, the complaint is not compilation |
+| incremental (one line appended to `lib.rs`) | the ordinary edit loop — the cost that actually gets felt |
+| relink only | link time in isolation, which matters because the debug binary is ~70 MB |
+| clean (`--clean`) | everything, dependencies included — the only number comparable across machines and toolchains |
+
+The incremental leg restores `lib.rs`'s exact bytes from a saved copy via
+a trap, so an interrupted run still leaves the tree as it found it, and a
+dirty tree's edits survive rather than being discarded. `--clean` builds
+into a scratch `CARGO_TARGET_DIR` and removes it afterward
+(`--keep-scratch` keeps it), so it cannot disturb the target dir you
+actually build into.
+
+**A before/after claim about build time is made with this script, not
+from memory.** That is the same rule §Perf diagnosis ordering states for
+the pane — the baseline is a commit, recorded with the instrument that
+will verify the "after" — applied to the one performance question that
+has no trace to read, because builds happen on the host before the app
+exists. Before this script, every slow-build report (#451) was a feeling.
+
+Run it on demand, not in CI: like `scripts/setup-harness.sh` and the
+membership starter check, it needs a machine that can build, which is
+not what the workflows have.
+
 ## Hand-testing the Worklist gate
 
 The gate's selection matrix — which buttons light for which combination of

@@ -3960,6 +3960,15 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // zero-delta ticks: watchers fire 2-3 events per write, and on a
         // multi-MB session each redundant refetch costs real main-thread
         // time (2026-07-07 codex esc wedge).
+        // switch-matrix-harness (found by the matrix, 2026-10-27 23:02Z): a
+        // New session (or fresh partner) reserves its Claude id before launch.
+        // When that id's file appears, it is the current session now, as an
+        // explicit resume is (resume-marks-session-current). Waiting for file
+        // times kept the outgoing session current for 2 minutes after a short
+        // first turn: its exit write made it look fresh, and nothing re-checked.
+        if provider == SessionProvider::Claude {
+            mark_reserved_claude_session_current(app);
+        }
         let ordinary_latest = latest_session_path_for_provider(app, provider).unwrap_or(None);
         // opencode-resume-marks-session-current: OpenCode's live session is
         // the one Bram resumed or its events named, not the newest export;
@@ -22201,13 +22210,47 @@ fn codex_composer_ready(tail: &str) -> bool {
 
 // opencode-partner-handoff: OpenCode's idle screen ends with its key-hint
 // footer (2.1.4 specimen: "shift+tab agents  ctrl+p commands").
+// switch-matrix-harness (2026-10-27 23:12Z, from opencode-catch-up-held-tail's
+// logged tail): in a narrow pane OpenCode 2.1.4 drops those hints and shows
+// the cwd and its "/update to install v2.2.0" notice instead, so every fresh
+// partner's catch-up was held. The empty input box's placeholder, "Ask
+// anything…" with its ellipsis character, is drawn only while the composer
+// is idle and empty, so it counts too.
 fn opencode_composer_ready(tail: &str) -> bool {
     let squashed: String = tail
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
         .to_lowercase();
-    squashed.contains("ctrl+pcommands")
+    squashed.contains("ctrl+pcommands") || squashed.contains("askanything\u{2026}")
+}
+
+#[cfg(test)]
+mod opencode_composer_ready_tests {
+    use super::opencode_composer_ready;
+
+    #[test]
+    fn narrow_pane_composer_without_key_hints_is_ready() {
+        // Logged held tail, OpenCode 2.1.4, 2026-10-27 23:12:44Z.
+        let tail = "am-demo-instance /update to install v2.2.0 Ask anything\u{2026} \
+                    'What is the \u{2503} DeepSeek V4.1 F\u{2026} \u{b7} high \u{2579} \
+                    ~/bram-demo-instance/uv2/updatv2.2.0/update tv2.2.0";
+        assert!(opencode_composer_ready(tail));
+    }
+
+    #[test]
+    fn wide_pane_footer_is_still_ready() {
+        assert!(opencode_composer_ready(
+            "~/bram shift+tab agents  ctrl+p commands"
+        ));
+    }
+
+    #[test]
+    fn a_reply_quoting_the_words_without_the_ellipsis_is_not_ready() {
+        assert!(!opencode_composer_ready(
+            "the placeholder says ask anything... working"
+        ));
+    }
 }
 
 // claude-boot-hold-no-bounce: a freshly booted Claude's ready screen, read
@@ -30248,6 +30291,41 @@ fn latest_opencode_session_path<R: tauri::Runtime>(
 
 // The session OpenCode's events last named (opencode-turn-lifecycle), so a
 // resumed older session reads as current before it is the most recent.
+// switch-matrix-harness: make a reserved Claude session current once its file
+// exists. Only the exact id a pending title reserves (claude-pending-title-
+// exact-id), so no other session can take this path.
+fn mark_reserved_claude_session_current<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(rec) = read_pending_session_title(app, SessionProvider::Claude) else {
+        return;
+    };
+    let Some(sid) = rec.session_id.as_deref() else {
+        return;
+    };
+    let Some(path) = session_path_for_id(app, SessionProvider::Claude, sid) else {
+        return;
+    };
+    let cache_cell = LIVE_CLAUDE_SESSION.get_or_init(|| Mutex::new(None));
+    let mut cached = match cache_cell.lock() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
+    if cached.as_ref().is_some_and(|(p, _)| *p == path) {
+        return;
+    }
+    *cached = Some((path, std::time::SystemTime::now()));
+    drop(cached);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=live-session-set provider=claude session={} source=reserved-id",
+                sid
+            ),
+        );
+    }
+}
+
 // opencode-resume-marks-session-current: an OpenCode session Bram resumes by
 // id is current from the launch, as Claude's explicit resume already is
 // (resume-marks-session-current). An idle resumed session emits no events, so
@@ -81669,6 +81747,80 @@ mod query_route_tests {
     }
 }
 
+// switch-matrix-harness: test-drive routes for scripts/switch-matrix.py. The
+// switch, reload and New session paths are Tauri commands the pane reaches
+// over IPC, so nothing outside the pane could drive them, and every check of
+// the session-switching matrix took a person clicking. With BRAM_TEST_DRIVE=1
+// (set only by the harness, for a disposable demo instance; never by ./bram)
+// `POST /__test/{switch,reload,new-session}` call the same command functions.
+// Off, they answer 404. docs/authorization.md records the condition.
+static TEST_DRIVE_APP: OnceLock<AppHandle> = OnceLock::new();
+
+fn test_drive_enabled() -> bool {
+    std::env::var("BRAM_TEST_DRIVE").is_ok_and(|v| v == "1")
+}
+
+fn handle_test_drive(path: &str, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let Some(app) = TEST_DRIVE_APP.get() else {
+        return (404, "text/plain; charset=utf-8", b"not found".to_vec());
+    };
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let opt = |k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from);
+    let result = match path {
+        "__test/switch" => switch_agent(app.clone(), s("provider"), app.state::<AppState>()),
+        "__test/reload" => {
+            reload_agent_session(app.clone(), s("provider"), s("id"), app.state::<AppState>())
+        }
+        "__test/new-session" => create_new_session(
+            app.clone(),
+            s("provider"),
+            s("title"),
+            opt("pairWithProvider"),
+            opt("pairWithSession"),
+            app.state::<AppState>(),
+        ),
+        // The New session dialog's brief is typed by the pane (toTurn), not
+        // by create_new_session, so a test-drive New session needs this to
+        // send the first message the dialog would. Same queue, same boot hold.
+        "__test/turn" => queue_pty_intent_inner(
+            app,
+            serde_json::json!({ "kind": "toTurn", "data": s("text"), "source": "test-drive" }),
+            &app.state::<AppState>(),
+        ),
+        _ => return (404, "text/plain; charset=utf-8", b"not found".to_vec()),
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "test-drive",
+            &format!(
+                "op=call route={} body={} result={}",
+                path,
+                String::from_utf8_lossy(body).replace('\n', " "),
+                match &result {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("err:{}", e),
+                }
+            ),
+        );
+    }
+    match result {
+        Ok(()) => (
+            200,
+            "application/json; charset=utf-8",
+            b"{\"ok\":true}".to_vec(),
+        ),
+        Err(e) => (
+            409,
+            "application/json; charset=utf-8",
+            serde_json::json!({ "ok": false, "error": e })
+                .to_string()
+                .into_bytes(),
+        ),
+    }
+}
+
 fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Request) {
     let url = request.url().to_string();
     let method = request.method().as_str().to_uppercase();
@@ -81759,6 +81911,17 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_draft_save(app, &buf)
+        }
+    } else if path.starts_with("__test/") {
+        // switch-matrix-harness: 404 unless BRAM_TEST_DRIVE=1 set it up.
+        if !test_drive_enabled() || TEST_DRIVE_APP.get().is_none() {
+            (404, "text/plain; charset=utf-8", b"not found".to_vec())
+        } else if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_test_drive(&path, &buf)
         }
     } else if path == "__worklist/mutate" {
         if method != "POST" {
@@ -82576,6 +82739,11 @@ pub fn run() {
             whisper_preflight,
         ])
         .setup(move |app| {
+            // switch-matrix-harness: test-drive routes, only on request.
+            if test_drive_enabled() {
+                let _ = TEST_DRIVE_APP.set(app.handle().clone());
+                append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");
+            }
             // issue-405: SIGTERM/SIGINT/SIGHUP run shutdown_children, so a
             // `kill` hangs up the terminal's jobs instead of orphaning them.
             #[cfg(unix)]

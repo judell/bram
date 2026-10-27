@@ -872,6 +872,35 @@ both facts and the exact git toplevel before acting. Transfer a scenario
 branch with ordinary Git plumbing (for example, a bundle), but never add
 an upstream to the disposable instance.
 
+### Switch matrix
+
+`scripts/switch-matrix.py` drives the session-switching matrix from
+[`decisions/2026-10-27-bram-chooses-the-session.md`](decisions/2026-10-27-bram-chooses-the-session.md)
+against a demo instance with the real agent CLIs, and checks the trace after
+each step. It launches the demo with `BRAM_TEST_DRIVE=1`, which turns on
+`POST /__test/{switch,reload,new-session,turn}`. These call the same functions
+the pane's clicks do, and are off otherwise (see `authorization.md`).
+
+```sh
+python3 -I scripts/switch-matrix.py --no-turns --agents claude,opencode   # no model turns
+python3 -I scripts/switch-matrix.py --agents claude,opencode              # adds New session, fresh partners, delete
+```
+
+The cases: a plain switch; New session (named on its reserved id, brief
+released when the composer is drawn); fresh partners (started, paired and named
+after the Claude session); partner resume by id; OpenCode marked current at
+launch; no-partner fallback by id, with the offer up; a reload clearing the
+offer; deleting the running session refused; deleting a paired one ending its
+pairs. Across the whole run, no `launch-timeout`, `launch-exited`,
+`boot-held-restore` or `rebound` may appear.
+
+Exit status is the number of failed checks; on failure the demo stays up. Cases
+that deliver a brief or catch-up start a real model turn; `--no-turns` skips
+them. The script waits for each launch to settle before the next step, as a
+person would: driving faster produced failures that weren't Bram's. It needs a
+windowing session, so it runs on demand, not in CI. Record new failures in the
+decision note, not as new items, unless one blocks a release.
+
 ### Membership starter checks
 
 `scripts/membership-starter-check.py` turns the starters into a regression

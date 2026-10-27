@@ -3979,7 +3979,12 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // provider. Watchers also emit for inactive-provider files, so writing
         // every observed session here would redefine "last active" as merely
         // "last file touched" and revive the original conflation.
-        if current_provider(app) == Some(provider) {
+        // delete-live-session-leaves-stub: with the shell at its prompt no
+        // agent is running, so this write is an exiting or failed CLI (at
+        // 2026-10-27 20:49:39 a resume that hit "No conversation found"),
+        // not the session the user is in. Don't make it the one to resume.
+        let sf = shell_foreground();
+        if current_provider(app) == Some(provider) && !(sf.seen && sf.at_prompt) {
             if let Some(session_id) = latest_path
                 .as_deref()
                 .and_then(|path| session_id_for_path(provider, path))
@@ -21979,20 +21984,35 @@ fn unpair_session<R: tauri::Runtime>(
 ) -> Result<Vec<u8>, String> {
     let provider = provider.ok_or("provider required")?;
     let conn = worklist_state_open(app).ok_or("state db unavailable")?;
+    end_session_pairs(app, &conn, provider, session_id, "unpair")?;
+    emit_replayable_signal(app, "sessions-list-changed");
+    Ok(br#"{"ok":true}"#.to_vec())
+}
+
+// Record an empty partner for every pair of (provider, session_id), ending
+// them from both sides. `source` names why: "unpair" (the Sessions tab's
+// Unpair) or "delete" (delete-live-session-leaves-stub).
+fn end_session_pairs<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    provider: SessionProvider,
+    session_id: &str,
+    source: &str,
+) -> Result<(), String> {
     let mine = session_provider_label(provider);
     // opencode-partner-handoff: a session can have a partner on each other
-    // provider, and Unpair ends all of them.
+    // provider, and this ends all of them.
     let partners =
-        worklist_state::session_partners(&conn, mine, session_id).map_err(|e| e.to_string())?;
+        worklist_state::session_partners(conn, mine, session_id).map_err(|e| e.to_string())?;
     for (other, _) in partners {
         let wrote = worklist_state::record_session_pair(
-            &conn,
+            conn,
             mine,
             session_id,
             other,
             "",
             unix_now_ms(),
-            "unpair",
+            source,
         )
         .map_err(|e| e.to_string())?;
         if bram_trace_enabled() {
@@ -22000,17 +22020,17 @@ fn unpair_session<R: tauri::Runtime>(
                 app,
                 "state-mirror",
                 &format!(
-                    "op=pair-stamp {}={} {}= source=unpair result={}",
+                    "op=pair-stamp {}={} {}= source={} result={}",
                     mine,
                     session_id,
                     other,
+                    source,
                     if wrote { "ok" } else { "unchanged" }
                 ),
             );
         }
     }
-    emit_replayable_signal(app, "sessions-list-changed");
-    Ok(br#"{"ok":true}"#.to_vec())
+    Ok(())
 }
 
 // provider-session-pair-offer: after a header switch that fell back to the
@@ -24049,6 +24069,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Codex,
             current: true,
             pending: false,
+            running: false,
         }];
         let pending = SessionEntry {
             id: "pending-2".to_string(),
@@ -24058,6 +24079,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Codex,
             current: true,
             pending: true,
+            running: false,
         };
 
         merge_pending_session_entry(&mut entries, pending, Some(20));
@@ -24083,6 +24105,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Claude,
             current: true,
             pending: false,
+            running: false,
         }];
         let pending = SessionEntry {
             id: "0192aabb-ccdd-4eef-8899-001122334455".to_string(),
@@ -24092,6 +24115,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Claude,
             current: true,
             pending: true,
+            running: false,
         };
 
         merge_pending_session_entry(&mut entries, pending, Some(20));
@@ -28197,6 +28221,9 @@ struct SessionEntry {
     provider: SessionProvider,
     current: bool,
     pending: bool,
+    // delete-live-session-leaves-stub: the row is the session a CLI is
+    // running now (session_delete_refused), so the pane disables its ✕.
+    running: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
@@ -34014,6 +34041,8 @@ fn list_sessions<R: tauri::Runtime>(
 ) -> Result<Vec<SessionEntry>, String> {
     let (provider, sessions) = sessions_for_provider(app, preferred, limit)?;
     let live_id = live_session_id(app, provider);
+    let provider_is_current = current_provider(app) == Some(provider);
+    let sf = shell_foreground();
     let mut entries: Vec<SessionEntry> = sessions
         .into_iter()
         .map(|session| {
@@ -34029,6 +34058,12 @@ fn list_sessions<R: tauri::Runtime>(
                 provider: session.provider,
                 current,
                 pending: false,
+                running: session_delete_refused(
+                    provider_is_current,
+                    current,
+                    sf.seen,
+                    sf.at_prompt,
+                ),
             }
         })
         .collect();
@@ -34072,6 +34107,7 @@ fn pending_session_entry<R: tauri::Runtime>(
         provider,
         current: true,
         pending: true,
+        running: false,
     })
 }
 
@@ -34175,8 +34211,59 @@ fn delete_session<R: tauri::Runtime>(
         .into_iter()
         .find(|session| session.id == id)
         .ok_or("session not found")?;
+    // delete-live-session-leaves-stub (2026-10-27 20:49Z): deleting the
+    // session its CLI was running let the CLI rewrite the file at exit, a
+    // 1 KB stub that its partner then resumed into "No conversation found".
+    let sf = shell_foreground();
+    if session_delete_refused(
+        current_provider(app) == Some(provider),
+        live_session_id(app, provider).as_deref() == Some(id),
+        sf.seen,
+        sf.at_prompt,
+    ) {
+        return Err(SESSION_DELETE_LIVE_REFUSAL.to_string());
+    }
     std::fs::remove_file(&session.path).map_err(|e| e.to_string())?;
+    // A deleted session can't be resumed, so its pairs end with it: a
+    // partner switch then finds no partner instead of resuming a ghost.
+    if let Some(conn) = worklist_state_open(app) {
+        let _ = end_session_pairs(app, &conn, provider, id, "delete");
+    }
+    emit_replayable_signal(app, "sessions-list-changed");
     Ok(b"{\"ok\":true}".to_vec())
+}
+
+const SESSION_DELETE_LIVE_REFUSAL: &str =
+    "This session is running. Switch away from it before deleting it.";
+
+// delete-live-session-leaves-stub: the running session is the current
+// provider's live session while its CLI is up. Once the shell reports its
+// prompt the CLI has exited, so a leftover (like that stub) can be deleted.
+fn session_delete_refused(
+    provider_is_current: bool,
+    id_is_live: bool,
+    shell_seen: bool,
+    shell_at_prompt: bool,
+) -> bool {
+    provider_is_current && id_is_live && !(shell_seen && shell_at_prompt)
+}
+
+#[cfg(test)]
+mod session_delete_refusal_tests {
+    use super::session_delete_refused;
+
+    #[test]
+    fn only_the_running_session_is_refused() {
+        // Current provider, live id, CLI up (shell not at its prompt).
+        assert!(session_delete_refused(true, true, true, false));
+        // No shell markers yet: assume the CLI may be running.
+        assert!(session_delete_refused(true, true, false, false));
+        // The CLI exited (shell at its prompt): a leftover can go.
+        assert!(!session_delete_refused(true, true, true, true));
+        // Not the live id, or another provider's session.
+        assert!(!session_delete_refused(true, false, true, false));
+        assert!(!session_delete_refused(false, true, true, false));
+    }
 }
 
 // Format `SystemTime::now()` as an RFC3339 string in UTC (seconds precision,
@@ -72124,6 +72211,7 @@ fn route_request<R: tauri::Runtime>(
                 let status = match e.as_str() {
                     "session not found" => 404,
                     "empty title" | "invalid session id" => 400,
+                    SESSION_DELETE_LIVE_REFUSAL => 409,
                     _ => 500,
                 };
                 (status, "text/plain; charset=utf-8", e.into_bytes())

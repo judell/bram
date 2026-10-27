@@ -73207,7 +73207,9 @@ fn guard_selftest_fixture() -> Result<PathBuf, String> {
 
 // Run one case through the installed guard. Claude answers deny with exit 2
 // and a stderr message; Codex always exits 0 and answers deny as stdout JSON
-// (permissionDecision "deny"). Anything else is an error, not a decision.
+// (permissionDecision "deny"); OpenCode always exits 0 and answers both ways
+// as one stdout JSON line, {"decision", "message"}, the line Bram's plugin
+// reads. Anything else is an error, not a decision.
 fn guard_selftest_run_case(
     link: &Path,
     hook: &str,
@@ -73261,6 +73263,27 @@ fn guard_selftest_run_case(
         }
         return ("allow".to_string(), String::new());
     }
+    if hook.starts_with("opencode") {
+        if code != Some(0) {
+            return (
+                "error".to_string(),
+                format!("exit {:?}: {}", code, short(&stderr)),
+            );
+        }
+        // No decision on the last line is a broken chain; the plugin denies
+        // it by default, and here it must fail rather than pass.
+        let line = stdout.trim().lines().last().unwrap_or("");
+        let v: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
+        let message = v.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        return match v.get("decision").and_then(|d| d.as_str()) {
+            Some("allow") => ("allow".to_string(), String::new()),
+            Some("deny") => ("deny".to_string(), short(message)),
+            _ => (
+                "error".to_string(),
+                format!("no decision: {}", short(&stdout)),
+            ),
+        };
+    }
     match code {
         Some(0) => ("allow".to_string(), String::new()),
         Some(2) => ("deny".to_string(), short(&stderr)),
@@ -73295,6 +73318,11 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
             };
             let signed = format!(
                 "Bram's Claude (Bram {}, main thread, selftest, {}, selftest) speaking from the Selftest project (github.com/example/bram-guard-selftest):\n\nguard self-test",
+                env!("CARGO_PKG_VERSION"),
+                os
+            );
+            let opencode_signed = format!(
+                "Bram's OpenCode (Bram {}, main thread, selftest, {}, selftest) speaking from the Selftest project (github.com/example/bram-guard-selftest):\n\nguard self-test",
                 env!("CARGO_PKG_VERSION"),
                 os
             );
@@ -73364,6 +73392,65 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                     serde_json::json!({
                     "tool_name": "apply_patch", "cwd": root, "tool_input": {"input": update}}),
                 ),
+                // opencode-guard-selftest: the events Bram's OpenCode plugin
+                // pipes in, shaped as OpenCode 2.1.4's execute.before sends
+                // them (`path`, not `filePath`; the patch carries patchText).
+                (
+                    "opencode-write-covered",
+                    "opencode-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "tool": "write", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "input": {"path": file("src/covered.txt"), "content": "y"}}),
+                ),
+                (
+                    "opencode-write-uncovered",
+                    "opencode-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool": "write", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "input": {"path": file("src/uncovered.txt"), "content": "y"}}),
+                ),
+                (
+                    "opencode-edit-uncovered",
+                    "opencode-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool": "edit", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "input": {"path": file("src/uncovered.txt"), "oldString": "a", "newString": "b"}}),
+                ),
+                (
+                    "opencode-patch-uncovered",
+                    "opencode-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool": "patch", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "input": {"patchText": add}}),
+                ),
+                (
+                    "opencode-patch-covered",
+                    "opencode-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "tool": "patch", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "input": {"patchText": update}}),
+                ),
+                (
+                    "opencode-forge-unsigned",
+                    "opencode-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool": "shell", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "input": {"command": "gh issue comment 5 --body \"guard self-test\""}}),
+                ),
+                (
+                    "opencode-forge-signed",
+                    "opencode-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "tool": "shell", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "input": {"command": format!("gh issue comment 5 --body {}", serde_json::json!(opencode_signed))}}),
+                ),
             ];
             for (id, hook, expect, payload) in specs {
                 let (got, reason) = guard_selftest_run_case(link, hook, &payload);
@@ -73418,6 +73505,19 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     if !codex_ok {
         failed.push("codex-registration".to_string());
     }
+    // opencode-guard-selftest: OpenCode's registration is the project plugin
+    // Setup seeds (.opencode/plugins/bram.js), checked wherever OpenCode is
+    // wanted (opencode_plugin_wanted, the rule Setup and opencodeNeedsSetup
+    // use), so a project that never runs OpenCode isn't failed for lacking it.
+    let (opencode_wanted, opencode_ok) = project_root(Some(app))
+        .map(|proj| {
+            let wanted = opencode_plugin_wanted(app, &proj);
+            (wanted, !wanted || opencode_plugin_current(app, &proj))
+        })
+        .unwrap_or((false, true));
+    if !opencode_ok {
+        failed.push("opencode-registration".to_string());
+    }
     let ok = failed.is_empty();
     append_bram_trace_line(
         app,
@@ -73471,6 +73571,7 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                 "extra": extra,
             },
             "codex": { "ok": codex_ok },
+            "opencode": { "ok": opencode_ok, "wanted": opencode_wanted },
         },
         "ranAtMs": unix_now_ms(),
     })
@@ -73497,6 +73598,53 @@ mod guard_selftest_tests {
             &serde_json::json!({ "tool_name": "apply_patch" }),
         );
         assert_eq!(got, "error");
+        let (got, _) = guard_selftest_run_case(
+            Path::new("/nonexistent/bram-guard"),
+            "opencode-worklist",
+            &serde_json::json!({ "tool": "write" }),
+        );
+        assert_eq!(got, "error");
+    }
+
+    // opencode-guard-selftest: OpenCode's answer is the last stdout line, as
+    // Bram's plugin reads it. A guard that prints no decision fails the
+    // self-test, because the plugin denies that case as a broken install.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_answer_is_read_from_the_last_stdout_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "bram-guard-selftest-opencode-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let payload = serde_json::json!({ "tool": "write" });
+        let deny = fake(
+            "deny",
+            r#"echo noise; echo '{"decision":"deny","message":"Blocked: uncovered"}'"#,
+        );
+        assert_eq!(
+            guard_selftest_run_case(&deny, "opencode-worklist", &payload),
+            ("deny".to_string(), "Blocked: uncovered".to_string())
+        );
+        let allow = fake("allow", r#"echo '{"decision":"allow","message":""}'"#);
+        assert_eq!(
+            guard_selftest_run_case(&allow, "opencode-worklist", &payload).0,
+            "allow"
+        );
+        let silent = fake("silent", "exit 0");
+        assert_eq!(
+            guard_selftest_run_case(&silent, "opencode-worklist", &payload).0,
+            "error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // The regression #119 recorded: the guard registered under every matcher

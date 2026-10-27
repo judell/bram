@@ -276,6 +276,12 @@ hook, add its allow and deny cases to `guard_selftest`, and confirm the
 Status tab reads green before and red after deliberately breaking the
 registration. Verified that way for this change: removing `Bash` from a demo
 instance's registration made the self-test report `missing: ["Bash"]`.
+OpenCode's registration is the plugin Setup seeds, `.opencode/plugins/bram.js`,
+and its cases run the `opencode-worklist` hook the plugin calls
+(opencode-guard-selftest). Verified the same way on 2026-10-26. All 15 cases
+passed. Moving the plugin out of a demo instance made the self-test report
+`failed: ["opencode-registration"]`. A Setup run then reseeded it
+byte-identical, and the self-test went green again.
 
 ## Ranked action plan
 

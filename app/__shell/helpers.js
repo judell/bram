@@ -16159,6 +16159,10 @@ window.__bramGuardRegistrationLine = function (r) {
     parts.push("Claude: " + (bits.join("; ") || "registration not current"));
   }
   parts.push("Codex: " + ((reg.codex || {}).ok ? "hook current" : "hook not current (run Setup)"));
+  // opencode-guard-selftest: only where OpenCode is wanted, the host's rule;
+  // an older host sends no opencode entry.
+  var o = reg.opencode;
+  if (o && o.wanted) parts.push("OpenCode: " + (o.ok ? "plugin current" : "plugin missing or stale (run Setup)"));
   return parts.join(" · ");
 };
 

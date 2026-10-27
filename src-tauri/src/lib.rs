@@ -6100,6 +6100,36 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     const CLAUDE_LOGIN_WINDOW: usize = 60;
     const CODEX_LOGIN_MARKERS: &[&str] = &["sign in with chatgpt", "provide your own api key"];
     const CODEX_LOGIN_FOOTER: &str = "press enter to continue";
+    // opencode-terminal-prompts: OpenCode 2.1.4's list dialogs and its
+    // permission prompt. Specimens: OpenCode 2.1.4 under a 120x40 PTY in a
+    // scratch folder, 2026-10-26, tails built as pty_tail_snippet builds them
+    // (pinned in opencode_prompt_tests). Each list dialog opens with its
+    // title, the "esc" hint and a Search field: "Commands esc Search", "Select
+    // model esc Search", "Select agent esc Search", and "Sessions for <dir>
+    // esc Search … delete ctrl+d rename ctrl+r". Enter there runs a command or
+    // switches model, agent or session. The status view ("Status esc") is left
+    // out: Enter grants nothing there, as at slash-panel.
+    // Not footer-anchored, unlike every shape above: OpenCode redraws its
+    // status line ("… ctrl+p commands 2.1.4") after drawing a dialog, so an
+    // open dialog and a closed one end the same way. The tail's drain keeps
+    // this honest instead: pty_menu_clear empties it on every keystroke, so
+    // the key that opens a dialog leaves only the dialog's drawing in it, and
+    // the Esc that closes one leaves only the redraw (both pinned). These
+    // count only while OpenCode is live (opencode_only_prompt_shape).
+    const OPENCODE_DIALOG_HEADERS: &[&str] = &[
+        "commands esc search",
+        "select model esc search",
+        "select agent esc search",
+    ];
+    const OPENCODE_SESSION_LIST: (&str, &str) = ("esc search", "delete ctrl+d rename ctrl+r");
+    // The permission prompt, drawn mid-turn ("△ Permission required … Allow
+    // once Always allow Reject … enter confirm"); Enter confirms the
+    // highlighted choice. OpenCode keeps animating a spinner under it, so its
+    // text scrolls out of the tail after a minute or so: this holds early
+    // sends, and OpenCode's own permission.asked event is the lasting signal
+    // (opencode-permission-menu).
+    const OPENCODE_PERMISSION_MARKERS: &[&str] =
+        &["permission required", "allow once", "always allow"];
     // All whitespace removed, on both sides of the match. The CLIs lay out
     // words with cursor-column moves (CSI n G), which strip_ansi drops
     // without leaving a space, so the tail reads "Esctocancel" and
@@ -6152,6 +6182,14 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     }
     if CODEX_LOGIN_MARKERS.iter().any(|m| has(m)) && ends_with_footer(CODEX_LOGIN_FOOTER) {
         return Some("codex-login");
+    }
+    if OPENCODE_DIALOG_HEADERS.iter().any(|m| has(m))
+        || (has(OPENCODE_SESSION_LIST.0) && has(OPENCODE_SESSION_LIST.1))
+    {
+        return Some("opencode-dialog");
+    }
+    if OPENCODE_PERMISSION_MARKERS.iter().all(|m| has(m)) {
+        return Some("opencode-permission");
     }
     let login_end: String = {
         let n = tail.chars().count();
@@ -6208,9 +6246,9 @@ impl TerminalAttentionTracker {
     // `pty_tail_snippet`, not a pre-computed string, so the lock + copy +
     // ANSI-strip cost is paid only when this detector has something to
     // decide.
-    // tail_fn returns the tail and whether Codex is the live provider (lazy:
-    // read only on the one evaluation per silence episode).
-    fn step<F: FnOnce() -> (String, bool)>(
+    // tail_fn returns the tail and the live provider (lazy: read only on the
+    // one evaluation per silence episode).
+    fn step<F: FnOnce() -> (String, Option<SessionProvider>)>(
         &mut self,
         authoritative_open: bool,
         bytes: usize,
@@ -6253,8 +6291,8 @@ impl TerminalAttentionTracker {
             return out;
         }
 
-        let (tail, codex_live) = tail_fn();
-        match prompt_shape_for_provider(&tail, codex_live) {
+        let (tail, provider) = tail_fn();
+        match prompt_shape_for_provider(&tail, provider) {
             Some(shape) => {
                 self.active = true;
                 self.shape = Some(shape);
@@ -6511,7 +6549,7 @@ mod login_switch_offer_tests {
 
 #[cfg(test)]
 mod terminal_attention_login_tests {
-    use super::{pane_input_blocking_prompt, terminal_attention_prompt_shape};
+    use super::{pane_input_blocking_prompt, terminal_attention_prompt_shape, SessionProvider};
 
     // Claude Code 2.1.310, logged out (empty CLAUDE_CONFIG_DIR), ANSI-stripped
     // under a 120x40 PTY, 2026-10-24. Whitespace is irrelevant to matching.
@@ -6558,15 +6596,18 @@ mod terminal_attention_login_tests {
     #[test]
     fn login_screens_hold_pane_sends() {
         assert_eq!(
-            pane_input_blocking_prompt(CLAUDE_LOGGED_OUT, false),
+            pane_input_blocking_prompt(CLAUDE_LOGGED_OUT, Some(SessionProvider::Claude)),
             Some("claude-login")
         );
         assert_eq!(
-            pane_input_blocking_prompt(CODEX_SIGN_IN, true),
+            pane_input_blocking_prompt(CODEX_SIGN_IN, Some(SessionProvider::Codex)),
             Some("codex-login")
         );
         // Codex's screen counts only while Codex is the live agent.
-        assert_eq!(pane_input_blocking_prompt(CODEX_SIGN_IN, false), None);
+        assert_eq!(
+            pane_input_blocking_prompt(CODEX_SIGN_IN, Some(SessionProvider::Claude)),
+            None
+        );
     }
 }
 
@@ -6693,9 +6734,13 @@ mod terminal_attention_tests {
         // And if a quote did end the tail, a Claude pane still never reads a
         // Codex-only shape.
         const ENDS_IN_QUOTE: &str = "Hooks need review 3 hooks are new or changed. Press enter to confirm or esc to go back";
-        assert_eq!(super::prompt_shape_for_provider(ENDS_IN_QUOTE, false), None);
+        let claude = Some(super::SessionProvider::Claude);
         assert_eq!(
-            super::prompt_shape_for_provider(ENDS_IN_QUOTE, true),
+            super::prompt_shape_for_provider(ENDS_IN_QUOTE, claude),
+            None
+        );
+        assert_eq!(
+            super::prompt_shape_for_provider(ENDS_IN_QUOTE, Some(super::SessionProvider::Codex)),
             Some("hooks-trust")
         );
     }
@@ -18387,7 +18432,7 @@ fn pty_spawn(
                 for transition in terminal_attention.step(authoritative_open, bytes, || {
                     (
                         pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS),
-                        current_provider(&app_for_throughput) == Some(SessionProvider::Codex),
+                        current_provider(&app_for_throughput),
                     )
                 }) {
                     trace_terminal_attention_transition(
@@ -19712,7 +19757,7 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // and an Enter there grants nothing.
     let prompt_shape = pane_input_blocking_prompt(
         &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
-        current_provider(app) == Some(SessionProvider::Codex),
+        current_provider(app),
     );
     let mut prompt_restores: Vec<(String, String)> = Vec::new();
 
@@ -22180,7 +22225,7 @@ fn catch_up_readiness(
     provider: SessionProvider,
     wait_for_composer: bool,
 ) -> CatchUpReadiness {
-    if let Some(shape) = prompt_shape_for_provider(tail, provider == SessionProvider::Codex) {
+    if let Some(shape) = prompt_shape_for_provider(tail, Some(provider)) {
         CatchUpReadiness::Prompt(shape)
     } else if !wait_for_composer || composer_ready(provider, tail) {
         CatchUpReadiness::Ready
@@ -43536,43 +43581,74 @@ fn codex_only_prompt_shape(shape: &str) -> bool {
     )
 }
 
-fn prompt_shape_for_provider(stripped_tail: &str, codex_live: bool) -> Option<&'static str> {
-    terminal_attention_prompt_shape(stripped_tail)
-        .filter(|shape| codex_live || !codex_only_prompt_shape(shape))
+// opencode-terminal-prompts: the same rule for the shapes only OpenCode draws.
+fn opencode_only_prompt_shape(shape: &str) -> bool {
+    matches!(shape, "opencode-dialog" | "opencode-permission")
 }
 
-fn pane_input_blocking_prompt(stripped_tail: &str, codex_live: bool) -> Option<&'static str> {
-    prompt_shape_for_provider(stripped_tail, codex_live).filter(|shape| {
+// The live provider decides which agent-only shapes count. The rest (folder
+// trust, slash-panel, claude-login) count under any agent, as they always
+// have.
+fn prompt_shape_for_provider(
+    stripped_tail: &str,
+    provider: Option<SessionProvider>,
+) -> Option<&'static str> {
+    terminal_attention_prompt_shape(stripped_tail).filter(|shape| {
+        if codex_only_prompt_shape(shape) {
+            provider == Some(SessionProvider::Codex)
+        } else if opencode_only_prompt_shape(shape) {
+            provider == Some(SessionProvider::Opencode)
+        } else {
+            true
+        }
+    })
+}
+
+fn pane_input_blocking_prompt(
+    stripped_tail: &str,
+    provider: Option<SessionProvider>,
+) -> Option<&'static str> {
+    prompt_shape_for_provider(stripped_tail, provider).filter(|shape| {
         matches!(
             *shape,
             // terminal-attention-login-screen: on Codex's sign-in screen an
             // Enter starts the ChatGPT sign-in; at a logged-out Claude a
             // message only draws "not logged in". Either way the message
             // stays in the box.
+            // opencode-terminal-prompts: in an OpenCode dialog Enter runs a
+            // command or switches model, agent or session; at its permission
+            // prompt Enter confirms the highlighted choice.
             "folder-trust"
                 | "hooks-trust"
                 | "codex-hooks-manage"
                 | "codex-update"
                 | "codex-login"
                 | "claude-login"
+                | "opencode-dialog"
+                | "opencode-permission"
         )
     })
 }
 
 #[cfg(test)]
 mod pane_input_blocking_prompt_tests {
-    use super::pane_input_blocking_prompt;
+    use super::{pane_input_blocking_prompt, SessionProvider};
+    const CODEX: Option<SessionProvider> = Some(SessionProvider::Codex);
+    const CLAUDE: Option<SessionProvider> = Some(SessionProvider::Claude);
     #[test]
     fn hooks_review_blocks_and_slash_panel_does_not() {
         // The pinned Codex hooks-review specimen (terminal_attention_tests).
         const HOOKS: &str = "Hooks need review 3 hooks are new or changed. Hooks can run outside the sandbox after you trust the \u{203a} 1. Review hooks 2. Trust all and continue 3. Continue without trusting (hooks won't run) Press enter to confirm or esc to go back";
-        assert_eq!(pane_input_blocking_prompt(HOOKS, true), Some("hooks-trust"));
         assert_eq!(
-            pane_input_blocking_prompt("Status Config Usage Stats Esc to cancel", true),
+            pane_input_blocking_prompt(HOOKS, CODEX),
+            Some("hooks-trust")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt("Status Config Usage Stats Esc to cancel", CODEX),
             None
         );
         assert_eq!(
-            pane_input_blocking_prompt("\u{203a} Write tests for @filename", true),
+            pane_input_blocking_prompt("\u{203a} Write tests for @filename", CODEX),
             None
         );
     }
@@ -43589,15 +43665,15 @@ mod pane_input_blocking_prompt_tests {
         // The untrusted captures say "needs review" but end in their own
         // footers, not the review prompt's, so they read as the manage shape.
         assert_eq!(
-            pane_input_blocking_prompt(TABLE, true),
+            pane_input_blocking_prompt(TABLE, CODEX),
             Some("codex-hooks-manage")
         );
         assert_eq!(
-            pane_input_blocking_prompt(EVENT, true),
+            pane_input_blocking_prompt(EVENT, CODEX),
             Some("codex-hooks-manage")
         );
         // On a Claude pane, neither blocks.
-        assert_eq!(pane_input_blocking_prompt(TABLE, false), None);
+        assert_eq!(pane_input_blocking_prompt(TABLE, CLAUDE), None);
         // Modeled trusted state: the review lines removed. Not a live
         // capture; the markers are the parts that don't depend on trust.
         let table = TABLE.replace("\u{26a0} 3 hooks need review before they can run.", "");
@@ -43605,33 +43681,108 @@ mod pane_input_blocking_prompt_tests {
             .replace("1 hook needs review before it can run.", "")
             .replace("New hook - reviewrequired", "Trusted");
         assert_eq!(
-            pane_input_blocking_prompt(&table, true),
+            pane_input_blocking_prompt(&table, CODEX),
             Some("codex-hooks-manage")
         );
         assert_eq!(
-            pane_input_blocking_prompt(&event, true),
+            pane_input_blocking_prompt(&event, CODEX),
             Some("codex-hooks-manage")
         );
     }
 
     #[test]
     fn composer_and_quotes_do_not_block() {
-        assert_eq!(pane_input_blocking_prompt(COMPOSER, true), None);
+        assert_eq!(pane_input_blocking_prompt(COMPOSER, CODEX), None);
         // An agent reply quoting the screens, not ending in their footer.
         assert_eq!(
             pane_input_blocking_prompt(
                 "Codex showed Lifecycle hooks from config and said esc close, then I continued.",
-                true,
+                CODEX,
             ),
             None
         );
         assert_eq!(
             pane_input_blocking_prompt(
                 "Fields were Matcher, Source, Timeout and Trust; press esc back to leave. Done.",
-                true,
+                CODEX,
             ),
             None
         );
+    }
+}
+
+// opencode-terminal-prompts: OpenCode 2.1.4 specimens, 2026-10-26, captured
+// under a 120x40 PTY in a scratch folder and built as pty_tail_snippet builds
+// a tail after the keystroke that drained it (pty_menu_clear).
+#[cfg(test)]
+mod opencode_prompt_tests {
+    use super::{
+        pane_input_blocking_prompt, prompt_shape_for_provider, terminal_attention_prompt_shape,
+        SessionProvider,
+    };
+    const OPENCODE: Option<SessionProvider> = Some(SessionProvider::Opencode);
+    const CLAUDE: Option<SessionProvider> = Some(SessionProvider::Claude);
+
+    // Ctrl+P, then Ctrl+X followed by m, l and a.
+    const PALETTE_OPEN: &str = "• New session • New session • New session • New session + New session Commands esc Search Suggested Switch session ctrl+x l Switch model ctrl+x m Connect an integration Open settings ┃ Session ┃ Ask Switch session ctrl+x l ┃ New session ctrl+x n ┃ Buil Clear session ╹▀▀▀▀▀▀ Open session or project ctrl+o ▀▀▀▀▀▀▀▀ /…/2f52 Close tab ctrl+x w commands Reopen closed tab ctrl+shift+t Open editor ctrl+x e 2.1.4";
+    const MODEL_LIST_OPEN: &str = "• New session • New session • New session • New session + New session Select model esc Search Big Pickle Free ● DeepSeek V4.1 Flash Free Free GLM-5.3-Flash Free Free Flint 40B Free Free Nemotron 3.5 Super VL Free Free Beam Free Free ┃ MiMo-V2.6-Flash Free Free ┃ Ask Nemotron 3.5 Lightning Free Free ┃ Nemotron 3 Ultra Free Free ┃ Buil ╹▀▀▀▀▀▀ View all integrations ctrl+a ▀▀▀▀▀▀▀▀ /…/2f52 commands 2.1.4";
+    const SESSION_LIST_OPEN: &str = "• New session • New session • New session • New session + New session Sessions for proj esc Search Today New session - 2026-10-27T03:09:51.611Z New session - 2026-10-27T03:09:18.437Z New session - 2026-10-27T03:09:41.159Z New session - 2026-10-27T03:09:29.796Z delete ctrl+d rename ctrl+r all projects ctrl+a ┃ ┃ Build · DeepSeek V4.1 Flash Free OpenCode ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ /…/2f52906f-64…/scratchpad/oc-ctrlc/proj shift+tab agents ctrl+p commands 2.1.4";
+    const AGENT_LIST_OPEN: &str = "• New session • New session • New session • New session + New session Select agent esc Search ● build The default agent. Executes tools based on con plan Read-only agent for exploring the codebase and ┃ ┃ Ask anything… 'What is the tech stack of this project?' ┃ ┃ Build · DeepSeek V4.1 Flash Free OpenCode ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ /…/2f52906f-64…/scratchpad/oc-ctrlc/proj shift+tab agents ctrl+p commands 2.1.4";
+    // Ctrl+X then s: read-only, Enter grants nothing there.
+    const STATUS_VIEW_OPEN: &str = "• New session • New session • New session • New session + New session Status esc No MCP servers ▄ █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█ █ █ █ █ █▀▀▀ █ █ █ █ █ █ █ █▀▀▀ ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ┃ ┃ Ask anything… 'What is the tech stack of this project?' ┃ ┃ Build · DeepSeek V4.1 Flash Free OpenCode ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ /…/2f52906f-64…/scratchpad/oc-ctrlc/proj shift+tab agents ctrl+p commands 2.1.4";
+    // The palette's tail after Esc: the logo, the composer and the status line.
+    const PALETTE_CLOSED: &str = "• New session • New session • New session • New session + New session ▄ █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█ █ █ █ █ █▀▀▀ █ █ █ █ █ █ █ █▀▀▀ ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ┃ ┃ Ask anything… 'What is the tech stack of this project?' ┃ ┃ Build · DeepSeek V4.1 Flash Free OpenCode ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ /…/2f52906f-64…/scratchpad/oc-ctrlc/proj shift+tab agents ctrl+p commands 2.1.4";
+    // Mid-turn, in a project whose opencode.json asks before bash. Excerpt:
+    // the spinner frames that keep coming after it are trimmed.
+    const PERMISSION: &str = "+Thought ┃ ┃ ⠋ Writing command… ┃ ! New session · 808ms⠋echo bram-permission-specimen┃ ┃ △ Permission required ┃ ┃ $ echo bram-permission-specimen ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New session ! New session ! New sessi ⠙ ! New sessi!New sessio ⠹ Press ctrl+b to move running work to the background⠧⠇⠏⠋⠙⠹⠸⠼⠴⠦";
+
+    #[test]
+    fn open_list_dialogs_hold_sends_under_opencode() {
+        for tail in [
+            PALETTE_OPEN,
+            MODEL_LIST_OPEN,
+            SESSION_LIST_OPEN,
+            AGENT_LIST_OPEN,
+        ] {
+            assert_eq!(
+                pane_input_blocking_prompt(tail, OPENCODE),
+                Some("opencode-dialog"),
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_dialog_and_the_status_view_are_not_prompts() {
+        assert_eq!(terminal_attention_prompt_shape(PALETTE_CLOSED), None);
+        assert_eq!(terminal_attention_prompt_shape(STATUS_VIEW_OPEN), None);
+    }
+
+    #[test]
+    fn the_permission_prompt_holds_sends_under_opencode() {
+        assert_eq!(
+            pane_input_blocking_prompt(PERMISSION, OPENCODE),
+            Some("opencode-permission")
+        );
+    }
+
+    #[test]
+    fn opencode_shapes_count_only_while_opencode_is_live() {
+        assert_eq!(prompt_shape_for_provider(PALETTE_OPEN, CLAUDE), None);
+        assert_eq!(prompt_shape_for_provider(PERMISSION, CLAUDE), None);
+        assert_eq!(prompt_shape_for_provider(PALETTE_OPEN, None), None);
+    }
+
+    // Near-misses: a reply naming one session-list key, or the dialog words
+    // apart, followed by OpenCode's own chrome.
+    #[test]
+    fn a_reply_naming_dialog_words_is_not_a_dialog() {
+        let chrome = " ┃ ┃ Ask anything… ┃ ┃ Build · DeepSeek V4.1 Flash Free OpenCode ╹▀▀▀▀ /…/proj shift+tab agents ctrl+p commands 2.1.4";
+        let one_key = format!("In the session list, delete ctrl+d removes a session.{chrome}");
+        assert_eq!(terminal_attention_prompt_shape(&one_key), None);
+        let apart =
+            format!("Open the commands palette, press esc to leave, then search again.{chrome}");
+        assert_eq!(terminal_attention_prompt_shape(&apart), None);
     }
 }
 
@@ -43696,7 +43847,7 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     // already refuses sends at these shapes; the nudge had no such check.
     let prompt_shape = pane_input_blocking_prompt(
         &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
-        current_provider(app) == Some(SessionProvider::Codex),
+        current_provider(app),
     );
     if agent_boot_hold_active()
         || prompt_shape.is_some()

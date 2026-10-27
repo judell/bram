@@ -9692,6 +9692,13 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     if (value && value.shape === "codex-login") {
       return "Codex is asking you to sign in. Open the terminal to sign in.";
     }
+    // opencode-terminal-prompts.
+    if (value && value.shape === "opencode-dialog") {
+      return "OpenCode has a dialog open in the terminal. Press Esc there to close it.";
+    }
+    if (value && value.shape === "opencode-permission") {
+      return "OpenCode is asking permission in the terminal. Answer it there.";
+    }
     return "The terminal is waiting at a prompt Bram can't answer.";
   };
   // The host names the alternative only when its CLI is on PATH, and with
@@ -15438,7 +15445,14 @@ window.__bramApplySendRestore = function (snapshot, box, toastApi) {
   // prompt (its default trusts the folder), so the send came back.
   if (p && p.reason === "prompt-on-screen" && typeof toastApi === "function") {
     var who = window.__bramProviderKey(p.provider) ? window.__bramProviderLabel(p.provider) : "The agent";
-    toastApi(who + " is waiting on a trust prompt in the terminal, so your message wasn't sent. Answer the prompt there, then send again. Your message is back in the message box.");
+    // opencode-terminal-prompts: the host names the shape it refused at.
+    if (p.shape === "opencode-dialog") {
+      toastApi("OpenCode has a dialog open in the terminal, so your message wasn't sent. Press Esc there to close it, then send again. Your message is back in the message box.");
+    } else if (p.shape === "opencode-permission") {
+      toastApi("OpenCode is asking permission in the terminal, so your message wasn't sent. Answer it there, then send again. Your message is back in the message box.");
+    } else {
+      toastApi(who + " is waiting on a trust prompt in the terminal, so your message wasn't sent. Answer the prompt there, then send again. Your message is back in the message box.");
+    }
   }
 };
 

@@ -14,6 +14,11 @@
 // writes no transcript file Bram can watch for them. opencode-permission-menu
 // added its permission prompts and their answers, so the pane can show the
 // question OpenCode is asking in the terminal.
+//
+// opencode-edit-advisory: after an edit lands, execute.after asks the guard
+// (`guard opencode-after`) whether it touched a file outside the items this
+// turn is addressed to, and adds Bram's note to the result OpenCode's model
+// reads. Advisory only: it never blocks.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -135,6 +140,53 @@ function askGuard(evt, mcp) {
   });
 }
 
+// --- edit advisory -------------------------------------------------------------
+
+// opencode-edit-advisory: Claude and Codex are told, once an edit lands, when it
+// touched a file the items this turn is addressed to don't list (their
+// PostToolUse additionalContext). OpenCode's model reads a tool result's
+// `content` parts: in the 2026-10-26 spike a text part appended here was quoted
+// back as part of the write's and edit's output. So the guard's note goes
+// there. The edit has already happened, so nothing here blocks, and any failure
+// adds nothing.
+const EDIT_TOOLS = new Set(["edit", "write", "patch"]);
+// The model waits on this after every edit; the guard answers in milliseconds.
+const ADVISORY_TIMEOUT_MS = 3000;
+
+function askAdvisory(evt) {
+  if (!existsSync(GUARD)) return Promise.resolve(null);
+  const payload = JSON.stringify({
+    tool: evt.tool,
+    input: evt.input,
+    sessionID: evt.sessionID,
+    agent: evt.agent,
+    cwd: ROOT,
+  });
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(GUARD, ["guard", "opencode-after"], {
+        cwd: ROOT,
+        stdio: ["pipe", "pipe", "ignore"],
+        timeout: ADVISORY_TIMEOUT_MS,
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      let answer = null;
+      try { answer = JSON.parse(out.trim().split("\n").pop() || ""); } catch {}
+      resolve(answer && typeof answer.advisory === "string" && answer.advisory ? answer.advisory : null);
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(payload);
+  });
+}
+
 // --- turn boundaries ---------------------------------------------------------
 
 const FORWARDED = new Set([
@@ -212,6 +264,17 @@ export default {
       if (READ_ONLY_TOOLS.has(evt.tool)) return;
       const verdict = await askGuard(evt, await mcpIdentity(api, evt.tool));
       if (!verdict.allow) throw new Error(verdict.message);
+    });
+    // Never throws: a failing execute.after must not turn a finished edit
+    // into a failed one.
+    api.tool.hook("execute.after", async (evt) => {
+      try {
+        if (!EDIT_TOOLS.has(evt.tool) || evt.status !== "completed") return;
+        const content = evt.result && evt.result.content;
+        if (!Array.isArray(content)) return;
+        const note = await askAdvisory(evt);
+        if (note) content.push({ type: "text", text: note });
+      } catch {}
     });
     forwardTurns(api).catch(() => {});
   },

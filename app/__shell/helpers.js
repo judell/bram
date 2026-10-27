@@ -1336,7 +1336,7 @@ window.__bramSwitchAgent = function (provider) {
 // OpenCode" rule.
 window.__bramSessionEditEnabled = function (item, action, pendingDeletes, pendingRenames) {
   if (!item || item.pending) return false;
-  if (item.provider === "opencode" && action !== "rename") return false;
+  // opencode-session-delete: OpenCode rows delete through its own CLI now.
   // delete-live-session-leaves-stub: the host marks the session a CLI is
   // running now; deleting it is refused, so don't offer the confirm at all.
   if (action === "delete" && item.running) return false;
@@ -1352,7 +1352,7 @@ window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendin
   }
   if (del && item.running) return "This session is running. Switch away from it before deleting it.";
   if (item.provider === "opencode") {
-    if (del) return "Delete OpenCode sessions inside OpenCode";
+    if (del) return "Delete session (OpenCode deletes it, with any child sessions)";
     // opencode-session-rename: be honest about the mechanism and its residual.
     return "Rename this session (writes the title into OpenCode's database; a session still open in OpenCode may keep showing the old one until it is reopened)";
   }

@@ -34346,11 +34346,6 @@ fn delete_session<R: tauri::Runtime>(
         return Err("invalid session id".to_string());
     }
     let (provider, sessions) = sessions_for_provider(app, preferred, None)?;
-    // opencode-sessions-browser: the file is Bram's export; the session itself
-    // lives in OpenCode's database and would come straight back.
-    if provider == SessionProvider::Opencode {
-        return Err("Delete OpenCode sessions from inside OpenCode.".to_string());
-    }
     let session = sessions
         .into_iter()
         .find(|session| session.id == id)
@@ -34367,7 +34362,16 @@ fn delete_session<R: tauri::Runtime>(
     ) {
         return Err(SESSION_DELETE_LIVE_REFUSAL.to_string());
     }
-    std::fs::remove_file(&session.path).map_err(|e| e.to_string())?;
+    // opencode-session-delete: the file is only Bram's export; the session
+    // lives in OpenCode's database, so OpenCode deletes it (child sessions
+    // too) with its own CLI, run without a shell from the project root.
+    // Then the export goes, so the list doesn't show it until the next scan.
+    if provider == SessionProvider::Opencode {
+        opencode_delete_session(app, id)?;
+        let _ = std::fs::remove_file(&session.path);
+    } else {
+        std::fs::remove_file(&session.path).map_err(|e| e.to_string())?;
+    }
     // A deleted session can't be resumed, so its pairs end with it: a
     // partner switch then finds no partner instead of resuming a ghost.
     if let Some(conn) = worklist_state_open(app) {
@@ -34375,6 +34379,39 @@ fn delete_session<R: tauri::Runtime>(
     }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(b"{\"ok\":true}".to_vec())
+}
+
+// opencode-session-delete: `opencode session delete <id>` (OpenCode 2.1.4,
+// "Delete a session and its child sessions"). The id is already checked by
+// session_id_is_safe and is passed as one argument, never through a shell.
+fn opencode_delete_session<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let out = std::process::Command::new("opencode")
+        .args(["session", "delete", id])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run opencode: {}", e))?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "sessions",
+            &format!(
+                "op=opencode-delete session={} status={}",
+                id,
+                out.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            ),
+        );
+    }
+    if out.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        Err(format!("opencode session delete failed: {}", err.trim()))
+    }
 }
 
 const SESSION_DELETE_LIVE_REFUSAL: &str =

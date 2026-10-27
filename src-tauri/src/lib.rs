@@ -41026,6 +41026,23 @@ struct SendLedgerEntry {
     // Observe-only for now: used to emit `would-suppress-strand` in the
     // mechanical-strand branch, no behavior change yet.
     session_path_at_inject: String,
+    // send-ledger-false-strand-opencode-export: is this entry's session corpus
+    // REBUILT rather than appended? True for OpenCode, whose "session JSONL" is
+    // an export Bram regenerates from SQLite (`opencode_export_session` ->
+    // `atomic_write_text` over every `session_message` row). A byte offset into
+    // such a file does not stay addressable: records are re-serialized, so a
+    // record that gained a field pushes later content forward, and the offset
+    // is itself taken from a path lookup that REGENERATES the export, so it can
+    // land after the delivering record was already written. Landing detection
+    // for a rebuilt corpus therefore gates on each candidate record's own
+    // timestamp instead of on the offset boundary.
+    session_rebuilt: bool,
+    // The rebuilt corpus's newest record when this send was recorded
+    // (`session_last_record_uuid`). Delivery is sought AFTER that record:
+    // identity survives a rebuild where a byte offset does not. Empty for
+    // append-only corpora, and empty-but-rebuilt means the corpus had no
+    // records yet, so everything now in it postdates this send.
+    session_anchor_uuid: String,
     state: &'static str, // "injected" | "landed" | "stranded"
     resolved_at_ms: i64,
     via_queue: bool,
@@ -41633,7 +41650,7 @@ mod send_ledger_unresolved_reason_tests {
 // them.
 #[cfg(test)]
 mod send_ledger_killed_turn_race_tests {
-    use super::{send_ledger_resolve_delivery, send_ledger_unresolved_reason};
+    use super::{send_ledger_resolve_delivery, send_ledger_unresolved_reason, SendLedgerAnchor};
 
     const A: &str = "Propose a worklist item to address #3859";
     const B: &str = "Propose a worklist item to address #3847";
@@ -41674,7 +41691,8 @@ mod send_ledger_killed_turn_race_tests {
         // Everything after the offset is what arrived post-injection: the
         // delayed completion bookkeeping for A, then B's real user record.
         let text = prefix + &item_completed_record(A) + &user_record(B);
-        let (delivered, from_inject) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        let (delivered, from_inject) =
+            send_ledger_resolve_delivery(B, (&text, offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             delivered,
             Some(false),
@@ -41690,7 +41708,8 @@ mod send_ledger_killed_turn_race_tests {
         let prefix = user_record(A) + &assistant_record("done with A");
         let offset = prefix.len();
         let text = prefix + &item_completed_record(B);
-        let (delivered, _) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        let (delivered, _) =
+            send_ledger_resolve_delivery(B, (&text, offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             delivered, None,
             "item_completed carries the text but is not a delivery record"
@@ -41713,14 +41732,16 @@ mod send_ledger_killed_turn_race_tests {
         let c_offset = mid.len();
         let text = mid + &user_record(C);
 
-        let (c_delivered, _) = send_ledger_resolve_delivery(C, (&text, c_offset), None);
+        let (c_delivered, _) =
+            send_ledger_resolve_delivery(C, (&text, c_offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             c_delivered,
             Some(false),
             "C resolves on its own offset and needle"
         );
 
-        let (b_delivered, _) = send_ledger_resolve_delivery(B, (&text, b_offset), None);
+        let (b_delivered, _) =
+            send_ledger_resolve_delivery(B, (&text, b_offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             b_delivered, None,
             "B is genuinely absent — but it did not affect C"
@@ -41738,7 +41759,8 @@ mod send_ledger_killed_turn_race_tests {
         let earlier = user_record(B);
         let offset = earlier.len();
         let text = earlier + &assistant_record("answered the first one");
-        let (delivered, _) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        let (delivered, _) =
+            send_ledger_resolve_delivery(B, (&text, offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             delivered, None,
             "the only occurrence precedes this entry's offset"
@@ -41746,9 +41768,93 @@ mod send_ledger_killed_turn_race_tests {
     }
 }
 
-fn send_ledger_find_delivery(text: &str, rel_offset: usize, needle: &str) -> Option<bool> {
-    let start = char_floor(text, rel_offset);
-    let suffix = &text[start..];
+// Where delivery may be sought within one candidate corpus. The choice is a
+// property of the CORPUS, not of this send: an append-only JSONL keeps a byte
+// offset addressable forever, a rebuilt export does not.
+#[derive(Clone, Copy)]
+enum SendLedgerAnchor<'a> {
+    // Append-only corpus (Claude, Codex): the recorded inject offset is the
+    // boundary. Exact and free.
+    Offset,
+    // Rebuilt corpus (OpenCode): the IDENTITY of the corpus's newest record
+    // when the send was recorded. `None` means the corpus held no records
+    // then, so everything now in it postdates the send.
+    //
+    // Identity rather than position because a rebuild re-serializes earlier
+    // records: a step gaining `stop_reason` lengthens its own line, which
+    // moves every byte after it. Measured on the live false strand — the
+    // record for a send recorded at offset 889,853 read back at 889,797,
+    // 56 bytes EARLIER — while the file as a whole only ever grew. Record
+    // ORDER is the provider's `seq` order and survives that; a uuid is the
+    // record's name for itself.
+    AfterRecord(Option<&'a str>),
+}
+
+// End of the line carrying `uuid`, so the search can begin after it. The
+// anchor is looked up by value: uuids are the provider's own identifiers and
+// occur nowhere but in their record.
+fn send_ledger_anchor_line_end(text: &str, uuid: &str) -> Option<usize> {
+    if uuid.is_empty() {
+        return None;
+    }
+    let pos = text.find(uuid)?;
+    Some(
+        text[pos..]
+            .find('\n')
+            .map(|i| pos + i + 1)
+            .unwrap_or(text.len()),
+    )
+}
+
+// The identity of a rebuilt corpus's newest record, read at send time. Any
+// record that certainly EXISTED when the send was recorded will do — a lagging
+// anchor still puts the delivering record after it, and a leading one is
+// impossible — which is why the scan needs no completeness guarantee.
+fn session_last_record_uuid(path: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|record| {
+            record
+                .get("uuid")
+                .and_then(|u| u.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default()
+}
+
+// Walk every needle occurrence in `text`, accepting only a line whose record
+// SEMANTICS constitute delivery (text presence alone is not delivery — queue
+// records carry the text at enqueue time, and assistant records can quote it
+// back). `anchor` decides where the search may begin.
+//
+// One documented fallback: a rebuilt corpus whose anchor record is no longer
+// in the searched text (a rebuild dropped it, or the session changed under the
+// entry) reverts to the recorded byte offset — the rule this replaced. That is
+// a known exception, not a design: the evidence we are waiting for is a trace
+// line reading `rebuilt_anchor=absent`, which has not been observed. Failing
+// that way round keeps the repeated-prose guard (`an identical earlier send
+// must not false-land a later entry`) in force.
+fn send_ledger_find_delivery(
+    text: &str,
+    rel_offset: usize,
+    needle: &str,
+    anchor: SendLedgerAnchor<'_>,
+) -> Option<bool> {
+    let start = match anchor {
+        SendLedgerAnchor::Offset => char_floor(text, rel_offset),
+        SendLedgerAnchor::AfterRecord(None) => 0,
+        SendLedgerAnchor::AfterRecord(Some(uuid)) => {
+            match send_ledger_anchor_line_end(text, uuid) {
+                Some(end) => end,
+                None => char_floor(text, rel_offset),
+            }
+        }
+    };
+    let suffix = &text[start.min(text.len())..];
     let mut search_from = 0usize;
     while let Some(rel) = suffix[search_from..].find(needle) {
         let pos = search_from + rel;
@@ -41773,16 +41879,21 @@ fn send_ledger_find_delivery(text: &str, rel_offset: usize, needle: &str) -> Opt
 // of scope) the inject-session candidate. Returns (delivered_via_queue,
 // landed_in_inject_session) — the second drives the audit-line choice
 // (`inject-session-land` vs `cross-session-land`) and never both.
+//
+// `anchor` applies to BOTH candidates: a rebuild changes the inject file as
+// much as the current one, and when the session changed the anchor simply
+// isn't there, which lands on the documented offset fallback.
 fn send_ledger_resolve_delivery(
     needle: &str,
     current: (&str, usize),
     inject: Option<(&str, usize)>,
+    anchor: SendLedgerAnchor<'_>,
 ) -> (Option<bool>, bool) {
-    if let Some(v) = send_ledger_find_delivery(current.0, current.1, needle) {
+    if let Some(v) = send_ledger_find_delivery(current.0, current.1, needle, anchor) {
         return (Some(v), false);
     }
     if let Some((text, rel)) = inject {
-        if let Some(v) = send_ledger_find_delivery(text, rel, needle) {
+        if let Some(v) = send_ledger_find_delivery(text, rel, needle, anchor) {
             return (Some(v), true);
         }
     }
@@ -41791,7 +41902,7 @@ fn send_ledger_resolve_delivery(
 
 #[cfg(test)]
 mod send_ledger_resolve_delivery_tests {
-    use super::send_ledger_resolve_delivery;
+    use super::{send_ledger_resolve_delivery, SendLedgerAnchor};
 
     const DELIVERING: &str = "{\"type\":\"user\",\"text\":\"probe for 307\"}\n";
     const UNRELATED: &str = "{\"type\":\"other\",\"text\":\"nothing here\"}\n";
@@ -41801,16 +41912,24 @@ mod send_ledger_resolve_delivery_tests {
         // The #307 harmful variant: current (post-switch) session shows no
         // delivery, inject session does — must resolve landed, flagged as
         // an inject-session land, never fall through to the strand path.
-        let (delivered, in_inject) =
-            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), Some((DELIVERING, 0)));
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (UNRELATED, 0),
+            Some((DELIVERING, 0)),
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, Some(false));
         assert!(in_inject);
     }
 
     #[test]
     fn current_session_wins_and_is_not_flagged_as_inject_land() {
-        let (delivered, in_inject) =
-            send_ledger_resolve_delivery("probe for 307", (DELIVERING, 0), Some((DELIVERING, 0)));
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (DELIVERING, 0),
+            Some((DELIVERING, 0)),
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, Some(false));
         assert!(
             !in_inject,
@@ -41820,22 +41939,31 @@ mod send_ledger_resolve_delivery_tests {
 
     #[test]
     fn found_in_neither_session_strands() {
-        let (delivered, in_inject) =
-            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), Some((UNRELATED, 0)));
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (UNRELATED, 0),
+            Some((UNRELATED, 0)),
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, None);
         assert!(!in_inject);
     }
 
     #[test]
     fn no_switch_means_no_second_candidate() {
-        let (delivered, _) = send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), None);
+        let (delivered, _) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (UNRELATED, 0),
+            None,
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, None);
     }
 }
 
 #[cfg(test)]
 mod send_ledger_find_delivery_tests {
-    use super::send_ledger_find_delivery;
+    use super::{send_ledger_find_delivery, SendLedgerAnchor};
 
     #[test]
     fn delivering_user_line_is_found_and_quoting_lines_are_not() {
@@ -41845,12 +41973,17 @@ mod send_ledger_find_delivery_tests {
         );
         // The assistant quote alone does not deliver; the user line does.
         assert_eq!(
-            send_ledger_find_delivery(text, 0, "hello world probe"),
+            send_ledger_find_delivery(text, 0, "hello world probe", SendLedgerAnchor::Offset),
             Some(false)
         );
         let quotes_only = "{\"type\":\"assistant\",\"text\":\"hello world probe\"}\n";
         assert_eq!(
-            send_ledger_find_delivery(quotes_only, 0, "hello world probe"),
+            send_ledger_find_delivery(
+                quotes_only,
+                0,
+                "hello world probe",
+                SendLedgerAnchor::Offset
+            ),
             None
         );
     }
@@ -41860,9 +41993,178 @@ mod send_ledger_find_delivery_tests {
         let first = "{\"type\":\"user\",\"text\":\"hello world probe\"}\n";
         let text = format!("{}{}", first, "{\"type\":\"other\"}\n");
         assert_eq!(
-            send_ledger_find_delivery(&text, first.len(), "hello world probe"),
+            send_ledger_find_delivery(
+                &text,
+                first.len(),
+                "hello world probe",
+                SendLedgerAnchor::Offset
+            ),
             None,
             "occurrences before the offset are out of scope"
+        );
+    }
+}
+
+// send-ledger-false-strand-opencode-export: the addressing rule for a corpus
+// Bram REBUILDS (OpenCode's export) versus one the CLI appends to. The fixtures
+// replay the shape the live ledger recorded — a delivering record that reads
+// back BEFORE the byte offset taken at inject, because a rebuild re-serialized
+// earlier records — and the case that boundary must still refuse: an identical
+// earlier payload. What separates the two is CONTENT (the identity of the
+// newest record when the send was recorded), not a byte count and not a clock.
+#[cfg(test)]
+mod send_ledger_rebuilt_corpus_tests {
+    use super::{
+        send_ledger_find_delivery, send_ledger_resolve_delivery, session_last_record_uuid,
+        SendLedgerAnchor,
+    };
+
+    const SENT: &str = "approved: {\"items\":[{\"id\":\"probe\"}]}";
+    const ANCHOR: &str = "msg_anchor";
+    const DELIVERING: &str = "msg_delivering";
+    const EARLIER: &str = "msg_earlier";
+
+    fn export_user_record(uuid: &str, text: &str) -> String {
+        let mut line = serde_json::json!({
+            "message": { "content": text },
+            "sessionId": "ses_probe",
+            "timestamp": "2026-10-27T09:05:51.961Z",
+            "type": "user",
+            "uuid": uuid,
+        })
+        .to_string();
+        line.push('\n');
+        line
+    }
+
+    // The ledger's needle is the JSON-ESCAPED payload (`send_ledger_needle`),
+    // which is what the export's own serialization stores. A fixture that
+    // searched for the raw text would fail for the right reason but read as a
+    // bug in the resolver.
+    fn escaped_needle() -> String {
+        let quoted = serde_json::Value::String(SENT.to_string()).to_string();
+        quoted[1..quoted.len() - 1].to_string()
+    }
+
+    fn after(uuid: &str) -> SendLedgerAnchor<'_> {
+        SendLedgerAnchor::AfterRecord(Some(uuid))
+    }
+
+    #[test]
+    fn rebuilt_corpus_lands_a_record_that_sits_before_the_recorded_offset() {
+        // The live shape: the delivering record precedes the offset the ledger
+        // recorded, so an offset-bounded search starts inside the record and
+        // matches nothing. The anchor puts the whole record in scope.
+        let text = export_user_record(ANCHOR, "the turn before")
+            + &export_user_record(DELIVERING, SENT)
+            + &export_user_record("msg_after", "the turn after");
+        let offset = text.len();
+        let (delivered, in_inject) =
+            send_ledger_resolve_delivery(&escaped_needle(), (&text, offset), None, after(ANCHOR));
+        assert_eq!(delivered, Some(false));
+        assert!(!in_inject);
+    }
+
+    #[test]
+    fn append_only_corpus_keeps_the_offset_boundary() {
+        // Same bytes under the Claude/Codex rule: the record still sits before
+        // the offset, so it stays out of scope. The proven path is untouched.
+        let text =
+            export_user_record(ANCHOR, "the turn before") + &export_user_record(DELIVERING, SENT);
+        let offset = text.len();
+        let (delivered, _) = send_ledger_resolve_delivery(
+            &escaped_needle(),
+            (&text, offset),
+            None,
+            SendLedgerAnchor::Offset,
+        );
+        assert_eq!(delivered, None);
+    }
+
+    #[test]
+    fn rebuilt_corpus_refuses_an_identical_payload_before_the_anchor() {
+        // The case the boundary exists to prevent, preserved without a clock:
+        // user prose repeats, so an older identical payload must not land a
+        // send that was genuinely lost.
+        let text = export_user_record(EARLIER, SENT) + &export_user_record(ANCHOR, "after it");
+        let (delivered, _) =
+            send_ledger_resolve_delivery(&escaped_needle(), (&text, 0), None, after(ANCHOR));
+        assert_eq!(delivered, None);
+    }
+
+    #[test]
+    fn rebuilt_corpus_walks_past_a_payload_before_the_anchor() {
+        // A refused occurrence must not stop the search: the delivering record
+        // after the anchor is this send.
+        let text = export_user_record(EARLIER, SENT)
+            + &export_user_record(ANCHOR, "the turn before")
+            + &export_user_record(DELIVERING, SENT);
+        let (delivered, _) =
+            send_ledger_resolve_delivery(&escaped_needle(), (&text, 0), None, after(ANCHOR));
+        assert_eq!(delivered, Some(false));
+    }
+
+    #[test]
+    fn rebuilt_corpus_with_no_records_at_send_time_searches_all_of_it() {
+        // An empty corpus at inject means everything now in it postdates the
+        // send, so there is no boundary to apply.
+        let text = export_user_record(DELIVERING, SENT);
+        let (delivered, _) = send_ledger_resolve_delivery(
+            &escaped_needle(),
+            (&text, 0),
+            None,
+            SendLedgerAnchor::AfterRecord(None),
+        );
+        assert_eq!(delivered, Some(false));
+    }
+
+    #[test]
+    fn missing_anchor_falls_back_to_the_recorded_offset() {
+        // Documented exception: a rebuild dropped the anchor record (or the
+        // session changed under the entry), so the content boundary cannot be
+        // located and the old byte rule applies. The first `rebuilt_anchor=absent`
+        // in a trace is the evidence a rebuild did this.
+        let text = export_user_record(DELIVERING, SENT);
+        let offset = text.len();
+        assert_eq!(
+            send_ledger_find_delivery(&text, offset, &escaped_needle(), after("msg_gone")),
+            None,
+            "fallback keeps the repeated-prose guard"
+        );
+        assert_eq!(
+            send_ledger_find_delivery(&text, 0, &escaped_needle(), after("msg_gone")),
+            Some(false),
+            "the fallback is the offset, not the anchor: from 0 the same bytes land"
+        );
+    }
+
+    #[test]
+    fn last_record_uuid_skips_lines_that_are_not_records() {
+        // The export ends with a `custom-title` line carrying no uuid, and the
+        // anchor must be the newest RECORD, not that.
+        let path = std::env::temp_dir().join(format!(
+            "bram-anchor-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let body = export_user_record("msg_one", "first")
+            + &export_user_record("msg_two", "second")
+            + &serde_json::json!({ "type": "custom-title", "customTitle": "a title" }).to_string()
+            + "\n";
+        std::fs::write(&path, body).expect("fixture writes");
+        let uuid = session_last_record_uuid(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(uuid, "msg_two");
+    }
+
+    #[test]
+    fn last_record_uuid_of_a_missing_file_is_empty_not_an_error() {
+        assert_eq!(
+            session_last_record_uuid(std::path::Path::new("/nonexistent/session.jsonl")),
+            ""
         );
     }
 }
@@ -43986,6 +44288,18 @@ fn schedule_send_ledger_sweep<R: tauri::Runtime>(app: &AppHandle<R>) {
     });
 }
 
+// send-ledger-false-strand-opencode-export: is this path a corpus Bram
+// REGENERATES from a provider database rather than one the CLI appends to?
+// Only the OpenCode export directory answers yes. Tested by path rather than
+// by provider so an entry recorded while the provider was ambiguous (or while
+// a switch was in flight) still classifies by what the file actually is.
+fn session_corpus_is_rebuilt<R: tauri::Runtime>(app: &AppHandle<R>, path: &Path) -> bool {
+    match opencode_export_dir(app) {
+        Ok(dir) => path.starts_with(&dir),
+        Err(_) => false,
+    }
+}
+
 fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
     let now = unix_now_ms();
     let session_path = active_session_path(app).ok().flatten();
@@ -43998,6 +44312,24 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // send-ledger-false-strand-opencode-export: recorded per entry because the
+    // landing rule differs by corpus shape — a rebuilt export cannot be
+    // addressed by offset, an append-only JSONL is best addressed by one.
+    let session_rebuilt = session_path
+        .as_deref()
+        .map(|p| session_corpus_is_rebuilt(app, p))
+        .unwrap_or(false);
+    // Content boundary for a rebuilt corpus, taken HERE rather than at the
+    // sweep: this runs before the payload reaches the PTY, so the delivering
+    // record cannot already be in the corpus. See `SendLedgerAnchor`.
+    let session_anchor_uuid = if session_rebuilt {
+        session_path
+            .as_deref()
+            .map(session_last_record_uuid)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let trimmed = payload.trim_start();
     let (mode, body) = match trimmed.strip_prefix("skip-worklist:") {
         Some(rest) => ("skip-worklist", rest.trim_start()),
@@ -44021,6 +44353,8 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             injected_at_ms: now,
             jsonl_offset_at_inject: jsonl_offset,
             session_path_at_inject: session_path_at_inject.clone(),
+            session_rebuilt,
+            session_anchor_uuid: session_anchor_uuid.clone(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -44043,6 +44377,8 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             injected_at_ms: now,
             jsonl_offset_at_inject: jsonl_offset,
             session_path_at_inject: session_path_at_inject.clone(),
+            session_rebuilt,
+            session_anchor_uuid: session_anchor_uuid.clone(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -44067,12 +44403,18 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             app,
             "send-ledger",
             &format!(
-                "op=inject id={} kind={} mode={} bytes={} jsonl_offset={}",
+                "op=inject id={} kind={} mode={} bytes={} jsonl_offset={} rebuilt={} anchor={}",
                 entry.id,
                 entry.kind,
                 entry.mode,
                 payload.len(),
                 jsonl_offset,
+                entry.session_rebuilt,
+                if entry.session_anchor_uuid.is_empty() {
+                    "-"
+                } else {
+                    entry.session_anchor_uuid.as_str()
+                },
             ),
         );
     }
@@ -44344,8 +44686,24 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
             } else {
                 None
             };
-            let (delivered, landed_in_inject_session) =
-                send_ledger_resolve_delivery(&needle, (search_text, rel_offset), inject_candidate);
+            // send-ledger-false-strand-opencode-export: a rebuilt corpus is
+            // addressed by the identity of its newest record at send time,
+            // not by the inject offset.
+            let anchor = if !entry.session_rebuilt {
+                SendLedgerAnchor::Offset
+            } else if entry.session_anchor_uuid.is_empty() {
+                // No records existed when this send was recorded, so every
+                // record present now postdates it.
+                SendLedgerAnchor::AfterRecord(None)
+            } else {
+                SendLedgerAnchor::AfterRecord(Some(entry.session_anchor_uuid.as_str()))
+            };
+            let (delivered, landed_in_inject_session) = send_ledger_resolve_delivery(
+                &needle,
+                (search_text, rel_offset),
+                inject_candidate,
+                anchor,
+            );
             // issue-335 phase 1: classified against the PRIMARY candidate only.
             // When the session re-anchored, `search_text` is the current
             // session and the inject session was searched as a fallback, so
@@ -44550,14 +44908,54 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 // the interesting signal (e.g. offset-past-end settling into
                 // needle-absent once the provider writes).
                 entry.last_unresolved_reason = unresolved_reason;
+                // send-ledger-false-strand-opencode-export: `needle-absent`
+                // alone cannot distinguish "outside the window we searched"
+                // from "not in the corpus at all" — the ambiguity that cost
+                // this item its own investigation. Answer it here, once per
+                // distinct reason, by asking the whole file. `base_offset`
+                // says where the searched slice started, so a window miss is
+                // readable without knowing which caller swept.
+                let needle_in_file = if !current_session_path.is_empty() {
+                    match current_session_full_text.as_deref() {
+                        Some(t) => Some(t.contains(&needle)),
+                        None => std::fs::read_to_string(&current_session_path)
+                            .ok()
+                            .map(|t| t.contains(&needle)),
+                    }
+                } else {
+                    None
+                };
+                // Where the boundary came from, and whether it was actually
+                // found: `absent` is the documented fallback to the byte
+                // offset, so its first appearance in a trace is the evidence
+                // a rebuild dropped an anchor record.
+                let rebuilt_anchor = if !entry.session_rebuilt {
+                    "none"
+                } else if entry.session_anchor_uuid.is_empty() {
+                    "start"
+                } else if send_ledger_anchor_line_end(search_text, &entry.session_anchor_uuid)
+                    .is_some()
+                {
+                    "found"
+                } else {
+                    "absent"
+                };
                 transitions.push(format!(
-                    "op=unresolved id={} reason={} needle_len={} rel_offset={} text_len={} sid_changed={}",
+                    "op=unresolved id={} reason={} needle_len={} rel_offset={} base_offset={} text_len={} sid_changed={} rebuilt={} rebuilt_anchor={} needle_in_file={}",
                     entry.id,
                     unresolved_reason,
                     needle.len(),
                     rel_offset,
+                    base_offset,
                     search_text.len(),
                     sid_changed,
+                    entry.session_rebuilt,
+                    rebuilt_anchor,
+                    match needle_in_file {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "unknown",
+                    },
                 ));
             }
         }
@@ -62667,6 +63065,8 @@ mod session_turn_tests {
             injected_at_ms: 0,
             jsonl_offset_at_inject: 0,
             session_path_at_inject: String::new(),
+            session_rebuilt: false,
+            session_anchor_uuid: String::new(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -62713,6 +63113,8 @@ mod session_turn_tests {
             injected_at_ms: 1000,
             jsonl_offset_at_inject: 0,
             session_path_at_inject: String::new(),
+            session_rebuilt: false,
+            session_anchor_uuid: String::new(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,

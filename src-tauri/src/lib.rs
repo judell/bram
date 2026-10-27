@@ -21762,6 +21762,7 @@ fn switch_agent(
                                     baseline: fresh_baseline.clone(),
                                     at_ms: unix_now_ms(),
                                     source: pair_source,
+                                    generation,
                                 });
                             }
                         }
@@ -22728,6 +22729,11 @@ struct PendingPair {
     at_ms: i64,
     // The pair-stamp source once it resolves.
     source: &'static str,
+    // fresh-partner-pending-pair-survives-reload: the launch that armed it.
+    // A newer launch (a reload, another switch) means the fresh session this
+    // waited for is never coming; on 2026-10-27 21:24Z the reload's own
+    // session change resolved it to an old OpenCode session instead.
+    generation: u64,
 }
 
 static PENDING_PAIR: Mutex<Option<PendingPair>> = Mutex::new(None);
@@ -22745,6 +22751,22 @@ fn resolve_pending_pair<R: tauri::Runtime>(app: &AppHandle<R>, provider: Session
         return;
     }
     if unix_now_ms().saturating_sub(pending.at_ms) > PENDING_PAIR_TTL_MS {
+        *guard = None;
+        return;
+    }
+    if !agent_launch_is_current(pending.generation) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=pending-pair-dropped reason=launch-superseded from={}={} to={}",
+                    session_provider_label(pending.from.0),
+                    pending.from.1,
+                    session_provider_label(pending.to)
+                ),
+            );
+        }
         *guard = None;
         return;
     }
@@ -24325,6 +24347,7 @@ fn create_new_session(
                             baseline: pair_baseline.clone(),
                             at_ms: unix_now_ms(),
                             source: "switch-new-session",
+                            generation,
                         });
                     }
                 }

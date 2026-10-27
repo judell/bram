@@ -503,7 +503,8 @@ needs, as a markdown table:
 | measurement | what it isolates |
 |---|---|
 | no-op | cargo's freshness scan. If this already costs seconds, the complaint is not compilation |
-| incremental (one line appended to `lib.rs`) | the ordinary edit loop — the cost that actually gets felt |
+| incremental (one line appended to `lib.rs`) | the cheapest edit there is: nothing below it moves |
+| incremental, lines shifted (one line inserted at the top) | a mid-file edit, which moves every line below it. Full debuginfo records line numbers, so this may cost much more than the appended row; the gap between the two is the measurement (2026-10-27's mid-file edits built in 34 s to 2m55s) |
 | relink only | link time in isolation, which matters because the debug binary is ~70 MB |
 | check only (same one-line probe) | type-checking and metadata, with no codegen and no link |
 | clean (`--clean`) | everything, dependencies included — the only number comparable across machines and toolchains |
@@ -531,6 +532,11 @@ nothing in build time. Only separate crates — a workspace — shrink the unit,
 which is a much larger change and should be taken on a number, not a hunch.
 The debug profile (`codegen-units`, `debug = "line-tables-only"`) is the other
 lever, and it wants the same treatment: measured, not guessed.
+
+Restoring a probe is itself an edit, so after each restore the script runs one
+untimed build before the next timed row. Before 2026-10-27 the relink row ran
+straight after the incremental probe's restore, so its number may include a
+recompile; compare it with earlier runs with that in mind.
 
 The incremental leg restores `lib.rs`'s exact bytes from a saved copy via
 a trap, so an interrupted run still leaves the tree as it found it, and a

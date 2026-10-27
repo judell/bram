@@ -100,6 +100,24 @@ probe_restore() {
   BACKUP=""   # restored; the exit trap need not repeat it
 }
 
+# build-timings-line-shift-row: the same probe, inserted as line 1 instead of
+# appended. Appending shifts no other line, the cheapest possible edit; real
+# edits land mid-file and move every line below them, which full debuginfo
+# records. Three mid-file edits on 2026-10-27 built in 2m55s, 1m38s and 34s
+# against the appended probe's 22.76s (#451), hence the second row.
+probe_edit_top() {
+  cp -p "$LIB" "$WORK/lib.rs.orig"
+  BACKUP="$WORK/lib.rs.orig"
+  { printf '// build-timings probe\n'; cat "$WORK/lib.rs.orig"; } > "$LIB"
+}
+
+# Restoring a probe is itself an edit (undoing a top insert shifts every line
+# back), so the next leg would pay for it. An untimed build after each restore
+# lets every timed row start from a settled tree.
+settle() {
+  cargo_run "$WORK/settle-$1.log" build
+}
+
 rows=()
 row() { rows+=("$1|$2|$3"); }
 
@@ -121,7 +139,17 @@ row "no-op build (nothing to do)" "$(timed_cargo "$WORK/noop.log" build)" "the f
 probe_edit
 inc_s="$(timed_cargo "$WORK/incremental.log" build)"
 probe_restore
+settle incremental
 row "incremental (one line added to lib.rs)" "$inc_s" "$(wc -l < "$LIB" | tr -d ' ') lines rechecked"
+
+# --- 2b. incremental, lines shifted -----------------------------------------
+# One line inserted at the top: every line below moves, as a mid-file edit
+# does. Compare with the row above; the gap is what line shifts cost.
+probe_edit_top
+shift_s="$(timed_cargo "$WORK/incremental-top.log" build)"
+probe_restore
+settle incremental-top
+row "incremental, lines shifted (one line inserted at top of lib.rs)" "$shift_s" "every line below moves"
 
 # --- 3. relink -------------------------------------------------------------
 # Removes the crate's own binary artifacts so cargo must relink from the rlibs
@@ -163,6 +191,7 @@ cargo_run "$WORK/check-warm.log" check
 probe_edit
 check_s="$(timed_cargo "$WORK/check.log" check)"
 probe_restore
+settle check
 row "check only (one line added to lib.rs)" "$check_s" "type-check, no codegen, no link"
 
 # --- 5. no derived row -----------------------------------------------------

@@ -21068,6 +21068,19 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
     if l.gate {
         match wait_for_shell_prompt_evidence() {
             Err(waited) => {
+                // launch-timeout-respects-supersede (2026-10-27 19:47Z): a
+                // switch whose interrupts didn't end OpenCode was replaced by
+                // a second click that launched Claude, and 45 s later this
+                // path still reported "Bram didn't start Claude". A replaced
+                // launch stops quietly here as it does before the write; the
+                // newer launch owns the banner and the boot hold.
+                if !agent_launch_is_current(l.generation) {
+                    trace(format!(
+                        "op=launch-superseded provider={} source={} stage=gate-timeout waited_ms={}",
+                        l.provider, l.source, waited
+                    ));
+                    return;
+                }
                 trace(format!(
                     "op=launch-timeout provider={} source={} waited_ms={}",
                     l.provider, l.source, waited

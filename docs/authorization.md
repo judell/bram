@@ -149,6 +149,16 @@ that detail limits blanket claims that every interrupt revokes every later
 route call. An expired mutate refusal also releases the refused ids' claim
 so a dead approval cannot keep the board locked.
 
+What counts as an interrupt depends on the agent. For Claude and Codex a
+user Esc in the terminal or from the pane marks it at the keystroke
+(`pty_menu_clear`). OpenCode stops a running turn only on a second Esc
+within 5 s, so a single Esc interrupts nothing there. With Bram's OpenCode
+plugin in place, the mark (and the claim clear) wait for OpenCode's own
+`session.execution.interrupted` event (`opencode_turn_interrupted`), which
+covers any stop, Esc-caused or not. Without the plugin no such event
+arrives and the keystroke marks it, as for the other agents
+(opencode-esc-interrupt).
+
 ### Direct edits and provenance
 
 The policy opt-out is scoped to the user's request in the same turn; agents

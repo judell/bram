@@ -9750,6 +9750,80 @@ fn last_pty_escape_ms_cell() -> &'static Mutex<i64> {
 }
 const POST_ESCAPE_NO_KILL_WINDOW_MS: i64 = 15_000;
 
+// opencode-esc-interrupt: OpenCode 2.1.4 stops a running turn only on the
+// SECOND Esc within 5 s (its session.interrupt handler counts presses), and
+// reports the stop itself: Bram's plugin forwards
+// session.execution.interrupted. So under OpenCode a lone Esc is not an
+// interrupt, and Bram waits for that event before doing what an Esc does for
+// Claude: clear the claim, fail the approval closed (security H4) and sweep
+// the send ledger. Reacting at the keystroke cleared the row and revoked the
+// approval while OpenCode kept working, and made the ledger restore a send
+// OpenCode had already answered (demo instance, 2026-10-26). The last press
+// is kept here so the sweep sees the Esc that caused the stop.
+static OPENCODE_ESC_PRESSED_AT_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+// OpenCode resets its press count 5 s after each Esc.
+const OPENCODE_ESC_COUNT_WINDOW_MS: i64 = 5_000;
+// The pane's Esc button presses twice under OpenCode, as separate writes: a
+// single "\x1b\x1b" write did not interrupt in the 2026-10-26 spike, two
+// writes 100 ms apart did.
+const OPENCODE_ESC_PRESS_GAP_MS: u64 = 100;
+
+// Whether a user Esc should wait for the agent's own interrupt report. Only
+// OpenCode reports one, and only through Bram's plugin: without a current
+// plugin no event arrives, and the keystroke stays the only signal.
+fn esc_waits_for_agent_interrupt(provider: Option<SessionProvider>, plugin_current: bool) -> bool {
+    provider == Some(SessionProvider::Opencode) && plugin_current
+}
+
+fn esc_waits_for_agent_interrupt_now<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    let provider = current_provider(app);
+    provider == Some(SessionProvider::Opencode)
+        && esc_waits_for_agent_interrupt(
+            provider,
+            project_root(Some(app)).is_some_and(|proj| opencode_plugin_current(app, &proj)),
+        )
+}
+
+// How many Esc presses the pane's Esc button sends: two to stop a running
+// OpenCode turn, one otherwise (Claude stops on one; an idle Esc or an open
+// menu wants a single key).
+fn pane_esc_presses(provider: Option<SessionProvider>, phase: &str, menu_pending: bool) -> u8 {
+    if provider == Some(SessionProvider::Opencode) && phase == "working" && !menu_pending {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(test)]
+mod opencode_esc_tests {
+    use super::SessionProvider::{Claude, Codex, Opencode};
+    use super::{esc_waits_for_agent_interrupt as waits, pane_esc_presses as presses};
+
+    #[test]
+    fn only_opencode_with_its_plugin_waits_for_the_agents_interrupt() {
+        assert!(waits(Some(Opencode), true));
+        // Without a current plugin no interrupt event arrives, so the
+        // keystroke has to keep doing the work.
+        assert!(!waits(Some(Opencode), false));
+        assert!(!waits(Some(Claude), true));
+        assert!(!waits(Some(Codex), true));
+        assert!(!waits(None, true));
+    }
+
+    #[test]
+    fn the_pane_esc_button_presses_twice_only_for_a_running_opencode_turn() {
+        assert_eq!(presses(Some(Opencode), "working", false), 2);
+        // A menu or an idle agent wants one key, as before.
+        assert_eq!(presses(Some(Opencode), "working", true), 1);
+        assert_eq!(presses(Some(Opencode), "waiting-for-permission", false), 1);
+        assert_eq!(presses(Some(Opencode), "finished", false), 1);
+        assert_eq!(presses(Some(Claude), "working", false), 1);
+        assert_eq!(presses(Some(Codex), "working", false), 1);
+    }
+}
+
 // user_ts_ms of the most recent turn whose start the natural-end banner
 // gate has observed. When pty_agent_status_update sees a fresh
 // stats.user_ts_ms (advance past this stamp), it drains pty_tail_cell so
@@ -13883,6 +13957,18 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // held every pane send for 7 minutes.
         turn_state_set_menu(app, None, "hook-permission", "dismissed");
         emit_replayable_payload(app, "pty-menu-changed", Option::<PtyMenu>::None);
+    } else if input == "\x1b" && esc_waits_for_agent_interrupt_now(app) {
+        // opencode-esc-interrupt: one Esc only arms OpenCode's interrupt.
+        // opencode_turn_interrupted does the Esc work below once OpenCode
+        // reports that the turn actually stopped.
+        OPENCODE_ESC_PRESSED_AT_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "inflight-sentinel",
+                "op=esc-deferred provider=opencode reason=await-interrupt",
+            );
+        }
     } else if input == "\x1b" {
         clear_active_sentinel_with_reason(app, "pty-escape");
         // security-h4: Esc abandons the in-flight worklist action; fail the
@@ -19825,6 +19911,22 @@ fn drain_pty_intents<R: tauri::Runtime>(
                         );
                     }
                     Ok(())
+                } else if data == "\x1b" && pane_esc_presses_now(app) == 2 {
+                    // opencode-esc-interrupt: the button means stop, and a
+                    // running OpenCode turn stops only on a second press.
+                    pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys").and_then(|_| {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            OPENCODE_ESC_PRESS_GAP_MS,
+                        ));
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                app,
+                                "send-gate",
+                                "op=esc-doubled provider=opencode reason=running-turn",
+                            );
+                        }
+                        pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys")
+                    })
                 } else {
                     let r = pty_write_internal(app, state, data, "pty-intent-sendKeys");
                     if r.is_ok()
@@ -42022,6 +42124,18 @@ static SEND_GATE_STALE_WARNED_MS: std::sync::atomic::AtomicI64 =
 // gesture (double-Esc opens rewind / can bounce the user out of the CLI),
 // so it is dropped and traced instead. Esc typed in the terminal never
 // passes through this path.
+fn pane_esc_presses_now<R: tauri::Runtime>(app: &AppHandle<R>) -> u8 {
+    let (phase, menu_pending) = turn_state_cell()
+        .lock()
+        .map(|s| (s.phase.clone(), s.pending_menu.is_some()))
+        .unwrap_or_default();
+    pane_esc_presses(
+        current_provider(app),
+        &phase,
+        menu_pending || PANE_MENU_DISPLAYED.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 fn pane_escape_has_job() -> bool {
     let turn = turn_state_cell()
         .lock()
@@ -80287,6 +80401,27 @@ fn opencode_input_delivered(sid: &str, at_ms: i64) {
     }
 }
 
+// opencode-esc-interrupt: what a user Esc does under Claude (pty_menu_clear),
+// done when OpenCode reports the interrupt instead of at the keystroke. The
+// claim clear and H4's fail-closed revocation happen for any interrupt. The
+// ledger's Esc stamp and sweep need a user press behind the stop, as for
+// Claude, where Bram's own switch Esc is not a user interrupt.
+fn opencode_turn_interrupted<R: tauri::Runtime>(app: &AppHandle<R>, at_ms: i64) {
+    if !esc_waits_for_agent_interrupt_now(app) {
+        // No current plugin: the keystroke path already did all of this.
+        return;
+    }
+    let pressed = OPENCODE_ESC_PRESSED_AT_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    clear_active_sentinel_with_reason(app, "opencode-interrupted");
+    invalidate_worklist_authorization(app, "opencode-interrupted");
+    if pressed > 0 && at_ms - pressed <= OPENCODE_ESC_COUNT_WINDOW_MS {
+        if let Ok(mut g) = last_pty_escape_ms_cell().lock() {
+            *g = pressed;
+        }
+        schedule_send_ledger_escape_sweep(app, pressed);
+    }
+}
+
 fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: i64) {
     let last_input = opencode_turn_cell()
         .lock()
@@ -80382,9 +80517,13 @@ fn handle_opencode_event<R: tauri::Runtime>(
     match kind.as_str() {
         "session.execution.started" => opencode_turn_started(app, &sid, at_ms),
         "session.inbox.delivered" => opencode_input_delivered(&sid, at_ms),
-        "session.execution.succeeded"
-        | "session.execution.failed"
-        | "session.execution.interrupted" => opencode_turn_ended(app, &sid, at_ms),
+        "session.execution.succeeded" | "session.execution.failed" => {
+            opencode_turn_ended(app, &sid, at_ms)
+        }
+        "session.execution.interrupted" => {
+            opencode_turn_interrupted(app, at_ms);
+            opencode_turn_ended(app, &sid, at_ms)
+        }
         // opencode-sessions-browser: a completed step is a new export line.
         "session.step.ended" => {}
         _ => return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec()),

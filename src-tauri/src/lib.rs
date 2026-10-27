@@ -23466,6 +23466,14 @@ fn pending_session_title_can_claim(
     if rec.session_id.as_deref() == Some(session_id) {
         return true; // A confirmed/reserved identity may retry its rename.
     }
+    // claude-pending-title-exact-id: Claude's id is pre-allocated
+    // (--session-id, #274), so a reserved Claude title belongs to that id
+    // alone. 2026-10-27 21:05Z: an outgoing Claude rewrote another session's
+    // file at exit, it read as newly created, and the title rebound to it.
+    // Rebinding stays for Codex, whose id surfaces only after launch.
+    if rec.provider == "claude" && rec.session_id.is_some() {
+        return false;
+    }
     allow_claim
         && rec.previous_session_id.as_deref() != Some(session_id)
         && created_ms.is_some_and(|created| created.saturating_add(2_000) >= rec.created_at_ms)
@@ -23650,6 +23658,40 @@ mod pending_session_title_tests {
             previous_session_id: Some("old-codex".into()),
             origin: None,
         }
+    }
+
+    // claude-pending-title-exact-id: a reserved Claude title never rebinds to
+    // a freshly created file inside the claim window; Codex still does.
+    #[test]
+    fn reserved_claude_title_claims_only_its_own_id() {
+        let rec = PendingSessionTitle {
+            provider: "claude".into(),
+            session_id: Some("reserved-claude".into()),
+            previous_session_id: Some("old-claude".into()),
+            ..pending_codex()
+        };
+        assert!(!pending_session_title_can_claim(
+            &rec,
+            "rewritten-at-exit",
+            true,
+            Some(10_001)
+        ));
+        assert!(pending_session_title_can_claim(
+            &rec,
+            "reserved-claude",
+            true,
+            Some(10_001)
+        ));
+        let codex = PendingSessionTitle {
+            session_id: Some("bootstrap-codex".into()),
+            ..pending_codex()
+        };
+        assert!(pending_session_title_can_claim(
+            &codex,
+            "fresh-codex",
+            true,
+            Some(10_001)
+        ));
     }
 
     #[test]

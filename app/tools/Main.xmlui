@@ -610,9 +610,15 @@
              so the pane needs no dark palette of its own; `persistTheme` on
              App (the value at the top of this file) remembers the choice
              across pane reloads and relaunches.
-             https://www.xmlui.org/docs/reference/components/ToneSwitch -->
-        <ToneSwitch
-          tooltip="Switch between light and dark tone" />
+             https://www.xmlui.org/docs/reference/components/ToneSwitch
+             tone-switch-smaller: ToneSwitch has no size prop, but its track,
+             thumb and padding all scale from --xmlui-fontSize (vendored CSS),
+             so a scoped fontSize shrinks it in proportion.
+             https://www.xmlui.org/docs/howto/override-a-components-theme-vars -->
+        <Theme fontSize="$fontSize-sm">
+          <ToneSwitch
+            tooltip="Switch between light and dark tone" />
+        </Theme>
         <!-- issue-414: opening the target app in a browser was three clicks
              deep (ⓘ, then Open in browser). The usual case, since the
              target pane is off by default. Tooltip shows the address. -->

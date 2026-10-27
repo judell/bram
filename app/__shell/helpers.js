@@ -873,6 +873,36 @@ window.__bramAgentSwitcherTrace = function (stage, fields) {
     window.__bramIframeTrace("agent-switcher", payload);
   } catch (e) {}
 };
+// agent-switcher-shows-stale-provider: keep the header's RadioGroup on the
+// provider that is actually running. XMLUI's RadioGroup seeds the mount from
+// `initialValue` and ignores later rebinds — `setValue` is the documented way
+// to move the selection from code
+// (https://www.xmlui.org/docs/howto/present-choices-with-a-radiogroup). The
+// seed falls back to enhanceStatus before mainAgentStatus reports, so the pane
+// can mount on a stale provider and never revise it.
+//
+// Safe against a switch loop by construction: setValue re-fires onDidChange,
+// which lands in __bramHandleAgentSwitcherChange(next, previous, ...) with
+// previous === next (both are the live provider), and that returns early.
+// `busy` skips the correction while a switch is in flight, so a status push
+// cannot yank the user's click back to the provider it is leaving.
+window.__bramSyncAgentSwitcher = function (select, provider, busy) {
+  if (!select || busy) return;
+  var key = window.__bramProviderKey(provider);
+  if (!key) return;
+  var shown = "";
+  try { shown = window.__bramProviderKey(select.value); } catch (e) { shown = ""; }
+  if (shown === key) return;
+  window.__bramAgentSwitcherTrace("sync", { shown: shown, provider: key });
+  try {
+    select.setValue(key);
+  } catch (e) {
+    window.__bramAgentSwitcherTrace("sync-failed", {
+      provider: key,
+      error: String((e && e.message) || e),
+    });
+  }
+};
 // issue-389: true when Settings → On Bram launch is "Do not start an agent".
 // The header hides the Claude/Codex switcher then (every host path it would
 // drive refuses under "none") and says why instead. Prefers the pushed

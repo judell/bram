@@ -588,6 +588,19 @@
           <Option value="codex" label="Codex" />
           <Option value="opencode" label="OpenCode" />
         </RadioGroup>
+        <!-- agent-switcher-shows-stale-provider: RadioGroup's `initialValue`
+             only seeds the mount
+             (https://www.xmlui.org/docs/howto/present-choices-with-a-radiogroup),
+             and the seed above falls back to enhanceStatus before
+             mainAgentStatus reports the live provider — so the pane can mount
+             showing a provider the terminal is no longer running. Correct it
+             when the truth arrives. A sibling of the RadioGroup so the id
+             resolves in the same scope; ChangeListener does not fire on mount
+             (https://www.xmlui.org/docs/howto/debounce-with-changelistener),
+             which is what we want: the mount seed already ran. -->
+        <ChangeListener
+          listenTo="{((mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '') + '|' + (agentSwitcherBusy.value ? 'busy' : 'idle')}"
+          onDidChange="() => window.__bramSyncAgentSwitcher(agentSwitcherSelect, (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '', agentSwitcherBusy.value)" />
         <!-- switch-to-transcript-on-action: the "Starting <item>…" claim
              message moved to the footer status line (Jon: it belongs there,
              not in the app header) — see the footer HStack below. -->

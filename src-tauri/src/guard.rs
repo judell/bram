@@ -284,12 +284,32 @@ fn post_hook_trace(root: &Path, tool: &str, target: &str, decision: &str, reason
 // the same `*** Begin Patch` text as Codex's apply_patch, so it takes Codex's.
 // Any other tool passes through by name, which the policy allows. Both
 // flavors read coverage from the same worklist_covered_files.
+//
+// opencode-mcp-guard: an MCP call reaches the plugin as `<server>_<tool>`,
+// which can't be told from a built-in by name (built-ins have namespaces too:
+// `opencode_worktree_create`, `browser_fill`). The plugin names the server
+// and tool when OpenCode's own lists say the tool's namespace is a connected
+// MCP server; spelled `mcp__<server>__<tool>`, the call then takes the
+// policy's MCP branch exactly as Claude's do.
 fn opencode_policy_payload(payload: &serde_json::Value) -> serde_json::Value {
     let input = payload
         .get("input")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     let cwd = str_field(payload, "cwd");
+    let mcp = payload.get("mcp").and_then(|m| {
+        let server = m.get("server")?.as_str()?;
+        let tool = m.get("tool")?.as_str()?;
+        (!server.is_empty() && !tool.is_empty()).then(|| format!("mcp__{}__{}", server, tool))
+    });
+    if let Some(tool_name) = mcp {
+        return serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": input,
+            "cwd": cwd,
+        });
+    }
     let field = |k: &str| input.get(k).cloned().unwrap_or(serde_json::Value::Null);
     // The plugin sends absolute paths today; a relative one is resolved the
     // way OpenCode resolves it, against the project directory.
@@ -1288,6 +1308,23 @@ mod guard_mode_tests {
         }));
         assert_eq!(read["tool_name"], "read");
         assert_eq!(read["tool_input"]["path"], "/p/a.txt");
+        // opencode-mcp-guard: the 2026-10-26 spike's event for a local MCP
+        // server's write_file, with the server and tool the plugin adds.
+        let mcp = t(serde_json::json!({
+            "tool": "spike_write_file", "cwd": "/p",
+            "mcp": { "server": "spike", "tool": "write_file" },
+            "input": { "path": "mcp-out.txt", "content": "hi" }
+        }));
+        assert_eq!(mcp["tool_name"], "mcp__spike__write_file");
+        assert_eq!(
+            mcp["tool_input"],
+            serde_json::json!({ "path": "mcp-out.txt", "content": "hi" })
+        );
+        // Unmarked, the same name stays an unknown tool, as built-ins do.
+        let unmarked = t(serde_json::json!({
+            "tool": "opencode_worktree_create", "cwd": "/p", "input": { "name": "w" }
+        }));
+        assert_eq!(unmarked["tool_name"], "opencode_worktree_create");
     }
 
     #[test]
@@ -1357,6 +1394,41 @@ mod guard_mode_tests {
         );
         assert_eq!(
             decide("read", serde_json::json!({ "path": at("other.txt") })),
+            "allow"
+        );
+        // opencode-mcp-guard: marked MCP calls are judged as Claude's are.
+        // The MCP path search counts a bare name only if it exists, so both
+        // files do, and the verdicts below come from coverage.
+        std::fs::write(root.join("covered.txt"), "a").unwrap();
+        std::fs::write(root.join("other.txt"), "a").unwrap();
+        let decide_mcp = |tool: &str, input: serde_json::Value| {
+            let p = opencode_policy_payload(&serde_json::json!({
+                "tool": format!("fs_{}", tool), "cwd": root.to_string_lossy(),
+                "mcp": { "server": "fs", "tool": tool }, "input": input
+            }));
+            crate::guard_policy::shadow_worklist_decision("claude-rs", &p)
+                .unwrap()
+                .decision
+        };
+        assert_eq!(
+            decide_mcp(
+                "write_file",
+                serde_json::json!({ "path": at("covered.txt"), "content": "ok" })
+            ),
+            "allow"
+        );
+        assert_eq!(
+            decide_mcp(
+                "write_file",
+                serde_json::json!({ "path": at("other.txt"), "content": "no" })
+            ),
+            "deny"
+        );
+        assert_eq!(
+            decide_mcp(
+                "read_text_file",
+                serde_json::json!({ "path": at("other.txt") })
+            ),
             "allow"
         );
         let _ = std::fs::remove_dir_all(&root);

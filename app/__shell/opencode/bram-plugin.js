@@ -34,8 +34,9 @@ const GUARD = join(
   process.platform === "win32" ? "bram-guard.exe" : "bram-guard",
 );
 const GUARD_TIMEOUT_MS = 15000;
-// Built-in tools that can't change the project. Everything else, MCP tools
-// included, goes to the guard, which allows what it has no rule for.
+// Built-in tools that can't change the project. Everything else goes to the
+// guard, which allows what it has no rule for; MCP calls go as MCP calls
+// (mcpIdentity below), so its MCP rule applies.
 const READ_ONLY_TOOLS = new Set([
   "read",
   "glob",
@@ -62,7 +63,28 @@ function bramManagedHere() {
   return existsSync(join(ROOT, "resources", ".worklist-authorization.json"));
 }
 
-function askGuard(evt) {
+// opencode-mcp-guard: OpenCode 2.1.4 runs MCP tools through code mode, and
+// each MCP call reaches execute.before as `<server>_<tool>`. The tool list
+// gives a tool's namespace, but built-ins have namespaces too ("opencode",
+// "browser"), so it counts as MCP only when the namespace is a server the
+// MCP list names. Then the guard judges it as Claude's MCP calls are judged.
+// A failed lookup leaves the call as it was before this check.
+async function mcpIdentity(api, toolId) {
+  try {
+    const entry = ((await api.tool.list()) || []).find((t) => t && t.id === toolId);
+    const namespace = entry && entry.options && entry.options.namespace;
+    if (!namespace || typeof entry.name !== "string") return null;
+    const listed = await api.mcp.list();
+    const servers = Array.isArray(listed) ? listed : (listed && listed.data) || [];
+    return servers.some((s) => s && s.name === namespace)
+      ? { server: namespace, tool: entry.name }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function askGuard(evt, mcp) {
   if (!existsSync(GUARD) && !bramManagedHere()) {
     return Promise.resolve({ allow: true, message: "" });
   }
@@ -72,6 +94,7 @@ function askGuard(evt) {
     sessionID: evt.sessionID,
     agent: evt.agent,
     cwd: ROOT,
+    ...(mcp ? { mcp } : {}),
   });
   return new Promise((resolve) => {
     let child;
@@ -187,7 +210,7 @@ export default {
   setup(api) {
     api.tool.hook("execute.before", async (evt) => {
       if (READ_ONLY_TOOLS.has(evt.tool)) return;
-      const verdict = await askGuard(evt);
+      const verdict = await askGuard(evt, await mcpIdentity(api, evt.tool));
       if (!verdict.allow) throw new Error(verdict.message);
     });
     forwardTurns(api).catch(() => {});

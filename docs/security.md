@@ -281,7 +281,15 @@ and its cases run the `opencode-worklist` hook the plugin calls
 (opencode-guard-selftest). Verified the same way on 2026-10-26. All 15 cases
 passed. Moving the plugin out of a demo instance made the self-test report
 `failed: ["opencode-registration"]`. A Setup run then reseeded it
-byte-identical, and the self-test went green again.
+byte-identical, and the self-test went green again. opencode-mcp-guard added
+two OpenCode MCP cases, an uncovered and a covered `write_file`, for 17 in
+all. They're shaped as the plugin sends them: OpenCode 2.1.4 runs MCP tools
+through code mode, and each call reaches the plugin as `<server>_<tool>`. The
+plugin names the server when the tool's namespace is one `api.mcp.list()`
+reports, because built-ins have namespaces too. The guard then judges the call
+as `mcp__<server>__<tool>`, in Claude's MCP branch. Code mode's `execute` itself
+couldn't write a file through Node's `fs` when tested, so the guard sees every
+write as a tool call.
 
 ## Ranked action plan
 

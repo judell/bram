@@ -73782,6 +73782,26 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                     "tool": "shell", "cwd": root, "sessionID": "selftest", "agent": "build",
                     "input": {"command": format!("gh issue comment 5 --body {}", serde_json::json!(opencode_signed))}}),
                 ),
+                // opencode-mcp-guard: an MCP call as the plugin sends it, the
+                // server and tool named from OpenCode's tool and MCP lists.
+                (
+                    "opencode-mcp-write-uncovered",
+                    "opencode-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool": "filesystem_write_file", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "mcp": {"server": "filesystem", "tool": "write_file"},
+                    "input": {"path": file("src/uncovered.txt"), "content": "y"}}),
+                ),
+                (
+                    "opencode-mcp-write-covered",
+                    "opencode-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "tool": "filesystem_write_file", "cwd": root, "sessionID": "selftest", "agent": "build",
+                    "mcp": {"server": "filesystem", "tool": "write_file"},
+                    "input": {"path": file("src/covered.txt"), "content": "y"}}),
+                ),
             ];
             for (id, hook, expect, payload) in specs {
                 let (got, reason) = guard_selftest_run_case(link, hook, &payload);

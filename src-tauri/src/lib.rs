@@ -23485,7 +23485,14 @@ fn apply_pending_session_title<R: tauri::Runtime>(
             SessionProvider::Claude => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
             }
-            SessionProvider::Opencode => Err("OpenCode sessions can't be renamed yet".to_string()),
+            // Unreachable in practice: pending rows are Codex/Claude bootstrap
+            // files, and OpenCode sessions only ever come from its database.
+            // Left as a refusal rather than a silent success, and worded for
+            // that reason instead of claiming renames are unsupported
+            // (opencode-session-rename made them work).
+            SessionProvider::Opencode => {
+                Err("OpenCode has no pending session files to rename".to_string())
+            }
         };
         match rename_result {
             Ok(_) => {
@@ -29384,6 +29391,23 @@ fn opencode_open_db() -> Option<rusqlite::Connection> {
     Some(conn)
 }
 
+// opencode-session-rename: the same database, writable. Titles live in
+// `session_v2.title`, so a rename is one UPDATE; everything else above stays
+// read-only. Same path resolution and busy timeout as `opencode_open_db`;
+// only the open flags differ. WAL is a property of the file, not a flag
+// requested here, so writes join the journal OpenCode is already using.
+fn opencode_open_db_rw() -> Option<rusqlite::Connection> {
+    let path = opencode_db_path().filter(|p| p.is_file())?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    // OpenCode writes while we write (WAL); wait briefly rather than fail.
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    Some(conn)
+}
+
 fn opencode_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let root = project_root(Some(app)).ok_or("could not resolve project root")?;
     let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
@@ -29437,6 +29461,51 @@ fn opencode_project_session_rows<R: tauri::Runtime>(
             Vec::new()
         }
     }
+}
+
+// opencode-session-rename: set this project's session title in OpenCode's own
+// database. Scoped to the project's rows (both spellings of the directory, as
+// `opencode_project_session_rows` reads them) so an id belonging to another
+// project can't be renamed through this project's window. `time_updated` is
+// left alone on purpose: the Sessions list sorts on it, and a rename should
+// not reorder the list. Zero rows changed means the id is not this project's
+// session, which is the caller's error, not a server fault.
+fn opencode_set_session_title<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    title: &str,
+) -> Result<(), String> {
+    let Some(project) = project_root(Some(app)) else {
+        return Err("could not resolve project root".to_string());
+    };
+    let canonical = canonical_path_string(&project);
+    let raw = project.to_string_lossy().into_owned();
+    let Some(conn) = opencode_open_db_rw() else {
+        return Err("OpenCode's database isn't available".to_string());
+    };
+    let changed = opencode_set_session_title_in(&conn, id, title, &canonical, &raw)?;
+    if changed == 0 {
+        return Err("session not found".to_string());
+    }
+    Ok(())
+}
+
+// The statement itself, split out of `opencode_set_session_title` so the tests
+// can pin the scoping against an in-memory copy of the table: one project's
+// window renames that project's row and never another's, and a rename leaves
+// `time_updated` where it was.
+fn opencode_set_session_title_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+    title: &str,
+    canonical: &str,
+    raw: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE session_v2 SET title = ?1 WHERE id = ?2 AND directory IN (?3, ?4)",
+        rusqlite::params![title, id, canonical, raw],
+    )
+    .map_err(|e| e.to_string())
 }
 
 // OpenCode tool names and arguments in the vocabulary the Transcript renders
@@ -29714,6 +29783,102 @@ fn opencode_session_path_for_id<R: tauri::Runtime>(
         .into_iter()
         .find(|s| s.id == id)
         .map(|s| s.path)
+}
+
+#[cfg(test)]
+mod opencode_rename_tests {
+    use super::opencode_set_session_title_in;
+
+    // The columns the statement touches, in OpenCode 2.1.4's shape: `title`,
+    // the `directory` the scoping reads, and `time_updated`, which a rename
+    // must leave alone so the Sessions list keeps its order.
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, title TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
+             INSERT INTO session_v2 VALUES ('ses_here', 'generated', '/work/app', 1000);
+             INSERT INTO session_v2 VALUES ('ses_raw', 'generated', '/work/../work/app', 2000);
+             INSERT INTO session_v2 VALUES ('ses_other', 'generated', '/work/elsewhere', 3000);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn title_of(conn: &rusqlite::Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT title FROM session_v2 WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn updated_of(conn: &rusqlite::Connection, id: &str) -> i64 {
+        conn.query_row(
+            "SELECT time_updated FROM session_v2 WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    // opencode-session-rename: the rename writes the row the export reads.
+    #[test]
+    fn renames_the_projects_session_and_leaves_its_timestamp() {
+        let conn = db();
+        let n = opencode_set_session_title_in(
+            &conn,
+            "ses_here",
+            "Fixed the guard",
+            "/work/app",
+            "/work/app",
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(title_of(&conn, "ses_here"), "Fixed the guard");
+        assert_eq!(
+            updated_of(&conn, "ses_here"),
+            1000,
+            "a rename must not reorder the Sessions list"
+        );
+    }
+
+    // Both spellings of the directory match, as opencode_project_session_rows
+    // reads them: a session stored under the un-canonicalized path is still
+    // this project's.
+    #[test]
+    fn matches_either_directory_spelling() {
+        let conn = db();
+        let n = opencode_set_session_title_in(
+            &conn,
+            "ses_raw",
+            "Renamed the other spelling",
+            "/work/app",
+            "/work/../work/app",
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(title_of(&conn, "ses_raw"), "Renamed the other spelling");
+    }
+
+    // A row belonging to another project is not this window's to rename, and
+    // an unknown id changes nothing: both report zero rows, which the caller
+    // turns into "session not found" rather than a false success.
+    #[test]
+    fn does_not_reach_another_projects_session() {
+        let conn = db();
+        assert_eq!(
+            opencode_set_session_title_in(&conn, "ses_other", "hijacked", "/work/app", "/work/app")
+                .unwrap(),
+            0
+        );
+        assert_eq!(title_of(&conn, "ses_other"), "generated");
+        assert_eq!(
+            opencode_set_session_title_in(&conn, "ses_missing", "x", "/work/app", "/work/app")
+                .unwrap(),
+            0
+        );
+    }
 }
 
 #[cfg(test)]
@@ -33993,7 +34158,8 @@ fn append_codex_title_record(id: &str, title: &str, reassert: bool) -> Result<()
 // to the session JSONL so claude_session_title picks it up on next read. For
 // Codex: append `{id, thread_name, updated_at}` to session_index.jsonl
 // (append-only, last entry wins). Codex contract verified against
-// codex-rs/rollout/src/session_index.rs.
+// codex-rs/rollout/src/session_index.rs. For OpenCode: write `session_v2.title`
+// in OpenCode's database (opencode-session-rename).
 fn rename_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id: &str,
@@ -34028,7 +34194,9 @@ fn rename_session<R: tauri::Runtime>(
             append_codex_session_title(&session.id, trimmed)?;
         }
         SessionProvider::Opencode => {
-            return Err("OpenCode sessions can't be renamed yet".to_string());
+            // opencode-session-rename: OpenCode keeps titles in its own
+            // database, so the rename is a single UPDATE there.
+            opencode_set_session_title(app, &session.id, trimmed)?;
         }
     }
     Ok(b"{\"ok\":true}".to_vec())
@@ -71358,7 +71526,16 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, content_type, bytes),
             Err(e) => {
                 eprintln!("[http /__sessions/{}] {}", rest, e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
+                // session-rename-refusal-status: a refusal about the caller's
+                // argument (an id Bram can't find, a title it won't take) is
+                // not a server fault. Reporting 500 for it is what made an
+                // unsupported provider read as a crash in the pane.
+                let status = match e.as_str() {
+                    "session not found" => 404,
+                    "empty title" | "invalid session id" => 400,
+                    _ => 500,
+                };
+                (status, "text/plain; charset=utf-8", e.into_bytes())
             }
         };
     }

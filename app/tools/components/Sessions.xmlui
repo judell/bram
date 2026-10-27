@@ -267,14 +267,14 @@
               label="✕"
               variant="ghost"
               size="xs"
-              enabled="{window.__bramSessionEditEnabled($item, pendingDeletes, pendingRenames)}"
+              enabled="{window.__bramSessionEditEnabled($item, 'delete', pendingDeletes, pendingRenames)}"
               tooltip="{window.__bramSessionEditTooltip($item, 'delete', pendingDeletes, pendingRenames)}"
               onClick="lastDeleteId = $item.id; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
             <Button
               label="✎"
               variant="ghost"
               size="xs"
-              enabled="{window.__bramSessionEditEnabled($item, pendingDeletes, pendingRenames)}"
+              enabled="{window.__bramSessionEditEnabled($item, 'rename', pendingDeletes, pendingRenames)}"
               tooltip="{window.__bramSessionEditTooltip($item, 'rename', pendingDeletes, pendingRenames)}"
               onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
             <Link

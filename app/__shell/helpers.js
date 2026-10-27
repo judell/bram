@@ -1286,11 +1286,13 @@ window.__bramSwitchAgent = function (provider) {
   window.__bramClearPairOfferForCreate = function () { forCreate = null; };
 })();
 
-// opencode-sessions-browser: the Sessions row's delete / rename buttons.
-// OpenCode rows are Bram's read-only exports of OpenCode's own database, so
-// those happen inside OpenCode; the other cases keep their existing text.
-window.__bramSessionEditEnabled = function (item, pendingDeletes, pendingRenames) {
-  if (!item || item.pending || item.provider === "opencode") return false;
+// opencode-sessions-browser / opencode-session-rename: the Sessions row's
+// delete / rename buttons. Rename now works for OpenCode too — it writes the
+// title into OpenCode's own database — so only delete keeps the "do it inside
+// OpenCode" rule.
+window.__bramSessionEditEnabled = function (item, action, pendingDeletes, pendingRenames) {
+  if (!item || item.pending) return false;
+  if (item.provider === "opencode" && action !== "rename") return false;
   return !((pendingDeletes || []).includes(item.id) || (pendingRenames || []).includes(item.id));
 };
 window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendingRenames) {
@@ -1302,7 +1304,9 @@ window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendin
       : "Available after the next message creates the session";
   }
   if (item.provider === "opencode") {
-    return del ? "Delete OpenCode sessions inside OpenCode" : "Rename OpenCode sessions inside OpenCode";
+    if (del) return "Delete OpenCode sessions inside OpenCode";
+    // opencode-session-rename: be honest about the mechanism and its residual.
+    return "Rename this session (writes the title into OpenCode's database; a session still open in OpenCode may keep showing the old one until it is reopened)";
   }
   if ((pendingDeletes || []).includes(item.id)) return "delete pending";
   if ((pendingRenames || []).includes(item.id)) return "rename pending";

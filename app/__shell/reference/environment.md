@@ -242,6 +242,28 @@ The same steps apply when a user says voice input won't start and no
 `voice-setup:` turn came (an older Bram, or the dialog was closed): grep
 the trace for `[whisper]` lines first.
 
+## Handing Bram's terminal a first command (launchers)
+
+A launcher that starts Bram for an agent it manages elsewhere (for example,
+herdr) can give Bram's terminal one command to run before its first prompt:
+set `BRAM_LAUNCHER_PROMPT_COMMAND` in Bram's environment, say
+`BRAM_LAUNCHER_PROMPT_COMMAND='herdr agent attach <pane>'`. The terminal's
+shell (`app/shell/claude-code-shellrc`) reads it, unsets it at once so nested
+shells and the agent's subprocesses never inherit it, and runs it before the
+first prompt. While it runs, Bram sees a started command (`exec`), and it
+sees `prompt;<status>` when the command returns. Pair it with **Do not start
+an agent** (`shell.startupPolicy: "none"` in `.bram.json`), so Bram never
+types a launch command into a terminal the launcher's command owns.
+
+Every new terminal shell Bram starts runs it again: one at launch, and
+another after a reload that respawns the terminal. Make the command safe to
+repeat. With herdr, `herdr agent attach <pane> --takeover` lets the newest
+shell win instead of being refused while an older one still holds the pane.
+
+An ordinary exported `PROMPT_COMMAND` (say, `history -a` from your bashrc) is
+not a way in. The shell replaces it, as it always has, because running it
+would report a started command while autostart may be typing a launch.
+
 ## Working across project boundaries
 
 Some of the best work happens between two sessions that each hold

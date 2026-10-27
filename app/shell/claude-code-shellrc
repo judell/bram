@@ -26,8 +26,32 @@ __bram_preexec() {
   __bram_at_prompt=
   printf '\033]7779;bram;exec\007'
 }
+# A launcher may hand us one command to run before the first prompt, in
+# BRAM_LAUNCHER_PROMPT_COMMAND (bram_herdr.py does, to run `herdr agent attach
+# <pane>`). It is opt-in on purpose: a PROMPT_COMMAND exported by the user's
+# own environment (e.g. `history -a`) is still replaced below, as it always
+# was, since running it would report a started command while autostart may be
+# typing a launch (judell/bram#442). Take the value and unset it at once, so
+# nested shells and the agent's subprocesses never inherit it. Run it once from
+# __bram_prompt; if it unsets PROMPT_COMMAND, ours is put back afterwards.
+__bram_launcher_pc="$BRAM_LAUNCHER_PROMPT_COMMAND"
+unset BRAM_LAUNCHER_PROMPT_COMMAND
 __bram_prompt() {
   local s=$?
+  if [ -n "$__bram_launcher_pc" ]; then
+    local pc="$__bram_launcher_pc"
+    __bram_launcher_pc=
+    # The DEBUG trap does not fire for commands run inside a function, so say
+    # a command started ourselves; otherwise the host keeps believing a bare
+    # shell is in the foreground and refuses to type (reason=shell-foreground).
+    # No prompt is reported before it: the shell is not ready for input until
+    # the inherited command returns (e.g. an attach that ended).
+    __bram_at_prompt=
+    printf '\033]7779;bram;exec\007'
+    eval "$pc"
+    s=$?
+    PROMPT_COMMAND=__bram_prompt
+  fi
   printf '\033]7779;bram;prompt;%s\007' "$s"
   __bram_at_prompt=1
 }

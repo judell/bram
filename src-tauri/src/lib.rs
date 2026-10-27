@@ -3961,6 +3961,19 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // multi-MB session each redundant refetch costs real main-thread
         // time (2026-07-07 codex esc wedge).
         let ordinary_latest = latest_session_path_for_provider(app, provider).unwrap_or(None);
+        // opencode-resume-marks-session-current: OpenCode's live session is
+        // the one Bram resumed or its events named, not the newest export;
+        // otherwise this path re-marks the newest export current.
+        let ordinary_latest = if provider == SessionProvider::Opencode {
+            opencode_live_session_cell()
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .and_then(|id| opencode_session_path_for_id(app, &id))
+                .or(ordinary_latest)
+        } else {
+            ordinary_latest
+        };
         // A Bram-created Codex session initially contains only bootstrap
         // context, so ordinary discovery intentionally keeps following the
         // previous real conversation. The pending-title record is the narrow
@@ -21528,6 +21541,18 @@ fn switch_agent(
     } else {
         "fresh"
     };
+    // fallback-switch-offer-names-wrong-session: resolve "most recent" to an
+    // id and launch that id, so the terminal and the pair offer name the
+    // same session. Without an id (none found) it stays `--continue`.
+    let latest_target: Option<String> = if resume_reason == "latest" {
+        fallback_latest_session_id(&app, target_provider)
+    } else {
+        None
+    };
+    let base_command = match latest_target.as_deref() {
+        Some(id) => agent_resume_command(provider_key, id).unwrap_or(base_command),
+        None => base_command,
+    };
     let args = configured_agent_args(&app);
     let command = if args.trim().is_empty() {
         base_command
@@ -21557,6 +21582,7 @@ fn switch_agent(
                         .as_deref()
                         .or(partner.as_deref())
                         .or_else(|| pin.as_ref().map(|target| target.id.as_str()))
+                        .or(latest_target.as_deref())
                         .unwrap_or("latest-or-fresh")
                 },
                 resume_reason
@@ -21570,10 +21596,19 @@ fn switch_agent(
         "resume-pending" => pending_target.clone(),
         "partner" => partner.clone(),
         "pin" => pin.as_ref().map(|t| t.id.clone()),
-        "latest" => live_session_id(&app, target_provider),
+        "latest" => latest_target
+            .clone()
+            .or_else(|| live_session_id(&app, target_provider)),
         "fresh-for-new-session" => fresh.as_ref().and_then(|(_, sid)| sid.clone()),
         _ => None,
     };
+    // opencode-resume-marks-session-current: a switch that resumes OpenCode
+    // by id (partner, pin, resolved latest) makes that session current now.
+    if target_provider == SessionProvider::Opencode {
+        if let Some(id) = target_sid.as_deref() {
+            mark_opencode_session_current(&app, id, "switch");
+        }
+    }
     let pair_from = leaving.clone();
     // new-session-switch-starts-fresh-partner: queue the fresh partner's name
     // (applied when its session surfaces), and note the target's live session
@@ -22779,6 +22814,33 @@ fn session_provider_display(provider: SessionProvider) -> &'static str {
     }
 }
 
+// fallback-switch-offer-names-wrong-session: the session a switch with no
+// partner resumes, chosen by Bram rather than by the CLI's own "most recent".
+// It reads the same discovery that orders the Sessions tab, and for OpenCode
+// deliberately skips the live-session cache: on 2026-10-27 21:27Z that cache
+// still held the session a reload had left (ses_e83a…) while `opencode
+// --continue` resumed another (ses_e80e…), and the pair offer named the wrong
+// one.
+fn fallback_latest_session_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+) -> Option<String> {
+    match provider {
+        SessionProvider::Claude => latest_claude_session_path(app)
+            .ok()
+            .flatten()
+            .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from)),
+        SessionProvider::Codex => latest_codex_session_path(app)
+            .ok()
+            .flatten()
+            .and_then(|p| codex_session_meta(&p).ok().flatten().map(|(id, _)| id)),
+        SessionProvider::Opencode => latest_opencode_session_path(app)
+            .ok()
+            .flatten()
+            .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p)),
+    }
+}
+
 fn provider_switch_launch(
     provider: &str,
     has_session: bool,
@@ -23166,9 +23228,7 @@ fn reload_agent_session(
     // opencode-sessions-browser: the resumed session is current from now,
     // before its next turn makes it the most recent.
     if session_provider == SessionProvider::Opencode && session_exists {
-        if let Ok(mut live) = opencode_live_session_cell().lock() {
-            *live = Some(session.clone());
-        }
+        mark_opencode_session_current(&app, &session, "reload");
     }
     let generation = begin_agent_launch();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
@@ -30130,6 +30190,32 @@ fn latest_opencode_session_path<R: tauri::Runtime>(
 
 // The session OpenCode's events last named (opencode-turn-lifecycle), so a
 // resumed older session reads as current before it is the most recent.
+// opencode-resume-marks-session-current: an OpenCode session Bram resumes by
+// id is current from the launch, as Claude's explicit resume already is
+// (resume-marks-session-current). An idle resumed session emits no events, so
+// without this the "current" session fell back to the newest export, and on
+// 2026-10-27 21:39Z a partner switch to "v0.8.0 burndown" was labelled
+// "naming test" in Sessions, the footer and last-active.
+fn mark_opencode_session_current<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, source: &str) {
+    if id.is_empty() {
+        return;
+    }
+    if let Ok(mut live) = opencode_live_session_cell().lock() {
+        *live = Some(id.to_string());
+    }
+    remember_last_active_session(app, SessionProvider::Opencode, id);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=live-session-set provider=opencode session={} source=explicit-resume via={}",
+                id, source
+            ),
+        );
+    }
+}
+
 fn opencode_live_session_cell() -> &'static Mutex<Option<String>> {
     static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))

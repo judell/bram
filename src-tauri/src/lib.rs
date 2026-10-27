@@ -41036,20 +41036,74 @@ fn send_ledger_awaiting_turn_for_entry(
     }
 }
 
-fn stale_terminal_input_clear_for_provider(provider: Option<SessionProvider>) -> &'static str {
+// opencode-ctrl-c-clear: the bytes that empty an agent's input box, and their
+// trace name. The key differs per agent, and on OpenCode the obvious one is
+// dangerous:
+// - Claude: Ctrl-C empties its Ink input (verified live 2026-07-03). Into an
+//   EMPTY input a lone Ctrl-C only half-arms the exit prompt (#306).
+// - Codex: its readline-style composer ignores Ctrl-C here and honors Ctrl-U.
+// - OpenCode 2.1.4: Ctrl-C is bound to both input_clear and app_exit, and into
+//   an empty box it QUITS OpenCode. Ctrl-U (input_delete_to_line_start) leaves
+//   the earlier lines of a multi-line box. Shift+End, Backspace, Shift+Home,
+//   Backspace deletes to both ends of the buffer. In a 2026-10-26 spike it
+//   emptied a one-line, a two-line, a pasted and a cursor-mid box, did
+//   nothing to an empty one, and behaved the same sent as one write.
+const OPENCODE_INPUT_CLEAR: &str = "\x1b[1;2F\x7f\x1b[1;2H\x7f";
+
+fn stale_terminal_input_clear_for_provider(
+    provider: Option<SessionProvider>,
+) -> (&'static str, &'static str) {
     match provider {
-        Some(SessionProvider::Codex) => "\x15",
-        _ => "\x03",
+        Some(SessionProvider::Codex) => ("\x15", "ctrl-u"),
+        Some(SessionProvider::Opencode) => (OPENCODE_INPUT_CLEAR, "select-delete"),
+        _ => ("\x03", "ctrl-c"),
     }
 }
 
-fn mark_stale_terminal_input_cleared<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) {
+#[cfg(test)]
+mod stale_terminal_input_clear_tests {
+    use super::{stale_terminal_input_clear_for_provider as clear, SessionProvider};
+
+    #[test]
+    fn opencode_clear_holds_no_key_that_quits_opencode() {
+        // OpenCode 2.1.4 binds app_exit to ctrl+c and ctrl+d.
+        let (bytes, key) = clear(Some(SessionProvider::Opencode));
+        assert!(
+            !bytes.contains('\x03') && !bytes.contains('\x04'),
+            "{bytes:?}"
+        );
+        // Shift+End, Backspace, Shift+Home, Backspace: the sequence the spike
+        // showed empties every box shape without quitting.
+        assert_eq!(bytes, "\x1b[1;2F\x7f\x1b[1;2H\x7f");
+        assert_eq!(key, "select-delete");
+        // Not mistaken for xterm.js answering a terminal query, so it still
+        // dismisses a menu the way a keystroke does.
+        assert!(!super::is_terminal_query_reply(bytes));
+    }
+
+    #[test]
+    fn claude_and_codex_keep_their_clear_keys() {
+        assert_eq!(clear(Some(SessionProvider::Claude)), ("\x03", "ctrl-c"));
+        assert_eq!(clear(Some(SessionProvider::Codex)), ("\x15", "ctrl-u"));
+        assert_eq!(clear(None), ("\x03", "ctrl-c"));
+    }
+}
+
+fn mark_stale_terminal_input_cleared<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    source: &str,
+    key: &str,
+) {
     set_stale_terminal_input_latched_at(0);
     if bram_trace_enabled() {
+        let provider = current_provider(app).map_or("none", session_provider_label);
         append_bram_trace_line(
             app,
             "send-ledger",
-            &format!("op=stale-input-clear source={}", source),
+            &format!(
+                "op=stale-input-clear source={} provider={} key={}",
+                source, provider, key
+            ),
         );
     }
     emit_replayable_signal(app, "send-ledger-changed");
@@ -41110,9 +41164,9 @@ fn clear_stale_terminal_input_before_pane_send<R: tauri::Runtime>(
         }
         return;
     }
-    let clear = stale_terminal_input_clear_for_provider(current_provider(app));
+    let (clear, key) = stale_terminal_input_clear_for_provider(current_provider(app));
     let _ = pty_write_internal(app, state, clear, "pane-send-stale-input-clear");
-    mark_stale_terminal_input_cleared(app, "pane-send");
+    mark_stale_terminal_input_cleared(app, "pane-send", key);
 }
 
 fn clear_stale_terminal_input_for_switch<R: tauri::Runtime>(
@@ -41127,9 +41181,9 @@ fn clear_stale_terminal_input_for_switch<R: tauri::Runtime>(
     if !stale_terminal_input() {
         return;
     }
-    let clear = stale_terminal_input_clear_for_provider(current_provider(app));
+    let (clear, key) = stale_terminal_input_clear_for_provider(current_provider(app));
     let _ = pty_write_internal(app, state, clear, source);
-    mark_stale_terminal_input_cleared(app, source);
+    mark_stale_terminal_input_cleared(app, source, key);
 }
 
 // Largest char-boundary index <= offset, so a byte offset captured from
@@ -44602,16 +44656,13 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 serde_json::json!({ "id": plan.ids, "text": plan.text, "aborted": plan.aborted }),
             );
             if plan.clear_input {
-                // Provider-aware input clear: Ctrl-C empties Claude Code's
-                // Ink input (verified live 2026-07-03) but not Codex's
-                // readline-style composer, which honors Ctrl-U. On Claude
-                // the byte is only ever written when stale text is known to
-                // sit in the input — into an EMPTY input a lone Ctrl-C
-                // half-arms the CLI's exit prompt (#306).
-                let clear = match current_provider(app) {
-                    Some(SessionProvider::Codex) => "\x15",
-                    _ => "\x03",
-                };
+                // Provider-aware input clear, the same bytes as the pane-send
+                // clear (stale_terminal_input_clear_for_provider). On Claude
+                // they're only ever written when stale text is known to sit
+                // in the input, since a lone Ctrl-C into an EMPTY input
+                // half-arms the CLI's exit prompt (#306); OpenCode's bytes
+                // are safe into an empty box.
+                let (clear, _) = stale_terminal_input_clear_for_provider(current_provider(app));
                 let state = app.state::<AppState>();
                 let _ = pty_write_internal(app, &state, clear, "send-ledger-restore-clear");
             }

@@ -22079,16 +22079,42 @@ fn emit_pair_offer<R: tauri::Runtime>(
     to: Option<(SessionProvider, String)>,
 ) {
     let payload = match (from, to) {
-        (Some((fp, fid)), Some((tp, tid))) => serde_json::json!({
-            "active": true,
-            "fromProvider": session_provider_label(*fp),
-            "fromSessionId": fid,
-            "fromTitle": session_title_by_id(app, *fp, fid),
-            "toProvider": session_provider_label(tp),
-            "toSessionId": tid,
-            "toTitle": session_title_by_id(app, tp, &tid),
-            "atMs": unix_now_ms(),
-        }),
+        (Some((fp, fid)), Some((tp, tid))) => {
+            // pair-offer-warns-before-replacing: a session has one partner per
+            // other agent, so Keep replaces the resumed session's existing
+            // partner on the leaving side's agent. Name it, so the banner can
+            // say what Keep costs (2026-10-27 21:47Z offered to replace
+            // Claude "v0.8.0 burndown"'s OpenCode partner without a word).
+            let current_partner = worklist_state_open(app)
+                .and_then(|conn| {
+                    worklist_state::session_partner(
+                        &conn,
+                        session_provider_label(tp),
+                        &tid,
+                        session_provider_label(*fp),
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .filter(|id| id != fid)
+                .map(|id| {
+                    serde_json::json!({
+                        "id": id,
+                        "title": session_title_by_id(app, *fp, &id),
+                    })
+                });
+            serde_json::json!({
+                "active": true,
+                "fromProvider": session_provider_label(*fp),
+                "fromSessionId": fid,
+                "fromTitle": session_title_by_id(app, *fp, fid),
+                "toProvider": session_provider_label(tp),
+                "toSessionId": tid,
+                "toTitle": session_title_by_id(app, tp, &tid),
+                "toCurrentPartner": current_partner,
+                "atMs": unix_now_ms(),
+            })
+        }
         _ => serde_json::json!({ "active": false, "atMs": unix_now_ms() }),
     };
     if bram_trace_enabled() {
@@ -23253,6 +23279,9 @@ fn reload_agent_session(
         mark_opencode_session_current(&app, &session, "reload");
     }
     let generation = begin_agent_launch();
+    // pair-offer-warns-before-replacing: a newer launch ends the situation the
+    // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
+    emit_pair_offer(&app, None, None);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
     // Dismiss any open agent menu/picker first so both Ctrl+C land on an empty
     // prompt and the agent actually exits (see switch_agent for the full
@@ -23354,6 +23383,9 @@ fn start_agent_fresh(
         );
     }
     let generation = begin_agent_launch();
+    // pair-offer-warns-before-replacing: a newer launch ends the situation the
+    // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
+    emit_pair_offer(&app, None, None);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-start-fresh");
     pty_write_internal(&app, &state, "\x1b", "agent-fresh-escape")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
@@ -24293,6 +24325,9 @@ fn create_new_session(
         let _ = write_session_digest(&app, *p, id, false);
     }
     let generation = begin_agent_launch();
+    // pair-offer-warns-before-replacing: a newer launch ends the situation the
+    // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
+    emit_pair_offer(&app, None, None);
     arm_agent_boot_hold(&app, provider_key);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
     pty_write_internal(&app, &state, "\x1b", "agent-new-escape")?;

@@ -1217,9 +1217,23 @@ window.__bramSwitchAgent = function (provider) {
       message: "No " + name(p.toProvider) + " session goes with " + name(p.fromProvider) + " session " +
         quoted(p.fromTitle, p.fromSessionId) + ". " + name(p.toProvider) + " resumed its most recent, " +
         quoted(p.toTitle, p.toSessionId) + ".",
+      // pair-offer-warns-before-replacing: Keep replaces the resumed session's
+      // existing partner on this agent; say so instead of doing it silently.
+      keepLabel: p.toCurrentPartner
+        ? "Keep these together (replaces its pairing with " +
+          quoted(p.toCurrentPartner.title, p.toCurrentPartner.id) + ")"
+        : "Keep these together",
       keepTooltip: "Pair these two, so switching between " + name(p.fromProvider) + " and " +
-        name(p.toProvider) + " moves between them.",
-      actionLabel: "Start a new " + name(p.toProvider) + " session",
+        name(p.toProvider) + " moves between them." +
+        (p.toCurrentPartner
+          ? " " + quoted(p.toTitle, p.toSessionId) + " is paired with " + name(p.fromProvider) +
+            " session " + quoted(p.toCurrentPartner.title, p.toCurrentPartner.id) +
+            " now; Keep ends that pairing."
+          : ""),
+      // pair-offer-warns-before-replacing (Jon, 2026-10-27): say which session
+      // the new one goes with; "Start a new … session" read as unrelated.
+      actionLabel: "Start a " + name(p.toProvider) + " session for " +
+        quoted(p.fromTitle, p.fromSessionId),
       actionTooltip: "Opens New session to start a " + name(p.toProvider) + " session that goes with " +
         quoted(p.fromTitle, p.fromSessionId) + "; switching back and forth will then move between those two.",
     };

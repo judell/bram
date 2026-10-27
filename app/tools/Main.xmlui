@@ -1259,7 +1259,7 @@
           size="xs"
           onClick="window.__bramPairOfferStart(pairOffer.value)" />
         <Button
-          label="Keep these together"
+          label="{pairOffer.value &amp;&amp; pairOffer.value.keepLabel}"
           tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
           variant="outlined"
           size="xs"

@@ -11967,6 +11967,11 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         Err(_) => return,
     };
     tail.extend_from_slice(chunk);
+    // claude-boot-hold-no-bounce: counted with the append (not in the boot
+    // scan, which runs first) so the count always matches the tail's bytes.
+    if AGENT_BOOT_EVIDENCE_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+        AGENT_BOOT_BYTES_SINCE_OPEN.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
+    }
     // issue #268: no completion latch here. Codex repaints historical rows, so
     // the terminal text "Context compacted" is not an episode edge -- it fired
     // 16 times for one real compaction. Completion now comes from the rollout
@@ -22121,6 +22126,43 @@ fn opencode_composer_ready(tail: &str) -> bool {
         .collect::<String>()
         .to_lowercase();
     squashed.contains("ctrl+pcommands")
+}
+
+// claude-boot-hold-no-bounce: a freshly booted Claude's ready screen, read
+// from the output since its launch was typed. Claude 2.1.312 draws its
+// banner ("Claude Code v2.1.312"), then the composer: a rule, the `❯` input
+// row, a rule, and the footer ("⏵⏵ auto mode on (shift+tab to cycle) · ←
+// for agents ◐ medium · /effort"; "? for shortcuts" in default mode). The
+// banner keeps a repaint of the outgoing session's composer from passing;
+// anchoring the footer to the end keeps a reply quoting it from passing.
+// The footer is matched by its start ("⏵⏵" modes, "⏸" plan mode): Claude
+// truncates it to the pane width, and a 32-column pane drew only
+// "⏵⏵ auto mode on (shift+tab", so a full-hint match held the brief 30 s
+// (2026-10-27 20:56Z).
+fn claude_boot_composer_ready(text: &str) -> bool {
+    let s: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    if !s.contains("claudecodev") {
+        return false;
+    }
+    let footer = ["⏵⏵", "⏸", "?forshortcuts"]
+        .iter()
+        .filter_map(|m| s.rfind(m).map(|i| i + m.len()))
+        .max();
+    let Some(end) = footer else {
+        return false;
+    };
+    let after = &s[end..];
+    if after.chars().count() > 100 || after.contains('❯') || after.contains('─') {
+        return false;
+    }
+    let Some(prompt) = s[..end].rfind('❯') else {
+        return false;
+    };
+    s[..prompt].contains('─') && s[prompt..end].contains('─')
 }
 
 fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
@@ -42535,6 +42577,11 @@ static AGENT_BOOT_EVIDENCE_OPEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static AGENT_BOOT_EVIDENCE_IGNORED: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
+// claude-boot-hold-no-bounce: PTY bytes read since boot evidence opened, so
+// the composer check reads only what the new CLI (and the shell's echo of
+// its launch) drew, never the outgoing session's last screen.
+static AGENT_BOOT_BYTES_SINCE_OPEN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 // boot-settle-wait-for-claude-bounce: Claude Code enables its TUI modes,
 // turns them off, and turns them on again before its input is live. The
 // 400 ms quiet window guessed at that and lost at 2026-09-30 22:10Z, when
@@ -42725,6 +42772,7 @@ fn open_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
     if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
         carry.clear();
     }
+    AGENT_BOOT_BYTES_SINCE_OPEN.store(0, std::sync::atomic::Ordering::Relaxed);
     AGENT_BOOT_EVIDENCE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
     set_boot_modes(true, BootModes::default());
     if bram_trace_enabled() {
@@ -42880,9 +42928,35 @@ fn reset_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) 
     }
 }
 
+// claude-boot-hold-no-bounce: Claude 2.1.312 turns focus reporting on once
+// and never bounces (2026-10-27 specimen; four briefs expired that day), so
+// a Claude hold also releases when its ready composer is on screen.
+fn claude_boot_composer_drawn() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !boot_hold_is_claude() || !AGENT_BOOT_EVIDENCE_OPEN.load(Relaxed) {
+        return false;
+    }
+    let since_open = AGENT_BOOT_BYTES_SINCE_OPEN.load(Relaxed);
+    if since_open == 0 {
+        return false;
+    }
+    let raw = match pty_tail_cell().lock() {
+        Ok(g) => {
+            let start = g.len().saturating_sub(since_open);
+            g[start..].to_vec()
+        }
+        Err(_) => return false,
+    };
+    claude_boot_composer_ready(&String::from_utf8_lossy(&strip_ansi(&raw)))
+}
+
 // Release the hold once the settle window has passed quietly. Called from
 // the drain tick and after each scanned chunk.
 fn poll_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if agent_boot_hold_active() && claude_boot_composer_drawn() {
+        release_agent_boot_hold(app, "composer");
+        return;
+    }
     let deadline = AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed);
     if deadline == 0 || deadline == i64::MAX || unix_now_ms() < deadline {
         return;
@@ -43071,6 +43145,63 @@ mod agent_boot_evidence_tests {
             Some("focus-reporting")
         );
     }
+    // claude-boot-hold-no-bounce: Claude Code 2.1.312 started as New session
+    // starts it (`claude --name 'specimen boot' --session-id <uuid>`), 100x61
+    // PTY, 12 s, no input, 2026-10-27. One ?1004h and no bounce; it is ready.
+    const CLAUDE_2_1_312_BOOT: &[u8] =
+        include_bytes!("../tests/fixtures/macos-pty/claude-2.1.312-boot-raw.txt");
+
+    fn stripped(raw: &[u8]) -> String {
+        String::from_utf8_lossy(&super::strip_ansi(raw)).into_owned()
+    }
+
+    #[test]
+    fn claude_2_1_312_boot_never_bounces_but_draws_its_composer() {
+        use super::{boot_focus_toggles, claude_boot_composer_ready};
+        assert_eq!(boot_focus_toggles(CLAUDE_2_1_312_BOOT, 0), vec![true]);
+        assert!(claude_boot_composer_ready(&stripped(CLAUDE_2_1_312_BOOT)));
+    }
+
+    #[test]
+    fn a_partial_boot_paint_is_not_ready() {
+        use super::claude_boot_composer_ready as ready;
+        let text = stripped(CLAUDE_2_1_312_BOOT);
+        let cut = text.find('❯').expect("prompt row");
+        assert!(!ready(&text[..cut]), "banner only, no composer yet");
+        assert!(!ready(&text[cut..]), "composer with no fresh banner");
+    }
+
+    #[test]
+    fn a_reply_quoting_the_composer_followed_by_more_output_is_not_ready() {
+        use super::claude_boot_composer_ready as ready;
+        let quoting = "Claude Code v2.1.312 Its composer is ─── ❯ ─── then \
+            ⏵⏵ auto mode on (shift+tab to cycle), and the reply keeps going for \
+            a good while after that, long past where any footer would end, \
+            because a reply is prose and a footer is a few short hints.";
+        assert!(!ready(quoting));
+        let no_rules = "Claude Code v2.1.312 type at ❯ and press shift+tab to cycle \
+            ⏵⏵ auto mode on (shift+tab to cycle)";
+        assert!(!ready(no_rules));
+        let default_mode = "Claude Code v2.1.312 ─── ❯ ─── ? for shortcuts";
+        assert!(ready(default_mode));
+    }
+
+    // A 32-column pane, 2026-10-27 20:56Z (send-capture rows): Claude cut its
+    // footer at the pane width, so "(shift+tab to cycle)" was never drawn.
+    #[test]
+    fn a_footer_truncated_by_a_narrow_pane_is_ready() {
+        use super::claude_boot_composer_ready as ready;
+        let narrow = "           Claude Code v2.1.312\n\
+            ▗ ▗   ▖ ▖  Opus 5.5\n           Claude Max\n ▘▘   ▝▝   ~/bram\n\n\n\
+            ──────────────────── boot test ─\n\
+            ❯ Try \"create a util logging.py…\n\
+            ────────────────────────────────\n\
+            \u{20}\u{20}⏵⏵ auto mode on (shift+tab\n\n";
+        assert!(ready(narrow));
+        let plan = "Claude Code v2.1.312 ─── ❯ ─── ⏸ plan mode on (shift+";
+        assert!(ready(plan));
+    }
+
     #[test]
     fn synchronized_output_never_resets_the_settle_window() {
         use super::agent_boot_settle_toggle as t;

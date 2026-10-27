@@ -22153,7 +22153,7 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
         }
         true
     };
-    let readiness = loop {
+    let (readiness, last_tail) = loop {
         if superseded(unix_now_ms().saturating_sub(started)) {
             return;
         }
@@ -22162,14 +22162,23 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
         if r != CatchUpReadiness::Waiting
             || unix_now_ms().saturating_sub(started) >= CATCH_UP_COMPOSER_WAIT_MS
         {
-            break r;
+            break (r, tail);
         }
         std::thread::sleep(std::time::Duration::from_millis(CATCH_UP_COMPOSER_POLL_MS));
     };
     let waited_ms = unix_now_ms().saturating_sub(started);
+    // opencode-catch-up-held-tail: a no-composer hold records the end of the
+    // tail the check last read, so the next live hold names what was on
+    // screen instead of leaving the marker miss to be guessed. Fresh OpenCode
+    // specimens (2.1.4, 60-120 cols) all passed, so the cause is only seen
+    // live. pty_tail_snippet already turns `"` into `'`.
     let held_reason = match readiness {
         CatchUpReadiness::Prompt(shape) => Some(format!("prompt-on-screen shape={}", shape)),
-        CatchUpReadiness::Waiting => Some("no-composer".to_string()),
+        CatchUpReadiness::Waiting => {
+            let n = last_tail.chars().count();
+            let end: String = last_tail.chars().skip(n.saturating_sub(300)).collect();
+            Some(format!("no-composer tail=\"{}\"", end))
+        }
         CatchUpReadiness::Ready => None,
     };
     if let Some(reason) = held_reason {

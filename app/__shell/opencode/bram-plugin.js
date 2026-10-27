@@ -202,6 +202,10 @@ const FORWARDED = new Set([
   // pane's menu from it) and its answer, which clears that menu.
   "permission.asked",
   "permission.replied",
+  // opencode-question-card: a question tool's form, whole, and how it closed.
+  "form.created",
+  "form.replied",
+  "form.cancelled",
 ]);
 
 // Read per event: Bram writes a new port each time it starts.
@@ -243,7 +247,8 @@ async function forwardTurns(api) {
   let chain = Promise.resolve();
   for await (const evt of api.event.subscribe()) {
     const data = (evt && evt.data) || {};
-    const sid = data.sessionID;
+    // form.created nests its session inside the form.
+    const sid = data.sessionID || (data.form && data.form.sessionID);
     if (!sid) continue;
     if (evt.type === "session.created" && data.parentID) children.add(sid);
     const dir = (evt.location && evt.location.directory) || (data.location && data.location.directory);
@@ -253,6 +258,7 @@ async function forwardTurns(api) {
     // a slow or absent Bram can't hold up OpenCode's event stream.
     const body = { type: evt.type, sessionID: sid, at: evt.created };
     if (evt.type.startsWith("permission.")) body.permission = data;
+    if (evt.type.startsWith("form.")) body.form = data;
     chain = chain.then(() => postEvent(body));
   }
 }

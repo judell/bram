@@ -6130,6 +6130,13 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     // (opencode-permission-menu).
     const OPENCODE_PERMISSION_MARKERS: &[&str] =
         &["permission required", "allow once", "always allow"];
+    // opencode-question-card: the footer under every OpenCode form, its
+    // question tool's ("Questions ┃ Pick a city ┃ 1. Paris … 3. Type your own
+    // answer ┃ ↑↓ select enter submit esc dismiss", 2.1.4 spike, 2026-10-27)
+    // and MCP servers' alike. Enter submits the highlighted answer and a digit
+    // picks one. Like the permission prompt it sits above an animation, so the
+    // form.created event is the lasting signal.
+    const OPENCODE_FORM_FOOTER: &str = "select enter submit esc dismiss";
     // All whitespace removed, on both sides of the match. The CLIs lay out
     // words with cursor-column moves (CSI n G), which strip_ansi drops
     // without leaving a space, so the tail reads "Esctocancel" and
@@ -6190,6 +6197,9 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     }
     if OPENCODE_PERMISSION_MARKERS.iter().all(|m| has(m)) {
         return Some("opencode-permission");
+    }
+    if has(OPENCODE_FORM_FOOTER) {
+        return Some("opencode-question");
     }
     let login_end: String = {
         let n = tail.chars().count();
@@ -9385,6 +9395,154 @@ mod opencode_permission_menu_tests {
     #[test]
     fn a_payload_without_an_action_builds_no_menu() {
         assert!(menu(&serde_json::json!({"id": "per_x", "resources": ["ls"]})).is_none());
+    }
+}
+
+// opencode-question-card: build the card from the form OpenCode's question
+// tool raises (form.created, 2.1.4 spike, 2026-10-27): {id: "frm_…", sessionID,
+// title: "Questions", metadata: {kind: "question", tool: {messageID, id}},
+// fields: [{key: "q0", title, description, type: "string", options: [{value,
+// label, description}], custom: true}]}. The prompt numbers the options from 1,
+// and a digit answers at once whichever row is highlighted, so each option's
+// key is its digit; past nine there is no one-key answer, so no card. Only a
+// one-question form gets one: with several, the terminal steps through them.
+// Free text ("Type your own answer") stays in the terminal, because Claude's
+// card types it through pane code that is AskUserQuestion's own.
+fn opencode_form_to_menu(form: &serde_json::Value) -> Result<PtyMenu, &'static str> {
+    if form.pointer("/metadata/kind").and_then(|k| k.as_str()) != Some("question") {
+        return Err("not-a-question");
+    }
+    let fields = form
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or("no-fields")?;
+    let [field] = fields.as_slice() else {
+        return Err("several-questions");
+    };
+    if field.get("type").and_then(|t| t.as_str()) != Some("string") {
+        return Err("not-a-choice");
+    }
+    let choices = field
+        .get("options")
+        .and_then(|o| o.as_array())
+        .filter(|o| !o.is_empty())
+        .ok_or("no-options")?;
+    if choices.len() > 9 {
+        return Err("too-many-options");
+    }
+    let text_of = |v: &serde_json::Value, k: &str| -> Option<String> {
+        v.get(k)
+            .and_then(|s| s.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let options = choices
+        .iter()
+        .enumerate()
+        .map(|(i, o)| MenuOption {
+            key: (i + 1).to_string(),
+            label: text_of(o, "label")
+                .or_else(|| text_of(o, "value"))
+                .unwrap_or_default(),
+            answer_keys: Some((i + 1).to_string()),
+            description: text_of(o, "description"),
+        })
+        .collect();
+    let question = text_of(field, "title")
+        .or_else(|| text_of(field, "description"))
+        .unwrap_or_else(|| "Pick an answer".to_string());
+    let text = if field.get("custom").and_then(|c| c.as_bool()) == Some(true) {
+        format!("{}\n\nTo type your own answer, use the terminal.", question)
+    } else {
+        question
+    };
+    Ok(PtyMenu {
+        tool: "Question".to_string(),
+        text,
+        options,
+        prompt_id: None,
+        tool_call_signature: None,
+        tool_call_diff: None,
+        tool_call_content: None,
+        cache_source: None,
+        at_host_ms: None,
+        signature_source: Some("hook"),
+    })
+}
+
+#[cfg(test)]
+mod opencode_question_menu_tests {
+    use super::opencode_form_to_menu as menu;
+
+    // form.created's `form`, verbatim from the 2026-10-27 spike.
+    fn color() -> serde_json::Value {
+        serde_json::json!({
+            "id": "frm_17c26415c001dA8izjolW6Uiza",
+            "sessionID": "ses_e83d9c899ffetTGBeuKB26JPAY",
+            "title": "Questions",
+            "metadata": {"kind": "question", "tool": {"messageID": "msg_17c2637c2001S4n24ApKiHFwLN", "id": "call_00_0krly025ev8e1vu97x5jvhrw"}},
+            "fields": [{"key": "q0", "title": "Pick a color", "description": "Pick a color", "type": "string",
+                "options": [{"value": "Red", "label": "Red", "description": "The color red."},
+                            {"value": "Green", "label": "Green", "description": "The color green."},
+                            {"value": "Blue", "label": "Blue", "description": "The color blue."}],
+                "custom": true}]
+        })
+    }
+
+    #[test]
+    fn a_one_question_form_answers_with_digits() {
+        let m = menu(&color()).unwrap();
+        assert_eq!(m.tool, "Question");
+        assert_eq!(
+            m.text,
+            "Pick a color\n\nTo type your own answer, use the terminal."
+        );
+        let rows: Vec<(&str, &str, &str)> = m
+            .options
+            .iter()
+            .map(|o| {
+                (
+                    o.label.as_str(),
+                    o.answer_keys.as_deref().unwrap_or(""),
+                    o.description.as_deref().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Red", "1", "The color red."),
+                ("Green", "2", "The color green."),
+                ("Blue", "3", "The color blue."),
+            ]
+        );
+    }
+
+    #[test]
+    fn forms_the_card_cant_answer_get_none() {
+        let mut v = color();
+        v["metadata"]["kind"] = serde_json::json!("mcp");
+        assert_eq!(menu(&v).err(), Some("not-a-question"));
+        let mut v = color();
+        let q = v["fields"][0].clone();
+        v["fields"].as_array_mut().unwrap().push(q);
+        assert_eq!(menu(&v).err(), Some("several-questions"));
+        let mut v = color();
+        v["fields"][0]["type"] = serde_json::json!("multiselect");
+        assert_eq!(menu(&v).err(), Some("not-a-choice"));
+        let mut v = color();
+        v["fields"][0]["options"] = serde_json::json!((0..10)
+            .map(|i| serde_json::json!({"value": i.to_string(), "label": i.to_string()}))
+            .collect::<Vec<_>>());
+        assert_eq!(menu(&v).err(), Some("too-many-options"));
+    }
+
+    #[test]
+    fn without_custom_answers_the_card_says_nothing_about_the_terminal() {
+        let mut v = color();
+        v["fields"][0]["custom"] = serde_json::json!(false);
+        assert_eq!(menu(&v).unwrap().text, "Pick a color");
     }
 }
 
@@ -43754,7 +43912,10 @@ fn codex_only_prompt_shape(shape: &str) -> bool {
 
 // opencode-terminal-prompts: the same rule for the shapes only OpenCode draws.
 fn opencode_only_prompt_shape(shape: &str) -> bool {
-    matches!(shape, "opencode-dialog" | "opencode-permission")
+    matches!(
+        shape,
+        "opencode-dialog" | "opencode-permission" | "opencode-question"
+    )
 }
 
 // The live provider decides which agent-only shapes count. The rest (folder
@@ -43789,6 +43950,8 @@ fn pane_input_blocking_prompt(
             // opencode-terminal-prompts: in an OpenCode dialog Enter runs a
             // command or switches model, agent or session; at its permission
             // prompt Enter confirms the highlighted choice.
+            // opencode-question-card: in one of its forms Enter submits the
+            // highlighted answer.
             "folder-trust"
                 | "hooks-trust"
                 | "codex-hooks-manage"
@@ -43797,6 +43960,7 @@ fn pane_input_blocking_prompt(
                 | "claude-login"
                 | "opencode-dialog"
                 | "opencode-permission"
+                | "opencode-question"
         )
     })
 }
@@ -43906,6 +44070,9 @@ mod opencode_prompt_tests {
     // Mid-turn, in a project whose opencode.json asks before bash. Excerpt:
     // the spinner frames that keep coming after it are trimmed.
     const PERMISSION: &str = "+Thought ┃ ┃ ⠋ Writing command… ┃ ! New session · 808ms⠋echo bram-permission-specimen┃ ┃ △ Permission required ┃ ┃ $ echo bram-permission-specimen ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New session ! New session ! New sessi ⠙ ! New sessi!New sessio ⠹ Press ctrl+b to move running work to the background⠧⠇⠏⠋⠙⠹⠸⠼⠴⠦";
+    // opencode-question-card: the question tool's form (2.1.4 spike,
+    // 2026-10-27), drawn after the previous answer's reply.
+    const QUESTION: &str = "+ Thought ⠋Asking questions… ? New session ┃ ┃Use your question tool to ask me exactly one single-choice question, 'Pick a fruit', with the options apple, ┃ banana and cherry. Then tell me which one I picked. ┃ ┃ ┃ # Questions ┃┃Pick a fruit ┃Cherry ┃ You picked cherry. Build · DeepSeek V4.1 Flash Free · 5.3s · 35.7 tok/s ┃ ┃Use your question tool to ask me exactly one single-choice question, 'Pick a city', with the options Paris and ┃ Rome, allowing a custom answer. Then tell me what I answered. ┃ + Thought · 417ms → Asked 1 question ┃ ┃Questions┃ ┃ Pick a city ┃ ┃ 1. Paris ┃ Paris, France. ┃ 2. Rome ┃ Rome, Italy. ┃ 3. Type your own answer ┃ ┃ ↑↓ select enter submit esc dismiss ┃ ? New session ? New session ? New session ? New sessio ? New sessio ? New session ? New session ? New session ? New sessn ? New sessin ? New sessio ? New sessio ? New sessi ? New session ? New sesion ? New session ? Newsession ? New sesson ? New session ? New session ? New sessn ? New session ? New session ? New sess ? New session ? New se ? New ession ? New session ? New s ? New session ? News ? New session ? ? New s?ew session ?? ? New ses?ssion";
 
     #[test]
     fn open_list_dialogs_hold_sends_under_opencode() {
@@ -43944,6 +44111,24 @@ mod opencode_prompt_tests {
         for not_asking in [PALETTE_OPEN, PALETTE_CLOSED, STATUS_VIEW_OPEN, ""] {
             assert!(!super::opencode_permission_on_screen(not_asking));
         }
+        assert!(!super::opencode_permission_on_screen(QUESTION));
+    }
+
+    // opencode-question-card: a form holds sends, and its card waits for it.
+    #[test]
+    fn a_question_form_holds_sends_and_shows_its_card() {
+        assert_eq!(
+            pane_input_blocking_prompt(QUESTION, OPENCODE),
+            Some("opencode-question")
+        );
+        assert_eq!(prompt_shape_for_provider(QUESTION, CLAUDE), None);
+        assert!(super::opencode_question_on_screen(QUESTION));
+        for not_asking in [PERMISSION, PALETTE_CLOSED, STATUS_VIEW_OPEN, ""] {
+            assert!(!super::opencode_question_on_screen(not_asking));
+        }
+        // A reply that tells the user to press Enter to submit isn't a form.
+        let reply = "Pick one, then press enter to submit your choice. ┃ ┃ Build · DeepSeek V4.1 Flash Free ctrl+p commands 2.1.4";
+        assert_eq!(terminal_attention_prompt_shape(reply), None);
     }
 
     #[test]
@@ -80929,7 +81114,7 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
         .filter(|(s, _, _)| s == sid)
         .map(|(_, _, input)| input);
     agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
-    clear_opencode_permission_claims(app, "opencode-turn-ended", None);
+    clear_opencode_prompt_claims(app, "opencode-turn-ended", None);
     clear_proposing_flag(app, "turn-finished");
     end_turn_context_unless_fresh(app, "opencode-turn-end");
     let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
@@ -80980,12 +81165,18 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
 // evidence instead is Bram's own terminal: the card shows only once the
 // terminal draws OpenCode's permission prompt. That also keeps a prompt from
 // another OpenCode window on the same project out of this pane.
-const OPENCODE_PERMISSION_CLAIM_PREFIX: &str = "opencode:";
+//
+// opencode-question-card: its question tool's forms (form.created, then
+// form.replied or form.cancelled) take the same path, keyed by the form id and
+// shown once the terminal draws the form.
+const OPENCODE_PROMPT_CLAIM_PREFIX: &str = "opencode:";
 // OpenCode draws the prompt as it publishes the event; seen in well under a
 // second in the spike. Past this the claim is dropped and the terminal alone
 // asks.
-const OPENCODE_PERMISSION_SEEN_WAIT_MS: u128 = 5_000;
-const OPENCODE_PERMISSION_SEEN_POLL_MS: u64 = 100;
+const OPENCODE_PROMPT_SEEN_WAIT_MS: u128 = 5_000;
+const OPENCODE_PROMPT_SEEN_POLL_MS: u64 = 100;
+// The tool name of a question card, which picks its on-screen check.
+const OPENCODE_QUESTION_TOOL: &str = "Question";
 
 fn opencode_event_token(v: &serde_json::Value, k: &str) -> String {
     v.get(k)
@@ -80999,6 +81190,10 @@ fn opencode_event_token(v: &serde_json::Value, k: &str) -> String {
 
 fn opencode_permission_on_screen(tail: &str) -> bool {
     prompt_shape_for_provider(tail, Some(SessionProvider::Opencode)) == Some("opencode-permission")
+}
+
+fn opencode_question_on_screen(tail: &str) -> bool {
+    prompt_shape_for_provider(tail, Some(SessionProvider::Opencode)) == Some("opencode-question")
 }
 
 fn opencode_permission_asked<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde_json::Value) {
@@ -81029,7 +81224,51 @@ fn opencode_permission_asked<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde
             ),
         );
     }
-    let id_key = format!("{}{}", OPENCODE_PERMISSION_CLAIM_PREFIX, id);
+    queue_opencode_prompt_claim(app, id, menu);
+}
+
+// opencode-question-card: form.created carries `{form}`. A form the card can't
+// answer (opencode_form_to_menu says why) is left to the terminal; pane sends
+// are still held while it is drawn (the opencode-question shape).
+fn opencode_form_created<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde_json::Value) {
+    if !bram_menus_hook_driven_enabled() {
+        return;
+    }
+    let form = data.get("form").unwrap_or(&serde_json::Value::Null);
+    let id = opencode_event_token(form, "id");
+    if id.is_empty() {
+        return;
+    }
+    let menu = match opencode_form_to_menu(form) {
+        Ok(menu) => menu,
+        Err(reason) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "hook-menu",
+                    &format!("op=opencode-question-skipped id={} reason={}", id, reason),
+                );
+            }
+            return;
+        }
+    };
+    if bram_trace_enabled() {
+        // Not the payload: a form's fields can carry text the user typed
+        // before (defaults, earlier answers).
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=question provider=opencode options={}",
+                menu.options.len()
+            ),
+        );
+    }
+    queue_opencode_prompt_claim(app, id, menu);
+}
+
+fn queue_opencode_prompt_claim<R: tauri::Runtime>(app: &AppHandle<R>, id: String, menu: PtyMenu) {
+    let id_key = format!("{}{}", OPENCODE_PROMPT_CLAIM_PREFIX, id);
     let at_ms = unix_now_ms();
     let (depth, dropped) = {
         let Ok(mut q) = menu_hook_claims_cell().lock() else {
@@ -81038,7 +81277,7 @@ fn opencode_permission_asked<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde
         // The terminal is OpenCode's, so another agent's leftover claims can't
         // be what it shows.
         let before = q.len();
-        q.retain(|c| c.id_key.starts_with(OPENCODE_PERMISSION_CLAIM_PREFIX));
+        q.retain(|c| c.id_key.starts_with(OPENCODE_PROMPT_CLAIM_PREFIX));
         let dropped = before - q.len();
         q.retain(|c| c.id_key != id_key);
         q.push(HookMenuClaim {
@@ -81063,14 +81302,14 @@ fn opencode_permission_asked<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde
             ),
         );
     }
-    schedule_opencode_permission_display(app, id_key, at_ms);
+    schedule_opencode_prompt_display(app, id_key, at_ms);
 }
 
 // Show the claim once the terminal shows the prompt, if it is the only open
 // request. With several, OpenCode shows one at a time and nothing here says
 // which, so a card already up comes down (its keys could answer the other
 // request); the next reply re-runs this for whichever is left.
-fn schedule_opencode_permission_display<R: tauri::Runtime>(
+fn schedule_opencode_prompt_display<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id_key: String,
     at_ms: i64,
@@ -81078,31 +81317,38 @@ fn schedule_opencode_permission_display<R: tauri::Runtime>(
     let app = app.clone();
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
+        let mut question = false;
         let result = loop {
             let (queued, sole) = menu_hook_claims_cell()
                 .lock()
                 .map(|q| {
-                    (
-                        q.iter()
-                            .any(|c| c.id_key == id_key && c.at_ms == at_ms && !c.answered),
-                        claim_remained_sole(&q, &id_key, at_ms),
-                    )
+                    let mine = q
+                        .iter()
+                        .find(|c| c.id_key == id_key && c.at_ms == at_ms && !c.answered);
+                    question = mine.is_some_and(|c| c.menu.tool == OPENCODE_QUESTION_TOOL);
+                    (mine.is_some(), claim_remained_sole(&q, &id_key, at_ms))
                 })
                 .unwrap_or((false, false));
             if !queued {
                 break "gone";
             }
-            if opencode_permission_on_screen(&pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS)) {
+            let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
+            let on_screen = if question {
+                opencode_question_on_screen(&tail)
+            } else {
+                opencode_permission_on_screen(&tail)
+            };
+            if on_screen {
                 break if sole { "shown" } else { "not-sole" };
             }
-            if started.elapsed().as_millis() >= OPENCODE_PERMISSION_SEEN_WAIT_MS {
+            if started.elapsed().as_millis() >= OPENCODE_PROMPT_SEEN_WAIT_MS {
                 if let Ok(mut q) = menu_hook_claims_cell().lock() {
                     q.retain(|c| c.id_key != id_key);
                 }
                 break "unseen";
             }
             std::thread::sleep(std::time::Duration::from_millis(
-                OPENCODE_PERMISSION_SEEN_POLL_MS,
+                OPENCODE_PROMPT_SEEN_POLL_MS,
             ));
         };
         if bram_trace_enabled() {
@@ -81110,7 +81356,8 @@ fn schedule_opencode_permission_display<R: tauri::Runtime>(
                 &app,
                 "hook-menu",
                 &format!(
-                    "op=opencode-permission-display result={} id_key={} waited_ms={}",
+                    "op=opencode-{}-display result={} id_key={} waited_ms={}",
+                    if question { "question" } else { "permission" },
                     result,
                     id_key,
                     started.elapsed().as_millis()
@@ -81143,25 +81390,63 @@ fn opencode_permission_replied<R: tauri::Runtime>(app: &AppHandle<R>, data: &ser
             ),
         );
     }
-    clear_opencode_permission_claims(app, "opencode-replied", Some(&id));
+    opencode_prompt_answered(app, &id, "opencode-replied");
+}
+
+// opencode-question-card: form.replied `{id, sessionID, answer}` and
+// form.cancelled `{id, sessionID}`. The answer itself isn't traced: it can be
+// text the user typed.
+fn opencode_form_closed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    data: &serde_json::Value,
+    cancelled: bool,
+) {
+    let id = opencode_event_token(data, "id");
+    if id.is_empty() {
+        return;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=opencode-question-{} id={}",
+                if cancelled { "cancelled" } else { "replied" },
+                id
+            ),
+        );
+    }
+    opencode_prompt_answered(
+        app,
+        &id,
+        if cancelled {
+            "opencode-form-cancelled"
+        } else {
+            "opencode-form-replied"
+        },
+    );
+}
+
+fn opencode_prompt_answered<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, reason: &str) {
+    clear_opencode_prompt_claims(app, reason, Some(id));
     // A request that waited behind this one may now be the only one open.
     let next = menu_hook_claims_cell().lock().ok().and_then(|q| {
         let mut open = q
             .iter()
-            .filter(|c| c.id_key.starts_with(OPENCODE_PERMISSION_CLAIM_PREFIX) && !c.answered);
+            .filter(|c| c.id_key.starts_with(OPENCODE_PROMPT_CLAIM_PREFIX) && !c.answered);
         match (open.next(), open.next()) {
             (Some(c), None) => Some((c.id_key.clone(), c.at_ms)),
             _ => None,
         }
     });
     if let Some((id_key, at_ms)) = next {
-        schedule_opencode_permission_display(app, id_key, at_ms);
+        schedule_opencode_prompt_display(app, id_key, at_ms);
     }
 }
 
 // Remove OpenCode's claims: the one a reply names, or all of them when its turn
 // ends, since a request can't outlive the turn that asked it.
-fn clear_opencode_permission_claims<R: tauri::Runtime>(
+fn clear_opencode_prompt_claims<R: tauri::Runtime>(
     app: &AppHandle<R>,
     reason: &str,
     only_id: Option<&str>,
@@ -81170,7 +81455,7 @@ fn clear_opencode_permission_claims<R: tauri::Runtime>(
         .lock()
         .map(|q| {
             q.iter()
-                .filter(|c| c.id_key.starts_with(OPENCODE_PERMISSION_CLAIM_PREFIX))
+                .filter(|c| c.id_key.starts_with(OPENCODE_PROMPT_CLAIM_PREFIX))
                 .filter_map(|c| Some((c.tool_use_id.clone()?, c.menu.tool.clone())))
                 .filter(|(id, _)| only_id.map_or(true, |only| only == id))
                 .collect()
@@ -81236,6 +81521,15 @@ fn handle_opencode_event<R: tauri::Runtime>(
                 opencode_permission_asked(app, data);
             } else {
                 opencode_permission_replied(app, data);
+            }
+            return (200, JSON, b"{\"ok\":true,\"handled\":true}".to_vec());
+        }
+        // opencode-question-card.
+        "form.created" | "form.replied" | "form.cancelled" => {
+            let data = v.get("form").unwrap_or(&serde_json::Value::Null);
+            match kind.as_str() {
+                "form.created" => opencode_form_created(app, data),
+                other => opencode_form_closed(app, data, other == "form.cancelled"),
             }
             return (200, JSON, b"{\"ok\":true,\"handled\":true}".to_vec());
         }

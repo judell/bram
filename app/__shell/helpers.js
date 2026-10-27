@@ -9699,6 +9699,10 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     if (value && value.shape === "opencode-permission") {
       return "OpenCode is asking permission in the terminal. Answer it there.";
     }
+    // opencode-question-card.
+    if (value && value.shape === "opencode-question") {
+      return "OpenCode is asking you a question in the terminal. Answer it there.";
+    }
     return "The terminal is waiting at a prompt Bram can't answer.";
   };
   // The host names the alternative only when its CLI is on PATH, and with
@@ -15450,6 +15454,8 @@ window.__bramApplySendRestore = function (snapshot, box, toastApi) {
       toastApi("OpenCode has a dialog open in the terminal, so your message wasn't sent. Press Esc there to close it, then send again. Your message is back in the message box.");
     } else if (p.shape === "opencode-permission") {
       toastApi("OpenCode is asking permission in the terminal, so your message wasn't sent. Answer it there, then send again. Your message is back in the message box.");
+    } else if (p.shape === "opencode-question") {
+      toastApi("OpenCode is asking you a question in the terminal, so your message wasn't sent. Answer it there, then send again. Your message is back in the message box.");
     } else {
       toastApi(who + " is waiting on a trust prompt in the terminal, so your message wasn't sent. Answer the prompt there, then send again. Your message is back in the message box.");
     }

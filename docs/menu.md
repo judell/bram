@@ -109,6 +109,18 @@ Two things differ from the hook path:
   whichever it is. So a second request takes the card down, and the one left
   shows once the other is answered.
 
+**Questions** (opencode-question-card). OpenCode's question tool asks through
+a form: `form.created`, then `form.replied` or `form.cancelled`, forwarded the
+same way. `opencode_form_to_menu` builds a card for a one-question form of
+up to nine choices, keyed by the form's `frm_…` id. It waits for the form's
+footer ("↑↓ select enter submit esc dismiss", the `opencode-question` shape),
+and each choice answers with its digit, which OpenCode takes at once whichever
+row is highlighted. Free text ("Type your own answer") stays in the terminal,
+and the card says so: Claude's card types free text through pane code that is
+AskUserQuestion's own. A form with several questions, a multi-select, or an
+MCP server's form gets no card, but the shape still holds pane sends while it
+is drawn.
+
 ### `menus.parseAndDisplay` is off by default
 
 `BRAM_MENUS_PARSE_ENABLED` defaults to off: "menu parsing is unreliable,

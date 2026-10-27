@@ -21611,12 +21611,11 @@ fn switch_agent(
         live_session_id(&app, target_provider)
     } else if resume_reason == "fresh-for-new-session" {
         let baseline = live_session_id(&app, target_provider);
-        // opencode-partner-handoff: Bram can't rename an OpenCode session, so
-        // its fresh partner keeps OpenCode's own title; the pair still forms.
-        if let Some((title, sid)) = fresh
-            .as_ref()
-            .filter(|_| target_provider != SessionProvider::Opencode)
-        {
+        // fresh-partner-takes-partner-name: OpenCode's fresh partner is named
+        // like the others. It was skipped while Bram couldn't rename an
+        // OpenCode session (opencode-partner-handoff); 509deb8 made renames
+        // work, and on 2026-10-27 19:46Z the user had to Match name by hand.
+        if let Some((title, sid)) = fresh.as_ref() {
             write_pending_session_title(&app, provider_key, title, sid.clone(), "switch");
             if bram_trace_enabled() {
                 append_bram_trace_line(
@@ -23504,16 +23503,11 @@ fn apply_pending_session_title<R: tauri::Runtime>(
         let rename_result = match provider {
             SessionProvider::Codex => pin_codex_reload_target(app, new_sid)
                 .and_then(|_| append_codex_session_title(new_sid, &rec.title)),
-            SessionProvider::Claude => {
+            // fresh-partner-takes-partner-name: an OpenCode fresh partner's
+            // queued name lands here once its session rotates in; the rename
+            // is a title UPDATE in OpenCode's database (509deb8).
+            SessionProvider::Claude | SessionProvider::Opencode => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
-            }
-            // Unreachable in practice: pending rows are Codex/Claude bootstrap
-            // files, and OpenCode sessions only ever come from its database.
-            // Left as a refusal rather than a silent success, and worded for
-            // that reason instead of claiming renames are unsupported
-            // (opencode-session-rename made them work).
-            SessionProvider::Opencode => {
-                Err("OpenCode has no pending session files to rename".to_string())
             }
         };
         match rename_result {

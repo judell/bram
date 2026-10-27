@@ -6123,13 +6123,23 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     ];
     const OPENCODE_SESSION_LIST: (&str, &str) = ("esc search", "delete ctrl+d rename ctrl+r");
     // The permission prompt, drawn mid-turn ("△ Permission required … Allow
-    // once Always allow Reject … enter confirm"); Enter confirms the
-    // highlighted choice. OpenCode keeps animating a spinner under it, so its
-    // text scrolls out of the tail after a minute or so: this holds early
-    // sends, and OpenCode's own permission.asked event is the lasting signal
-    // (opencode-permission-menu).
-    const OPENCODE_PERMISSION_MARKERS: &[&str] =
-        &["permission required", "allow once", "always allow"];
+    // once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm");
+    // Enter confirms the highlighted choice. OpenCode keeps animating a
+    // spinner under it, so its text scrolls out of the tail after a minute or
+    // so: this holds early sends, and OpenCode's own permission.asked event is
+    // the lasting signal (opencode-permission-menu).
+    // opencode-permission-markers: only what every captured layout draws
+    // (2.1.4, 2026-10-27, at 24, 40, 60, 80 and 120 columns, with and without
+    // save patterns; pinned). The "Always allow" row appears only when the
+    // request carries save patterns, which 2.1.4's own tools always send but a
+    // plugin's permission.assert or the HTTP create route need not. Narrow
+    // terminals clip "Reject" and the footer's "enter confirm", the footer
+    // already at 80 columns with three rows. Its "⇆ select" hint is drawn in
+    // all of them (the TUI's prompt; `opencode run`'s differs), and a reply
+    // quoting the rows doesn't carry it, so requiring it keeps such a reply
+    // from holding sends. Matched with the prompt's ┃ frame removed: at 24
+    // columns the title wraps inside it.
+    const OPENCODE_PERMISSION_MARKERS: &[&str] = &["permission required", "allow once", "⇆ select"];
     // opencode-question-card: the footer under every OpenCode form, its
     // question tool's ("Questions ┃ Pick a city ┃ 1. Paris … 3. Type your own
     // answer ┃ ↑↓ select enter submit esc dismiss", 2.1.4 spike, 2026-10-27)
@@ -6195,7 +6205,11 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     {
         return Some("opencode-dialog");
     }
-    if OPENCODE_PERMISSION_MARKERS.iter().all(|m| has(m)) {
+    let unframed = tail.replace('┃', "");
+    if OPENCODE_PERMISSION_MARKERS
+        .iter()
+        .all(|m| unframed.contains(&squash(m)))
+    {
         return Some("opencode-permission");
     }
     if has(OPENCODE_FORM_FOOTER) {
@@ -44070,6 +44084,24 @@ mod opencode_prompt_tests {
     // Mid-turn, in a project whose opencode.json asks before bash. Excerpt:
     // the spinner frames that keep coming after it are trimmed.
     const PERMISSION: &str = "+Thought ┃ ┃ ⠋ Writing command… ┃ ! New session · 808ms⠋echo bram-permission-specimen┃ ┃ △ Permission required ┃ ┃ $ echo bram-permission-specimen ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New session ! New session ! New sessi ⠙ ! New sessi!New sessio ⠹ Press ctrl+b to move running work to the background⠧⠇⠏⠋⠙⠹⠸⠼⠴⠦";
+    // opencode-permission-markers: a request without save patterns, created
+    // over OpenCode's HTTP route (2026-10-27), so no "Always allow" row and
+    // the resource reads "- …". Excerpt from the prompt on: before it, the
+    // tail held the spike's own message quoting the rows.
+    const SAVELESS_PERMISSION: &str = "! New sess ┃ ┃ △ Permission required ┃ ┃ - printf bram-saveless-specimen ┃ ┃ ┃ Allow once Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses !New !New s ! Ne sesi wNwss es ! Nw ! e e ! New s w s !New s ! Newsei ! New s ew ses !New s ! Nwess ! New s Newse ! N News ! Nses ! Nw ssew";
+    // The same requests in narrower terminals (`opencode --continue`, 2.1.4,
+    // 2026-10-27), excerpts from the prompt on. At 80 columns with three rows
+    // the footer is clipped to "enter con"; at 24 the title wraps inside the
+    // frame, the footer loses "enter confirm", and with three rows "Reject" is
+    // clipped too.
+    const NARROW_PERMISSIONS: [&str; 3] = [
+        "! New sess ┃ ┃ △ Permission required ┃ ┃ - printf bram-narrow-withsave ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter con┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses ! New !New s ! Ne sei ! swNwss ! News e e ! New ss ! New s ! Ne sei ! ew s !News ! Ne se ! Nwses ! ew s !New ses ! e New s ! ese ! Nw sssew",
+        "! New sess ┃ ┃ △ Permission ┃ required ┃ ┃ - printf bram- ┃ narrow-saveless ┃ ┃┃ Allow once Reject┃┃ ctrl+f ⇆ select┃ fullscreen ┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses New eNew s ! Ne sesi wNwss ! News e e ! New ss ! New s ! Ne si ! ew se ! News ! Ne se ! Newses ! ew s ! New ses ! e New s ! ese Nw s !ssew",
+        "! New sess ┃ ┃ △ Permission ┃ required ┃ ┃ - printf bram- ┃ narrow-withsave ┃ ┃┃ Allow once Always┃┃ ctrl+f ⇆ select┃ fullscreen ┃ ! Ne ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses ! New esNew s ! Ne sesi wNwss ! News ! e e ! New ss ! New s ! Ne sei ! ew se ! News ! Ne se ! Nwses ! ew s !New ses ! e New s ! Neses ! Nw ssew",
+    ];
+    // A real reply quoting the prompt's rows, then the composer's chrome
+    // (2026-10-27). Excerpt: the repeated "• New session" frames are trimmed.
+    const QUOTED_PERMISSION: &str = "⬝⬝⬝⬝⬝⬝⬝⬝⠇n s ⠸⬝⬝⬝⬝⬝⬝⬝⬝ion s ⠏on ⬝⬝⬝⬝⬝⬝⬝⬝ i ⠼⬝⬝⬝⬝⬝⬝⬝⬝n +Thought · 439msPermission required. Choose Allow once, Always allow, or Reject. o ⬝⬝⬝⬝⬝⬝⬝⬝⠋ ⬝⬝⬝⬝⬝⬝⬝⬝n • New session Build · DeepSeek V4.1 Flash Free · 1.6s · 65.5 tok/s/…/-…/2f52906f-64d8-4313-bbf6-f2afda62b881/scratchpad/oc-ctrlc/proj-saveless:main 8.1K (4%) • New session Users-a…/2f52906f-64d8-4313-bbf6-f2afda62b881/scrathpad/oc-ctrlc/proj-aveless:main • New session • New session • New session • New session";
     // opencode-question-card: the question tool's form (2.1.4 spike,
     // 2026-10-27), drawn after the previous answer's reply.
     const QUESTION: &str = "+ Thought ⠋Asking questions… ? New session ┃ ┃Use your question tool to ask me exactly one single-choice question, 'Pick a fruit', with the options apple, ┃ banana and cherry. Then tell me which one I picked. ┃ ┃ ┃ # Questions ┃┃Pick a fruit ┃Cherry ┃ You picked cherry. Build · DeepSeek V4.1 Flash Free · 5.3s · 35.7 tok/s ┃ ┃Use your question tool to ask me exactly one single-choice question, 'Pick a city', with the options Paris and ┃ Rome, allowing a custom answer. Then tell me what I answered. ┃ + Thought · 417ms → Asked 1 question ┃ ┃Questions┃ ┃ Pick a city ┃ ┃ 1. Paris ┃ Paris, France. ┃ 2. Rome ┃ Rome, Italy. ┃ 3. Type your own answer ┃ ┃ ↑↓ select enter submit esc dismiss ┃ ? New session ? New session ? New session ? New sessio ? New sessio ? New session ? New session ? New session ? New sessn ? New sessin ? New sessio ? New sessio ? New sessi ? New session ? New sesion ? New session ? Newsession ? New sesson ? New session ? New session ? New sessn ? New session ? New session ? New sess ? New session ? New se ? New ession ? New session ? New s ? New session ? News ? New session ? ? New s?ew session ?? ? New ses?ssion";
@@ -44098,20 +44130,37 @@ mod opencode_prompt_tests {
 
     #[test]
     fn the_permission_prompt_holds_sends_under_opencode() {
-        assert_eq!(
-            pane_input_blocking_prompt(PERMISSION, OPENCODE),
-            Some("opencode-permission")
-        );
+        for tail in [PERMISSION, SAVELESS_PERMISSION]
+            .into_iter()
+            .chain(NARROW_PERMISSIONS)
+        {
+            assert_eq!(
+                pane_input_blocking_prompt(tail, OPENCODE),
+                Some("opencode-permission"),
+                "{tail}"
+            );
+        }
     }
 
     // opencode-permission-menu: the pane's card waits for this screen.
     #[test]
     fn the_permission_card_needs_the_prompt_on_screen() {
         assert!(super::opencode_permission_on_screen(PERMISSION));
+        assert!(super::opencode_permission_on_screen(SAVELESS_PERMISSION));
+        for narrow in NARROW_PERMISSIONS {
+            assert!(super::opencode_permission_on_screen(narrow), "{narrow}");
+        }
         for not_asking in [PALETTE_OPEN, PALETTE_CLOSED, STATUS_VIEW_OPEN, ""] {
             assert!(!super::opencode_permission_on_screen(not_asking));
         }
         assert!(!super::opencode_permission_on_screen(QUESTION));
+    }
+
+    // opencode-permission-markers: the rows' words without the prompt's footer.
+    #[test]
+    fn a_reply_quoting_the_permission_prompt_is_not_one() {
+        assert_eq!(terminal_attention_prompt_shape(QUOTED_PERMISSION), None);
+        assert!(!super::opencode_permission_on_screen(QUOTED_PERMISSION));
     }
 
     // opencode-question-card: a form holds sends, and its card waits for it.
@@ -44148,6 +44197,12 @@ mod opencode_prompt_tests {
         let apart =
             format!("Open the commands palette, press esc to leave, then search again.{chrome}");
         assert_eq!(terminal_attention_prompt_shape(&apart), None);
+        // opencode-permission-markers: a reply naming a dialog's title and
+        // both its hints, as prose punctuates them.
+        let titled = format!(
+            "Ctrl+X m opens Select model: esc closes it, and Search filters the list.{chrome}"
+        );
+        assert_eq!(terminal_attention_prompt_shape(&titled), None);
     }
 }
 

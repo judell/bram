@@ -10574,8 +10574,29 @@ static OPENCODE_SECOND_ESC_PENDING: std::sync::atomic::AtomicBool =
 // pool, where two quick pane sends could reach the terminal out of order. The
 // flag is cleared whether or not the write succeeds, so a failed press can't
 // hold the queue.
+//
+// #456 review: the second press is written only if the launch that took the
+// first is still current and OpenCode is still the agent. A switch, reload or
+// New session in the gap takes a new launch generation (begin_agent_launch),
+// and an unchecked Esc would land in its interrupt sequence or the next agent.
+// Held sends drain either way.
+fn second_esc_still_wanted(
+    generation_then: u64,
+    generation_now: u64,
+    provider_now: Option<SessionProvider>,
+) -> Result<(), &'static str> {
+    if generation_now != generation_then {
+        return Err("launch-superseded");
+    }
+    if provider_now != Some(SessionProvider::Opencode) {
+        return Err("provider-changed");
+    }
+    Ok(())
+}
+
 fn schedule_opencode_second_esc<R: tauri::Runtime>(app: &AppHandle<R>) {
     OPENCODE_SECOND_ESC_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let generation = AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(OPENCODE_ESC_PRESS_GAP_MS));
@@ -10584,6 +10605,22 @@ fn schedule_opencode_second_esc<R: tauri::Runtime>(app: &AppHandle<R>) {
             OPENCODE_SECOND_ESC_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         };
+        if let Err(reason) = second_esc_still_wanted(
+            generation,
+            AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
+            current_provider(&app),
+        ) {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "send-gate",
+                    &format!("op=esc-doubled-skipped provider=opencode reason={}", reason),
+                );
+            }
+            OPENCODE_SECOND_ESC_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = drain_pty_intents(&app, &state);
+            return;
+        }
         if bram_trace_enabled() {
             append_bram_trace_line(
                 &app,
@@ -10604,6 +10641,24 @@ fn schedule_opencode_second_esc<R: tauri::Runtime>(app: &AppHandle<R>) {
         }
         let _ = drain_pty_intents(&app, &state);
     });
+}
+
+#[cfg(test)]
+mod second_esc_still_wanted_tests {
+    use super::{second_esc_still_wanted, SessionProvider};
+
+    #[test]
+    fn only_the_same_launch_under_opencode_gets_the_second_press() {
+        let oc = Some(SessionProvider::Opencode);
+        assert_eq!(second_esc_still_wanted(7, 7, oc), Ok(()));
+        // A switch, reload or New session in the gap.
+        assert_eq!(second_esc_still_wanted(7, 8, oc), Err("launch-superseded"));
+        assert_eq!(
+            second_esc_still_wanted(7, 7, Some(SessionProvider::Claude)),
+            Err("provider-changed")
+        );
+        assert_eq!(second_esc_still_wanted(7, 7, None), Err("provider-changed"));
+    }
 }
 
 // Whether a user Esc should wait for the agent's own interrupt report. Only

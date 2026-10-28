@@ -278,6 +278,22 @@
               enabled="{window.__bramSessionEditEnabled($item, 'rename', pendingDeletes, pendingRenames)}"
               tooltip="{window.__bramSessionEditTooltip($item, 'rename', pendingDeletes, pendingRenames)}"
               onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
+            <!-- session-groups: a loose session can join a group that has no
+                 session on this agent yet, and takes the group's name. Each
+                 entry carries this row's id (inside Items, $item is the
+                 entry). Peer: the agent overflow menu in Main.xmlui;
+                 https://www.xmlui.org/docs/reference/components/DropdownMenu -->
+            <DropdownMenu
+              when="{!$item.group &amp;&amp; ($item.joinable || []).length > 0}"
+              label="+"
+              tooltip="Add to a group (it takes the group's name)"
+              triggerButtonVariant="ghost">
+              <Items data="{$item.joinable}">
+                <MenuItem
+                  label="{window.__bramSessionAddToGroupLabel($item)}"
+                  onClick="window.__bramSessionAddToGroup($item, toast)" />
+              </Items>
+            </DropdownMenu>
             <Link
               when="{!$item.pending}"
               width="*"
@@ -296,11 +312,10 @@
             <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
             <Text width="70px" fontSize="$fontSize-sm" value="{$item.pending ? 'Pending' : (Math.round($item.size / 1024) + ' KB')}" />
           </HStack>
-          <!-- provider-session-pair-offer: the session's partner on the other
-               provider (switching providers moves between the two), with
-               Unpair for when one side has drifted. -->
+          <!-- session-groups: the session's group (switching agents moves
+               among its members), with Leave for when one has drifted. -->
           <HStack
-            when="{!!$item.partner}"
+            when="{!!$item.group}"
             gap="$space-2"
             paddingHorizontal="$space-3"
             paddingBottom="$space-2"
@@ -309,19 +324,12 @@
               width="*"
               fontSize="$fontSize-sm"
               color="$textColor-secondary"
-              value="{window.__bramPairedWithLabel($item.partner)}" />
+              value="{window.__bramSessionGroupLabel($item)}" />
             <Button
-              when="{!!window.__bramPairMatchTitle($item)}"
-              label="Match name"
+              label="Leave"
               variant="ghost"
               size="xs"
-              tooltip="{window.__bramPairMatchTooltip($item)}"
-              onClick="window.__bramPairMatchName($item, toast)" />
-            <Button
-              label="Unpair"
-              variant="ghost"
-              size="xs"
-              tooltip="Stop moving between these two sessions when you switch providers"
+              tooltip="{window.__bramSessionLeaveTooltip($item)}"
               onClick="window.__bramUnpairSession($item.provider, $item.id, toast)" />
           </HStack>
           <VStack when="{expandedId === $item.id}" paddingBottom="$space-2">

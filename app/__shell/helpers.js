@@ -1207,6 +1207,19 @@ window.__bramSwitchAgent = function (provider) {
     var p = latest;
     if (!p || !p.active) return null;
     if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
+    // session-groups (Jon, 2026-10-28): a switch never lands in another
+    // group's session, so the offer only ever joins two loose sessions; from
+    // inside a group the switch goes to the group's member or a new one.
+    var to = name(p.toProvider);
+    var toTitle = quoted(p.toTitle, p.toSessionId);
+    // Say what holds, not "no X session goes with": after a Leave the left
+    // session keeps its name, so a same-named session on the target agent made
+    // that read as false (2026-10-28 05:25Z).
+    var message = name(p.fromProvider) + " " + quoted(p.fromTitle, p.fromSessionId) +
+      " isn't in a group, so " + to + " resumed its most recent loose session, " + toTitle + ".";
+    var keepLabel = "Group these two";
+    var keepTooltip = "Then switching between " + name(p.fromProvider) + " and " + to +
+      " moves between them, and both take the name " + quoted(p.fromTitle, p.fromSessionId) + ".";
     return {
       atMs: p.atMs,
       fromProvider: p.fromProvider,
@@ -1214,28 +1227,12 @@ window.__bramSwitchAgent = function (provider) {
       fromTitle: p.fromTitle || "",
       toProvider: p.toProvider,
       toSessionId: p.toSessionId,
-      message: "No " + name(p.toProvider) + " session goes with " + name(p.fromProvider) + " session " +
-        quoted(p.fromTitle, p.fromSessionId) + ". " + name(p.toProvider) + " resumed its most recent, " +
-        quoted(p.toTitle, p.toSessionId) + ".",
-      // pair-offer-warns-before-replacing: Keep replaces the resumed session's
-      // existing partner on this agent; say so instead of doing it silently.
-      keepLabel: p.toCurrentPartner
-        ? "Keep these together (replaces its pairing with " +
-          quoted(p.toCurrentPartner.title, p.toCurrentPartner.id) + ")"
-        : "Keep these together",
-      keepTooltip: "Pair these two, so switching between " + name(p.fromProvider) + " and " +
-        name(p.toProvider) + " moves between them." +
-        (p.toCurrentPartner
-          ? " " + quoted(p.toTitle, p.toSessionId) + " is paired with " + name(p.fromProvider) +
-            " session " + quoted(p.toCurrentPartner.title, p.toCurrentPartner.id) +
-            " now; Keep ends that pairing."
-          : ""),
-      // pair-offer-warns-before-replacing (Jon, 2026-10-27): say which session
-      // the new one goes with; "Start a new … session" read as unrelated.
-      actionLabel: "Start a " + name(p.toProvider) + " session for " +
-        quoted(p.fromTitle, p.fromSessionId),
-      actionTooltip: "Opens New session to start a " + name(p.toProvider) + " session that goes with " +
-        quoted(p.fromTitle, p.fromSessionId) + "; switching back and forth will then move between those two.",
+      message: message,
+      keepLabel: keepLabel,
+      keepTooltip: keepTooltip,
+      actionLabel: "Start a new one",
+      actionTooltip: "Opens New session for a " + to + " session that goes with " +
+        quoted(p.fromTitle, p.fromSessionId) + ".",
     };
   };
   var notify = function (reason) {
@@ -1312,8 +1309,8 @@ window.__bramSwitchAgent = function (provider) {
     };
     dismiss(value, "start-click");
     window.__bramSessionSuggestIngest({
-      name: (value.fromTitle || (name(value.fromProvider) + " session " + String(value.fromSessionId || "").slice(0, 8))) +
-        " (" + name(value.toProvider) + ")",
+      // session-groups: the new session joins the group and takes its name.
+      name: value.fromTitle || (name(value.fromProvider) + " session " + String(value.fromSessionId || "").slice(0, 8)),
       whatsNext: "Pick up the work of the " + name(value.fromProvider) + " session " +
         quoted(value.fromTitle, value.fromSessionId) + " here in " + name(value.toProvider) + ".",
       atMs: Date.now(),
@@ -1340,6 +1337,8 @@ window.__bramSessionEditEnabled = function (item, action, pendingDeletes, pendin
   // delete-live-session-leaves-stub: the host marks the session a CLI is
   // running now; deleting it is refused, so don't offer the confirm at all.
   if (action === "delete" && item.running) return false;
+  // session-groups: a group's sessions share its name; leave to rename.
+  if (action !== "delete" && item.group) return false;
   return !((pendingDeletes || []).includes(item.id) || (pendingRenames || []).includes(item.id));
 };
 window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendingRenames) {
@@ -1351,6 +1350,7 @@ window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendin
       : "Available after the next message creates the session";
   }
   if (del && item.running) return "This session is running. Switch away from it before deleting it.";
+  if (!del && item.group) return "This session takes its group's name. Leave the group to rename it.";
   if (item.provider === "opencode") {
     if (del) return "Delete session (OpenCode deletes it, with any child sessions)";
     // opencode-session-rename: be honest about the mechanism and its residual.
@@ -1361,44 +1361,37 @@ window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendin
   return del ? "Delete session" : "Rename session";
 };
 
-// provider-session-pair-offer: the Sessions row's "paired with" label.
-window.__bramPairedWithLabel = function (partner) {
-  if (!partner) return "";
-  var who = window.__bramProviderLabel(partner.provider);
-  return "Paired with " + who + " session " +
-    (partner.title ? "'" + partner.title + "'" : String(partner.id || "").slice(0, 8));
+// session-groups: the Sessions row's group line. Members share the group's
+// name (Jon, 2026-10-28), so only the agents are listed: "In a group with
+// Claude, Codex".
+window.__bramSessionGroupLabel = function (item) {
+  var g = item && item.group;
+  if (!g) return "";
+  var agents = (g.members || []).map(function (m) { return window.__bramProviderLabel(m.provider); });
+  return "In a group with " + agents.join(", ");
+};
+window.__bramSessionLeaveTooltip = function (item) {
+  var g = item && item.group;
+  return g ? "Take this session out of its group; switching agents from the others no longer comes here" : "";
 };
 
-// provider-session-pair-offer: Match name. The name this row's session would
-// take to match its partner: "<partner title> (<this provider>)". Empty when
-// there's nothing to match (no partner title) or the names already match,
-// ignoring a trailing "(Claude)" / "(Codex)".
-window.__bramPairMatchTitle = function (item) {
-  var p = item && item.partner;
-  if (!p || !p.title) return "";
-  var mine = window.__bramProviderLabel(item.provider);
-  var strip = function (t) { return String(t || "").replace(/ \((Claude|Codex|OpenCode)\)$/, ""); };
-  var base = strip(p.title);
-  // Already matching, suffix aside: nothing to offer on either row.
-  if (strip(item.title) === base) return "";
-  return base + " (" + mine + ")";
+// session-groups: the Sessions row's Add to '<group>'. The group's member
+// anchors the join, so this session joins its group and takes its name. No
+// `from`: nothing is resumed, so no catch-up is offered.
+window.__bramSessionAddToGroupLabel = function (entry) {
+  return entry ? "Add to '" + entry.name + "'" : "";
 };
-window.__bramPairMatchTooltip = function (item) {
-  var t = window.__bramPairMatchTitle(item);
-  return t ? "Rename this session to '" + t + "'" : "";
-};
-window.__bramPairMatchName = function (item, toastApi) {
-  var t = window.__bramPairMatchTitle(item);
-  if (!t) return;
-  var url = "/__sessions/rename?provider=" + encodeURIComponent(item.provider || "") +
-    "&id=" + encodeURIComponent(item.id || "") + "&title=" + encodeURIComponent(t);
-  try { window.__bramIframeTrace("pair-offer", { op: "match-name", provider: item.provider || "" }); } catch (e) {}
+window.__bramSessionAddToGroup = function (entry, toastApi) {
+  if (!entry) return;
+  var url = "/__sessions/pair?" + encodeURIComponent(entry.anchorProvider) + "=" +
+    encodeURIComponent(entry.anchorId) + "&" + encodeURIComponent(entry.provider) + "=" +
+    encodeURIComponent(entry.id);
   window.fetch(url, { cache: "no-store" }).then(function (r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
-    if (typeof toastApi === "function") toastApi("Renamed to '" + t + "'");
+    if (typeof toastApi === "function") toastApi("Added to '" + entry.name + "'");
   }).catch(function (e) {
     if (toastApi && typeof toastApi.error === "function") {
-      toastApi.error("Could not rename: " + String((e && e.message) || e));
+      toastApi.error("Could not add to the group: " + String((e && e.message) || e));
     }
   });
 };
@@ -1412,7 +1405,7 @@ window.__bramUnpairSession = function (provider, id, toastApi) {
     if (!r.ok) throw new Error("HTTP " + r.status);
   }).catch(function (e) {
     if (toastApi && typeof toastApi.error === "function") {
-      toastApi.error("Could not unpair: " + String((e && e.message) || e));
+      toastApi.error("Could not leave the group: " + String((e && e.message) || e));
     }
   });
 };
@@ -1437,16 +1430,24 @@ window.__bramUnpairSession = function (provider, id, toastApi) {
     var p = latest;
     if (!p || !p.active || !p.path) return null;
     if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
-    var n = Number(p.turns) || 0;
-    var from = name(p.fromProvider) + " session " + label(p.fromTitle, p.fromSessionId);
+    // session-groups: one source per group member with new turns.
+    var sources = (p.sources && p.sources.length) ? p.sources : [{
+      provider: p.fromProvider, id: p.fromSessionId, title: p.fromTitle, path: p.path, turns: p.turns,
+    }];
+    var parts = sources.map(function (s) {
+      var n = Number(s.turns) || 0;
+      return name(s.provider) + " session " + label(s.title, s.id) + " (" + n + " turn" + (n === 1 ? "" : "s") + ")";
+    });
+    var listed = parts.length > 1
+      ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1]
+      : parts[0];
     return {
       atMs: p.atMs,
       toProvider: p.toProvider,
-      message: name(p.toProvider) + " doesn't know what happened in " + from + " since it last ran (" +
-        n + " turn" + (n === 1 ? "" : "s") + ").",
+      message: name(p.toProvider) + " doesn't know what happened in " + listed + " since it last caught up.",
       actionLabel: "Catch " + name(p.toProvider) + " up",
-      actionTooltip: "Sends " + name(p.toProvider) + " one message asking it to read " + p.path +
-        " and say what changed.",
+      actionTooltip: "Sends " + name(p.toProvider) + " one message asking it to read " +
+        sources.map(function (s) { return s.path; }).join(", ") + " and say what changed.",
       // Written by the host (catch_up_turn_text), so a later digest can
       // recognise this exchange and leave it out.
       turn: p.turnText || "",

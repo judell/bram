@@ -2,8 +2,8 @@
 """Drive the session-switching matrix in a demo instance and check its trace.
 
 docs/decisions/2026-10-27-bram-chooses-the-session.md states the rule (Bram
-chooses the session, launches it by id, marks it current at launch, and pairs
-only through an explicit act tied to that id) and the matrix that checks it.
+chooses the session, launches it by id, marks it current at launch, and groups
+sessions only through an explicit act tied to that id) and the matrix that checks it.
 This runs the matrix against a real Bram on the demo repo, with the real agent
 CLIs, through the BRAM_TEST_DRIVE routes (switch-matrix-harness), and asserts on
 the trace lines a person read by hand on 2026-10-27.
@@ -154,7 +154,7 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
         ("claude launch-confirmed", bool(r.wait(m0, r"op=launch-confirmed provider=claude"))),
     ])
 
-    a = b = None
+    a = b = x = None
     if turns:
         # new-session: named on its reserved id, brief released on the composer.
         m = r.mark()
@@ -172,7 +172,7 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
         r.wait(m, r"op=launch-(confirmed|exited|timeout|superseded) provider=claude source=new-session")
 
         # fresh partners: a New-session-born session starts a named, paired partner.
-        for p, label in (("opencode", "OpenCode"), ("codex", "Codex")):
+        for p in ("opencode", "codex"):
             if p not in agents:
                 r.skip(f"fresh-partner-{p}", "agent not selected")
                 continue
@@ -182,9 +182,12 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
             m = r.mark()
             r.post("__test/switch", {"provider": p})
             fresh = r.wait(m, rf"op=fresh-partner provider={p} .*from={a}")
-            paired = r.wait(m, rf"op=pair-stamp claude={a} {p}=(\S+) source=switch-new-session-born", self_timeout(r))
+            # The first partner joins as New session's; the second joins the group.
+            paired = r.wait(m, rf"op=pair-stamp claude={a} {p}=(\S+) source=(switch-new-session-born|switch-group)",
+                            self_timeout(r))
             pid = paired.group(1) if paired else None
-            named = r.wait(m, rf"op=named provider={p} sid={pid} title={re.escape(title)} \({label}\)") if pid else None
+            # session-groups: a group's sessions share its name, untagged.
+            named = r.wait(m, rf"op=named provider={p} sid={pid} title={re.escape(title)}$") if pid else None
             r.case(f"fresh-partner-{p}", [
                 ("fresh partner started", bool(fresh)),
                 ("paired with the claude session", bool(paired)),
@@ -192,6 +195,10 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
             ])
             if p == "opencode":
                 b = pid
+            else:
+                x = pid
+            # No wait for the partner's catch-up turn: people switch mid-turn,
+            # and Bram escalates when an agent doesn't exit (op=exit-retry).
             # partner-resume back to claude.
             m = r.act("__test/switch", {"provider": "claude"}, "claude")
             r.case(f"partner-resume-from-{p}", [
@@ -201,6 +208,26 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
     else:
         r.skip("new-session-claude", "--no-turns")
         r.skip("fresh-partners", "--no-turns")
+
+    # session-groups: a group of three. Codex and OpenCode both joined Claude's
+    # group, so a switch between them resumes the other's member by id (on
+    # 2026-10-28 they were each paired with Claude but not with each other).
+    if b and x:
+        r.act("__test/switch", {"provider": "codex"}, "codex")
+        m = r.act("__test/switch", {"provider": "opencode"}, "opencode")
+        row = next((s for s in r.sessions("claude") if s.get("id") == a), {})
+        members = {(g.get("provider"), g.get("id")) for g in (row.get("group") or {}).get("members", [])}
+        titles = {s.get("title") for p in ("opencode", "codex") for s in r.sessions(p) if s.get("id") in (b, x)}
+        r.case("group-of-three", [
+            ("claude row lists both members", {("opencode", b), ("codex", x)} <= members),
+            ("all three share the group's name", titles == {title}),
+            ("codex -> opencode resumed its member by id",
+             bool(r.wait(m, rf"op=start provider=opencode .*resume_sid={b} resume_reason=partner"))),
+        ])
+        # Back to Claude, where the next case starts.
+        r.act("__test/switch", {"provider": "claude"}, "claude")
+    else:
+        r.skip("group-of-three", "needs both fresh partners (Codex's may be held: see the decision note)")
 
     # opencode partner marked current at launch.
     if b:
@@ -214,6 +241,7 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
 
     # fallback: from an unpaired OpenCode session, Claude resumes its newest by id
     # and the offer names that id.
+    grouping = None
     if "opencode" in agents:
         # A cross-agent reload pairs on purpose ("an explicit resume ... re-pairs
         # with the session being left", provider-session-counterparts), so the
@@ -225,7 +253,11 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
             m = r.act("__test/reload", {"provider": "opencode", "id": u}, "opencode")
             current = r.wait(m, rf"op=live-session-set provider=opencode session={re.escape(u)} .*via=reload")
             r.get(f"__sessions/unpair?provider=opencode&id={u}")
-            newest = (r.sessions("claude") or [{}])[0].get("id")
+            # session-groups: a switch from a loose session resumes the target's
+            # newest *loose* session, never another group's.
+            loose = sorted((s for s in r.sessions("claude") if not s.get("group")),
+                           key=lambda s: s.get("mtime", 0), reverse=True)
+            newest = (loose or [{}])[0].get("id")
             m2 = r.act("__test/switch", {"provider": "claude"}, "claude")
             offered = r.wait(m2, r"op=pair-offer active=true", 15)
             r.case("fallback-by-id", [
@@ -245,10 +277,11 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
                 r.wait(m3, r"op=launch-(confirmed|exited|timeout) provider=claude")
             else:
                 r.skip("reload-clears-offer", "no offer was shown")
+            grouping = (u, newest)
         else:
             r.skip("fallback-by-id", "no OpenCode session in the demo repo")
 
-    # delete: the running session is refused; a paired one ends its pairs.
+    # delete: the running session is refused; a grouped one leaves its group.
     live = next((s for s in r.sessions("claude") if s.get("current")), None)
     if live:
         code, _ = r.get(f"__sessions/delete?id={live['id']}&provider=claude")
@@ -258,13 +291,81 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
     if b:
         m = r.mark()
         code, _ = r.get(f"__sessions/delete?id={b}&provider=opencode")
-        r.case("delete-ends-pairs", [
+        r.case("delete-leaves-group", [
             (f"HTTP {code}, expected 200", code == 200),
             ("opencode deleted it", bool(r.wait(m, rf"op=opencode-delete session={b} status=0"))),
-            ("pair ended", bool(r.wait(m, rf"op=pair-stamp opencode={b} claude= source=delete"))),
+            ("left its group", bool(r.wait(m, rf"op=group-leave opencode={b} source=delete result=ok"))),
         ])
     else:
-        r.skip("delete-ends-pairs", "no opencode partner to delete")
+        r.skip("delete-leaves-group", "no opencode partner to delete")
+    # session-groups: from inside a group with no OpenCode member (b was just
+    # deleted), a switch to OpenCode starts a new session for the group rather
+    # than falling back to another one (2026-10-28 04:00Z: it fell back to
+    # another group's session, and the offer moved and renamed it).
+    if turns and a and b and x:
+        r.post("__test/reload", {"provider": "claude", "id": a})
+        r.wait(r.mark(), r"op=launch-(confirmed|exited|timeout) provider=claude")
+        m = r.mark()
+        r.post("__test/switch", {"provider": "opencode"})
+        fresh = r.wait(m, r"op=fresh-partner provider=opencode reason=group")
+        joined = r.wait(m, rf"op=pair-stamp claude={a} opencode=(\S+) source=switch-group", self_timeout(r))
+        r.case("group-gets-a-new-member", [
+            ("started a new OpenCode session", bool(fresh)),
+            ("no fallback to another session", not r.wait(m, r"op=start provider=opencode .*resume_reason=latest", 1)),
+            ("it joined the group", bool(joined)),
+        ])
+        r.wait(m, r"\[turn-state\] from=working to=finished provider=opencode", self_timeout(r))
+    else:
+        r.skip("group-gets-a-new-member", "needs the group of three (turns, all agents)")
+
+    # session-groups: the offer's Add (the pair route) groups the two,
+    # anchored on the session left; the Sessions row's Leave ends it. After
+    # delete, so adding doesn't evict the OpenCode member that case deletes.
+    if grouping and grouping[1]:
+        u, newest = grouping
+        m4 = r.mark()
+        code, _ = r.get(f"__sessions/pair?opencode={u}&claude={newest}&from=opencode")
+        r.case("add-to-group", [
+            (f"HTTP {code}, expected 200", code == 200),
+            ("grouped", bool(r.wait(m4, rf"op=pair-stamp opencode={re.escape(u)} claude={newest} source=offer-keep result=ok"))),
+        ])
+        m5 = r.mark()
+        r.get(f"__sessions/unpair?provider=opencode&id={u}")
+        r.case("leave-group", [
+            ("left", bool(r.wait(m5, rf"op=group-leave opencode={re.escape(u)} source=unpair result=ok"))),
+        ])
+        # session-groups: the loose row's "Add to '<group>'" (the row's joinable
+        # entries) joins without resuming anything.
+        row = next((s for s in r.sessions("opencode") if s.get("id") == u), {})
+        entry = (row.get("joinable") or [None])[0]
+        if entry:
+            m6 = r.mark()
+            code, _ = r.get(f"__sessions/pair?{entry['anchorProvider']}={entry['anchorId']}&opencode={u}")
+            r.case("add-from-row", [
+                (f"HTTP {code}, expected 200", code == 200),
+                ("joined the group", bool(r.wait(m6, rf"op=pair-stamp {entry['anchorProvider']}={entry['anchorId']} opencode={re.escape(u)} .*result=ok"))),
+                ("took its name", bool(r.wait(m6, rf"op=group-name opencode={re.escape(u)} .*result=ok"))
+                 or row.get("title") == entry.get("name")),
+                ("nothing resumed", not r.wait(m6, r"op=(start|reload) provider=", 2)),
+            ])
+        else:
+            r.skip("add-from-row", "no group to join")
+
+
+def new_session_opencode(r: Run, turns: bool, agents: list[str]) -> None:
+    # 2026-10-28 05:15Z: New session in OpenCode queued no name, so OpenCode
+    # titled the session with its first message.
+    if not turns or "opencode" not in agents:
+        r.skip("new-session-opencode", "needs turns and opencode")
+        return
+    title = f"matrix oc {time.strftime('%H%M%S')}"
+    r.act("__test/switch", {"provider": "opencode"}, "opencode")
+    m = r.mark()
+    r.post("__test/new-session", {"provider": "opencode", "title": title})
+    r.post("__test/turn", {"text": f"Switch-matrix brief for '{title}'. Reply with just: ok"})
+    named = r.wait(m, rf"\[session-new\] op=named provider=opencode sid=(\S+) title={re.escape(title)}$",
+                   self_timeout(r))
+    r.case("new-session-opencode", [("named on its id", bool(named))])
 
 
 def self_timeout(r: Run) -> float:
@@ -309,6 +410,7 @@ def main() -> int:
     r.wait(r.start, r"op=launch-(confirmed|exited|timeout) provider=\S+ source=autostart", 90)
 
     matrix(r, not args.no_turns, agents)
+    new_session_opencode(r, not args.no_turns, agents)
 
     never = sorted({line.split("] ", 2)[-1][:120] for line in msc.trace_lines(repo)[r.start:]
                     if NEVER.search(line)})

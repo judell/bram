@@ -932,11 +932,12 @@ python3 -I scripts/switch-matrix.py --agents claude,opencode              # adds
 ```
 
 The cases: a plain switch; New session (named on its reserved id, brief
-released when the composer is drawn); fresh partners (started, paired and named
-after the Claude session); partner resume by id; OpenCode marked current at
-launch; no-partner fallback by id, with the offer up; a reload clearing the
-offer; deleting the running session refused; deleting a paired one ending its
-pairs. Across the whole run, no `launch-timeout`, `launch-exited`,
+released when the composer is drawn); fresh partners (started, grouped with and
+named after the Claude session); resuming a group member by id, including
+Codex → OpenCode in a group of three; OpenCode marked current at launch;
+no-group fallback by id, with the offer up; a reload clearing the offer;
+deleting the running session refused; deleting a grouped one taking it out of
+its group; the offer's Add and the Sessions row's Leave. Across the whole run, no `launch-timeout`, `launch-exited`,
 `boot-held-restore` or `rebound` may appear.
 
 Exit status is the number of failed checks; on failure the demo stays up. Cases

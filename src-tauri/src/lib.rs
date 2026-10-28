@@ -11988,6 +11988,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             }
         }
     }
+    note_agent_state_marker(chunk);
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
@@ -20845,12 +20846,9 @@ const NEW_SESSION_PROMPT_TIMEOUT_MS: i64 = 45_000;
 const NEW_SESSION_PROMPT_POLL_MS: u64 = 100;
 const AGENT_RELAUNCH_SETTLE_MS: u64 = 1200;
 const AGENT_SESSION_REFRESH_MS: u64 = 3000;
-// Delay after a cross-provider switch/reload before auto-reloading the agent
-// pane. Cross-provider has several independent provider caches (the active-agent
-// hint, mainAgentStatus.provider/verb, latest-session caches); flipping them all
-// in place is fragile, so once the target provider's hint is set we reload the
-// pane (the same action the user did by hand) to re-derive everything cleanly.
-const AGENT_CROSS_PROVIDER_RELOAD_MS: u64 = 2500;
+// Delay after a cross-provider switch/reload before resetting the agent status
+// the banner shows, once the target provider's hint is set.
+const AGENT_CROSS_PROVIDER_RESET_MS: u64 = 2500;
 
 // issue-314: the shared evidence gate for typing a launch command into the
 // PTY — a settle floor (so the launch can't race the interrupt echo when the
@@ -20884,6 +20882,68 @@ fn wait_for_shell_prompt_evidence() -> Result<(i64, &'static str), i64> {
         let waited = unix_now_ms().saturating_sub(started);
         if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
             return Err(waited);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
+    }
+}
+
+// codex-exit-escalation (switch matrix 2026-10-28 03:43Z and 04:26Z): Codex
+// 0.165.0 sometimes stayed up after Bram's Esc + Ctrl-C + Ctrl-C, showing
+// "Working…" seconds later with nothing else typed, and the next agent's
+// launch timed out after 45 s. Probed directly, the same keys exit it idle,
+// mid-turn and just after a turn (two Ctrl-C's give "Shutting down..."), so
+// what differs is state Bram can't see. When the shell is known to be running
+// a foreground program (markers seen, not at the prompt) and no prompt has
+// come back after EXIT_RETRY_AFTER_MS, send Ctrl-C twice more, at most
+// EXIT_RETRIES times. Only while the prompt is still missing: a shell that is
+// back never sees them.
+const EXIT_RETRY_AFTER_MS: i64 = 4000;
+const EXIT_RETRIES: u32 = 2;
+
+fn wait_for_shell_prompt_escalating<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    provider: &str,
+    generation: u64,
+) -> Result<(i64, &'static str), i64> {
+    if !shell_foreground().seen {
+        return wait_for_shell_prompt_evidence();
+    }
+    let started = unix_now_ms();
+    let mut retries = 0u32;
+    loop {
+        if let Some(via) = shell_prompt_evidence(shell_foreground(), pty_tail_shows_shell_prompt())
+        {
+            return Ok((unix_now_ms().saturating_sub(started), via));
+        }
+        let waited = unix_now_ms().saturating_sub(started);
+        if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
+            return Err(waited);
+        }
+        let fg = shell_foreground();
+        if retries < EXIT_RETRIES
+            && fg.seen
+            && !fg.at_prompt
+            && waited >= EXIT_RETRY_AFTER_MS * (retries as i64 + 1)
+            && agent_launch_is_current(generation)
+        {
+            retries += 1;
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "agent-switch",
+                    &format!(
+                        "op=exit-retry provider={} n={} waited_ms={} tail=\"{}\"",
+                        provider,
+                        retries,
+                        waited,
+                        pty_tail_snippet(160)
+                    ),
+                );
+            }
+            let _ = pty_write_internal(app, state, "\x03", "agent-exit-retry-1");
+            std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
+            let _ = pty_write_internal(app, state, "\x03", "agent-exit-retry-2");
         }
         std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
     }
@@ -20929,7 +20989,54 @@ static AGENT_LAUNCH_PENDING_GEN: std::sync::atomic::AtomicU64 =
 // a routine whose generation is no longer the latest stops quietly.
 static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// session-groups (switch matrix 2026-10-28 04:50Z): when the newest launch
+// began, and the last agent state marker (OSC 7501 "state=<s>:app=<a>") an
+// agent printed, with its app and time. OpenCode prints one about 2 s after
+// it starts (`state=idle:app=opencode`), a readiness signal that doesn't
+// depend on reading its screen: its animated "/update to install v2.2.0"
+// notice filled the tail with fragments (tail=".0") and every screen marker
+// missed.
+static AGENT_LAUNCH_BEGAN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn agent_state_marker_cell() -> &'static Mutex<(String, i64)> {
+    static CELL: OnceLock<Mutex<(String, i64)>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new((String::new(), 0)))
+}
+
+fn note_agent_state_marker(chunk: &[u8]) {
+    const OSC: &[u8] = b"\x1b]7501;state=";
+    let Some(at) = chunk.windows(OSC.len()).rposition(|w| w == OSC) else {
+        return;
+    };
+    let rest = &chunk[at + OSC.len()..];
+    let end = rest
+        .iter()
+        .position(|b| *b == 0x1b || *b == 0x07)
+        .unwrap_or(rest.len());
+    let body = String::from_utf8_lossy(&rest[..end]);
+    let Some(app) = body
+        .split(':')
+        .find_map(|kv| kv.strip_prefix("app="))
+        .map(|a| a.to_string())
+    else {
+        return;
+    };
+    if let Ok(mut cell) = agent_state_marker_cell().lock() {
+        *cell = (app, unix_now_ms());
+    }
+}
+
+// Whether `provider` printed a state marker since the newest launch began.
+fn agent_state_marker_since_launch(provider: SessionProvider) -> bool {
+    let began = AGENT_LAUNCH_BEGAN_MS.load(std::sync::atomic::Ordering::SeqCst);
+    agent_state_marker_cell()
+        .lock()
+        .map(|g| g.0 == session_provider_label(provider) && g.1 >= began)
+        .unwrap_or(false)
+}
+
 fn begin_agent_launch() -> u64 {
+    AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms(), std::sync::atomic::Ordering::SeqCst);
     // codex-resume-false-working: a fresh launch hasn't shown its composer.
     CODEX_COMPOSER_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
     AGENT_LAUNCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
@@ -21098,7 +21205,12 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
         }
     };
     if l.gate {
-        match wait_for_shell_prompt_evidence() {
+        let gate = if matches!(l.source, "switch" | "reload" | "new-session") {
+            wait_for_shell_prompt_escalating(app, &state, l.provider, l.generation)
+        } else {
+            wait_for_shell_prompt_evidence()
+        };
+        match gate {
             Err(waited) => {
                 // launch-timeout-respects-supersede (2026-10-27 19:47Z): a
                 // switch whose interrupts didn't end OpenCode was replaced by
@@ -21454,8 +21566,31 @@ fn switch_agent(
             None
         }
     });
+    // session-groups (Jon, 2026-10-28): a switch never lands in another
+    // group's session. From inside a group, the group decides: its member for
+    // the target agent, or a new session made for the group. From a loose
+    // session, the target's most recent *loose* session, or a new one when
+    // every session it has is grouped. On 2026-10-28 04:00Z a switch from a
+    // new group fell back to the burndown group's OpenCode session, and one
+    // click on the offer moved and renamed it.
+    let leaving_group = leaving.as_ref().and_then(|(p, sid)| {
+        let conn = worklist_state_open(&app)?;
+        worklist_state::session_group(&conn, session_provider_label(*p), sid)
+            .ok()
+            .flatten()
+    });
     let pin = if provider_key == "codex" {
-        usable_codex_reload_target(&app)
+        usable_codex_reload_target(&app).filter(|t| {
+            worklist_state_open(&app)
+                .and_then(|conn| worklist_state::session_group(&conn, "codex", &t.id).ok())
+                .flatten()
+                .is_none()
+        })
+    } else {
+        None
+    };
+    let target_latest_loose = if partner.is_none() && leaving_group.is_none() && has_session {
+        latest_loose_session_id(&app, target_provider)
     } else {
         None
     };
@@ -21478,26 +21613,41 @@ fn switch_agent(
     // so a session already paired with one provider can still start its
     // first partner on another.
     let fresh_reason: Option<&'static str> = leaving.as_ref().and_then(|(p, sid)| {
+        if partner.is_some() {
+            return None;
+        }
+        // session-groups: the group has no session on this agent (or its
+        // member's file is gone), so it gets a new one.
+        if leaving_group.is_some() {
+            return Some("group");
+        }
         let conn = worklist_state_open(&app)?;
         let label = session_provider_label(*p);
-        if !worklist_state::session_never_paired(
+        let never = worklist_state::session_never_paired(
             &conn,
             label,
             sid,
             session_provider_label(target_provider),
         )
-        .ok()?
-        {
-            return None;
-        }
-        fresh_partner_reason(
-            worklist_state::session_born_from_new_session(&conn, label, sid).unwrap_or(false),
-            has_session,
-        )
+        .ok()?;
+        let reason = never
+            .then(|| {
+                fresh_partner_reason(
+                    worklist_state::session_born_from_new_session(&conn, label, sid)
+                        .unwrap_or(false),
+                    has_session,
+                )
+            })
+            .flatten();
+        // session-groups: every session the target has is in a group, so a
+        // new one is the only session this switch can mean.
+        reason.or_else(|| (has_session && target_latest_loose.is_none()).then_some("all-grouped"))
     });
     let wants_fresh = fresh_reason.is_some();
     let pair_source = match fresh_reason {
         Some("first-session") => "switch-first-session",
+        Some("group") => "switch-group",
+        Some("all-grouped") => "switch-all-grouped",
         _ => "switch-new-session-born",
     };
     let fresh: Option<(String, Option<String>)> = if switch_starts_fresh_partner(
@@ -21553,8 +21703,11 @@ fn switch_agent(
     // fallback-switch-offer-names-wrong-session: resolve "most recent" to an
     // id and launch that id, so the terminal and the pair offer name the
     // same session. Without an id (none found) it stays `--continue`.
+    // session-groups: only a loose session (with groups off, any).
     let latest_target: Option<String> = if resume_reason == "latest" {
-        fallback_latest_session_id(&app, target_provider)
+        target_latest_loose
+            .clone()
+            .or_else(|| fallback_latest_session_id(&app, target_provider))
     } else {
         None
     };
@@ -21616,6 +21769,17 @@ fn switch_agent(
     if target_provider == SessionProvider::Opencode {
         if let Some(id) = target_sid.as_deref() {
             mark_opencode_session_current(&app, id, "switch");
+        }
+    }
+    // session-groups: the same for Codex, whose current session is its reload
+    // pin. 2026-10-28 05:25Z: a switch ran `codex resume 01a04c1d` but the pin
+    // still named the group's fresh partner 01a180f6, which an idle resume
+    // never displaces. Sessions marked the wrong one [current], and the next
+    // switch left from it, starting a duplicate OpenCode partner for its group.
+    // A pending target is pinned at launch below.
+    if target_provider == SessionProvider::Codex && resume_reason != "resume-pending" {
+        if let Some(id) = target_sid.as_deref() {
+            let _ = pin_codex_reload_target(&app, id);
         }
     }
     let pair_from = leaving.clone();
@@ -21781,12 +21945,12 @@ fn switch_agent(
                 // what it missed in the session being left, and offer the
                 // catch-up turn. Then mark the entered session. A fresh
                 // partner has missed everything, so it gets the latest turns.
+                // session-groups: a resumed group member gets one catch-up
+                // covering every other member, since it last caught up on each.
                 let digest = match resume_reason {
-                    "partner" | "fresh-for-new-session" => {
-                        pair_from.as_ref().and_then(|(p, id)| {
-                            write_session_digest(app, *p, id, resume_reason == "partner")
-                        })
-                    }
+                    "fresh-for-new-session" => pair_from
+                        .as_ref()
+                        .and_then(|(p, id)| write_session_digest(app, *p, id, false, None)),
                     _ => None,
                 };
                 // A fresh Codex session has no file, name or pair until its
@@ -21826,6 +21990,13 @@ fn switch_agent(
                     }
                     return;
                 }
+                if resume_reason == "partner" {
+                    if let Some(sid) = target_sid.as_ref() {
+                        let sources = group_catch_up(app, &(target_provider, sid.clone()));
+                        emit_group_catch_up_offer(app, Some(target_provider), sources);
+                        return;
+                    }
+                }
                 emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
                 return;
             }
@@ -21852,7 +22023,7 @@ fn switch_agent(
                 // banner, agent name and verb all switch instead of staying
                 // stale on the prior provider.
                 set_current_provider(app, session_provider, "switch");
-                schedule_cross_provider_pane_reload(app.clone());
+                schedule_cross_provider_status_reset(app.clone());
             }
         }),
     });
@@ -21881,6 +22052,13 @@ fn record_pair_for<R: tauri::Runtime>(
     };
     let result =
         worklist_state::record_session_pair(&conn, al, &a.1, bl, &b.1, unix_now_ms(), source);
+    // session-groups: whoever joined takes the group's name.
+    if matches!(result, Ok(true)) {
+        if let Ok(Some(group)) = worklist_state::session_group(&conn, al, &a.1) {
+            harmonize_group_names(app, &group, source);
+            emit_replayable_signal(app, "sessions-list-changed");
+        }
+    }
     if bram_trace_enabled() {
         let outcome = match &result {
             Ok(true) => "ok".to_string(),
@@ -21935,20 +22113,14 @@ fn pair_sessions_route<R: tauri::Runtime>(
     let [a, b] = sides.as_slice() else {
         return Err("two sessions of different providers required".to_string());
     };
-    record_pair_for(app, a, b, "offer-keep");
+    // session-groups: the session you switched away from anchors the join, so
+    // the one you arrived at moves into its group (or both start one).
+    let (anchor, arrived) = if from == Some(b.0) { (b, a) } else { (a, b) };
+    record_pair_for(app, anchor, arrived, "offer-keep");
     emit_pair_offer(app, None, None);
-    if let Some(fp) = from {
-        let target = if fp == a.0 {
-            Some((a.1.clone(), b.0))
-        } else if fp == b.0 {
-            Some((b.1.clone(), a.0))
-        } else {
-            None
-        };
-        if let Some((fid, tp)) = target {
-            let digest = write_session_digest(app, fp, &fid, true);
-            emit_catch_up_offer(app, Some(&(fp, fid)), Some(tp), digest);
-        }
+    if from.is_some() {
+        let sources = group_catch_up(app, arrived);
+        emit_group_catch_up_offer(app, Some(arrived.0), sources);
     }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
@@ -21970,13 +22142,98 @@ fn session_title_by_id<R: tauri::Runtime>(
             .ok()
             .and_then(|titles| titles.get(id).cloned())
             .or_else(|| codex_session_title(&path).ok().flatten()),
-        // The export carries OpenCode's title as a custom-title record.
-        SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
+        // session-groups: OpenCode's own database, as the Sessions list reads
+        // it. The export file's custom-title record is only a fallback: it
+        // goes stale after a rename until the session is exported again
+        // (2026-10-28 04:11Z: a renamed member still showed its old name in
+        // the group line, and group naming compared against it).
+        SessionProvider::Opencode => opencode_session_title_from_db(id)
+            .or_else(|| claude_session_title(&path).ok().flatten()),
     }
 }
 
-// provider-session-pair-offer: each /__sessions/list row whose session has a
-// partner gets `partner: {provider, id, title}` (computed, never stored).
+fn opencode_session_title_from_db(id: &str) -> Option<String> {
+    let conn = opencode_open_db()?;
+    conn.query_row(
+        "SELECT COALESCE(title, '') FROM session_v2 WHERE id = ?1",
+        rusqlite::params![id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .map(|t| t.trim().to_string())
+    .filter(|t| !t.is_empty())
+}
+
+// session-groups: a group's name is the title of the session it started
+// with (another member's once that one has left), without an agent tag, or
+// that session's short id.
+fn session_group_name<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    group: &worklist_state::SessionGroup,
+) -> String {
+    group_title(app, group).unwrap_or_else(|| group.origin.1.chars().take(8).collect())
+}
+
+fn group_title<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    group: &worklist_state::SessionGroup,
+) -> Option<String> {
+    let title_of = |(p, id): &(String, String)| {
+        SessionProvider::from_str(p).and_then(|sp| session_title_by_id(app, sp, id))
+    };
+    let origin_member = group.members.contains(&group.origin);
+    origin_member
+        .then(|| title_of(&group.origin))
+        .flatten()
+        .or_else(|| group.members.iter().find_map(title_of))
+        .map(|t| strip_agent_tag(&t).to_string())
+}
+
+// session-groups (Jon, 2026-10-28: "When you join a group session, you adopt
+// its name"): rename every member whose title differs from the group's name.
+// Renaming inside a group is otherwise refused (the rename route).
+fn harmonize_group_names<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    group: &worklist_state::SessionGroup,
+    source: &str,
+) {
+    let Some(name) = group_title(app, group) else {
+        return;
+    };
+    for (p, id) in &group.members {
+        let Some(sp) = SessionProvider::from_str(p) else {
+            continue;
+        };
+        let current = session_title_by_id(app, sp, id);
+        if current.as_deref() == Some(name.as_str()) {
+            continue;
+        }
+        let result = rename_session(app, id, Some(sp), &name);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "state-mirror",
+                &format!(
+                    "op=group-name {}={} from={:?} to={:?} source={} result={}",
+                    p,
+                    id,
+                    current.unwrap_or_default(),
+                    name,
+                    source,
+                    match &result {
+                        Ok(_) => "ok".to_string(),
+                        Err(e) => format!("error detail={}", e),
+                    }
+                ),
+            );
+        }
+    }
+}
+
+// provider-session-pair-offer, session-groups: each /__sessions/list row whose
+// session is in a group gets `group: {id, name, members}` (the other members,
+// each {provider, id, title}) and, for older pane code, `partner`/`partners`
+// (computed, never stored).
 fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut serde_json::Value) {
     let Some(list) = rows.as_array_mut() else {
         return;
@@ -21984,6 +22241,19 @@ fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut ser
     let Some(conn) = worklist_state_open(app) else {
         return;
     };
+    let Ok(snap) = worklist_state::group_snapshot(&conn) else {
+        return;
+    };
+    // session-groups: the groups a loose session could join (none of their
+    // members is on its agent), each with the member that anchors the join.
+    let groups: Vec<(worklist_state::SessionGroup, String)> = snap
+        .groups()
+        .into_iter()
+        .map(|g| {
+            let name = session_group_name(app, &g);
+            (g, name)
+        })
+        .collect();
     for row in list.iter_mut() {
         let provider = row
             .get("provider")
@@ -21995,27 +22265,51 @@ fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut ser
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // opencode-partner-handoff: up to one partner per other provider.
-        let Ok(found) = worklist_state::session_partners(&conn, &provider, &id) else {
+        let Some(group) = snap.group_of(&provider, &id) else {
+            let joinable: Vec<serde_json::Value> = groups
+                .iter()
+                .filter(|(g, _)| !g.members.iter().any(|(p, _)| p == &provider))
+                .filter_map(|(g, name)| {
+                    let (ap, aid) = g.members.first()?;
+                    Some(serde_json::json!({
+                        "name": name,
+                        "anchorProvider": ap,
+                        "anchorId": aid,
+                        "provider": provider,
+                        "id": id,
+                    }))
+                })
+                .collect();
+            if !joinable.is_empty() {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("joinable".to_string(), serde_json::Value::Array(joinable));
+                }
+            }
             continue;
         };
-        let partners: Vec<serde_json::Value> = found
-            .into_iter()
+        let members: Vec<serde_json::Value> = group
+            .members
+            .iter()
+            .filter(|(p, mid)| !(p == &provider && mid == &id))
             .filter_map(|(label, pid)| {
                 let other = SessionProvider::from_str(label)?;
                 Some(serde_json::json!({
                     "provider": label,
                     "id": pid,
-                    "title": session_title_by_id(app, other, &pid),
+                    "title": session_title_by_id(app, other, pid),
                 }))
             })
             .collect();
-        let Some(first) = partners.first().cloned() else {
-            continue;
-        };
+        let name = session_group_name(app, &group);
         if let Some(obj) = row.as_object_mut() {
-            obj.insert("partner".to_string(), first);
-            obj.insert("partners".to_string(), serde_json::Value::Array(partners));
+            if let Some(first) = members.first().cloned() {
+                obj.insert("partner".to_string(), first);
+            }
+            obj.insert(
+                "group".to_string(),
+                serde_json::json!({ "id": group.id, "name": name, "members": members }),
+            );
+            obj.insert("partners".to_string(), serde_json::Value::Array(members));
         }
     }
 }
@@ -22034,9 +22328,9 @@ fn unpair_session<R: tauri::Runtime>(
     Ok(br#"{"ok":true}"#.to_vec())
 }
 
-// Record an empty partner for every pair of (provider, session_id), ending
-// them from both sides. `source` names why: "unpair" (the Sessions tab's
-// Unpair) or "delete" (delete-live-session-leaves-stub).
+// session-groups: take (provider, session_id) out of its group. `source`
+// names why: "unpair" (the Sessions tab's Leave) or "delete"
+// (delete-live-session-leaves-stub).
 fn end_session_pairs<R: tauri::Runtime>(
     app: &AppHandle<R>,
     conn: &rusqlite::Connection,
@@ -22045,35 +22339,20 @@ fn end_session_pairs<R: tauri::Runtime>(
     source: &str,
 ) -> Result<(), String> {
     let mine = session_provider_label(provider);
-    // opencode-partner-handoff: a session can have a partner on each other
-    // provider, and this ends all of them.
-    let partners =
-        worklist_state::session_partners(conn, mine, session_id).map_err(|e| e.to_string())?;
-    for (other, _) in partners {
-        let wrote = worklist_state::record_session_pair(
-            conn,
-            mine,
-            session_id,
-            other,
-            "",
-            unix_now_ms(),
-            source,
-        )
+    let left = worklist_state::leave_group(conn, mine, session_id, unix_now_ms(), source)
         .map_err(|e| e.to_string())?;
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "state-mirror",
-                &format!(
-                    "op=pair-stamp {}={} {}= source={} result={}",
-                    mine,
-                    session_id,
-                    other,
-                    source,
-                    if wrote { "ok" } else { "unchanged" }
-                ),
-            );
-        }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "state-mirror",
+            &format!(
+                "op=group-leave {}={} source={} result={}",
+                mine,
+                session_id,
+                source,
+                if left { "ok" } else { "unchanged" }
+            ),
+        );
     }
     Ok(())
 }
@@ -22089,29 +22368,6 @@ fn emit_pair_offer<R: tauri::Runtime>(
 ) {
     let payload = match (from, to) {
         (Some((fp, fid)), Some((tp, tid))) => {
-            // pair-offer-warns-before-replacing: a session has one partner per
-            // other agent, so Keep replaces the resumed session's existing
-            // partner on the leaving side's agent. Name it, so the banner can
-            // say what Keep costs (2026-10-27 21:47Z offered to replace
-            // Claude "v0.8.0 burndown"'s OpenCode partner without a word).
-            let current_partner = worklist_state_open(app)
-                .and_then(|conn| {
-                    worklist_state::session_partner(
-                        &conn,
-                        session_provider_label(tp),
-                        &tid,
-                        session_provider_label(*fp),
-                    )
-                    .ok()
-                    .flatten()
-                })
-                .filter(|id| id != fid)
-                .map(|id| {
-                    serde_json::json!({
-                        "id": id,
-                        "title": session_title_by_id(app, *fp, &id),
-                    })
-                });
             serde_json::json!({
                 "active": true,
                 "fromProvider": session_provider_label(*fp),
@@ -22120,7 +22376,6 @@ fn emit_pair_offer<R: tauri::Runtime>(
                 "toProvider": session_provider_label(tp),
                 "toSessionId": tid,
                 "toTitle": session_title_by_id(app, tp, &tid),
-                "toCurrentPartner": current_partner,
                 "atMs": unix_now_ms(),
             })
         }
@@ -22290,9 +22545,29 @@ fn claude_boot_composer_ready(text: &str) -> bool {
     s[..prompt].contains('─') && s[prompt..end].contains('─')
 }
 
+// session-groups (switch matrix 2026-10-28 03:35Z): Codex 0.165.0 drew its
+// composer, then printed usage warnings below it ("Heads up, you have less
+// than 25% of your 5h limit left", "5h limit: 14% left · /status"), so the
+// screen no longer ended with "? for shortcuts" and the fresh partner's
+// catch-up was held `no-composer`. For the catch-up only, the empty
+// composer's placeholder with its footer anywhere in the tail counts too; an
+// update or trust prompt is checked first and still holds. Idle detection
+// keeps the stricter codex_composer_ready.
+fn codex_catch_up_composer_ready(tail: &str) -> bool {
+    if codex_composer_ready(tail) {
+        return true;
+    }
+    let squashed: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    squashed.contains("askcodextodoanything") && squashed.contains("?forshortcuts")
+}
+
 fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
     match provider {
-        SessionProvider::Codex => codex_composer_ready(tail),
+        SessionProvider::Codex => codex_catch_up_composer_ready(tail),
         SessionProvider::Opencode => opencode_composer_ready(tail),
         SessionProvider::Claude => true,
     }
@@ -22336,8 +22611,23 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
         if superseded(unix_now_ms().saturating_sub(started)) {
             return;
         }
-        let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
-        let r = catch_up_readiness(&tail, target_provider, wait_for_composer);
+        // session-groups (switch matrix 2026-10-28 04:29Z): a fresh OpenCode
+        // partner was held with tail="" for the whole wait. An idle TUI draws
+        // its screen once, and a tail drain racing that draw leaves nothing
+        // to read; fall back to what the drain stashed, as terminal attention
+        // does. Each agent's composer markers are its own, so a stashed screen
+        // from the agent being left can't read as ready.
+        let tail = pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS);
+        let mut r = catch_up_readiness(&tail, target_provider, wait_for_composer);
+        // OpenCode's own state report since this launch began counts as its
+        // composer being up (this wait starts only after the launch is
+        // confirmed, ~8 s in). A prompt on screen still holds.
+        if r == CatchUpReadiness::Waiting
+            && target_provider == SessionProvider::Opencode
+            && agent_state_marker_since_launch(target_provider)
+        {
+            r = CatchUpReadiness::Ready;
+        }
         if r != CatchUpReadiness::Waiting
             || unix_now_ms().saturating_sub(started) >= CATCH_UP_COMPOSER_WAIT_MS
         {
@@ -22356,7 +22646,17 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
         CatchUpReadiness::Waiting => {
             let n = last_tail.chars().count();
             let end: String = last_tail.chars().skip(n.saturating_sub(300)).collect();
-            Some(format!("no-composer tail=\"{}\"", end))
+            // Which drain emptied the tail last, and how long ago.
+            let (site, at) = pty_tail_last_clear_cell()
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(("unknown", 0));
+            Some(format!(
+                "no-composer tail=\"{}\" last_clear={} clear_age_ms={}",
+                end,
+                site,
+                unix_now_ms().saturating_sub(at)
+            ))
         }
         CatchUpReadiness::Ready => None,
     };
@@ -22452,6 +22752,19 @@ mod catch_up_readiness_tests {
     fn live_update_paint_holds_and_its_composer_is_not_ready() {
         assert_eq!(r(LIVE_UPDATE, CODEX, true), Prompt("codex-update"));
         assert!(!super::codex_composer_ready(LIVE_UPDATE));
+    }
+
+    // Codex 0.165.0 in a narrow pane, from the held catch-up's logged tail
+    // (switch matrix 2026-10-28 03:35Z): the composer, then usage warnings.
+    const LIVE_LIMIT_WARNING: &str = "\u{203a} Ask Codex to do anything ? for shortcuts ~/bram-demo-instanceGPT-6-Astra default\u{b7}~/bram-demo-instance\u{2190}agens \u{b7} ?forshortcutshigh \u{b7} ~/bram-demo-instance\u{26a0} Heads up, you have less than 25% of your 5h limit left. Run /status for a breakdown.\u{26a0} 5h limit: 14% left \u{b7} /statu";
+
+    #[test]
+    fn codex_composer_above_usage_warnings_is_ready_for_a_catch_up() {
+        assert_eq!(r(LIVE_LIMIT_WARNING, CODEX, true), Ready);
+        // Idle detection keeps its stricter end-of-screen rule.
+        assert!(!super::codex_composer_ready(LIVE_LIMIT_WARNING));
+        // A shell screen that merely mentions Codex is still waiting.
+        assert_eq!(r("$ codex --help ? for shortcuts", CODEX, true), Waiting);
     }
 
     #[test]
@@ -22557,20 +22870,12 @@ fn session_turns<R: tauri::Runtime>(
 }
 
 // Record a session's turn total as it is entered.
-fn record_session_published<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    provider: SessionProvider,
-    id: &str,
-    total: usize,
-) {
+fn record_session_published<R: tauri::Runtime>(app: &AppHandle<R>, key: &str, total: usize) {
     let Some(path) = session_digest_published_path(app) else {
         return;
     };
     let mut marks = read_session_digest_published(app);
-    marks.insert(
-        format!("{}-{}", session_provider_label(provider), id),
-        serde_json::json!(total),
-    );
+    marks.insert(key.to_string(), serde_json::json!(total));
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -22585,6 +22890,61 @@ fn digest_new_turns(total: usize, watermark: Option<usize>, window_len: usize) -
     match watermark {
         Some(m) if m <= total => total - m,
         _ => window_len,
+    }
+}
+
+#[cfg(test)]
+mod session_group_catch_up_tests {
+    use super::*;
+
+    // OpenCode 2.1.4's state marker, as it arrives in a PTY chunk.
+    #[test]
+    fn an_agent_state_marker_is_noted_with_its_app() {
+        AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms() - 1, std::sync::atomic::Ordering::SeqCst);
+        note_agent_state_marker(b"draw\x1b]7501;state=idle:app=opencode\x1b\\more");
+        assert!(agent_state_marker_since_launch(SessionProvider::Opencode));
+        assert!(!agent_state_marker_since_launch(SessionProvider::Codex));
+        // A launch after the marker: not seen since.
+        AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms() + 1000, std::sync::atomic::Ordering::SeqCst);
+        assert!(!agent_state_marker_since_launch(SessionProvider::Opencode));
+    }
+
+    // session-groups: counts are per (reader, source), so catching OpenCode up
+    // on Claude leaves Codex's count for Claude where it was.
+    #[test]
+    fn digest_counts_are_kept_per_reader() {
+        let oc = (SessionProvider::Opencode, "ses_o1".to_string());
+        let cx = (SessionProvider::Codex, "x1".to_string());
+        let a = session_digest_mark_key(Some(&oc), SessionProvider::Claude, "c1");
+        let b = session_digest_mark_key(Some(&cx), SessionProvider::Claude, "c1");
+        assert_eq!(a, "opencode-ses_o1|claude-c1");
+        assert_ne!(a, b);
+        // No reader: the source's own count, as pairs kept it.
+        assert_eq!(
+            session_digest_mark_key(None, SessionProvider::Claude, "c1"),
+            "claude-c1"
+        );
+    }
+
+    // A catch-up from several members is still recognized as a catch-up,
+    // so later digests leave the exchange out.
+    #[test]
+    fn a_group_catch_up_turn_is_a_catch_up_turn() {
+        let text = catch_up_group_turn_text(&[
+            (
+                "Claude session 'v0.8.0 burndown'".to_string(),
+                12,
+                "a.md".to_string(),
+            ),
+            (
+                "Codex session 'v0.8.0 burndown (Codex)'".to_string(),
+                1,
+                "b.md".to_string(),
+            ),
+        ]);
+        assert!(is_catch_up_turn(&text));
+        assert!(text.contains("(12 turns, `a.md`)"));
+        assert!(text.contains("(1 turn, `b.md`)"));
     }
 }
 
@@ -22677,16 +23037,36 @@ fn render_session_digest(
 // turns added since it was entered (the partner's catch-up); otherwise the
 // latest SESSION_DIGEST_CAP. Returns (relative path, turns written); None
 // when nothing new happened or the session can't be read.
+// session-groups: `reader` is the session the digest is for. Its count is
+// per (reader, source), "<reader>|<source>", so catching one member up
+// doesn't mark anything read for another; with no reader count yet it falls
+// back to the source's own count (how pairs kept it), so a migrated pair
+// resumes where it left off.
+fn session_digest_mark_key(
+    reader: Option<&(SessionProvider, String)>,
+    provider: SessionProvider,
+    id: &str,
+) -> String {
+    let source = format!("{}-{}", session_provider_label(provider), id);
+    match reader {
+        Some((rp, rid)) => format!("{}-{}|{}", session_provider_label(*rp), rid, source),
+        None => source,
+    }
+}
+
 fn write_session_digest<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: SessionProvider,
     id: &str,
     since_mark: bool,
+    reader: Option<&(SessionProvider, String)>,
 ) -> Option<(String, usize)> {
     let (total, window) = session_turns(app, provider, id)?;
     let mark = if since_mark {
-        read_session_digest_published(app)
-            .get(&format!("{}-{}", session_provider_label(provider), id))
+        let marks = read_session_digest_published(app);
+        marks
+            .get(&session_digest_mark_key(reader, provider, id))
+            .or_else(|| marks.get(&session_digest_mark_key(None, provider, id)))
             .and_then(|v| v.as_u64())
             .map(|m| m as usize)
     } else {
@@ -22731,27 +23111,28 @@ fn write_session_digest<R: tauri::Runtime>(
     std::fs::write(&file, body.as_bytes()).ok()?;
     // Published through `total`: the next digest starts here, however many
     // times the session is entered (switch, autostart, reload) before then.
-    record_session_published(app, provider, id, total);
+    record_session_published(app, &session_digest_mark_key(reader, provider, id), total);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
             "agent-switch",
             &format!(
-                "op=digest-written provider={} session={} turns={} bytes={} from={} total={}",
+                "op=digest-written provider={} session={} turns={} bytes={} from={} total={} reader={}",
                 session_provider_label(provider),
                 id,
                 take,
                 body.len(),
                 from,
-                total
+                total,
+                reader
+                    .map(|(p, r)| format!("{}={}", session_provider_label(*p), r))
+                    .unwrap_or_else(|| "none".to_string())
             ),
         );
     }
     Some((session_digest_rel_path(provider, id), take))
 }
 
-// The pane's "Catch <partner> up" notice. Replayable (a cross-provider switch
-// reloads the pane); any switch without a digest clears it.
 // "Claude session '<title>'", or the id's first 8 characters when untitled.
 fn catch_up_from_label(provider: SessionProvider, id: &str, title: Option<&str>) -> String {
     let who = session_provider_display(provider);
@@ -22761,25 +23142,116 @@ fn catch_up_from_label(provider: SessionProvider, id: &str, title: Option<&str>)
     }
 }
 
+// One source of a catch-up: a session, its digest path and its new turns.
+type CatchUpSource = ((SessionProvider, String), String, usize);
+
+// session-groups: what the rest of `reader`'s group did since `reader` last
+// caught up on each member, one digest per member with new turns.
+fn group_catch_up<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    reader: &(SessionProvider, String),
+) -> Vec<CatchUpSource> {
+    let Some(group) = worklist_state_open(app).and_then(|conn| {
+        worklist_state::session_group(&conn, session_provider_label(reader.0), &reader.1)
+            .ok()
+            .flatten()
+    }) else {
+        return Vec::new();
+    };
+    group
+        .members
+        .iter()
+        .filter_map(|(p, id)| {
+            let sp = SessionProvider::from_str(p)?;
+            if sp == reader.0 {
+                return None;
+            }
+            let (path, turns) = write_session_digest(app, sp, id, true, Some(reader))?;
+            (turns > 0).then(|| ((sp, id.clone()), path, turns))
+        })
+        .collect()
+}
+
+// The catch-up turn for several sources; starts like catch_up_turn_text so
+// is_catch_up_turn recognizes both.
+fn catch_up_group_turn_text(sources: &[(String, usize, String)]) -> String {
+    let parts: Vec<String> = sources
+        .iter()
+        .map(|(who, turns, path)| {
+            format!(
+                "{} ({} turn{}, `{}`)",
+                who,
+                turns,
+                if *turns == 1 { "" } else { "s" },
+                path
+            )
+        })
+        .collect();
+    format!(
+        "Your partner sessions {}: {}. Read each (its header names the full transcript if you need more), then tell me in a few lines what changed before we go on.",
+        CATCH_UP_TURN_MARK,
+        parts.join("; ")
+    )
+}
+
 fn emit_catch_up_offer<R: tauri::Runtime>(
     app: &AppHandle<R>,
     from: Option<&(SessionProvider, String)>,
     to: Option<SessionProvider>,
     digest: Option<(String, usize)>,
 ) {
-    let payload = match (from, to, digest) {
-        (Some((fp, fid)), Some(tp), Some((path, turns))) => {
-            let title = session_title_by_id(app, *fp, fid);
-            let from = catch_up_from_label(*fp, fid, title.as_deref());
+    let sources = match (from, digest) {
+        (Some(f), Some((path, turns))) => vec![(f.clone(), path, turns)],
+        _ => Vec::new(),
+    };
+    emit_group_catch_up_offer(app, to, sources);
+}
+
+// The pane's "Catch <agent> up" notice. Replayable (a cross-provider switch
+// reloads the pane); any switch without a digest clears it. The first
+// source's fields stay at the top level for the single-source case.
+fn emit_group_catch_up_offer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    to: Option<SessionProvider>,
+    sources: Vec<CatchUpSource>,
+) {
+    let payload = match (to, sources.first()) {
+        (Some(tp), Some(((fp, fid), path, turns))) => {
+            let listed: Vec<(serde_json::Value, (String, usize, String))> = sources
+                .iter()
+                .map(|((sp, sid), spath, sturns)| {
+                    let title = session_title_by_id(app, *sp, sid);
+                    let who = catch_up_from_label(*sp, sid, title.as_deref());
+                    (
+                        serde_json::json!({
+                            "provider": session_provider_label(*sp),
+                            "id": sid,
+                            "title": title,
+                            "path": spath,
+                            "turns": sturns,
+                        }),
+                        (who, *sturns, spath.clone()),
+                    )
+                })
+                .collect();
+            let turn_text = if listed.len() == 1 {
+                let (who, n, p) = &listed[0].1;
+                catch_up_turn_text(who, *n, p)
+            } else {
+                let parts: Vec<(String, usize, String)> =
+                    listed.iter().map(|(_, x)| x.clone()).collect();
+                catch_up_group_turn_text(&parts)
+            };
             serde_json::json!({
                 "active": true,
                 "fromProvider": session_provider_label(*fp),
                 "fromSessionId": fid,
-                "fromTitle": title,
+                "fromTitle": session_title_by_id(app, *fp, fid),
                 "toProvider": session_provider_label(tp),
                 "path": path,
                 "turns": turns,
-                "turnText": catch_up_turn_text(&from, turns, &path),
+                "sources": listed.into_iter().map(|(v, _)| v).collect::<Vec<_>>(),
+                "turnText": turn_text,
                 "atMs": unix_now_ms(),
             })
         }
@@ -22883,17 +23355,20 @@ fn fresh_partner_reason(
     }
 }
 
-// new-session-switch-starts-fresh-partner: the name of a fresh partner is the
-// session it goes with, tagged with the provider it runs on. A title already
-// tagged with the other provider swaps the tag rather than stacking a second.
-fn fresh_partner_title(from_title: &str, to: SessionProvider) -> String {
-    let base = from_title.trim();
-    let base = base
-        .strip_suffix(" (Claude)")
+// session-groups (Jon, 2026-10-28): a group's sessions share one name, so a
+// fresh partner takes the name of the session it goes with, without the
+// "(Codex)"-style tag partners once carried; the agent switcher says which
+// agent. A tag already on the name is dropped.
+fn strip_agent_tag(title: &str) -> &str {
+    let base = title.trim();
+    base.strip_suffix(" (Claude)")
         .or_else(|| base.strip_suffix(" (Codex)"))
         .or_else(|| base.strip_suffix(" (OpenCode)"))
-        .unwrap_or(base);
-    format!("{} ({})", base, session_provider_display(to))
+        .unwrap_or(base)
+}
+
+fn fresh_partner_title(from_title: &str, _to: SessionProvider) -> String {
+    strip_agent_tag(from_title).to_string()
 }
 
 // The provider's name as people write it.
@@ -22930,6 +23405,29 @@ fn fallback_latest_session_id<R: tauri::Runtime>(
             .flatten()
             .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p)),
     }
+}
+
+// session-groups: the target's most recent session that is in no group.
+// Tries the usual "most recent" first (cheap, and the common case), then the
+// full list by modified time.
+fn latest_loose_session_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+) -> Option<String> {
+    let label = session_provider_label(provider);
+    let snap = worklist_state_open(app).and_then(|c| worklist_state::group_snapshot(&c).ok());
+    let loose = |id: &str| {
+        snap.as_ref()
+            .map_or(true, |s| s.group_of(label, id).is_none())
+    };
+    if let Some(id) = fallback_latest_session_id(app, provider) {
+        if loose(&id) {
+            return Some(id);
+        }
+    }
+    let (_, mut sessions) = sessions_for_provider(app, Some(provider), None).ok()?;
+    sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    sessions.into_iter().map(|s| s.id).find(|id| loose(id))
 }
 
 fn provider_switch_launch(
@@ -23231,27 +23729,26 @@ fn schedule_resync_transcript_to_session<R: tauri::Runtime>(
     });
 }
 
-// Auto-reload the agent pane after a cross-provider switch once the new agent
-// has settled. The surgical event-based sync handles same-provider switches,
-// but crossing Claude<->Codex leaves independent caches stale (banner provider
-// and verb from mainAgentStatus, etc.); a pane reload re-derives them all from
-// the now-flipped active-agent hint — the manual reload the user was doing,
-// automated. Only call this when actually crossing providers.
-fn schedule_cross_provider_pane_reload<R: tauri::Runtime>(app: AppHandle<R>) {
+// After a cross-provider switch, once the new agent has settled, reset the
+// agent status the banner shows, so the prior provider's verb doesn't persist
+// until the new agent emits. Only call this when actually crossing providers.
+//
+// session-groups: this used to reload the whole pane (1effe4a: a pane reload
+// re-derived the provider caches, "the manual reload the user was doing,
+// automated"), which flashed a blank white page mid-switch, worst in dark
+// tone. The pane now follows the switch through its pushed events instead:
+// enhance-status-changed refetches enhanceStatus and restarts the transcript
+// push for the new provider, agent-status-changed carries this reset, and
+// Sessions follows sessions-list-changed.
+fn schedule_cross_provider_status_reset<R: tauri::Runtime>(app: AppHandle<R>) {
     thread::spawn(move || {
         thread::sleep(std::time::Duration::from_millis(
-            AGENT_CROSS_PROVIDER_RELOAD_MS,
+            AGENT_CROSS_PROVIDER_RESET_MS,
         ));
-        // Clear the stale banner verb/provider before reloading — an iframe
-        // reload alone doesn't reset the host-side agent status, so the prior
-        // provider's verb would otherwise persist until the new agent emits.
         reset_agent_status(&app);
         if bram_trace_enabled() {
-            append_bram_trace_line(&app, "agent-switch", "op=cross-provider-pane-reload");
+            append_bram_trace_line(&app, "agent-switch", "op=cross-provider-status-reset");
         }
-        // force=true: a runtime cross-provider reload must fire regardless of the
-        // dev toolsPaneHotReload setting (still defers during an inflight cycle).
-        emit_or_defer_tools_pane_reload(&app, true);
     });
 }
 
@@ -23277,10 +23774,7 @@ fn reload_agent_session(
     clear_pending_session_title_for_resume(&app, session_provider, &session, "session-reload");
     cancel_agent_boot_hold(&app, "session-reload");
     // provider-session-counterparts: an explicit resume always wins over a
-    // pairing, and a cross-provider one re-pairs with the session being left.
-    let leaving = current_provider(&app)
-        .filter(|p| *p != session_provider)
-        .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
+    // grouping (session-groups: and no longer joins one).
     // agent-launch-shared-routine precondition: the session named must still
     // exist. Resuming a deleted one makes the CLI print an error and exit,
     // leaving a bare shell; start the provider fresh instead, as the switch
@@ -23351,14 +23845,9 @@ fn reload_agent_session(
         first_command: false,
         hook: Box::new(move |app, phase| {
             if phase == LaunchPhase::Confirmed {
-                if let (Some(from), true) = (leaving.as_ref(), session_exists) {
-                    record_pair_for(
-                        app,
-                        from,
-                        &(session_provider, session.clone()),
-                        "explicit-resume",
-                    );
-                }
+                // session-groups: a resume across agents no longer joins
+                // anything. Joining is the explicit "Add to '<group>'" on a
+                // loose session's row, or the switch offer's "Group these two".
                 return;
             }
             if phase != LaunchPhase::Written {
@@ -23384,7 +23873,7 @@ fn reload_agent_session(
                 // pane once the resumed agent settles so the banner/verb and
                 // other per-provider caches re-derive cleanly instead of
                 // staying stale on the old provider.
-                schedule_cross_provider_pane_reload(app.clone());
+                schedule_cross_provider_status_reset(app.clone());
             }
         }),
     });
@@ -23455,7 +23944,7 @@ fn start_agent_fresh(
             set_current_provider(app, session_provider, "start-fresh");
             schedule_agent_switch_refresh(app.clone(), provider_key, "start-fresh");
             if crossing {
-                schedule_cross_provider_pane_reload(app.clone());
+                schedule_cross_provider_status_reset(app.clone());
             }
         }),
     });
@@ -24156,14 +24645,14 @@ mod pending_session_title_tests {
     }
 
     #[test]
-    fn fresh_partner_title_names_the_target_provider_once() {
+    fn fresh_partner_title_is_the_shared_name_without_an_agent_tag() {
         assert_eq!(
             fresh_partner_title("General (Oct 8, 0.7.4)", SessionProvider::Codex),
-            "General (Oct 8, 0.7.4) (Codex)"
+            "General (Oct 8, 0.7.4)"
         );
         assert_eq!(
             fresh_partner_title("General (Oct 8, 0.7.4) (Codex)", SessionProvider::Claude),
-            "General (Oct 8, 0.7.4) (Claude)"
+            "General (Oct 8, 0.7.4)"
         );
     }
 
@@ -24305,10 +24794,12 @@ fn create_new_session(
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
-    // opencode-partner-handoff: OpenCode titles its own sessions and Bram
-    // can't rename them, so no name is queued for one; the session still
-    // starts, and a pair asked for still forms once its id surfaces.
-    let names_session = provider_key != "opencode";
+    // session-groups (2026-10-28 05:15Z): OpenCode is named like the others.
+    // This once skipped it ("Bram can't rename them"), but Bram writes
+    // OpenCode titles into its database (opencode-session-rename) and the
+    // queued name applies to OpenCode since fresh-partner-takes-partner-name;
+    // skipping it left a New session titled with its first message.
+    let names_session = true;
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
@@ -24365,7 +24856,7 @@ fn create_new_session(
     // provider-session-digest-for-codex: the new partner has no history, so
     // its brief points at the latest turns of the session it was created for.
     if let Some((p, id)) = pair_with.as_ref() {
-        let _ = write_session_digest(&app, *p, id, false);
+        let _ = write_session_digest(&app, *p, id, false, None);
     }
     let generation = begin_agent_launch();
     // pair-offer-warns-before-replacing: a newer launch ends the situation the
@@ -30694,6 +31185,11 @@ fn worklist_state_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathB
 static WORKLIST_STATE_DB_OPENED_ONCE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// session-groups: the pairs-to-groups migration runs on the first open per
+// process (it is itself once-only per db).
+static SESSION_GROUPS_MIGRATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // state-mirror-divergence-tripwire: count of distinct (deduped)
 // `[state-mirror] op=divergence` lines emitted this process. Read by the
 // Status tab's "State Mirror" section ("Divergences (this process)") so
@@ -30723,6 +31219,44 @@ fn worklist_state_open<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<rusqlite
                         if existed { "existing" } else { "created" }
                     ),
                 );
+            }
+            // session-groups: convert the pairs still holding, once per db.
+            if !SESSION_GROUPS_MIGRATED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let outcome = worklist_state::migrate_pairs_to_groups(&conn, unix_now_ms());
+                if bram_trace_enabled() {
+                    let line = match &outcome {
+                        Ok(None) => None,
+                        Ok(Some(dropped)) => Some(format!(
+                            "op=group-migrate result=ok dropped={}",
+                            if dropped.is_empty() {
+                                "none".to_string()
+                            } else {
+                                dropped.join(",")
+                            }
+                        )),
+                        Err(e) => Some(format!("op=group-migrate result=error detail={}", e)),
+                    };
+                    if let Some(line) = line {
+                        append_bram_trace_line(app, "state-mirror", &line);
+                    }
+                }
+                // Converted groups take their names too, off this thread:
+                // renaming reads each agent's session list.
+                if matches!(outcome, Ok(Some(_))) {
+                    let app = app.clone();
+                    std::thread::spawn(move || {
+                        let Some(conn) = worklist_state_open(&app) else {
+                            return;
+                        };
+                        let Ok(snap) = worklist_state::group_snapshot(&conn) else {
+                            return;
+                        };
+                        for group in snap.groups() {
+                            harmonize_group_names(&app, &group, "migrate-pairs");
+                        }
+                        emit_replayable_signal(&app, "sessions-list-changed");
+                    });
+                }
             }
             Some(conn)
         }
@@ -34289,6 +34823,41 @@ fn list_sessions<R: tauri::Runtime>(
             }
         })
         .collect();
+    // session-groups: the [current] row comes first. Rows are newest-modified
+    // first, and a Codex or OpenCode session resumed by id isn't modified
+    // until its next turn (Claude's resume touches its file). On 2026-10-28
+    // 05:47Z the Codex member of Claude's group was current but fifth, below
+    // the fold, so the group looked one-sided. When the limit cut it off
+    // entirely, find it in the full list.
+    if let Some(index) = entries.iter().position(|e| e.current) {
+        let row = entries.remove(index);
+        entries.insert(0, row);
+    } else if let (Some(live), Some(limit)) = (live_id.as_deref(), limit) {
+        let found = sessions_for_provider(app, Some(provider), None)
+            .ok()
+            .and_then(|(_, all)| all.into_iter().find(|s| s.id == live));
+        if let Some(session) = found {
+            entries.insert(
+                0,
+                SessionEntry {
+                    id: session.id,
+                    mtime: session.mtime,
+                    size: session.size,
+                    title: session.title,
+                    provider: session.provider,
+                    current: true,
+                    pending: false,
+                    running: session_delete_refused(
+                        provider_is_current,
+                        true,
+                        sf.seen,
+                        sf.at_prompt,
+                    ),
+                },
+            );
+            entries.truncate(limit);
+        }
+    }
     if let Some(pending) = pending_session_entry(app, provider) {
         merge_pending_session_entry(&mut entries, pending, limit);
     }
@@ -72446,9 +73015,24 @@ fn route_request<R: tauri::Runtime>(
                 delete_session(app, &session_id, provider),
             )
         } else if rest == "rename" {
+            // session-groups: a grouped session takes its group's name; the
+            // pane's ✎ is disabled there, and this refuses it too.
+            let grouped = provider.is_some_and(|p| {
+                worklist_state_open(app)
+                    .and_then(|conn| {
+                        worklist_state::session_group(&conn, session_provider_label(p), &session_id)
+                            .ok()
+                    })
+                    .flatten()
+                    .is_some()
+            });
             // provider-session-pair-offer: refresh the list after a rename, so
-            // Match name (and the ✎ rename) show the new title without a reload.
-            let r = rename_session(app, &session_id, provider, &title);
+            // the ✎ rename shows the new title without a reload.
+            let r = if grouped {
+                Err("this session is in a group; leave the group to rename it".to_string())
+            } else {
+                rename_session(app, &session_id, provider, &title)
+            };
             if r.is_ok() {
                 emit_replayable_signal(app, "sessions-list-changed");
             }

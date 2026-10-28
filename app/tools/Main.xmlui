@@ -1236,40 +1236,43 @@
         id="pairOffer"
         initial="{null}"
         subscribe="{window.bramSubscribePairOffer()}" />
-      <HStack
+      <!-- session-groups: message on its own full-width line, the buttons
+           below it, wrapping when the pane is narrow
+           (https://www.xmlui.org/docs/reference/components/Stack#wrapcontent).
+           On 2026-10-28 the offer squeezed its message into a narrow column. -->
+      <VStack
         when="{!!pairOffer.value}"
-        gap="$space-2"
-        verticalAlignment="center"
+        gap="$space-1"
         paddingHorizontal="$space-2"
         paddingVertical="$space-1"
         backgroundColor="$color-info-50"
         border="1px solid $color-info-200"
         borderRadius="$borderRadius">
         <Text
-          width="*"
           fontSize="$fontSize-sm"
           value="{pairOffer.value &amp;&amp; pairOffer.value.message}" />
-        <!-- new-session-switch-starts-fresh-partner: Start new leads; keeping
-             the old session is the less common intent (2026-10-08, a
-             fast Keep click paired a new session with last release's). -->
-        <Button
-          label="{pairOffer.value &amp;&amp; pairOffer.value.actionLabel}"
-          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.actionTooltip}"
-          variant="outlined"
-          size="xs"
-          onClick="window.__bramPairOfferStart(pairOffer.value)" />
-        <Button
-          label="{pairOffer.value &amp;&amp; pairOffer.value.keepLabel}"
-          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
-          variant="outlined"
-          size="xs"
-          onClick="window.__bramPairOfferKeep(pairOffer.value, toast)" />
-        <Button
-          label="Dismiss"
-          variant="ghost"
-          size="xs"
-          onClick="window.__bramPairOfferDismiss(pairOffer.value)" />
-      </HStack>
+        <HStack gap="$space-2" wrapContent="true" verticalAlignment="center">
+          <Button
+            label="{pairOffer.value &amp;&amp; pairOffer.value.keepLabel}"
+            tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
+            size="xs"
+            onClick="window.__bramPairOfferKeep(pairOffer.value, toast)" />
+          <!-- new-session-switch-starts-fresh-partner: a fast Keep click once
+               paired a new session with last release's (2026-10-08). The
+               group's name now says what Add joins, so Add leads. -->
+          <Button
+            label="{pairOffer.value &amp;&amp; pairOffer.value.actionLabel}"
+            tooltip="{pairOffer.value &amp;&amp; pairOffer.value.actionTooltip}"
+            variant="outlined"
+            size="xs"
+            onClick="window.__bramPairOfferStart(pairOffer.value)" />
+          <Button
+            label="Dismiss"
+            variant="ghost"
+            size="xs"
+            onClick="window.__bramPairOfferDismiss(pairOffer.value)" />
+        </HStack>
+      </VStack>
       <!-- The hot TextArea is isolated from this App-scope footer. Props flow
            down only when provider state changes; the low-frequency Skills
            request flows up as a component event. -->

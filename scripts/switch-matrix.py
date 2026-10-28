@@ -103,6 +103,31 @@ class Run:
         # Bram can resume or delete; on 2026-10-27 it read as "newest" and "current".
         return [row for row in rows if not row.get("pending")]
 
+    def wait_session_text(self, provider: str, sid: str, role: str, text: str) -> bool:
+        """Verify delivery/reply in the named session, not just a PTY write."""
+        deadline = time.time() + self.timeout
+        while time.time() < deadline:
+            code, body = self.get(f"__sessions/content?provider={provider}&id={sid}")
+            if code == 200:
+                for line in body.splitlines():
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if record.get("sessionId") != sid:
+                        continue
+                    message = record.get("message", {})
+                    if message.get("role") != role:
+                        continue
+                    content = message.get("content", "")
+                    if isinstance(content, list):
+                        content = "".join(p.get("text", "") for p in content
+                                          if isinstance(p, dict) and p.get("type") == "text")
+                    if isinstance(content, str) and content.strip() == text:
+                        return True
+            time.sleep(0.5)
+        return False
+
     # --- trace -----------------------------------------------------------
     def mark(self) -> int:
         return len(msc.trace_lines(self.repo))
@@ -160,13 +185,17 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
         m = r.mark()
         r.post("__test/new-session", {"provider": "claude", "title": title})
         # The dialog's brief comes from the pane; send a short one the same way.
-        r.post("__test/turn", {"text": f"Switch-matrix brief for '{title}'. Reply with just: ok"})
+        brief = f"Switch-matrix brief for '{title}'. Reply with just: ok"
+        r.post("__test/turn", {"text": brief})
         named = r.wait(m, rf"\[session-new\] op=named provider=claude sid=(\S+) title={re.escape(title)}$")
         a = named.group(1) if named else None
         r.case("new-session-claude", [
             ("named on its id", bool(named)),
             ("boot-settled rule=composer", bool(r.wait(m, r"op=boot-settled rule=composer"))),
-            ("brief flushed", bool(r.wait(m, r"\[send-gate\] op=flush wrote=1"))),
+            # A catch-up and brief can share a drain (wrote=2). The receipt
+            # that matters is the brief in this session, not the batch size.
+            ("brief reached that exact session",
+             bool(a and r.wait_session_text("claude", a, "user", brief))),
         ])
         # Let New session's own launch settle before the next switch.
         r.wait(m, r"op=launch-(confirmed|exited|timeout|superseded) provider=claude source=new-session")
@@ -362,10 +391,20 @@ def new_session_opencode(r: Run, turns: bool, agents: list[str]) -> None:
     r.act("__test/switch", {"provider": "opencode"}, "opencode")
     m = r.mark()
     r.post("__test/new-session", {"provider": "opencode", "title": title})
-    r.post("__test/turn", {"text": f"Switch-matrix brief for '{title}'. Reply with just: ok"})
+    brief = f"Switch-matrix brief for '{title}'. Reply with just: ok"
+    r.post("__test/turn", {"text": brief})
     named = r.wait(m, rf"\[session-new\] op=named provider=opencode sid=(\S+) title={re.escape(title)}$",
                    self_timeout(r))
-    r.case("new-session-opencode", [("named on its id", bool(named))])
+    sid = named.group(1) if named else None
+    delivered = bool(sid and r.wait_session_text("opencode", sid, "user", brief))
+    replied = bool(delivered and r.wait_session_text("opencode", sid, "assistant", "ok"))
+    r.case("new-session-opencode", [
+        ("named on its id", bool(named)),
+        ("brief reached that exact session", delivered),
+        ("model replied ok in that session", replied),
+    ])
+    if sid:
+        print(f"OpenCode New session: {sid}; brief={delivered}; reply={replied}", flush=True)
 
 
 def self_timeout(r: Run) -> float:
@@ -381,9 +420,13 @@ def main() -> int:
     ap.add_argument("--agents", default="claude,opencode,codex",
                     help="comma list; claude is always used (default: all three)")
     ap.add_argument("--keep", action="store_true", help="leave the demo running even on success")
+    ap.add_argument("--new-session-opencode-only", action="store_true",
+                    help="run just the OpenCode New session delivery/reply regression")
     args = ap.parse_args()
     repo = Path(args.repo).resolve()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()]
+    if args.new_session_opencode_only and (args.no_turns or "opencode" not in agents):
+        ap.error("--new-session-opencode-only requires turns and opencode")
 
     os.environ["BRAM_TEST_DRIVE"] = "1"
     msc.run(repo, "stop", tolerate="no recorded demo process")
@@ -409,7 +452,8 @@ def main() -> int:
     # Let autostart settle before driving.
     r.wait(r.start, r"op=launch-(confirmed|exited|timeout) provider=\S+ source=autostart", 90)
 
-    matrix(r, not args.no_turns, agents)
+    if not args.new_session_opencode_only:
+        matrix(r, not args.no_turns, agents)
     new_session_opencode(r, not args.no_turns, agents)
 
     never = sorted({line.split("] ", 2)[-1][:120] for line in msc.trace_lines(repo)[r.start:]

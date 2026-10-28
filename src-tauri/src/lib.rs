@@ -45230,6 +45230,8 @@ static AGENT_BOOT_SETTLE_RESETS: std::sync::atomic::AtomicU32 =
 // noted the same teardown source.
 static AGENT_BOOT_EVIDENCE_OPEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static AGENT_BOOT_EVIDENCE_LAUNCH_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 static AGENT_BOOT_EVIDENCE_IGNORED: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
 // claude-boot-hold-no-bounce: PTY bytes read since boot evidence opened, so
@@ -45428,6 +45430,10 @@ fn open_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
         carry.clear();
     }
     AGENT_BOOT_BYTES_SINCE_OPEN.store(0, std::sync::atomic::Ordering::Relaxed);
+    AGENT_BOOT_EVIDENCE_LAUNCH_GEN.store(
+        AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     AGENT_BOOT_EVIDENCE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
     set_boot_modes(true, BootModes::default());
     if bram_trace_enabled() {
@@ -45472,8 +45478,51 @@ fn boot_hold_is_claude() -> bool {
     agent_boot_hold_provider() == "claude"
 }
 
-// Release the hold (both rules). Claude releases on the bounce; the quiet
-// window's poll calls this too.
+fn boot_uses_quiet_window(provider: &str) -> bool {
+    !matches!(provider, "claude" | "opencode")
+}
+
+// The same OSC 7501 readiness signal used by fresh-partner catch-up, but
+// require idle, a complete marker, and bytes new to this scan. A blocked or
+// working marker is not permission to paste a New session's first message.
+fn opencode_boot_idle_marker(buf: &[u8], carry_len: usize) -> bool {
+    const OSC: &[u8] = b"\x1b]7501;state=";
+    let Some(at) = buf.windows(OSC.len()).rposition(|w| w == OSC) else {
+        return false;
+    };
+    let rest = &buf[at + OSC.len()..];
+    let Some(end) = rest.iter().position(|b| *b == 0x1b || *b == 0x07) else {
+        return false;
+    };
+    let terminator_len = if rest[end] == 0x07 {
+        1
+    } else if rest.get(end + 1) == Some(&b'\\') {
+        2
+    } else {
+        return false;
+    };
+    if at + OSC.len() + end + terminator_len <= carry_len {
+        return false;
+    }
+    let Ok(body) = std::str::from_utf8(&rest[..end]) else {
+        return false;
+    };
+    let mut fields = body.split(':');
+    fields.next() == Some("idle") && fields.any(|field| field == "app=opencode")
+}
+
+fn opencode_boot_ready(
+    evidence_open: bool,
+    evidence_launch: u64,
+    current_launch: u64,
+    buf: &[u8],
+    carry_len: usize,
+) -> bool {
+    evidence_open && evidence_launch == current_launch && opencode_boot_idle_marker(buf, carry_len)
+}
+
+// Claude releases on its bounce/composer, OpenCode on its fresh idle marker,
+// and Codex on the quiet-window poll.
 fn release_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, rule: &str) {
     AGENT_BOOT_SETTLE_DEADLINE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -45524,11 +45573,12 @@ fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
         return;
     }
     let now = unix_now_ms();
-    // Claude: no deadline; the bounce releases (i64::MAX marks "settling").
-    let deadline = if boot_hold_is_claude() {
-        i64::MAX
-    } else {
+    let provider = agent_boot_hold_provider();
+    // Claude and OpenCode need readiness evidence, never elapsed quiet time.
+    let deadline = if boot_uses_quiet_window(&provider) {
         now + AGENT_BOOT_SETTLE_MS
+    } else {
+        i64::MAX
     };
     if AGENT_BOOT_SETTLE_DEADLINE_MS
         .compare_exchange(
@@ -45551,6 +45601,8 @@ fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
                 now.saturating_sub(since),
                 if boot_hold_is_claude() {
                     "bounce".to_string()
+                } else if provider == "opencode" {
+                    "opencode-idle".to_string()
                 } else {
                     format!("quiet-window-{}ms", AGENT_BOOT_SETTLE_MS)
                 }
@@ -45561,7 +45613,7 @@ fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
 
 // A mode toggle while settling: the TUI isn't done initializing.
 fn reset_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
-    if boot_hold_is_claude() {
+    if !boot_uses_quiet_window(&agent_boot_hold_provider()) {
         return;
     }
     if !agent_boot_hold_active()
@@ -45610,6 +45662,9 @@ fn claude_boot_composer_drawn() -> bool {
 fn poll_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>) {
     if agent_boot_hold_active() && claude_boot_composer_drawn() {
         release_agent_boot_hold(app, "composer");
+        return;
+    }
+    if !boot_uses_quiet_window(&agent_boot_hold_provider()) {
         return;
     }
     let deadline = AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed);
@@ -45702,16 +45757,33 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
     {
         return;
     }
-    let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 16);
+    // Retain enough of a split OSC state marker, including its terminator.
+    let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 1024);
     let mut carry_len = 0;
     if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
         carry_len = carry.len();
         buf.extend_from_slice(&carry);
         buf.extend_from_slice(chunk);
-        let keep = buf.len().min(15);
+        let keep = buf.len().min(1024);
         *carry = buf[buf.len() - keep..].to_vec();
     } else {
         buf.extend_from_slice(chunk);
+    }
+    if agent_boot_hold_provider() == "opencode" {
+        if agent_boot_hold_active()
+            && opencode_boot_ready(
+                AGENT_BOOT_EVIDENCE_OPEN.load(std::sync::atomic::Ordering::Relaxed),
+                AGENT_BOOT_EVIDENCE_LAUNCH_GEN.load(std::sync::atomic::Ordering::Relaxed),
+                AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
+                &buf,
+                carry_len,
+            )
+        {
+            release_agent_boot_hold(app, "opencode-idle");
+        } else if let Some(name) = agent_boot_evidence_match(&buf) {
+            note_agent_boot_evidence(app, name);
+        }
+        return;
     }
     if BOOT_MODES_TRACKING.load(std::sync::atomic::Ordering::Relaxed) {
         let mut m = boot_modes();
@@ -45741,6 +45813,58 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
 #[cfg(test)]
 mod agent_boot_evidence_tests {
     use super::agent_boot_evidence_match as m;
+    #[test]
+    fn opencode_setup_and_quiet_time_do_not_release_the_brief() {
+        use super::{boot_uses_quiet_window, opencode_boot_ready};
+        // 2026-10-28 18:48:09 setup, then 400 ms quiet; idle at 18:48:10.154.
+        let setup = b"\x1b[?2031h\x1b[?1049h\x1b[?2004h";
+        assert!(m(setup).is_some());
+        assert!(!boot_uses_quiet_window("opencode"));
+        assert!(!opencode_boot_ready(true, 7, 7, setup, 0));
+        assert!(opencode_boot_ready(
+            true,
+            7,
+            7,
+            b"\x1b]7501;state=idle:app=opencode\x1b\\",
+            0
+        ));
+        assert!(boot_uses_quiet_window("codex"));
+        assert!(!boot_uses_quiet_window("claude"));
+    }
+
+    #[test]
+    fn opencode_boot_rejects_outgoing_and_superseded_launch_evidence() {
+        use super::opencode_boot_ready as ready;
+        let idle = b"\x1b]7501;state=idle:app=opencode\x1b\\";
+        assert!(!ready(false, 7, 7, idle, 0));
+        assert!(!ready(true, 7, 8, idle, 0));
+        assert!(!ready(true, 7, 7, idle, idle.len()));
+        for marker in [
+            b"\x1b]7501;state=working:app=opencode\x07".as_slice(),
+            b"\x1b]7501;state=blocked:app=opencode:kind=question\x07",
+            b"\x1b]7501;state=idle:app=codex\x07",
+        ] {
+            assert!(!ready(true, 7, 7, marker, 0));
+        }
+    }
+
+    #[test]
+    fn opencode_boot_marker_may_split_at_any_byte() {
+        use super::opencode_boot_idle_marker as idle;
+        for marker in [
+            b"\x1b]7501;state=idle:app=opencode\x1b\\".as_slice(),
+            b"\x1b]7501;state=idle:id=ses_new:app=opencode\x07",
+        ] {
+            for split in 0..marker.len() {
+                assert!(!idle(&marker[..split], 0));
+                assert!(idle(marker, split));
+            }
+        }
+        assert!(!idle(
+            b"\x1b]7501;state=idle:app=opencode\x07\x1b]7501;state=blocked:app=opencode\x07",
+            0
+        ));
+    }
     #[test]
     fn windows_codex_synchronized_output_is_boot_evidence() {
         assert_eq!(m(b"x\x1b[?2026h"), Some("synchronized-output"));

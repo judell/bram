@@ -163,6 +163,16 @@ AskUserQuestion's own. A form with several questions, a multi-select, or an
 MCP server's form gets no card, but the shape still holds pane sends while it
 is drawn.
 
+**If cards stop appearing.** The self-test's `opencode-registration` check
+proves the plugin file is current, not that the running service has loaded
+it. OpenCode 2.1.4's service watches the file: in a scratch project it re-ran
+an edited plugin's `setup` 153 ms after the edit, with no OpenCode window
+attached (opencode-review-small-fixes, 2026-10-27). Nothing promises that in
+other versions. If cards or the edit warning stop appearing after Setup
+refreshes the plugin or OpenCode is upgraded, run `opencode service restart`.
+The service is shared by every OpenCode window on the machine, not only this
+project's.
+
 ### `menus.parseAndDisplay` is off by default
 
 `BRAM_MENUS_PARSE_ENABLED` defaults to off: "menu parsing is unreliable,

@@ -50992,11 +50992,16 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // opencode-worklist-guard: OpenCode's install is the project plugin plus
     // the `instructions` entry in .opencode/opencode.json
     // (opencode-signature-and-conventions). Only where OpenCode can run;
-    // elsewhere neither is seeded.
-    let opencode_plugin_current = opencode_plugin_current(app, &proj);
+    // elsewhere neither is seeded. A user's own plugin needs no Setup, which
+    // would keep it anyway (opencode-review-small-fixes).
+    let opencode_plugin_state = opencode_plugin_state(app, &proj);
+    let opencode_plugin_current = opencode_plugin_state == OpencodePluginState::Current;
+    let opencode_plugin_custom = opencode_plugin_state == OpencodePluginState::Custom;
     let opencode_instructions_current = opencode_instructions_current(&proj, is_source_repo);
     let opencode_needs_setup = opencode_plugin_wanted(app, &proj)
-        && (!core_installed || !opencode_plugin_current || !opencode_instructions_current);
+        && (!core_installed
+            || !(opencode_plugin_current || opencode_plugin_custom)
+            || !opencode_instructions_current);
     let provider_needs_setup = provider_needs_setup_for(
         active_provider,
         claude_needs_setup,
@@ -51101,6 +51106,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "codexNeedsSetup": codex_needs_setup,
         "opencodeNeedsSetup": opencode_needs_setup,
         "opencodePluginCurrent": opencode_plugin_current,
+        "opencodePluginCustom": opencode_plugin_custom,
         "opencodeInstructionsCurrent": opencode_instructions_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
@@ -51883,19 +51889,48 @@ fn opencode_plugin_bundle<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Vec<u
     serve_app_file(Some(app), ENHANCE_OPENCODE_PLUGIN_BUNDLE_REL).map(|(bytes, _mime)| bytes)
 }
 
-fn opencode_plugin_current<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
-    match (
-        std::fs::read(proj.join(ENHANCE_OPENCODE_PLUGIN_REL)),
-        opencode_plugin_bundle(app),
-    ) {
-        (Ok(disk), Some(bundle)) => disk == bundle,
-        _ => false,
+// Ownership as for bundled skills: a plugin file without Setup's marker is
+// the user's own.
+fn opencode_plugin_is_users(disk: &[u8]) -> bool {
+    !String::from_utf8_lossy(disk).contains(OPENCODE_PLUGIN_MARKER)
+}
+
+// opencode-review-small-fixes: `Custom` is the user's own file, which Setup
+// keeps (seed_opencode_plugin). Reading it as stale would fail the self-test
+// and raise the Setup banner for good, since no Setup run can change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpencodePluginState {
+    Missing,
+    Current,
+    Stale,
+    Custom,
+}
+
+fn opencode_plugin_state_of(disk: Option<&[u8]>, bundle: Option<&[u8]>) -> OpencodePluginState {
+    match disk {
+        None => OpencodePluginState::Missing,
+        Some(d) if Some(d) == bundle => OpencodePluginState::Current,
+        Some(d) if opencode_plugin_is_users(d) => OpencodePluginState::Custom,
+        Some(_) => OpencodePluginState::Stale,
     }
 }
 
-// Ownership as for bundled skills: Setup writes or refreshes only a file
-// carrying its marker, and a user's own `.opencode/plugins/bram.js` is kept
-// and reported in `skipped`.
+fn opencode_plugin_state<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+) -> OpencodePluginState {
+    let disk = std::fs::read(proj.join(ENHANCE_OPENCODE_PLUGIN_REL)).ok();
+    opencode_plugin_state_of(disk.as_deref(), opencode_plugin_bundle(app).as_deref())
+}
+
+// Bram's own plugin, as the bundle has it: what the Esc wait needs, since only
+// that plugin reports OpenCode's interrupts.
+fn opencode_plugin_current<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    opencode_plugin_state(app, proj) == OpencodePluginState::Current
+}
+
+// Setup writes or refreshes only a file carrying its marker, and a user's own
+// `.opencode/plugins/bram.js` is kept and reported in `skipped`.
 fn seed_opencode_plugin<R: tauri::Runtime>(
     app: &AppHandle<R>,
     proj: &Path,
@@ -51911,12 +51946,12 @@ fn seed_opencode_plugin<R: tauri::Runtime>(
     match std::fs::read(&dest) {
         Ok(existing) if existing == bytes => {}
         Ok(existing) => {
-            if String::from_utf8_lossy(&existing).contains(OPENCODE_PLUGIN_MARKER) {
+            if opencode_plugin_is_users(&existing) {
+                skipped.push(dest.display().to_string());
+            } else {
                 std::fs::write(&dest, &bytes)
                     .map_err(|e| format!("write {}: {}", dest.display(), e))?;
                 wrote.push(dest.display().to_string());
-            } else {
-                skipped.push(dest.display().to_string());
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -51931,6 +51966,33 @@ fn seed_opencode_plugin<R: tauri::Runtime>(
         Err(e) => return Err(format!("read {}: {}", dest.display(), e)),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod opencode_plugin_state_tests {
+    use super::{opencode_plugin_state_of as state, OpencodePluginState::*};
+
+    const BUNDLE: &[u8] = include_bytes!("../../app/__shell/opencode/bram-plugin.js");
+
+    #[test]
+    fn current_stale_custom_and_missing() {
+        assert_eq!(state(Some(BUNDLE), Some(BUNDLE)), Current);
+        // An older copy of Bram's own plugin still carries the marker, so
+        // Setup refreshes it.
+        let older = [BUNDLE, b"\n// a line this build dropped\n"].concat();
+        assert_eq!(state(Some(&older), Some(BUNDLE)), Stale);
+        let users = b"export default { id: \"mine\", setup() {} };\n";
+        assert_eq!(state(Some(users), Some(BUNDLE)), Custom);
+        assert_eq!(state(None, Some(BUNDLE)), Missing);
+    }
+
+    // A build that can't serve the bundle can't call Bram's copy current, and
+    // a user's file is still theirs.
+    #[test]
+    fn without_the_bundle() {
+        assert_eq!(state(Some(BUNDLE), None), Stale);
+        assert_eq!(state(Some(b"mine"), None), Custom);
+    }
 }
 
 // The files OpenCode should load, relative to the project. The source repo
@@ -74796,12 +74858,23 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     // Setup seeds (.opencode/plugins/bram.js), checked wherever OpenCode is
     // wanted (opencode_plugin_wanted, the rule Setup and opencodeNeedsSetup
     // use), so a project that never runs OpenCode isn't failed for lacking it.
-    let (opencode_wanted, opencode_ok) = project_root(Some(app))
+    // A user's own plugin isn't failed either: Setup keeps it, so no Setup run
+    // could make the check pass. It is reported as `custom` instead
+    // (opencode-review-small-fixes).
+    let (opencode_wanted, opencode_state) = project_root(Some(app))
         .map(|proj| {
-            let wanted = opencode_plugin_wanted(app, &proj);
-            (wanted, !wanted || opencode_plugin_current(app, &proj))
+            (
+                opencode_plugin_wanted(app, &proj),
+                opencode_plugin_state(app, &proj),
+            )
         })
-        .unwrap_or((false, true));
+        .unwrap_or((false, OpencodePluginState::Missing));
+    let opencode_custom = opencode_wanted && opencode_state == OpencodePluginState::Custom;
+    let opencode_ok = !opencode_wanted
+        || matches!(
+            opencode_state,
+            OpencodePluginState::Current | OpencodePluginState::Custom
+        );
     if !opencode_ok {
         failed.push("opencode-registration".to_string());
     }
@@ -74858,7 +74931,7 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                 "extra": extra,
             },
             "codex": { "ok": codex_ok },
-            "opencode": { "ok": opencode_ok, "wanted": opencode_wanted },
+            "opencode": { "ok": opencode_ok, "wanted": opencode_wanted, "custom": opencode_custom },
         },
         "ranAtMs": unix_now_ms(),
     })

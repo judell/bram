@@ -9936,6 +9936,44 @@ fn permission_claim_signature(value: &serde_json::Value) -> Option<String> {
     }))
 }
 
+fn authenticated_menu_payload(body: &[u8], expected: &str) -> Option<serde_json::Value> {
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if expected.is_empty() || value.get("bram_token")?.as_str()? != expected {
+        return None;
+    }
+    // Authentication is complete. The credential must never reach traces
+    // or the menu/claim payload passed to the pane.
+    value.as_object_mut()?.remove("bram_token");
+    Some(value)
+}
+
+#[cfg(test)]
+mod menu_credential_tests {
+    use super::authenticated_menu_payload;
+
+    #[test]
+    fn valid_credential_is_removed_before_the_payload_can_be_traced() {
+        let body = br#"{"bram_token":"instance-secret","tool_name":"Bash","tool_input":{"command":"Get-TimeZone"}}"#;
+        let payload = authenticated_menu_payload(body, "instance-secret").unwrap();
+        assert_eq!(payload["tool_input"]["command"], "Get-TimeZone");
+        assert!(!payload.to_string().contains("instance-secret"));
+        assert!(payload.get("bram_token").is_none());
+    }
+
+    #[test]
+    fn absent_foreign_and_malformed_credentials_are_rejected() {
+        for body in [
+            br#"{}"#.as_slice(),
+            br#"{"bram_token":"other-instance"}"#,
+            br#"{"bram_token":null}"#,
+            b"bad json",
+        ] {
+            assert!(authenticated_menu_payload(body, "this-instance").is_none());
+        }
+        assert!(authenticated_menu_payload(br#"{"bram_token":""}"#, "").is_none());
+    }
+}
+
 fn handle_permission_menu<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -9951,14 +9989,15 @@ fn handle_permission_menu<R: tauri::Runtime>(
     // Foreign-agent guard: every POST must carry the per-session BRAM_MENU_TOKEN
     // (see menu_session_token). An agent running outside Bram can read
     // .bram-port and POST here, but lacks the env token, so reject mismatches.
-    {
-        let probe: serde_json::Value =
-            serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
-        let supplied = probe
-            .get("bram_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if supplied != menu_session_token() {
+    let value = match authenticated_menu_payload(body, menu_session_token()) {
+        Some(value) => value,
+        None => {
+            let probe: serde_json::Value =
+                serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+            let supplied = probe
+                .get("bram_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     app,
@@ -9980,10 +10019,8 @@ fn handle_permission_menu<R: tauri::Runtime>(
                 b"{\"ok\":false,\"rejected\":\"foreign-token\"}".to_vec(),
             );
         }
-    }
+    };
     if clear {
-        let value: serde_json::Value =
-            serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
         // Same canonical signature the claim path computes, so keyed
         // removal matches when tool_use_id can't (PermissionRequest claims
         // carry no id; PostToolUse clears do — signature is the shared key).
@@ -10008,16 +10045,6 @@ fn handle_permission_menu<R: tauri::Runtime>(
             b"{\"ok\":true,\"cleared\":true}".to_vec(),
         );
     }
-    let value: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                400,
-                "text/plain; charset=utf-8",
-                format!("bad json: {}", e).into_bytes(),
-            )
-        }
-    };
     let Some(mut menu) = permission_request_to_menu(&value) else {
         return (
             200,
@@ -21822,8 +21849,86 @@ struct AgentLaunch<R: tauri::Runtime> {
     hook: Box<dyn Fn(&AppHandle<R>, LaunchPhase) + Send>,
 }
 
-fn launch_agent_command<R: tauri::Runtime>(launch: AgentLaunch<R>) {
-    std::thread::spawn(move || run_agent_launch(launch));
+fn codex_supports_no_daemon() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            // npm installs a .cmd shim, which Command::new cannot run directly.
+            let mut command = std::process::Command::new("cmd.exe");
+            command.args(["/d", "/c", "codex", "--help"]);
+            command.creation_flags(CREATE_NO_WINDOW);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("codex");
+            command.arg("--help");
+            command
+        };
+        command
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .is_some_and(|out| {
+                out.status.success() && String::from_utf8_lossy(&out.stdout).contains("--no-daemon")
+            })
+    })
+}
+
+fn codex_instance_launch_command(command: &str, supported: bool) -> String {
+    if !supported
+        || command
+            .split_whitespace()
+            .any(|arg| arg == "--no-daemon" || arg == "--remote" || arg.starts_with("--remote="))
+    {
+        return command.to_string();
+    }
+    format!("{command} --no-daemon")
+}
+
+fn launch_agent_command<R: tauri::Runtime>(mut launch: AgentLaunch<R>) {
+    std::thread::spawn(move || {
+        // A shared Codex server inherits another launch's environment. Hooks
+        // then lack this Bram instance's menu token (Windows 0.165.0, #455).
+        // Keep the backend local to this launch without changing hook trust.
+        if launch.provider == "codex" {
+            launch.command =
+                codex_instance_launch_command(&launch.command, codex_supports_no_daemon());
+        }
+        run_agent_launch(launch)
+    });
+}
+
+#[cfg(test)]
+mod codex_instance_launch_tests {
+    use super::codex_instance_launch_command as local;
+
+    #[test]
+    fn every_local_launch_shape_preserves_its_session_and_options() {
+        for command in [
+            "codex",
+            "codex resume exact-id",
+            "codex resume --last",
+            "codex -m model",
+        ] {
+            assert_eq!(local(command, true), format!("{command} --no-daemon"));
+            assert_eq!(local(command, false), command);
+        }
+    }
+
+    #[test]
+    fn explicit_remote_and_existing_standalone_flags_are_preserved() {
+        for command in [
+            "codex --no-daemon",
+            "codex resume id --no-daemon",
+            "codex --remote ws://localhost:9000",
+            "codex resume id --remote=unix://",
+        ] {
+            assert_eq!(local(command, true), command);
+        }
+    }
 }
 
 fn emit_launch_outcome<R: tauri::Runtime>(

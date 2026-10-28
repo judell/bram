@@ -50,6 +50,26 @@ chat approval or external clients.
 
 ## Action matrix
 
+Permission-menu callbacks use a separate per-Bram-instance credential,
+`BRAM_MENU_TOKEN`, inherited by the terminal child and echoed by its hook as
+`bram_token`. Missing or mismatched credentials receive HTTP 403; presenting a
+menu does not authorize the underlying tool or a Worklist operation. Bram
+feature-detects Codex's `--no-daemon` option and adds it to local launches so
+hooks run with this instance's environment rather than a shared server's.
+Explicit remote connections are preserved and may require the terminal
+fallback. Existing same-user-process limits still apply; no project-readable
+credential file or unauthenticated callback fallback is introduced. Regression
+coverage: `codex_instance_launch_tests` and `menu_credential_tests`; Windows
+live evidence is in #455. Successful validation removes the credential from
+the parsed payload before any menu tracing or claim handling.
+
+An existing conversation can remain owned by the shared server after its
+terminal closes. Moving it to standalone mode may show Codex's "conversation
+is open in another app" dialog. Do not shut down the shared server, which may
+own other work. The user must release the conversation there or choose a new
+session; holding Bram's queued sends at this dialog is tracked separately
+in the Windows release burndown (#455).
+
 The **policy** column governs agent behavior even where enforcement is
 coarser. The next column describes current checks, not permission to exploit
 their gaps. TTLs and the consumption distinction are explained below.

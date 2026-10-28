@@ -643,6 +643,17 @@ composer with Worklist items selected.
 
 ## 13. Prompt lifecycle
 
+- **`POST /__menu/permission`**, **`POST /__menu/permission/clear`** — hook
+  callbacks for presenting and retiring permission menus. Their JSON bodies
+  must include `bram_token` equal to the current instance's inherited
+  `BRAM_MENU_TOKEN`; missing or foreign credentials receive 403. The existing
+  event-specific tool fields are built by `guard.rs::menu_post_body`. These
+  routes do not grant tool or Worklist authorization. Local Codex launches use
+  `--no-daemon` when supported so the hook inherits the correct credential.
+  Explicit remote launches retain their requested transport; an unhandled
+  Codex permission block can instead reveal the terminal. Never copy tokens
+  into project files, command arguments, traces, or issue reports.
+
 - **`GET /__prompt-lifecycle`** — Bram's locally-implemented
   PromptShown/PromptResolved ledger (upstream-prompt-lifecycle-events;
   rationale in `docs/upstream-asks.md` #3). Returns

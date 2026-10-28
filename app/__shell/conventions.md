@@ -551,6 +551,8 @@ shows the code; chat is for what those can't show.
 
 ### Narrate as you reach for tools
 
+Codex local launches use `--no-daemon` when supported.
+
 Before a tool call (or batch), say in a sentence what you're about to
 do and why. When a result changes your plan, say so before acting on
 it. Long-running work (builds, test suites, background tasks) gets a

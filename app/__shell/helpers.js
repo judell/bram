@@ -9766,6 +9766,9 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
   // terminal-attention-slash-panel (#423): the banner's words follow the
   // host's classified shape. The hooks prompt keeps the original line.
   window.__bramTerminalAttentionText = function (value) {
+    if (value && value.shape === "codex-permission") {
+      return "Codex is asking permission in the terminal. Open it to review and answer.";
+    }
     if (value && value.shape === "slash-panel") {
       return "Claude has a panel open in the terminal. Press Esc there to close it.";
     }

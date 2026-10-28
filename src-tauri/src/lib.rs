@@ -6288,13 +6288,46 @@ impl TerminalAttentionTracker {
     // decide.
     // tail_fn returns the tail and the live provider (lazy: read only on the
     // one evaluation per silence episode).
+    #[cfg(test)]
     fn step<F: FnOnce() -> (String, Option<SessionProvider>)>(
         &mut self,
         authoritative_open: bool,
         bytes: usize,
         tail_fn: F,
     ) -> Vec<TerminalAttentionTransition> {
+        self.step_with_permission_block(authoritative_open, bytes, false, tail_fn)
+    }
+
+    fn step_with_permission_block<F: FnOnce() -> (String, Option<SessionProvider>)>(
+        &mut self,
+        authoritative_open: bool,
+        bytes: usize,
+        permission_blocked: bool,
+        tail_fn: F,
+    ) -> Vec<TerminalAttentionTransition> {
         let mut out = Vec::new();
+
+        if self.active && self.shape == Some("codex-permission") && !permission_blocked {
+            out.push(TerminalAttentionTransition::Clear {
+                reason: "permission-unblocked",
+            });
+            self.active = false;
+            self.shape = None;
+            self.episode_evaluated = false;
+        }
+
+        // Unlike a guessed boot prompt, the CLI explicitly reports this
+        // block. Reveal it immediately, even during an open turn/redraw.
+        if permission_blocked {
+            if !self.active || self.shape != Some("codex-permission") {
+                self.active = true;
+                self.shape = Some("codex-permission");
+                out.push(TerminalAttentionTransition::Fire {
+                    shape: "codex-permission",
+                });
+            }
+            return out;
+        }
 
         if bytes > 0 {
             self.silent_ms = 0;
@@ -6344,6 +6377,59 @@ impl TerminalAttentionTracker {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod terminal_attention_permission_tests {
+    use super::*;
+
+    #[test]
+    fn captured_codex_blocked_marker_is_permission_specific() {
+        assert!(codex_permission_marker("blocked:app=codex:kind=permission"));
+        for body in [
+            "idle:app=codex:kind=permission",
+            "working:app=codex",
+            "blocked:app=opencode:kind=permission",
+            "blocked:app=codex:kind=question",
+        ] {
+            assert!(!codex_permission_marker(body), "{body}");
+        }
+    }
+
+    #[test]
+    fn unhandled_permission_fires_during_open_turn_and_clears_without_activity() {
+        let mut tracker = TerminalAttentionTracker::new();
+        let transitions = tracker.step_with_permission_block(true, 100, true, || {
+            panic!("explicit marker needs no guessed prompt text")
+        });
+        assert_eq!(
+            transitions,
+            vec![TerminalAttentionTransition::Fire {
+                shape: "codex-permission"
+            }]
+        );
+        assert!(tracker
+            .step_with_permission_block(true, 100, true, || panic!(
+                "redraw must not clear the block"
+            ))
+            .is_empty());
+        assert_eq!(
+            tracker.step_with_permission_block(true, 0, false, || panic!("still working")),
+            vec![TerminalAttentionTransition::Clear {
+                reason: "permission-unblocked"
+            }]
+        );
+    }
+
+    #[test]
+    fn ordinary_open_turn_never_uses_the_permission_fallback() {
+        let mut tracker = TerminalAttentionTracker::new();
+        for _ in 0..100 {
+            assert!(tracker
+                .step(true, 0, || panic!("working turn must not inspect prose"))
+                .is_empty());
+        }
     }
 }
 
@@ -9878,8 +9964,9 @@ fn handle_permission_menu<R: tauri::Runtime>(
                     app,
                     "hook-menu",
                     &format!(
-                        "op=reject reason=foreign-token clear={} tool={}",
+                        "op=reject reason=foreign-token clear={} token_present={} tool={}",
                         clear,
+                        !supplied.is_empty(),
                         probe
                             .get("tool_name")
                             .and_then(|v| v.as_str())
@@ -18827,12 +18914,23 @@ fn pty_spawn(
                         _ => {}
                     }
                 }
-                for transition in terminal_attention.step(authoritative_open, bytes, || {
-                    (
-                        pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS),
-                        current_provider(&app_for_throughput),
-                    )
-                }) {
+                let permission_blocked =
+                    codex_permission_blocked_since_launch(current_provider(&app_for_throughput))
+                        && turn_state_cell()
+                            .lock()
+                            .map(|s| s.pending_menu.is_none())
+                            .unwrap_or(false);
+                for transition in terminal_attention.step_with_permission_block(
+                    authoritative_open,
+                    bytes,
+                    permission_blocked,
+                    || {
+                        (
+                            pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS),
+                            current_provider(&app_for_throughput),
+                        )
+                    },
+                ) {
                     trace_terminal_attention_transition(
                         &app_for_throughput,
                         &transition,
@@ -21526,6 +21624,23 @@ static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic
 // notice filled the tail with fragments (tail=".0") and every screen marker
 // missed.
 static AGENT_LAUNCH_BEGAN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static CODEX_PERMISSION_BLOCKED_AT_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+fn codex_permission_marker(body: &str) -> bool {
+    // Captured Codex 0.165.0 Windows OSC 7501, 2026-10-28 (#455).
+    let parts: Vec<&str> = body.split(':').collect();
+    parts.first() == Some(&"blocked")
+        && parts.contains(&"app=codex")
+        && parts.contains(&"kind=permission")
+}
+
+fn codex_permission_blocked_since_launch(provider: Option<SessionProvider>) -> bool {
+    let at = CODEX_PERMISSION_BLOCKED_AT_MS.load(std::sync::atomic::Ordering::SeqCst);
+    provider == Some(SessionProvider::Codex)
+        && at > 0
+        && at >= AGENT_LAUNCH_BEGAN_MS.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 fn agent_state_marker_cell() -> &'static Mutex<(String, i64)> {
     static CELL: OnceLock<Mutex<(String, i64)>> = OnceLock::new();
@@ -21550,6 +21665,14 @@ fn note_agent_state_marker(chunk: &[u8]) {
     else {
         return;
     };
+    CODEX_PERMISSION_BLOCKED_AT_MS.store(
+        if codex_permission_marker(&body) {
+            unix_now_ms()
+        } else {
+            0
+        },
+        std::sync::atomic::Ordering::SeqCst,
+    );
     if let Ok(mut cell) = agent_state_marker_cell().lock() {
         *cell = (app, unix_now_ms());
     }
@@ -21565,6 +21688,7 @@ fn agent_state_marker_since_launch(provider: SessionProvider) -> bool {
 }
 
 fn begin_agent_launch() -> u64 {
+    CODEX_PERMISSION_BLOCKED_AT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
     AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms(), std::sync::atomic::Ordering::SeqCst);
     // codex-resume-false-working: a fresh launch hasn't shown its composer.
     CODEX_COMPOSER_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);

@@ -209,11 +209,9 @@
           showCount="{findText.trim().length >= 2}"
           onNeedleChange="(v) => findText = v"
           onStep="(d) => findCursor = window.__bramFindCursorStep(findPlan ? findPlan.total : 0, findCursor, d)" />
-        <!-- #427: the Worklist and its gate buttons in a pane below the
-             transcript (the VSplitter around the List). -->
-        <Button label="{worklistOpen ? 'Hide worklist' : 'Show worklist'}"
-          size="sm" variant="outlined"
-          onClick="worklistOpen = window.__bramToggleTranscriptWorklistOpen(worklistOpen)" />
+        <!-- transcript-worklist-expander-bar: the Show/Hide worklist button
+             that lived here is now the bar at the bottom of the transcript,
+             where the pane it opens appears (#427's split, below). -->
       </HStack>
     </StickySection>
     <Text
@@ -277,8 +275,28 @@
          resized). -->
     <PushSource id="splitHeight" initial="{0}"
       subscribe="{window.bramSubscribeTranscriptSplitHeight()}" />
-    <VSplitter testId="transcript-split"
-      height="{window.__bramTranscriptSplitHeightCss(splitHeight.value)}"
+    <!-- transcript-worklist-expander-bar: the board the bar summarizes,
+         refreshed the way Worklist.xmlui refreshes its own (push, no poll). -->
+    <DataSource id="twlBoard" url="/__worklist" />
+    <PushSource id="twlWorklistEvt" initial="{null}"
+      subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+    <ChangeListener
+      listenTo="{twlWorklistEvt.value &amp;&amp; twlWorklistEvt.value.tick}"
+      onDidChange="window.__bramRefetchOnLiveEvent(twlWorklistEvt.value, twlBoard)" />
+    <PushSource id="twlGitEvt" initial="{null}"
+      subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+    <ChangeListener
+      listenTo="{twlGitEvt.value &amp;&amp; twlGitEvt.value.tick}"
+      onDidChange="window.__bramRefetchOnLiveEvent(twlGitEvt.value, twlBoard)" />
+    <!-- transcript-worklist-expander-bar: a DockPanel. The bounded height the
+         split already had moves to this Stack; the VSplitter fills what is
+         left (dock="stretch") and, while the pane is closed, the bar docks
+         to the bottom. The bar's room comes out of the stretch region, so
+         nothing is measured or subtracted.
+         https://www.xmlui.org/docs/howto/dock-elements-to-panel-edges -->
+    <Stack height="{window.__bramTranscriptSplitHeightCss(splitHeight.value)}" gap="0">
+    <VSplitter testId="transcript-split" dock="stretch"
+      height="100%"
       initialPrimarySize="{window.__bramRestoreSplitterSize('transcript-worklist', '55%')}"
       minPrimarySize="15%" maxPrimarySize="-120px"
       onResize="(px) => window.__bramTranscriptSplitResized(px, splitHeight.value, worklistOpen, transcriptList, $props.agentId)">
@@ -488,13 +506,21 @@
            own scroll position (helpers.js __bramWorklistPaneMounted) across
            Hide/Show and tab switches. Lifecycle events:
            https://www.xmlui.org/docs/howto/clean-up-when-a-panel-closes -->
-      <VStack when="{worklistOpen}" height="100%">
+      <VStack when="{worklistOpen}" height="100%" gap="0">
+        <!-- transcript-worklist-expander-bar: open, the bar heads the pane
+             (dock="top") and the scroller fills the rest. -->
+        <HStack dock="top" backgroundColor="$color-secondary-50">
+          <Button variant="ghost" size="sm" width="100%" contentPosition="start"
+            label="{window.__bramTranscriptWorklistBarLabel(true, twlBoard.value)}"
+            tooltip="Hide the Worklist"
+            onClick="worklistOpen = window.__bramToggleTranscriptWorklistOpen(worklistOpen)" />
+        </HStack>
         <!-- transcript-worklist-pane-tint: a faint tint marks "the Worklist,
              shown inside the Transcript". The secondary scale because rows
              use primary for highlights and the Transcript uses surface;
              $color-* (not $const-color-*) follows dark mode.
              https://www.xmlui.org/docs/styles-and-themes/theme-variables -->
-        <VStack height="100%" overflowY="auto" paddingTop="$space-2"
+        <VStack dock="stretch" overflowY="auto" paddingTop="$space-2"
           backgroundColor="$color-secondary-50"
           testId="transcript-worklist-pane"
           onMount="window.__bramWorklistPaneMounted()"
@@ -504,6 +530,16 @@
         </VStack>
       </VStack>
     </VSplitter>
+    <!-- transcript-worklist-expander-bar: closed, the bar docks under the
+         transcript. Same tint as the pane, so it reads as part of the
+         transcript rather than of the message box below. -->
+    <HStack dock="bottom" when="{!worklistOpen}" backgroundColor="$color-secondary-50">
+      <Button variant="ghost" size="sm" width="100%" contentPosition="start"
+        label="{window.__bramTranscriptWorklistBarLabel(false, twlBoard.value)}"
+        tooltip="Show the Worklist below the transcript"
+        onClick="worklistOpen = window.__bramToggleTranscriptWorklistOpen(worklistOpen)" />
+    </HStack>
+    </Stack>
     <!-- Closing the pane REMOUNTS the List (XMLUI's Splitter renders one
          child and two children in different trees), which starts at the
          top. The toggle records follow/row and the remounted List's first

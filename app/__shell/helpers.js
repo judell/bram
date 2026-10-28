@@ -11443,6 +11443,24 @@ window.bramSubscribeTranscriptSplitHeight = (function () {
   };
 })();
 
+// transcript-worklist-expander-bar: the bar at the bottom of the transcript.
+// "▸ Worklist · 3 items · 1 ready to commit" (▾ when open). Ready to commit
+// uses the same predicate the Worklist's Commit button does, one item at a
+// time, so the bar never promises a commit the gate won't offer.
+window.__bramTranscriptWorklistBarLabel = function (open, board) {
+  var items = (board && board.items) || [];
+  var head = (open ? "▾" : "▸") + " Worklist";
+  if (!items.length) return head + " · empty";
+  var ready = 0;
+  items.forEach(function (it) {
+    try {
+      if (window.__bramSelectionAllCommittable(items, [it.id], null)) ready++;
+    } catch (e) {}
+  });
+  return head + " · " + items.length + " item" + (items.length === 1 ? "" : "s") +
+    (ready ? " · " + ready + " ready to commit" : "");
+};
+
 // #427: the Transcript's Worklist pane, open or closed. FOCUS (what the user
 // is looking at now), so sessionStorage: it survives a tab switch or pane
 // reload, which remount the Transcript, but not a relaunch.

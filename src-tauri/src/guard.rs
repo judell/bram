@@ -69,6 +69,9 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
             started,
             authority_worklist_hook,
         ),
+        // opencode-edit-advisory: called by the plugin's `execute.after` once
+        // an OpenCode edit has landed.
+        "opencode-after" => opencode_after_hook(&opencode_policy_payload(&payload), started),
         other => {
             // Misregistration surfaces in stderr, never in the exit code: a
             // nonzero exit from a PreToolUse-shaped hook could block a tool
@@ -284,12 +287,32 @@ fn post_hook_trace(root: &Path, tool: &str, target: &str, decision: &str, reason
 // the same `*** Begin Patch` text as Codex's apply_patch, so it takes Codex's.
 // Any other tool passes through by name, which the policy allows. Both
 // flavors read coverage from the same worklist_covered_files.
+//
+// opencode-mcp-guard: an MCP call reaches the plugin as `<server>_<tool>`,
+// which can't be told from a built-in by name (built-ins have namespaces too:
+// `opencode_worktree_create`, `browser_fill`). The plugin names the server
+// and tool when OpenCode's own lists say the tool's namespace is a connected
+// MCP server; spelled `mcp__<server>__<tool>`, the call then takes the
+// policy's MCP branch exactly as Claude's do.
 fn opencode_policy_payload(payload: &serde_json::Value) -> serde_json::Value {
     let input = payload
         .get("input")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     let cwd = str_field(payload, "cwd");
+    let mcp = payload.get("mcp").and_then(|m| {
+        let server = m.get("server")?.as_str()?;
+        let tool = m.get("tool")?.as_str()?;
+        (!server.is_empty() && !tool.is_empty()).then(|| format!("mcp__{}__{}", server, tool))
+    });
+    if let Some(tool_name) = mcp {
+        return serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": input,
+            "cwd": cwd,
+        });
+    }
     let field = |k: &str| input.get(k).cloned().unwrap_or(serde_json::Value::Null);
     // The plugin sends absolute paths today; a relative one is resolved the
     // way OpenCode resolves it, against the project directory.
@@ -334,6 +357,33 @@ fn opencode_policy_payload(payload: &serde_json::Value) -> serde_json::Value {
         "tool_input": tool_input,
         "cwd": cwd,
     })
+}
+
+// opencode-edit-advisory: the addressed-turn advisory Claude and Codex get as
+// PostToolUse additionalContext. OpenCode has no such field; its plugin appends
+// the note to the tool's result, which is what OpenCode's model reads. One JSON
+// line, `advisory` null when there is nothing to say. Exit 0 always and never
+// a deny: the edit has already happened.
+fn opencode_after_hook(payload: &serde_json::Value, started: std::time::Instant) -> i32 {
+    let tool = str_field(payload, "tool_name");
+    let advisory = if matches!(tool.as_str(), "Edit" | "Write" | "apply_patch") {
+        crate::guard_policy::opencode_addressed_turn_advisory(payload)
+    } else {
+        None
+    };
+    append_breadcrumb(
+        &resolve_project_root("opencode-rs", payload),
+        "opencode-rs",
+        "PostToolUse",
+        &tool,
+        &format!(
+            "advisory={} ms={}",
+            if advisory.is_some() { "yes" } else { "no" },
+            started.elapsed().as_millis()
+        ),
+    );
+    println!("{}", serde_json::json!({ "advisory": advisory }));
+    0
 }
 
 // The OpenCode plugin reads one JSON line from stdout; anything else, it
@@ -1288,6 +1338,88 @@ mod guard_mode_tests {
         }));
         assert_eq!(read["tool_name"], "read");
         assert_eq!(read["tool_input"]["path"], "/p/a.txt");
+        // opencode-mcp-guard: the 2026-10-26 spike's event for a local MCP
+        // server's write_file, with the server and tool the plugin adds.
+        let mcp = t(serde_json::json!({
+            "tool": "spike_write_file", "cwd": "/p",
+            "mcp": { "server": "spike", "tool": "write_file" },
+            "input": { "path": "mcp-out.txt", "content": "hi" }
+        }));
+        assert_eq!(mcp["tool_name"], "mcp__spike__write_file");
+        assert_eq!(
+            mcp["tool_input"],
+            serde_json::json!({ "path": "mcp-out.txt", "content": "hi" })
+        );
+        // Unmarked, the same name stays an unknown tool, as built-ins do.
+        let unmarked = t(serde_json::json!({
+            "tool": "opencode_worktree_create", "cwd": "/p", "input": { "name": "w" }
+        }));
+        assert_eq!(unmarked["tool_name"], "opencode_worktree_create");
+    }
+
+    // opencode-edit-advisory: what the plugin's execute.after gets back.
+    #[test]
+    fn opencode_edits_outside_the_addressed_items_get_the_advisory() {
+        let root = scratch("opencode-advisory");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("resources/worklist.json"),
+            r#"{"version":1,"items":[
+                {"id":"mine","status":"proposed","files":["a.txt"]},
+                {"id":"other","status":"proposed","files":["b.txt"]}]}"#,
+        )
+        .unwrap();
+        let context = root.join("resources/.turn-context.json");
+        std::fs::write(
+            &context,
+            r#"{"schema":1,"addressedIds":["mine"],"kind":"approved"}"#,
+        )
+        .unwrap();
+        let advise = |tool: &str, input: serde_json::Value| {
+            crate::guard_policy::opencode_addressed_turn_advisory(&opencode_policy_payload(
+                &serde_json::json!({ "tool": tool, "cwd": root.to_string_lossy(), "input": input }),
+            ))
+        };
+        let at = |name: &str| root.join(name).to_string_lossy().into_owned();
+        assert_eq!(
+            advise(
+                "edit",
+                serde_json::json!({ "path": at("a.txt"), "oldString": "x", "newString": "y" })
+            ),
+            None
+        );
+        let stray = advise(
+            "write",
+            serde_json::json!({ "path": at("b.txt"), "content": "y" }),
+        )
+        .unwrap();
+        assert!(
+            stray.starts_with("Bram: `b.txt` isn't in the files"),
+            "{stray}"
+        );
+        assert!(stray.contains("(mine)"), "{stray}");
+        let both = advise(
+            "patch",
+            serde_json::json!({ "patchText": "*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n+b\n*** Update File: b.txt\n@@\n-a\n+b\n*** End Patch" }),
+        )
+        .unwrap();
+        assert!(both.starts_with("Bram: `b.txt` isn't"), "{both}");
+        assert!(!both.contains("`a.txt`"), "{both}");
+        // A read isn't an edit, and a general turn has nothing to be outside of.
+        assert_eq!(
+            advise("read", serde_json::json!({ "path": at("b.txt") })),
+            None
+        );
+        std::fs::remove_file(&context).unwrap();
+        assert_eq!(
+            advise(
+                "write",
+                serde_json::json!({ "path": at("b.txt"), "content": "y" })
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1357,6 +1489,41 @@ mod guard_mode_tests {
         );
         assert_eq!(
             decide("read", serde_json::json!({ "path": at("other.txt") })),
+            "allow"
+        );
+        // opencode-mcp-guard: marked MCP calls are judged as Claude's are.
+        // The MCP path search counts a bare name only if it exists, so both
+        // files do, and the verdicts below come from coverage.
+        std::fs::write(root.join("covered.txt"), "a").unwrap();
+        std::fs::write(root.join("other.txt"), "a").unwrap();
+        let decide_mcp = |tool: &str, input: serde_json::Value| {
+            let p = opencode_policy_payload(&serde_json::json!({
+                "tool": format!("fs_{}", tool), "cwd": root.to_string_lossy(),
+                "mcp": { "server": "fs", "tool": tool }, "input": input
+            }));
+            crate::guard_policy::shadow_worklist_decision("claude-rs", &p)
+                .unwrap()
+                .decision
+        };
+        assert_eq!(
+            decide_mcp(
+                "write_file",
+                serde_json::json!({ "path": at("covered.txt"), "content": "ok" })
+            ),
+            "allow"
+        );
+        assert_eq!(
+            decide_mcp(
+                "write_file",
+                serde_json::json!({ "path": at("other.txt"), "content": "no" })
+            ),
+            "deny"
+        );
+        assert_eq!(
+            decide_mcp(
+                "read_text_file",
+                serde_json::json!({ "path": at("other.txt") })
+            ),
             "allow"
         );
         let _ = std::fs::remove_dir_all(&root);

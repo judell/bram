@@ -80,6 +80,59 @@ can't land in the menu as an answer (`:37152`). The current menu is
 `pendingMenu` on `/__turn-state` (`:64071`); `/__prompt-lifecycle`
 (`:64590`) keeps the ledger of prompts shown and answered.
 
+### OpenCode: the plugin poses, the terminal corroborates
+
+OpenCode has no hook for its permission prompt. Its event bus does:
+`permission.asked`, then `permission.replied` once the prompt is answered.
+Bram's seeded plugin (`app/__shell/opencode/bram-plugin.js`) forwards both
+for this project's top-level sessions to `/__opencode/event`
+(opencode-permission-menu). The plugin runs in OpenCode's shared background
+service, which can be days old. A green `opencode-registration` after Setup
+says the plugin *file* is current, not that the running service loaded it, so
+after an upgrade the first session may show no cards until that service
+restarts. The host builds the menu
+(`opencode_permission_request_to_menu`) and queues it as a claim keyed by
+OpenCode's `per_…` request id. A reply removes the claim, and so does the
+end of the turn.
+
+Two things differ from the hook path:
+
+- **No token.** The plugin runs in OpenCode's shared background service
+  (`opencode serve --service`), started by whichever OpenCode ran first, so it
+  can't carry this launch's `BRAM_MENU_TOKEN`. Instead the card waits until
+  Bram's own terminal draws OpenCode's permission prompt (the
+  `opencode-permission` shape) and is dropped if that doesn't happen within
+  5 s. This also keeps a prompt from another OpenCode window on the same
+  project out of the pane. It doesn't authenticate the payload:
+  `/__opencode/event` takes unauthenticated loopback POSTs, and each row's
+  answer keys come from the posted JSON. So a same-user local process, or an
+  agent in the project with a shell and the loopback port, could post a
+  crafted `permission.asked` while a real prompt is up and relabel the rows
+  (a "Reject" row whose keys are Allow once's). That is the same-user
+  loopback residual [security.md](security.md) accepts under #113 (H6), here
+  with keystrokes at stake. The follow-up is to derive each row's position
+  from the terminal's own drawn row, making the payload advisory (#453
+  review).
+- **No grid.** OpenCode draws its options in one row (Allow once, Always
+  allow, Reject) with no numbered cursor for the grid to join, so the claim's
+  own options are shown. Each option's keys are Right × its position, then
+  Enter, which OpenCode 2.1.4 accepts as one write. With two requests open,
+  nothing says which one the terminal shows, and a card's keys answer
+  whichever it is. So a second request takes the card down, and the one left
+  shows once the other is answered.
+
+**Questions** (opencode-question-card). OpenCode's question tool asks through
+a form: `form.created`, then `form.replied` or `form.cancelled`, forwarded the
+same way. `opencode_form_to_menu` builds a card for a one-question form of
+up to nine choices, keyed by the form's `frm_…` id. It waits for the form's
+footer ("↑↓ select enter submit esc dismiss", the `opencode-question` shape),
+and each choice answers with its digit, which OpenCode takes at once whichever
+row is highlighted. Free text ("Type your own answer") stays in the terminal,
+and the card says so: Claude's card types free text through pane code that is
+AskUserQuestion's own. A form with several questions, a multi-select, or an
+MCP server's form gets no card, but the shape still holds pane sends while it
+is drawn.
+
 ### `menus.parseAndDisplay` is off by default
 
 `BRAM_MENUS_PARSE_ENABLED` defaults to off: "menu parsing is unreliable,

@@ -2758,6 +2758,29 @@ pub(crate) fn codex_addressed_turn_advisory(payload: &Value) -> Option<String> {
     addressed_advisory_for(&project_root, "codex-rs", &rels)
 }
 
+// opencode-edit-advisory: an OpenCode edit as `opencode_policy_payload`
+// (guard.rs) translates it, `edit` / `write` to Claude's Edit / Write and
+// `patch` to Codex's apply_patch, so each takes its own target reading. The
+// plugin sends the project root as `cwd`.
+pub(crate) fn opencode_addressed_turn_advisory(payload: &Value) -> Option<String> {
+    let ti = payload.get("tool_input")?;
+    let project_root = find_project_root(payload.get("cwd")?.as_str()?)?;
+    let rels: Vec<String> = match str_field(payload, "tool_name").as_str() {
+        "apply_patch" => patch_targets(ti)
+            .iter()
+            .filter_map(|t| codex_normalize_target(&project_root, t))
+            .collect(),
+        "Edit" | "Write" => ti
+            .get("file_path")
+            .and_then(|p| p.as_str())
+            .and_then(|p| normalize_target(&project_root, p))
+            .into_iter()
+            .collect(),
+        _ => return None,
+    };
+    addressed_advisory_for(&project_root, "opencode-rs", &rels)
+}
+
 // The shared check: which of these targets the addressed items don't cover.
 fn addressed_advisory_for(project_root: &Path, provider: &str, rels: &[String]) -> Option<String> {
     let ids = turn_context_addressed_ids(project_root)?;

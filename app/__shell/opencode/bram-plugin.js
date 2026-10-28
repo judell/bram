@@ -11,7 +11,14 @@
 //
 // opencode-turn-lifecycle: it also forwards this project's turn boundaries
 // from OpenCode's event bus to Bram (POST /__opencode/event), since OpenCode
-// writes no transcript file Bram can watch for them.
+// writes no transcript file Bram can watch for them. opencode-permission-menu
+// added its permission prompts and their answers, so the pane can show the
+// question OpenCode is asking in the terminal.
+//
+// opencode-edit-advisory: after an edit lands, execute.after asks the guard
+// (`guard opencode-after`) whether it touched a file outside the items this
+// turn is addressed to, and adds Bram's note to the result OpenCode's model
+// reads. Advisory only: it never blocks.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -32,8 +39,9 @@ const GUARD = join(
   process.platform === "win32" ? "bram-guard.exe" : "bram-guard",
 );
 const GUARD_TIMEOUT_MS = 15000;
-// Built-in tools that can't change the project. Everything else, MCP tools
-// included, goes to the guard, which allows what it has no rule for.
+// Built-in tools that can't change the project. Everything else goes to the
+// guard, which allows what it has no rule for; MCP calls go as MCP calls
+// (mcpIdentity below), so its MCP rule applies.
 const READ_ONLY_TOOLS = new Set([
   "read",
   "glob",
@@ -60,7 +68,28 @@ function bramManagedHere() {
   return existsSync(join(ROOT, "resources", ".worklist-authorization.json"));
 }
 
-function askGuard(evt) {
+// opencode-mcp-guard: OpenCode 2.1.4 runs MCP tools through code mode, and
+// each MCP call reaches execute.before as `<server>_<tool>`. The tool list
+// gives a tool's namespace, but built-ins have namespaces too ("opencode",
+// "browser"), so it counts as MCP only when the namespace is a server the
+// MCP list names. Then the guard judges it as Claude's MCP calls are judged.
+// A failed lookup leaves the call as it was before this check.
+async function mcpIdentity(api, toolId) {
+  try {
+    const entry = ((await api.tool.list()) || []).find((t) => t && t.id === toolId);
+    const namespace = entry && entry.options && entry.options.namespace;
+    if (!namespace || typeof entry.name !== "string") return null;
+    const listed = await api.mcp.list();
+    const servers = Array.isArray(listed) ? listed : (listed && listed.data) || [];
+    return servers.some((s) => s && s.name === namespace)
+      ? { server: namespace, tool: entry.name }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function askGuard(evt, mcp) {
   if (!existsSync(GUARD) && !bramManagedHere()) {
     return Promise.resolve({ allow: true, message: "" });
   }
@@ -70,6 +99,7 @@ function askGuard(evt) {
     sessionID: evt.sessionID,
     agent: evt.agent,
     cwd: ROOT,
+    ...(mcp ? { mcp } : {}),
   });
   return new Promise((resolve) => {
     let child;
@@ -110,6 +140,53 @@ function askGuard(evt) {
   });
 }
 
+// --- edit advisory -------------------------------------------------------------
+
+// opencode-edit-advisory: Claude and Codex are told, once an edit lands, when it
+// touched a file the items this turn is addressed to don't list (their
+// PostToolUse additionalContext). OpenCode's model reads a tool result's
+// `content` parts: in the 2026-10-26 spike a text part appended here was quoted
+// back as part of the write's and edit's output. So the guard's note goes
+// there. The edit has already happened, so nothing here blocks, and any failure
+// adds nothing.
+const EDIT_TOOLS = new Set(["edit", "write", "patch"]);
+// The model waits on this after every edit; the guard answers in milliseconds.
+const ADVISORY_TIMEOUT_MS = 3000;
+
+function askAdvisory(evt) {
+  if (!existsSync(GUARD)) return Promise.resolve(null);
+  const payload = JSON.stringify({
+    tool: evt.tool,
+    input: evt.input,
+    sessionID: evt.sessionID,
+    agent: evt.agent,
+    cwd: ROOT,
+  });
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(GUARD, ["guard", "opencode-after"], {
+        cwd: ROOT,
+        stdio: ["pipe", "pipe", "ignore"],
+        timeout: ADVISORY_TIMEOUT_MS,
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      let answer = null;
+      try { answer = JSON.parse(out.trim().split("\n").pop() || ""); } catch {}
+      resolve(answer && typeof answer.advisory === "string" && answer.advisory ? answer.advisory : null);
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(payload);
+  });
+}
+
 // --- turn boundaries ---------------------------------------------------------
 
 const FORWARDED = new Set([
@@ -121,6 +198,14 @@ const FORWARDED = new Set([
   "session.execution.succeeded",
   "session.execution.failed",
   "session.execution.interrupted",
+  // opencode-permission-menu: the request (sent whole, as Bram builds the
+  // pane's menu from it) and its answer, which clears that menu.
+  "permission.asked",
+  "permission.replied",
+  // opencode-question-card: a question tool's form, whole, and how it closed.
+  "form.created",
+  "form.replied",
+  "form.cancelled",
 ]);
 
 // Read per event: Bram writes a new port each time it starts.
@@ -162,7 +247,8 @@ async function forwardTurns(api) {
   let chain = Promise.resolve();
   for await (const evt of api.event.subscribe()) {
     const data = (evt && evt.data) || {};
-    const sid = data.sessionID;
+    // form.created nests its session inside the form.
+    const sid = data.sessionID || (data.form && data.form.sessionID);
     if (!sid) continue;
     if (evt.type === "session.created" && data.parentID) children.add(sid);
     const dir = (evt.location && evt.location.directory) || (data.location && data.location.directory);
@@ -171,6 +257,8 @@ async function forwardTurns(api) {
     // Chained so the host sees boundaries in order; never awaited here, so
     // a slow or absent Bram can't hold up OpenCode's event stream.
     const body = { type: evt.type, sessionID: sid, at: evt.created };
+    if (evt.type.startsWith("permission.")) body.permission = data;
+    if (evt.type.startsWith("form.")) body.form = data;
     chain = chain.then(() => postEvent(body));
   }
 }
@@ -180,8 +268,19 @@ export default {
   setup(api) {
     api.tool.hook("execute.before", async (evt) => {
       if (READ_ONLY_TOOLS.has(evt.tool)) return;
-      const verdict = await askGuard(evt);
+      const verdict = await askGuard(evt, await mcpIdentity(api, evt.tool));
       if (!verdict.allow) throw new Error(verdict.message);
+    });
+    // Never throws: a failing execute.after must not turn a finished edit
+    // into a failed one.
+    api.tool.hook("execute.after", async (evt) => {
+      try {
+        if (!EDIT_TOOLS.has(evt.tool) || evt.status !== "completed") return;
+        const content = evt.result && evt.result.content;
+        if (!Array.isArray(content)) return;
+        const note = await askAdvisory(evt);
+        if (note) content.push({ type: "text", text: note });
+      } catch {}
     });
     forwardTurns(api).catch(() => {});
   },

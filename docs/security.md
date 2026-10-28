@@ -276,6 +276,23 @@ hook, add its allow and deny cases to `guard_selftest`, and confirm the
 Status tab reads green before and red after deliberately breaking the
 registration. Verified that way for this change: removing `Bash` from a demo
 instance's registration made the self-test report `missing: ["Bash"]`.
+OpenCode's registration is the plugin Setup seeds, `.opencode/plugins/bram.js`,
+and its cases run the `opencode-worklist` hook the plugin calls
+(opencode-guard-selftest). Verified the same way on 2026-10-26: moving the
+plugin out of a demo instance made the self-test report
+`failed: ["opencode-registration"]`, a Setup run reseeded it byte-identical,
+and the self-test went green again. There are 17 cases: 15 from that change,
+plus two OpenCode MCP cases from opencode-mcp-guard (an uncovered and a
+covered `write_file`). They're shaped as the plugin sends them: OpenCode 2.1.4 runs MCP tools
+through code mode, and each call reaches the plugin as `<server>_<tool>`. The
+plugin names the server when the tool's namespace is one `api.mcp.list()`
+reports, because built-ins have namespaces too. The guard then judges the call
+as `mcp__<server>__<tool>`, in Claude's MCP branch. That lookup fails open: if
+`api.mcp.list()` can't resolve the namespace, the call reaches the guard as an
+unknown `<server>_<tool>` tool, which is allowed, the same as before
+opencode-mcp-guard (#453 review). Code mode's `execute` itself
+couldn't write a file through Node's `fs` when tested, so the guard sees every
+write as a tool call.
 
 ## Ranked action plan
 
@@ -297,7 +314,7 @@ day, **M** = half to two days, **L** = more than two days.
 | H1 | Bracketed-paste `\x1b[201~` smuggling / auto-submit. | **DONE** — paste-end neutralized in outbound payloads (`6a13cde`). |
 | H2 | Worklist authorization forged from PTY input. | **DONE** — host-owned approve/drop auth (`6d49edf`). Root cause #3. |
 | H3 | Claude guard exits 0 for all `Bash`; write ops bypass the worklist. | **DONE (regressed 2026-07-23, re-fixed)** — `_BASH_WRITE_PATTERNS` landed in the guard, but the `Bash` matcher was dropped from the registration by unrelated collateral (`a8d2acb`), leaving the branch unreachable for three and a half weeks. The original DONE verified the script, not the artifact that runs. Re-fixed by registering the surface in `CLAUDE_GUARD_MATCHERS` and verifying by probe (#261). Root cause #4. |
-| H4 | Auth did not fail closed on interrupt. | **Original fix landed** (`d044b34`, `e75fea2`); #255 subsequently permits reconciliation (advance/prune) after interruption while publication stays blocked by a recorded interrupt. TTL applies to both. Already-consumed records are skipped by the invalidator; see [current limits](authorization.md#resolve-consumption-expiry-and-interruption). |
+| H4 | Auth did not fail closed on interrupt. | **Original fix landed** (`d044b34`, `e75fea2`); #255 subsequently permits reconciliation (advance/prune) after interruption while publication stays blocked by a recorded interrupt. TTL applies to both. Already-consumed records are skipped by the invalidator; see [current limits](authorization.md#resolve-consumption-expiry-and-interruption). Under OpenCode the interrupt is recorded when OpenCode reports one (`session.execution.interrupted`), not on the Esc keystroke: OpenCode stops a turn only on a second Esc within 5 s, so recording the first press blocked publication of work that kept running (opencode-esc-interrupt). Without Bram's OpenCode plugin no such report arrives, and the keystroke still records it. |
 | H5 | Issue-close / push side effects ungated. | **DONE** — agent `/__issue/close` route removed; closing is a host consequence of the user's explicit Push (`8c64ef7`). |
 | H6 | Loopback wildcard CORS let any cross-origin browser page that learned the port read responses. | **DONE — browser vector** (`issue-113-h6-loopback-cors-and-token`). The blanket `Access-Control-Allow-Origin: *` is gone; ACAO is echoed only for the shell (agent-pane) origin and omitted for every other Origin and for no-Origin callers (`cors_allowed_origin`). Confirmed by soak that real pane traffic sends no Origin, so the change is transparent to it; a cross-origin browser page — and the target pane's `bramapp://` origin — can no longer read loopback responses. **Residual (accepted):** a same-user *local process* is not browser-CORS-bound; a per-session token was designed and deliberately dropped as low-value, since such a process could equally read the token (env via `ps eww`, or a port-adjacent file). |
 

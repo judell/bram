@@ -1030,6 +1030,8 @@ fields of config away:
 | Claude logged out | `CLAUDE_CONFIG_DIR=$(mktemp -d)`, unset `ANTHROPIC_API_KEY`, and pre-set onboarding and folder trust in its `.claude.json` (`hasCompletedOnboarding`, `projects."<dir>".hasTrustDialogAccepted`). Otherwise the first-run theme picker and the folder-trust prompt come first. |
 | Codex logged out | `CODEX_HOME=$(mktemp -d)`, unset `OPENAI_API_KEY`, and pre-trust the folder in its `config.toml` (`[projects."<dir>"] trust_level = "trusted"`). |
 | A first-run prompt | the same throwaway directory with nothing pre-set |
+| An OpenCode dialog | At an idle composer, Ctrl+P opens the command palette, and Ctrl+X then `m`, `l` or `a` opens the model, session or agent list. Bram drains its tail on every keystroke, so capture what is drawn after the last key, not the whole stream. |
+| OpenCode logged out | No such screen in 2.1.4. With empty `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME`, it prints a stack trace (`cli.server-connection.resolve`) and exits before drawing its composer. With a real config, it runs its free models without signing in. |
 
 Capture from an empty working directory, so the Bram repo's own trust state
 doesn't interfere. The same environment works for a demo instance:

@@ -584,7 +584,50 @@ fn legacy_pair_holds(conn: &Connection, a: &str, a_id: &str, b: &str, b_id: &str
 /// yet). Pairs that share a session merge into one group; when a merge would
 /// put two sessions of one agent in a group, the more recent pair wins and
 /// the older one is returned as dropped ("<p>=<id>+<q>=<id>").
+///
+/// group-migration-atomic (OpenCode's review of 116cded): the check and every
+/// write run in one IMMEDIATE transaction. A failure partway rolls back, so
+/// "any group row exists" means the migration finished and the next launch
+/// retries from scratch; a second Bram process on the same project blocks on
+/// the write lock, then sees the committed rows and skips (bounded by the
+/// connection's busy_timeout; on timeout it errors and retries next launch).
 pub fn migrate_pairs_to_groups(conn: &Connection, at_ms: i64) -> Result<Option<Vec<String>>> {
+    migrate_pairs_to_groups_tx(conn, at_ms, None)
+}
+
+fn migrate_pairs_to_groups_tx(
+    conn: &Connection,
+    at_ms: i64,
+    fail_after_rows: Option<usize>,
+) -> Result<Option<Vec<String>>> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match migrate_pairs_to_groups_in_tx(conn, at_ms, fail_after_rows) {
+        Ok(out) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(out)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+// The migration body, run inside migrate_pairs_to_groups_tx's transaction.
+// `fail_after_rows` is a test hook: fail after writing that many rows.
+fn migrate_pairs_to_groups_in_tx(
+    conn: &Connection,
+    at_ms: i64,
+    fail_after_rows: Option<usize>,
+) -> Result<Option<Vec<String>>> {
+    let mut written = 0usize;
+    let wrote = |written: &mut usize| -> Result<()> {
+        *written += 1;
+        if fail_after_rows.is_some_and(|n| *written >= n) {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    };
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM transitions WHERE kind = 'group' AND item_id IS NULL",
         [],
@@ -684,6 +727,7 @@ pub fn migrate_pairs_to_groups(conn: &Connection, at_ms: i64) -> Result<Option<V
                 at_ms,
                 "migrate-pairs",
             )?;
+            wrote(&mut written)?;
         }
     }
     append_group_row(
@@ -692,6 +736,7 @@ pub fn migrate_pairs_to_groups(conn: &Connection, at_ms: i64) -> Result<Option<V
         at_ms,
         "migrate-pairs",
     )?;
+    wrote(&mut written)?;
     Ok(Some(dropped))
 }
 
@@ -2292,6 +2337,47 @@ mod tests {
         assert_eq!(session_group(&conn, "claude", "new").unwrap(), None);
         // Having been grouped still counts against a fresh partner.
         assert!(!session_never_paired(&conn, "claude", "new", "codex").unwrap());
+    }
+
+    // group-migration-atomic: a migration that fails after its first row
+    // leaves nothing, and a rerun completes it; a rerun after success writes
+    // nothing.
+    #[test]
+    fn a_failed_migration_rolls_back_and_a_rerun_completes_it() {
+        let conn = open_in_memory().unwrap();
+        let pair = |a: &str, ai: &str, b: &str, bi: &str, at: i64| {
+            let detail = serde_json::json!({ a: ai, b: bi }).to_string();
+            append_transition(&conn, at, None, "pair", &detail, "test").unwrap();
+        };
+        pair("claude", "c1", "opencode", "o1", 1);
+        pair("claude", "c1", "codex", "x1", 2);
+        let groups = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM transitions WHERE kind = 'group'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(migrate_pairs_to_groups_tx(&conn, 10, Some(1)).is_err());
+        assert_eq!(
+            groups(&conn),
+            0,
+            "a failed migration must leave no group rows"
+        );
+        assert!(migrate_pairs_to_groups(&conn, 11).unwrap().is_some());
+        let after = groups(&conn);
+        assert_eq!(after, 4, "three joins and the migrated marker");
+        assert_eq!(
+            session_group(&conn, "codex", "x1")
+                .unwrap()
+                .unwrap()
+                .members
+                .len(),
+            3
+        );
+        assert_eq!(migrate_pairs_to_groups(&conn, 12).unwrap(), None);
+        assert_eq!(groups(&conn), after, "a second migration writes nothing");
     }
 
     #[test]

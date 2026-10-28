@@ -1375,6 +1375,23 @@ window.__bramSessionLeaveTooltip = function (item) {
   return g ? "Take this session out of its group; switching agents from the others no longer comes here" : "";
 };
 
+// search-index-opencode-sessions: the Search page queries only once the
+// index has completed a cycle (lastCycleMs), which is when /__search stops
+// refusing with 503.
+window.__bramSearchReady = function (query, status) {
+  return !!query && String(query).trim().length >= 2 && !!(status && status.lastCycleMs);
+};
+
+// search-index-opencode-sessions (Jon, 2026-10-28): a session hit's badge
+// names its agent ("claude", "codex", "opencode") instead of "session"; the
+// colors still match the Sessions facet (blue).
+window.__bramSearchTypeLabel = function (h) {
+  if (!h) return "";
+  if (h.type === "worklist-history") return "history";
+  if (h.type === "session" && h.provider) return h.provider;
+  return h.type;
+};
+
 // session-groups: the Sessions row's Add to '<group>'. The group's member
 // anchors the join, so this session joins its group and takes its name. No
 // `from`: nothing is resumed, so no catch-up is offered.

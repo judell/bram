@@ -30187,6 +30187,13 @@ fn opencode_open_db_rw() -> Option<rusqlite::Connection> {
     Some(conn)
 }
 
+// search-index-opencode-sessions: whether an indexed session path is one of
+// Bram's OpenCode exports. Compared by path components (Path::starts_with),
+// not a "/"-joined substring, so it holds on Windows too.
+fn is_opencode_export_path(path: &std::path::Path, export_dir: &std::path::Path) -> bool {
+    path.starts_with(export_dir)
+}
+
 fn opencode_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let root = project_root(Some(app)).ok_or("could not resolve project root")?;
     let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
@@ -30266,6 +30273,13 @@ fn opencode_set_session_title<R: tauri::Runtime>(
     if changed == 0 {
         return Err("session not found".to_string());
     }
+    // search-index-opencode-sessions: a rename keeps time_updated, so the
+    // export would still look current and keep the old title. Drop it; the
+    // next discovery re-exports it, and the sessions pass sees a new file.
+    if let Ok(dir) = opencode_export_dir(app) {
+        let _ = std::fs::remove_file(dir.join(format!("{}.jsonl", id)));
+    }
+    search_index_request(IndexBucket::Sessions);
     Ok(())
 }
 
@@ -31729,6 +31743,28 @@ fn claude_session_search_data(path: &Path) -> SessionSearchExtraction {
     data
 }
 
+fn opencode_export_change_token(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let ms = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+    };
+    let modified = ms(meta.modified());
+    let created = ms(meta.created());
+    modified.max(created)
+}
+
+// search-index-opencode-sessions: OpenCode exports are Claude-shaped but
+// rewritten whole on every change, so always a cold parse, never the
+// append-only cache claude_session_search_data keeps.
+fn opencode_session_search_data(path: &Path) -> SessionSearchExtraction {
+    match std::fs::read_to_string(path) {
+        Ok(content) => claude_incremental_extract(None, &content).1,
+        Err(_) => SessionSearchExtraction::default(),
+    }
+}
+
 /// Join the `text` fields of a Codex content/output array (`[{type, text}, …]`),
 /// or return a bare string as-is.
 fn codex_content_text(value: Option<&serde_json::Value>) -> String {
@@ -32063,6 +32099,69 @@ mod claude_title_incremental_tests {
         let f2 = format!("{}\n", user("fresh"));
         let (_, s2) = claude_incremental_title(Some((o1, &s1)), &f2);
         assert_eq!(s2.resolved().as_deref(), Some("fresh"));
+    }
+}
+
+#[cfg(test)]
+mod opencode_search_index_tests {
+    use super::*;
+
+    fn rec(role: &str, text: &str) -> String {
+        format!(
+            "{{\"type\":\"{}\",\"message\":{{\"content\":\"{}\"}}}}",
+            role, text
+        )
+    }
+
+    fn tool(id: &str, command: &str) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"{}\",\"name\":\"Bash\",\"input\":{{\"command\":\"{}\"}}}}]}}}}",
+            id, command
+        )
+    }
+
+    // An OpenCode export is rewritten whole: an earlier record can change
+    // while the file stays the same size or grows. The OpenCode extractor
+    // must match a cold parse; the append-only one keeps the stale text
+    // (which is why OpenCode no longer uses it).
+    #[test]
+    fn a_rewritten_export_indexes_like_a_cold_parse() {
+        let dir = std::env::temp_dir().join(format!("bram-oc-search-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ses_test.jsonl");
+        let v1 = format!("{}\n{}\n", rec("user", "alpha"), tool("t1", "rg one"));
+        std::fs::write(&path, &v1).unwrap();
+        let _ = claude_session_search_data(&path); // warm the append-only cache
+        for v2 in [
+            // same size: one record's text changed
+            format!("{}\n{}\n", rec("user", "omega"), tool("t1", "rg one")),
+            // grows: an earlier record changed and one was added
+            format!(
+                "{}\n{}\n{}\n",
+                rec("user", "delta"),
+                tool("t2", "rg two"),
+                rec("assistant", "more")
+            ),
+        ] {
+            std::fs::write(&path, &v2).unwrap();
+            let cold = claude_incremental_extract(None, &v2).1;
+            assert_eq!(opencode_session_search_data(&path), cold);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_paths_are_recognized_by_component() {
+        let dir = Path::new("/cache/opencode-sessions/-Users-me-proj");
+        assert!(is_opencode_export_path(&dir.join("ses_1.jsonl"), dir));
+        assert!(!is_opencode_export_path(
+            Path::new("/cache/opencode-sessions/-Users-me-proj-other/ses_1.jsonl"),
+            dir
+        ));
+        assert!(!is_opencode_export_path(
+            Path::new("/home/me/.claude/projects/x/abc.jsonl"),
+            dir
+        ));
     }
 }
 
@@ -32496,11 +32595,22 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             .collect();
     // opencode-sessions-browser: OpenCode's exports are Claude-shaped, so the
     // same extraction indexes them; only the provider label differs.
+    // search-index-opencode-sessions: the change token for an export is in
+    // milliseconds, the later of its modified time (the session's
+    // time_updated, opencode_export_session) and its creation time (each
+    // export is a fresh file via atomic_write_text). SessionRecord.mtime is
+    // seconds, so a same-size rewrite inside one second looked unchanged; and
+    // a rename keeps time_updated, so only the creation time shows a
+    // title-only re-export. The first pass with this token reindexes each
+    // export once.
     files_vec.extend(
         discover_opencode_sessions(app, None)
             .unwrap_or_default()
             .into_iter()
-            .map(|s| (s.path, s.mtime, s.size, s.id, SessionProvider::Opencode)),
+            .map(|s| {
+                let token = opencode_export_change_token(&s.path).unwrap_or(s.mtime * 1000);
+                (s.path, token, s.size, s.id, SessionProvider::Opencode)
+            }),
     );
     stats.discover_ms = discover_started.elapsed().as_millis();
     stats.files = files_vec.len();
@@ -32541,7 +32651,11 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         // full FTS5 rewrite, so withhold until the growth is worth it or the
         // staleness bound expires. Never applies to a forced pass.
         let mut live_delta_skip: Option<(i64, i64)> = None;
-        if needs_index && !forced {
+        // search-index-opencode-sessions: an OpenCode export changes only when
+        // a turn ends or the session is renamed (it is rewritten whole, never
+        // appended), so withholding its small final change would leave it
+        // stale with no later change to bring the pass back.
+        if needs_index && !forced && provider != SessionProvider::Opencode {
             if let Ok(Some((prev_size, indexed_at))) = search_index::indexed_meta(&conn, &path_str)
             {
                 let age = (unix_now_ms() / 1000) - indexed_at;
@@ -32586,7 +32700,14 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         let path_str = path.to_string_lossy().to_string();
         let extract_started = std::time::Instant::now();
         let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
-        let extracted = claude_session_search_data(&path);
+        // search-index-opencode-sessions: an export is rewritten whole, so
+        // earlier records can change while the file grows; the incremental
+        // (append-only) extractor would keep stale text. Parse it cold.
+        let extracted = if provider == SessionProvider::Opencode {
+            opencode_session_search_data(&path)
+        } else {
+            claude_session_search_data(&path)
+        };
         stats.indexed_bytes = stats
             .indexed_bytes
             .saturating_add(extracted.content.len() as u64);
@@ -32608,7 +32729,15 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
                 session_provider_label(provider),
                 size / 1024
             ),
-            date: mtime.to_string(),
+            // search-index-opencode-sessions: an OpenCode export's change
+            // token is in milliseconds; the row's date stays in seconds like
+            // every other session (a ms value read as seconds dated the
+            // burndown hit 58793-02-18).
+            date: if provider == SessionProvider::Opencode {
+                (mtime / 1000).to_string()
+            } else {
+                mtime.to_string()
+            },
             // Internal tab route; exact-session deep-link is deferred. The
             // expander derives id from the doc key (file basename) for /__turns.
             link: "/sessions".to_string(),
@@ -33611,6 +33740,10 @@ struct SearchIndexStatus {
     // passes are visibly active even on QuietUnlessAdded startup runs; cleared
     // at pass end and, as a safety net, by run_and_trace_index_pass.
     progress: Option<(String, usize, usize)>,
+    // search-index-opencode-sessions: a cycle is running, footer-quiet or not.
+    // The quiet startup cycle sets no active bucket, so before this flag a
+    // refusal during the first cycle read "holding" (2026-10-28 06:26Z).
+    cycle_running: bool,
 }
 
 // issue-316: the shared not-ready check for /__search and /__search/doc.
@@ -33626,11 +33759,13 @@ fn search_not_ready_reason(st: &SearchIndexStatus) -> Option<&'static str> {
     if st.last_cycle_ms != 0 {
         return None;
     }
-    Some(if st.progress.is_some() || !st.active_buckets.is_empty() {
-        "initial-scan"
-    } else {
-        "holding"
-    })
+    Some(
+        if st.progress.is_some() || !st.active_buckets.is_empty() || st.cycle_running {
+            "initial-scan"
+        } else {
+            "holding"
+        },
+    )
 }
 
 fn search_not_ready_refusal<R: tauri::Runtime>(
@@ -33713,6 +33848,7 @@ fn search_index_record_cycle<R: tauri::Runtime>(
 ) {
     if let Ok(mut s) = search_index_status_cell().lock() {
         s.active_buckets = Vec::new();
+        s.cycle_running = false;
         s.total = total;
         s.last_cycle_ms = unix_now_ms() as i64;
         if !added.is_empty() {
@@ -34069,6 +34205,9 @@ fn run_index_buckets<R: tauri::Runtime>(
     buckets: &[IndexBucket],
     display: IndexRunDisplay,
 ) {
+    if let Ok(mut s) = search_index_status_cell().lock() {
+        s.cycle_running = true;
+    }
     let live_names = live_index_bucket_names(buckets, display);
     let live_started = if live_names.is_empty() {
         None
@@ -71705,16 +71844,31 @@ fn route_request<R: tauri::Runtime>(
             .unwrap_or_default()
         };
         let enrich_started = std::time::Instant::now();
+        // search-index-opencode-sessions: OpenCode sessions are indexed from
+        // Bram's exports of them, which live in its cache, not under ~/.codex/,
+        // so they were labeled Claude (and their Switch went to Claude).
+        let opencode_dir = opencode_export_dir(app).ok();
         let enriched_hits = hits
             .iter()
             .map(|h| {
                 // Session doc key is the JSONL path. Recover the provider
-                // (Codex sessions live under ~/.codex/) and the session id
-                // the expander needs: Claude's is the file stem, but a
-                // Codex id lives inside the file (codex_session_meta).
+                // (Codex sessions live under ~/.codex/, OpenCode exports in
+                // Bram's cache) and the session id the expander needs:
+                // Claude's and OpenCode's is the file stem, but a Codex id
+                // lives inside the file (codex_session_meta).
                 let (provider, id) = if h.kind == "session" {
                     let path = std::path::Path::new(&h.key);
-                    if h.key.contains("/.codex/") {
+                    if opencode_dir
+                        .as_deref()
+                        .is_some_and(|dir| is_opencode_export_path(path, dir))
+                    {
+                        let id = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        ("opencode".to_string(), id)
+                    } else if h.key.contains("/.codex/") {
                         let id = codex_session_meta(path)
                             .ok()
                             .flatten()
@@ -71732,10 +71886,17 @@ fn route_request<R: tauri::Runtime>(
                 } else {
                     (String::new(), String::new())
                 };
+                // search-index-opencode-sessions: rows indexed by the first
+                // build of this item stored an OpenCode date in milliseconds;
+                // anything past ~5138 AD as seconds is ms.
+                let date = match h.date.parse::<i64>() {
+                    Ok(d) if d > 100_000_000_000 => (d / 1000).to_string(),
+                    _ => h.date.clone(),
+                };
                 serde_json::json!({
                     "type": h.kind,
                     "source": h.source,
-                    "date": h.date,
+                    "date": date,
                     "link": h.link,
                     "snippet": h.snippet,
                     "rank": h.rank,
@@ -81943,6 +82104,10 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
         .filter(|(s, _, _)| s == sid)
         .map(|(_, _, input)| input);
     agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
+    // search-index-opencode-sessions: no watcher sees OpenCode's database, so
+    // a finished turn asks for a sessions pass (which re-exports the changed
+    // session and indexes it).
+    search_index_request(IndexBucket::Sessions);
     clear_proposing_flag(app, "turn-finished");
     end_turn_context_unless_fresh(app, "opencode-turn-end");
     let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
@@ -85708,6 +85873,12 @@ mod search_not_ready_tests {
         st.active_buckets.clear();
         st.progress = Some(("commits".into(), 1, 10));
         assert_eq!(search_not_ready_reason(&st), Some("initial-scan"));
+        // A quiet startup cycle names no bucket but is still a scan.
+        st.progress = None;
+        st.cycle_running = true;
+        assert_eq!(search_not_ready_reason(&st), Some("initial-scan"));
+        st.cycle_running = false;
+        st.progress = Some(("commits".into(), 1, 10));
         // A completed cycle — even over zero documents — is ready: [] is
         // then the genuine empty (verified live: 200 [] with total=0).
         st.last_cycle_ms = 1;

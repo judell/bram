@@ -14,7 +14,7 @@
        evaluates in this scope, so typeColors resolves here.
        https://docs.xmlui.org/howto/pass-a-template-slot-to-a-component -->
   <variable name="typeColors"
-    value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
+    value="{{ session: 'blue', claude: 'blue', codex: 'blue', opencode: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
   <ResultList
     data="{$props.hits}"
     query="{$props.query}"

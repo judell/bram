@@ -9,7 +9,7 @@
        selected buckets by rank. Clicking a title inline-expands that row
        (single-open) and fetches the real per-type source. -->
   <variable name="typeColors"
-    value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
+    value="{{ session: 'blue', claude: 'blue', codex: 'blue', opencode: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
   <variable name="facetColors"
     value="{{ Sessions: 'blue', Commits: 'green', Issues: '#c2410c', History: 'purple' }}" />
   <!-- selectedTypes (the facet pills) and mode seed from the URL so an
@@ -34,7 +34,11 @@
        Issues / History seed their filters from it at mount (Globals.xs). -->
   <ChangeListener listenTo="{query}"
     onDidChange="() => setLastSearchQuery(query)" />
-  <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
+  <!-- search-index-opencode-sessions: don't query until the index has
+       finished a cycle. The server refuses until then (503), and each of the
+       four bucket queries raised its own error toast on top of the page's
+       "hasn't scanned this project yet" line (2026-10-28 06:26Z). -->
+  <variable name="ready" value="{window.__bramSearchReady(query, searchIndexStatus.value)}" />
   <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
   <variable name="dateFilter" value="{null}" />
   <!-- Live thumb position during a drag; dateFilter is its debounced
@@ -254,7 +258,7 @@
     )
       .slice(0, 100)
       .map(h => Object.assign({}, h, {
-        typeLabel: h.type === 'worklist-history' ? 'history' : h.type,
+        typeLabel: window.__bramSearchTypeLabel(h),
         dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : '',
         snippetSegs: snippetSegments(h.snippet, query.trim())
       }))

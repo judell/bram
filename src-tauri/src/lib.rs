@@ -10532,6 +10532,48 @@ const OPENCODE_ESC_COUNT_WINDOW_MS: i64 = 5_000;
 // single "\x1b\x1b" write did not interrupt in the 2026-10-26 spike, two
 // writes 100 ms apart did.
 const OPENCODE_ESC_PRESS_GAP_MS: u64 = 100;
+// opencode-esc-off-main-thread: set from the first press until the second is
+// written (schedule_opencode_second_esc). Pane sends queued meanwhile wait
+// for it, so they still reach OpenCode after both presses.
+static OPENCODE_SECOND_ESC_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// The pane's second Esc for a running OpenCode turn, the gap after the first.
+// queue_pty_intent is a plain command, so it runs on the main thread, and
+// sleeping there for the gap stalled the app at the busiest point of a turn
+// (#453 review). The flag is cleared whether or not the write succeeds, so a
+// failed press can't hold the queue.
+fn schedule_opencode_second_esc<R: tauri::Runtime>(app: &AppHandle<R>) {
+    OPENCODE_SECOND_ESC_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(OPENCODE_ESC_PRESS_GAP_MS));
+        let state = app.state::<AppState>();
+        let Ok(_drain_guard) = pty_intent_lock().lock() else {
+            OPENCODE_SECOND_ESC_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        };
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "send-gate",
+                "op=esc-doubled provider=opencode reason=running-turn",
+            );
+        }
+        let wrote = pty_write_internal(&app, &state, "\x1b", "pty-intent-sendKeys");
+        OPENCODE_SECOND_ESC_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Err(e) = wrote {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "send-gate",
+                    &format!("op=esc-doubled-failed provider=opencode error={}", e),
+                );
+            }
+        }
+        let _ = drain_pty_intents(&app, &state);
+    });
+}
 
 // Whether a user Esc should wait for the agent's own interrupt report. Only
 // OpenCode reports one, and only through Bram's plugin: without a current
@@ -20479,12 +20521,20 @@ fn drain_pty_intents<R: tauri::Runtime>(
         current_provider(app),
     );
     let mut prompt_restores: Vec<(String, String)> = Vec::new();
+    let mut esc_held: usize = 0;
 
     for line in content.lines() {
         if line.is_empty() {
             continue;
         }
         if drain_error.is_some() {
+            remaining.push(line.to_string());
+            continue;
+        }
+        // opencode-esc-off-main-thread: everything queued after the pane's
+        // first Esc waits for its second, and drains after it.
+        if OPENCODE_SECOND_ESC_PENDING.load(std::sync::atomic::Ordering::SeqCst) {
+            esc_held += 1;
             remaining.push(line.to_string());
             continue;
         }
@@ -20678,19 +20728,12 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 } else if data == "\x1b" && pane_esc_presses_now(app) == 2 {
                     // opencode-esc-interrupt: the button means stop, and a
                     // running OpenCode turn stops only on a second press.
-                    pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys").and_then(|_| {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            OPENCODE_ESC_PRESS_GAP_MS,
-                        ));
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "send-gate",
-                                "op=esc-doubled provider=opencode reason=running-turn",
-                            );
-                        }
-                        pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys")
-                    })
+                    // opencode-esc-off-main-thread: which comes from a thread.
+                    let r = pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys");
+                    if r.is_ok() {
+                        schedule_opencode_second_esc(app);
+                    }
+                    r
                 } else {
                     let r = pty_write_internal(app, state, data, "pty-intent-sendKeys");
                     if r.is_ok()
@@ -20869,6 +20912,14 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 &format!("op=flush wrote={} held_ms={}", wrote, held_ms),
             );
         }
+    }
+
+    if esc_held > 0 && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!("op=hold count={} reason=esc-second-press", esc_held),
+        );
     }
 
     if remaining.is_empty() {

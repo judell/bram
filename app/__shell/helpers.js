@@ -16265,7 +16265,13 @@ window.__bramLandedIds = function (board) {
 window.__bramGuardSelftestSummary = function (r) {
   if (!r) return "";
   if (!r.link) return "not installed: ~/.bram/bram-guard is missing";
-  if (r.ok) return "working: " + (r.cases || []).length + " cases as expected, registration current";
+  if (r.ok) {
+    // opencode-review-small-fixes: a user's own OpenCode plugin passes, but it
+    // isn't Bram's registration.
+    var custom = ((r.registration || {}).opencode || {}).custom;
+    return "working: " + (r.cases || []).length + " cases as expected, registration current" +
+      (custom ? " except OpenCode's (your own plugin)" : "");
+  }
   var failed = r.failed || [];
   return "failing: " + failed.length + " check" + (failed.length === 1 ? "" : "s") + " (" + failed.join(", ") + ")";
 };
@@ -16282,9 +16288,13 @@ window.__bramGuardRegistrationLine = function (r) {
   }
   parts.push("Codex: " + ((reg.codex || {}).ok ? "hook current" : "hook not current (run Setup)"));
   // opencode-guard-selftest: only where OpenCode is wanted, the host's rule;
-  // an older host sends no opencode entry.
+  // an older host sends no opencode entry. opencode-review-small-fixes: a
+  // plugin without Setup's marker is the user's, which Setup keeps.
   var o = reg.opencode;
-  if (o && o.wanted) parts.push("OpenCode: " + (o.ok ? "plugin current" : "plugin missing or stale (run Setup)"));
+  if (o && o.wanted) {
+    parts.push("OpenCode: " + (o.custom ? "your own plugin, so Bram's checks are off"
+      : o.ok ? "plugin current" : "plugin missing or stale (run Setup)"));
+  }
   return parts.join(" · ");
 };
 

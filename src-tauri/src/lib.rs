@@ -20357,18 +20357,26 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 } else if data == "\x1b" && pane_esc_presses_now(app) == 2 {
                     // opencode-esc-interrupt: the button means stop, and a
                     // running OpenCode turn stops only on a second press.
-                    pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys").and_then(|_| {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            OPENCODE_ESC_PRESS_GAP_MS,
-                        ));
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "send-gate",
-                                "op=esc-doubled provider=opencode reason=running-turn",
-                            );
-                        }
-                        pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys")
+                    // #453 review: the gap is slept on a spawned thread, not
+                    // here. queue_pty_intent is a sync command, so it runs on
+                    // the main thread (the issue-395-claim-capture-timed
+                    // receipt), and it stays sync so pane sends keep their order.
+                    pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys").map(|_| {
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                OPENCODE_ESC_PRESS_GAP_MS,
+                            ));
+                            if bram_trace_enabled() {
+                                append_bram_trace_line(
+                                    &app,
+                                    "send-gate",
+                                    "op=esc-doubled provider=opencode reason=running-turn",
+                                );
+                            }
+                            let state = app.state::<AppState>();
+                            let _ = pty_write_internal(&app, &state, "\x1b", "pty-intent-sendKeys");
+                        });
                     })
                 } else {
                     let r = pty_write_internal(app, state, data, "pty-intent-sendKeys");

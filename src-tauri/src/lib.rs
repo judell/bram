@@ -20624,7 +20624,12 @@ fn pty_write_internal<R: tauri::Runtime>(
         // submitted or got stranded in the input ("needed a newline"). Only the
         // submit-bearing write carries \r (the Windows payload chunk does not),
         // so this fires once per send on both platforms.
-        if caller_hint.starts_with("pty-intent-toTurn") && data.contains('\r') {
+        // trace-new-session-brief-submit: the ledger's nudge CR too, so a
+        // strand shows the screen after the retry as well.
+        if (caller_hint.starts_with("pty-intent-toTurn")
+            || caller_hint == "send-ledger-submit-nudge")
+            && data.contains('\r')
+        {
             let _ = app.emit(
                 "pty-send-sent",
                 serde_json::json!({ "source": caller_hint }),
@@ -22085,6 +22090,25 @@ fn bracketed_paste_turn_payload(data: &str) -> String {
     format!("{}\x1b[200~{}\x1b[201~", COMPOSER_CLEAR, data)
 }
 
+// Whether the PTY tail shows the end of `data` (whitespace squashed, since a
+// narrow pane wraps it). Diagnostic only.
+fn payload_echoed_in_tail(data: &str) -> bool {
+    let squash = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    let want: String = {
+        let d = squash(data);
+        let n = d.chars().count();
+        d.chars().skip(n.saturating_sub(16)).collect()
+    };
+    if want.is_empty() {
+        return false;
+    }
+    let raw = match pty_tail_cell().lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return false,
+    };
+    squash(&String::from_utf8_lossy(&strip_ansi(&raw))).contains(&want)
+}
+
 // The raw PTY injection for a turn payload. Shared by the normal send
 // path above and the ledger's trust-gated auto-resend.
 fn inject_turn_payload<R: tauri::Runtime>(
@@ -22101,8 +22125,27 @@ fn inject_turn_payload<R: tauri::Runtime>(
             windows_turn_composer_clear(current_provider(app)),
             "pty-intent-toTurn-windows-clear",
         )?;
+        let payload_at = unix_now_ms();
         pty_write_internal(app, state, data, "pty-intent-toTurn-windows-payload")?;
         std::thread::sleep(std::time::Duration::from_millis(200));
+        // trace-new-session-brief-submit: a fresh Claude can take this CR as
+        // a newline (Windows matrix 2026-10-28 20:23Z: the brief sat in the
+        // prompt with the cursor on a new line). Record whether the agent had
+        // echoed the payload, or written anything, before the CR goes in.
+        if bram_trace_enabled() {
+            let output_since_payload =
+                LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed) > payload_at;
+            append_bram_trace_line(
+                app,
+                "turn-send",
+                &format!(
+                    "op=submit path=windows-raw payload_echoed={} output_since_payload={} wait_ms={}",
+                    payload_echoed_in_tail(data),
+                    output_since_payload,
+                    unix_now_ms().saturating_sub(payload_at)
+                ),
+            );
+        }
         pty_write_internal(app, state, "\r", "pty-intent-toTurn-windows-submit")
     } else {
         let wrapped = bracketed_paste_turn_payload(data);

@@ -167,7 +167,7 @@ class Run:
         self.results.append((name, "skip", why))
 
 
-def matrix(r: Run, turns: bool, agents: list[str]) -> None:
+def matrix(r: Run, turns: bool, agents: list[str], new_session_only: bool = False) -> None:
     stamp = time.strftime("%H%M%S")
     title = f"matrix {stamp}"
 
@@ -199,6 +199,8 @@ def matrix(r: Run, turns: bool, agents: list[str]) -> None:
         ])
         # Let New session's own launch settle before the next switch.
         r.wait(m, r"op=launch-(confirmed|exited|timeout|superseded) provider=claude source=new-session")
+        if new_session_only:
+            return
 
         # fresh partners: a New-session-born session starts a named, paired partner.
         for p in ("opencode", "codex"):
@@ -422,6 +424,9 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="leave the demo running even on success")
     ap.add_argument("--new-session-opencode-only", action="store_true",
                     help="run just the OpenCode New session delivery/reply regression")
+    # trace-new-session-brief-submit: loop the Windows Claude first-message case.
+    ap.add_argument("--new-session-claude-only", action="store_true",
+                    help="run just switch-to-claude and the Claude New session case")
     args = ap.parse_args()
     repo = Path(args.repo).resolve()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()]
@@ -452,9 +457,12 @@ def main() -> int:
     # Let autostart settle before driving.
     r.wait(r.start, r"op=launch-(confirmed|exited|timeout) provider=\S+ source=autostart", 90)
 
-    if not args.new_session_opencode_only:
-        matrix(r, not args.no_turns, agents)
-    new_session_opencode(r, not args.no_turns, agents)
+    if args.new_session_claude_only:
+        matrix(r, True, agents, new_session_only=True)
+    else:
+        if not args.new_session_opencode_only:
+            matrix(r, not args.no_turns, agents)
+        new_session_opencode(r, not args.no_turns, agents)
 
     never = sorted({line.split("] ", 2)[-1][:120] for line in msc.trace_lines(repo)[r.start:]
                     if NEVER.search(line)})

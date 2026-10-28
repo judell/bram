@@ -31447,8 +31447,6 @@ fn codex_payload_first_user_text(payload: &serde_json::Value) -> Option<String> 
 
 #[cfg(test)]
 mod codex_session_title_tests {
-    use super::*;
-
     // codex-session-title-lost-to-codex: the retired matcher returned None for
     // every current rollout, so the first-user-message fallback was dead and
     // the index — the value Codex overwrites — was all that remained.

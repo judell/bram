@@ -26400,8 +26400,18 @@ fn create_new_session(
             // release the hold.
             LaunchPhase::Timeout => open_agent_boot_evidence(app, "launch-timeout"),
             LaunchPhase::BeforeWrite => open_agent_boot_evidence(app, "launch"),
+            // new-session-marks-its-agent-current: as start-fresh does. Until
+            // this, a New session for another agent left the old one current,
+            // so the boot hold's delivery check (brief provider == current)
+            // bounced the brief back to the box (Windows demo 2026-10-28
+            // 20:10:24, reason=target-changed, 52 ms before the refresh).
             LaunchPhase::Written => {
-                schedule_agent_switch_refresh(app.clone(), provider_key, "new-session")
+                let crossing = current_provider(app) != Some(new_provider);
+                set_current_provider(app, new_provider, "new-session");
+                schedule_agent_switch_refresh(app.clone(), provider_key, "new-session");
+                if crossing {
+                    schedule_cross_provider_status_reset(app.clone());
+                }
             }
             LaunchPhase::Confirmed => {
                 let Some(from) = pair_with.as_ref() else {

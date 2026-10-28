@@ -86,7 +86,11 @@ OpenCode has no hook for its permission prompt. Its event bus does:
 `permission.asked`, then `permission.replied` once the prompt is answered.
 Bram's seeded plugin (`app/__shell/opencode/bram-plugin.js`) forwards both
 for this project's top-level sessions to `/__opencode/event`
-(opencode-permission-menu). The host builds the menu
+(opencode-permission-menu). The plugin runs in OpenCode's shared background
+service, which can be days old. A green `opencode-registration` after Setup
+says the plugin *file* is current, not that the running service loaded it, so
+after an upgrade the first session may show no cards until that service
+restarts. The host builds the menu
 (`opencode_permission_request_to_menu`) and queues it as a claim keyed by
 OpenCode's `per_…` request id. A reply removes the claim, and so does the
 end of the turn.
@@ -99,8 +103,16 @@ Two things differ from the hook path:
   Bram's own terminal draws OpenCode's permission prompt (the
   `opencode-permission` shape) and is dropped if that doesn't happen within
   5 s. This also keeps a prompt from another OpenCode window on the same
-  project out of the pane. Same-user loopback access remains the residual that
-  [security.md](security.md) accepts under #113.
+  project out of the pane. It doesn't authenticate the payload:
+  `/__opencode/event` takes unauthenticated loopback POSTs, and each row's
+  answer keys come from the posted JSON. So a same-user local process, or an
+  agent in the project with a shell and the loopback port, could post a
+  crafted `permission.asked` while a real prompt is up and relabel the rows
+  (a "Reject" row whose keys are Allow once's). That is the same-user
+  loopback residual [security.md](security.md) accepts under #113 (H6), here
+  with keystrokes at stake. The follow-up is to derive each row's position
+  from the terminal's own drawn row, making the payload advisory (#453
+  review).
 - **No grid.** OpenCode draws its options in one row (Allow once, Always
   allow, Reject) with no numbered cursor for the grid to join, so the claim's
   own options are shown. Each option's keys are Right × its position, then

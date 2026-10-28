@@ -278,16 +278,19 @@ registration. Verified that way for this change: removing `Bash` from a demo
 instance's registration made the self-test report `missing: ["Bash"]`.
 OpenCode's registration is the plugin Setup seeds, `.opencode/plugins/bram.js`,
 and its cases run the `opencode-worklist` hook the plugin calls
-(opencode-guard-selftest). Verified the same way on 2026-10-26. All 15 cases
-passed. Moving the plugin out of a demo instance made the self-test report
-`failed: ["opencode-registration"]`. A Setup run then reseeded it
-byte-identical, and the self-test went green again. opencode-mcp-guard added
-two OpenCode MCP cases, an uncovered and a covered `write_file`, for 17 in
-all. They're shaped as the plugin sends them: OpenCode 2.1.4 runs MCP tools
+(opencode-guard-selftest). Verified the same way on 2026-10-26: moving the
+plugin out of a demo instance made the self-test report
+`failed: ["opencode-registration"]`, a Setup run reseeded it byte-identical,
+and the self-test went green again. There are 17 cases: 15 from that change,
+plus two OpenCode MCP cases from opencode-mcp-guard (an uncovered and a
+covered `write_file`). They're shaped as the plugin sends them: OpenCode 2.1.4 runs MCP tools
 through code mode, and each call reaches the plugin as `<server>_<tool>`. The
 plugin names the server when the tool's namespace is one `api.mcp.list()`
 reports, because built-ins have namespaces too. The guard then judges the call
-as `mcp__<server>__<tool>`, in Claude's MCP branch. Code mode's `execute` itself
+as `mcp__<server>__<tool>`, in Claude's MCP branch. That lookup fails open: if
+`api.mcp.list()` can't resolve the namespace, the call reaches the guard as an
+unknown `<server>_<tool>` tool, which is allowed, the same as before
+opencode-mcp-guard (#453 review). Code mode's `execute` itself
 couldn't write a file through Node's `fs` when tested, so the guard sees every
 write as a tool call.
 

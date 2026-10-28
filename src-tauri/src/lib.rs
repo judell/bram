@@ -47666,6 +47666,36 @@ struct ProjectedTurnsCacheEntry {
     provider_label: &'static str,
     turns: Vec<serde_json::Value>,
 }
+impl ProjectedTurnsCacheEntry {
+    fn matches_file(&self, path: &Path, mtime: std::time::SystemTime, len: u64) -> bool {
+        // Windows can keep an open writer's mtime unchanged while it appends.
+        self.path == path && self.mtime == mtime && self.len == len
+    }
+}
+
+#[cfg(test)]
+mod projected_turns_file_cache_tests {
+    use super::*;
+
+    #[test]
+    fn appended_session_invalidates_cache_even_when_windows_mtime_is_unchanged() {
+        let path = Path::new("rollout.jsonl");
+        let mtime = std::time::SystemTime::UNIX_EPOCH;
+        let entry = ProjectedTurnsCacheEntry {
+            path: path.to_path_buf(),
+            mtime,
+            len: 100,
+            sid: "test".into(),
+            provider_label: "codex",
+            turns: vec![],
+        };
+        assert!(entry.matches_file(path, mtime, 100));
+        assert!(!entry.matches_file(path, mtime, 200));
+        assert!(!entry.matches_file(path, mtime, 50));
+        assert!(!entry.matches_file(Path::new("other.jsonl"), mtime, 100));
+        assert!(!entry.matches_file(path, mtime + std::time::Duration::from_secs(1), 100));
+    }
+}
 static PROJECTED_TURNS_CACHE: std::sync::Mutex<Option<ProjectedTurnsCacheEntry>> =
     std::sync::Mutex::new(None);
 
@@ -48692,7 +48722,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
     if entry.path != path || len < entry.len {
         return None;
     }
-    if entry.mtime == mtime {
+    if entry.matches_file(path, mtime, len) {
         return Some(projected_turns_body(
             app,
             &entry.sid,
@@ -48880,7 +48910,7 @@ fn read_projected_turns<R: tauri::Runtime>(
     }
     if let Ok(guard) = PROJECTED_TURNS_CACHE.lock() {
         if let Some(entry) = guard.as_ref() {
-            if entry.path == path && entry.mtime == mtime {
+            if entry.matches_file(&path, mtime, len) {
                 return projected_turns_body(
                     app,
                     &entry.sid,

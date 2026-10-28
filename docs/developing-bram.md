@@ -438,6 +438,16 @@ either. And always launch the `./bram` symlink at the repo root, not
 an installed/older app — both for fresh code and because the symlink
 is what makes disk serving resolve at all.
 
+**Build through `scripts/build.sh`**, the same debug build with a
+record: output and exit status pass through, and each build appends a
+line to `resources/build-log.jsonl` (gitignored). The line has its
+duration, HEAD and whether it moved, `src-tauri/` lines changed since
+the last logged build, other `cargo`/`rustc` processes running, load,
+and the caller. `scripts/build-timings.sh` times synthetic edits on a
+quiet tree; this log catches the slow real builds it can't (#452:
+2m55s and 1m38s builds the same day the synthetic rows read 25–34 s).
+Read it by sorting on `seconds` and looking at the slow rows' context.
+
 ### Formatting is enforced, so run `cargo fmt`
 
 `src-tauri/` was normalized in `d94a3b9`, and `.github/workflows/fmt.yml`
@@ -494,6 +504,96 @@ files, so a 12-line fix would ship as a 900-line diff under your item's
 id. That is what normalizing bought: the rule stopped depending on
 anyone remembering it. The cross-machine coordination that landing it
 required is on judell/bram#322.
+
+### Measuring build time, not guessing at it
+
+`scripts/build-timings.sh` prints the four numbers a build-time claim
+needs, as a markdown table:
+
+| measurement | what it isolates |
+|---|---|
+| no-op | cargo's freshness scan. If this already costs seconds, the complaint is not compilation |
+| incremental (one line appended to `lib.rs`) | the cheapest edit there is: nothing below it moves |
+| incremental, lines shifted (one line inserted at the top) | a mid-file edit, which moves every line below it. Full debuginfo records line numbers, so this may cost much more than the appended row; the gap between the two is the measurement (2026-10-27's mid-file edits built in 34 s to 2m55s) |
+| relink only | link time in isolation, which matters because the debug binary is ~70 MB |
+| check only (same one-line probe) | type-checking and metadata, with no codegen and no link |
+| clean (`--clean`) | everything, dependencies included — the only number comparable across machines and toolchains |
+
+**The rows do not add up, and the script does not pretend they do.** The
+obvious derived figure — `incremental − check − relink` as "codegen" — was
+tried and came out **negative**, twice: cold (`260.59s` of check against a
+`25.48s` build) and warm (`19.66s` check plus `9.91s` relink against a
+`23.95s` build). The legs share work: relink recompiles the bin's trivial
+`main.rs`, and check runs its own analysis pass. So read `check` and `relink`
+as independent scales for type-checking and for linking, and don't subtract
+one from another.
+
+The `check` leg needs warming to be a scale at all: `cargo check` keeps
+separate fingerprints, so a check issued right after a build type-checks the
+whole crate from nothing. The script warms that cache first, which is why the
+cold `260.59s` above is not the number it reports.
+
+**What these rows settle, and what they don't.** `check` is the row that
+decides whether crate size is worth attacking, because it is the cost that
+does **not** shrink when files are split *within* one crate: `lib.rs` →
+`lib/*.rs` stays a single compilation unit, and rustc type-checks and
+codegens the whole of it either way. A module split buys readability and
+nothing in build time. Only separate crates — a workspace — shrink the unit,
+which is a much larger change and should be taken on a number, not a hunch.
+The debug profile (`codegen-units`, `debug = "line-tables-only"`) is the other
+lever, and it wants the same treatment: measured, not guessed.
+
+Restoring a probe is itself an edit, so after each restore the script runs one
+untimed build before the next timed row. Before 2026-10-27 the relink row ran
+straight after the incremental probe's restore, so its number may include a
+recompile; compare it with earlier runs with that in mind.
+
+The incremental leg restores `lib.rs`'s exact bytes from a saved copy via
+a trap, so an interrupted run still leaves the tree as it found it, and a
+dirty tree's edits survive rather than being discarded. `--clean` builds
+into a scratch `CARGO_TARGET_DIR` and removes it afterward
+(`--keep-scratch` keeps it), so it cannot disturb the target dir you
+actually build into.
+
+**A before/after claim about build time is made with this script, not
+from memory.** That is the same rule §Perf diagnosis ordering states for
+the pane — the baseline is a commit, recorded with the instrument that
+will verify the "after" — applied to the one performance question that
+has no trace to read, because builds happen on the host before the app
+exists. Before this script, every slow-build report (#451) was a feeling.
+
+Run it on demand, not in CI: like `scripts/setup-harness.sh` and the
+membership starter check, it needs a machine that can build, which is
+not what the workflows have.
+
+### When builds get slow, check `target/debug/deps` first
+
+Cargo never deletes old build artifacts, and `rustc`, the linker and
+`cargo check` list `target/debug/deps` on every invocation. On
+2026-10-27 that directory held 982,330 files (119 GB), and it, not the
+code, was why builds had crept from seconds to half a minute (#452). The
+library rebuild used 4.3 s of CPU in 10.8 s of wall time. Neither
+`-Z time-passes` nor `-Z self-profile` sees that gap, because both time
+work, not waiting. macOS `sample` on the running `rustc` found it in
+`__getdirentries64` under `rustc_session::search_paths`.
+
+`cargo clean --manifest-path src-tauri/Cargo.toml --profile dev` fixed it.
+The full rebuild afterwards took 40 s, and then:
+
+| | before | after |
+|---|---|---|
+| library rebuild | 10.6–10.9 s | 2.4 s |
+| incremental (appended) | 24–34 s | 3–8 s |
+| relink only | 7–8.5 s | 0.5 s |
+| check only | 16–20 s | 1.5 s |
+
+The directory grows back by about 360 files per build. `scripts/build.sh`
+logs the count as `deps_files` and prints a warning past 100,000 files
+(set `BRAM_DEPS_WARN` to change that). It never cleans on its own,
+because a clean forces a full rebuild. Earlier build-time numbers in this
+section, and any profile or crate-split argument resting on them, were
+measured on the polluted directory: re-measure on a clean one before
+relying on them.
 
 ## Hand-testing the Worklist gate
 
@@ -816,6 +916,36 @@ a conspicuous marker and no remote; every destructive verb verifies
 both facts and the exact git toplevel before acting. Transfer a scenario
 branch with ordinary Git plumbing (for example, a bundle), but never add
 an upstream to the disposable instance.
+
+### Switch matrix
+
+`scripts/switch-matrix.py` drives the session-switching matrix from
+[`decisions/2026-10-27-bram-chooses-the-session.md`](decisions/2026-10-27-bram-chooses-the-session.md)
+against a demo instance with the real agent CLIs, and checks the trace after
+each step. It launches the demo with `BRAM_TEST_DRIVE=1`, which turns on
+`POST /__test/{switch,reload,new-session,turn}`. These call the same functions
+the pane's clicks do, and are off otherwise (see `authorization.md`).
+
+```sh
+python3 -I scripts/switch-matrix.py --no-turns --agents claude,opencode   # no model turns
+python3 -I scripts/switch-matrix.py --agents claude,opencode              # adds New session, fresh partners, delete
+```
+
+The cases: a plain switch; New session (named on its reserved id, brief
+released when the composer is drawn); fresh partners (started, grouped with and
+named after the Claude session); resuming a group member by id, including
+Codex → OpenCode in a group of three; OpenCode marked current at launch;
+no-group fallback by id, with the offer up; a reload clearing the offer;
+deleting the running session refused; deleting a grouped one taking it out of
+its group; the offer's Add and the Sessions row's Leave. Across the whole run, no `launch-timeout`, `launch-exited`,
+`boot-held-restore` or `rebound` may appear.
+
+Exit status is the number of failed checks; on failure the demo stays up. Cases
+that deliver a brief or catch-up start a real model turn; `--no-turns` skips
+them. The script waits for each launch to settle before the next step, as a
+person would: driving faster produced failures that weren't Bram's. It needs a
+windowing session, so it runs on demand, not in CI. Record new failures in the
+decision note, not as new items, unless one blocks a release.
 
 ### Membership starter checks
 

@@ -588,6 +588,19 @@
           <Option value="codex" label="Codex" />
           <Option value="opencode" label="OpenCode" />
         </RadioGroup>
+        <!-- agent-switcher-shows-stale-provider: RadioGroup's `initialValue`
+             only seeds the mount
+             (https://www.xmlui.org/docs/howto/present-choices-with-a-radiogroup),
+             and the seed above falls back to enhanceStatus before
+             mainAgentStatus reports the live provider — so the pane can mount
+             showing a provider the terminal is no longer running. Correct it
+             when the truth arrives. A sibling of the RadioGroup so the id
+             resolves in the same scope; ChangeListener does not fire on mount
+             (https://www.xmlui.org/docs/howto/debounce-with-changelistener),
+             which is what we want: the mount seed already ran. -->
+        <ChangeListener
+          listenTo="{((mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '') + '|' + (agentSwitcherBusy.value ? 'busy' : 'idle')}"
+          onDidChange="() => window.__bramSyncAgentSwitcher(agentSwitcherSelect, (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '', agentSwitcherBusy.value)" />
         <!-- switch-to-transcript-on-action: the "Starting <item>…" claim
              message moved to the footer status line (Jon: it belongs there,
              not in the app header) — see the footer HStack below. -->
@@ -597,9 +610,25 @@
              so the pane needs no dark palette of its own; `persistTheme` on
              App (the value at the top of this file) remembers the choice
              across pane reloads and relaunches.
-             https://www.xmlui.org/docs/reference/components/ToneSwitch -->
-        <ToneSwitch
-          tooltip="Switch between light and dark tone" />
+             https://www.xmlui.org/docs/reference/components/ToneSwitch
+             tone-switch-smaller: ToneSwitch has no size prop, but its track,
+             thumb and padding all scale from --xmlui-fontSize (vendored CSS),
+             so a scoped fontSize shrinks it in proportion.
+             https://www.xmlui.org/docs/howto/override-a-components-theme-vars -->
+        <!-- header-toolbar-even-spacing (Jon, 2026-10-28: "poor spacing"):
+             one row with one gap. Ghost buttons carried their own
+             paddingHorizontal-Button-sm ($space-4) while the switch and the
+             Inspector had none, so the gaps depended on which two controls
+             were neighbours. Inside this row the padding hugs each label and
+             the gap does the spacing.
+             https://www.xmlui.org/docs/reference/components/Stack#gap
+             https://www.xmlui.org/docs/howto/override-a-components-theme-vars -->
+        <Theme paddingHorizontal-Button-sm="$space-1">
+        <HStack gap="$space-3" verticalAlignment="center">
+        <Theme fontSize="$fontSize-sm">
+          <ToneSwitch
+            tooltip="Switch between light and dark tone" />
+        </Theme>
         <!-- issue-414: opening the target app in a browser was three clicks
              deep (ⓘ, then Open in browser). The usual case, since the
              target pane is off by default. Tooltip shows the address. -->
@@ -628,6 +657,8 @@
           tooltip="Increase app font size"
           onClick="window.setAppFontSize(window.getAppFontSize() + 1)" />
         <Inspector src="{'/__vendor/xs-diff.html?v=' + window.APP_VERSION}" />
+        </HStack>
+        </Theme>
       </HStack>
     </Theme>
   </AppHeader>
@@ -648,17 +679,19 @@
     <NavLink label="Commits" to="/commits" tooltip="Recent commits, and pushing them" />
     <NavLink label="Queue" to="/queue" tooltip="Notes you&apos;re holding to send the agent when it&apos;s free" />
     <NavLink label="Search" to="/search" tooltip="Search the project&apos;s history: sessions, commits, issues, worklist" />
-    <NavLink label="Awaiting You" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
+    <NavLink label="Alerts" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
+    <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
+    <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
     <NavLink label="Settings" to="/settings" tooltip="Project and personal settings for Bram" />
     <!-- nav-primary-list-and-more-group: less-used pages, collapsed by
          default (initiallyExpanded unset;
          https://www.xmlui.org/docs/reference/components/NavGroup). The group
-         opens itself when one of its pages becomes the active route (the
-         Worklist tab's History button relies on this; NavGroupReact.tsx,
-         the pathname effect looking for .xmlui-navlink-active). -->
+         opens itself when one of its pages becomes the active route
+         (NavGroupReact.tsx, the pathname effect looking for
+         .xmlui-navlink-active). History and Files moved out to the main list
+         above Settings (nav-history-files-above-settings), so the Worklist
+         tab's History button no longer depends on that. -->
     <NavGroup label="More">
-      <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
-      <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
       <NavLink label="Tips" to="/tips" tooltip="All the footer tips, including ones you dismissed" />
       <NavLink label="Context" to="/context" tooltip="What the agent reads: CLAUDE.md, memory, hooks and settings" />
       <NavLink label="Status" to="/status" tooltip="Bram&apos;s health: guards, session size, state checks" />
@@ -1215,40 +1248,43 @@
         id="pairOffer"
         initial="{null}"
         subscribe="{window.bramSubscribePairOffer()}" />
-      <HStack
+      <!-- session-groups: message on its own full-width line, the buttons
+           below it, wrapping when the pane is narrow
+           (https://www.xmlui.org/docs/reference/components/Stack#wrapcontent).
+           On 2026-10-28 the offer squeezed its message into a narrow column. -->
+      <VStack
         when="{!!pairOffer.value}"
-        gap="$space-2"
-        verticalAlignment="center"
+        gap="$space-1"
         paddingHorizontal="$space-2"
         paddingVertical="$space-1"
         backgroundColor="$color-info-50"
         border="1px solid $color-info-200"
         borderRadius="$borderRadius">
         <Text
-          width="*"
           fontSize="$fontSize-sm"
           value="{pairOffer.value &amp;&amp; pairOffer.value.message}" />
-        <!-- new-session-switch-starts-fresh-partner: Start new leads; keeping
-             the old session is the less common intent (2026-10-08, a
-             fast Keep click paired a new session with last release's). -->
-        <Button
-          label="{pairOffer.value &amp;&amp; pairOffer.value.actionLabel}"
-          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.actionTooltip}"
-          variant="outlined"
-          size="xs"
-          onClick="window.__bramPairOfferStart(pairOffer.value)" />
-        <Button
-          label="Keep these together"
-          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
-          variant="outlined"
-          size="xs"
-          onClick="window.__bramPairOfferKeep(pairOffer.value, toast)" />
-        <Button
-          label="Dismiss"
-          variant="ghost"
-          size="xs"
-          onClick="window.__bramPairOfferDismiss(pairOffer.value)" />
-      </HStack>
+        <HStack gap="$space-2" wrapContent="true" verticalAlignment="center">
+          <Button
+            label="{pairOffer.value &amp;&amp; pairOffer.value.keepLabel}"
+            tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
+            size="xs"
+            onClick="window.__bramPairOfferKeep(pairOffer.value, toast)" />
+          <!-- new-session-switch-starts-fresh-partner: a fast Keep click once
+               paired a new session with last release's (2026-10-08). The
+               group's name now says what Add joins, so Add leads. -->
+          <Button
+            label="{pairOffer.value &amp;&amp; pairOffer.value.actionLabel}"
+            tooltip="{pairOffer.value &amp;&amp; pairOffer.value.actionTooltip}"
+            variant="outlined"
+            size="xs"
+            onClick="window.__bramPairOfferStart(pairOffer.value)" />
+          <Button
+            label="Dismiss"
+            variant="ghost"
+            size="xs"
+            onClick="window.__bramPairOfferDismiss(pairOffer.value)" />
+        </HStack>
+      </VStack>
       <!-- The hot TextArea is isolated from this App-scope footer. Props flow
            down only when provider state changes; the low-frequency Skills
            request flows up as a component event. -->

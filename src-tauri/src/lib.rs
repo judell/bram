@@ -3960,7 +3960,29 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // zero-delta ticks: watchers fire 2-3 events per write, and on a
         // multi-MB session each redundant refetch costs real main-thread
         // time (2026-07-07 codex esc wedge).
+        // switch-matrix-harness (found by the matrix, 2026-10-27 23:02Z): a
+        // New session (or fresh partner) reserves its Claude id before launch.
+        // When that id's file appears, it is the current session now, as an
+        // explicit resume is (resume-marks-session-current). Waiting for file
+        // times kept the outgoing session current for 2 minutes after a short
+        // first turn: its exit write made it look fresh, and nothing re-checked.
+        if provider == SessionProvider::Claude {
+            mark_reserved_claude_session_current(app);
+        }
         let ordinary_latest = latest_session_path_for_provider(app, provider).unwrap_or(None);
+        // opencode-resume-marks-session-current: OpenCode's live session is
+        // the one Bram resumed or its events named, not the newest export;
+        // otherwise this path re-marks the newest export current.
+        let ordinary_latest = if provider == SessionProvider::Opencode {
+            opencode_live_session_cell()
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .and_then(|id| opencode_session_path_for_id(app, &id))
+                .or(ordinary_latest)
+        } else {
+            ordinary_latest
+        };
         // A Bram-created Codex session initially contains only bootstrap
         // context, so ordinary discovery intentionally keeps following the
         // previous real conversation. The pending-title record is the narrow
@@ -3979,7 +4001,12 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // provider. Watchers also emit for inactive-provider files, so writing
         // every observed session here would redefine "last active" as merely
         // "last file touched" and revive the original conflation.
-        if current_provider(app) == Some(provider) {
+        // delete-live-session-leaves-stub: with the shell at its prompt no
+        // agent is running, so this write is an exiting or failed CLI (at
+        // 2026-10-27 20:49:39 a resume that hit "No conversation found"),
+        // not the session the user is in. Don't make it the one to resume.
+        let sf = shell_foreground();
+        if current_provider(app) == Some(provider) && !(sf.seen && sf.at_prompt) {
             if let Some(session_id) = latest_path
                 .as_deref()
                 .and_then(|path| session_id_for_path(provider, path))
@@ -10267,11 +10294,44 @@ fn kill_current_claude_turn_with_finished<R: tauri::Runtime>(
     if let Ok(mut g) = last_killed_user_ts_ms_cell().lock() {
         *g = current_ts;
     }
-    let provider = match current_provider(app) {
-        Some(SessionProvider::Codex) => "codex",
-        _ => "claude",
-    };
+    let provider = pty_turn_provider_label(current_provider(app));
     schedule_pty_turn_finished(app, provider.to_string(), current_ts, verb, elapsed_text);
+}
+
+// turn-finished-names-opencode (2026-10-28 07:23:57Z): this was "Codex, else
+// Claude", written for two agents, so an OpenCode turn ending in the terminal
+// was announced as Claude's and the header's switcher moved to Claude while
+// OpenCode kept running. Unknown keeps the old Claude default.
+fn pty_turn_provider_label(provider: Option<SessionProvider>) -> &'static str {
+    match provider {
+        Some(SessionProvider::Codex) => "codex",
+        Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Claude) | None => "claude",
+    }
+}
+
+#[cfg(test)]
+mod pty_turn_provider_label_tests {
+    use super::*;
+
+    // Every agent names itself; an exhaustive match keeps a fourth from
+    // falling through to Claude without a compile error.
+    #[test]
+    fn each_agent_names_itself() {
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Claude)),
+            "claude"
+        );
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Codex)),
+            "codex"
+        );
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Opencode)),
+            "opencode"
+        );
+        assert_eq!(pty_turn_provider_label(None), "claude");
+    }
 }
 
 fn schedule_pty_turn_finished<R: tauri::Runtime>(
@@ -12409,12 +12469,18 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             }
         }
     }
+    note_agent_state_marker(chunk);
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
         Err(_) => return,
     };
     tail.extend_from_slice(chunk);
+    // claude-boot-hold-no-bounce: counted with the append (not in the boot
+    // scan, which runs first) so the count always matches the tail's bytes.
+    if AGENT_BOOT_EVIDENCE_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+        AGENT_BOOT_BYTES_SINCE_OPEN.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
+    }
     // issue #268: no completion latch here. Codex repaints historical rows, so
     // the terminal text "Context compacted" is not an episode edge -- it fired
     // 16 times for one real compaction. Completion now comes from the rollout
@@ -21289,12 +21355,9 @@ const NEW_SESSION_PROMPT_TIMEOUT_MS: i64 = 45_000;
 const NEW_SESSION_PROMPT_POLL_MS: u64 = 100;
 const AGENT_RELAUNCH_SETTLE_MS: u64 = 1200;
 const AGENT_SESSION_REFRESH_MS: u64 = 3000;
-// Delay after a cross-provider switch/reload before auto-reloading the agent
-// pane. Cross-provider has several independent provider caches (the active-agent
-// hint, mainAgentStatus.provider/verb, latest-session caches); flipping them all
-// in place is fragile, so once the target provider's hint is set we reload the
-// pane (the same action the user did by hand) to re-derive everything cleanly.
-const AGENT_CROSS_PROVIDER_RELOAD_MS: u64 = 2500;
+// Delay after a cross-provider switch/reload before resetting the agent status
+// the banner shows, once the target provider's hint is set.
+const AGENT_CROSS_PROVIDER_RESET_MS: u64 = 2500;
 
 // issue-314: the shared evidence gate for typing a launch command into the
 // PTY — a settle floor (so the launch can't race the interrupt echo when the
@@ -21328,6 +21391,68 @@ fn wait_for_shell_prompt_evidence() -> Result<(i64, &'static str), i64> {
         let waited = unix_now_ms().saturating_sub(started);
         if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
             return Err(waited);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
+    }
+}
+
+// codex-exit-escalation (switch matrix 2026-10-28 03:43Z and 04:26Z): Codex
+// 0.165.0 sometimes stayed up after Bram's Esc + Ctrl-C + Ctrl-C, showing
+// "Working…" seconds later with nothing else typed, and the next agent's
+// launch timed out after 45 s. Probed directly, the same keys exit it idle,
+// mid-turn and just after a turn (two Ctrl-C's give "Shutting down..."), so
+// what differs is state Bram can't see. When the shell is known to be running
+// a foreground program (markers seen, not at the prompt) and no prompt has
+// come back after EXIT_RETRY_AFTER_MS, send Ctrl-C twice more, at most
+// EXIT_RETRIES times. Only while the prompt is still missing: a shell that is
+// back never sees them.
+const EXIT_RETRY_AFTER_MS: i64 = 4000;
+const EXIT_RETRIES: u32 = 2;
+
+fn wait_for_shell_prompt_escalating<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    provider: &str,
+    generation: u64,
+) -> Result<(i64, &'static str), i64> {
+    if !shell_foreground().seen {
+        return wait_for_shell_prompt_evidence();
+    }
+    let started = unix_now_ms();
+    let mut retries = 0u32;
+    loop {
+        if let Some(via) = shell_prompt_evidence(shell_foreground(), pty_tail_shows_shell_prompt())
+        {
+            return Ok((unix_now_ms().saturating_sub(started), via));
+        }
+        let waited = unix_now_ms().saturating_sub(started);
+        if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
+            return Err(waited);
+        }
+        let fg = shell_foreground();
+        if retries < EXIT_RETRIES
+            && fg.seen
+            && !fg.at_prompt
+            && waited >= EXIT_RETRY_AFTER_MS * (retries as i64 + 1)
+            && agent_launch_is_current(generation)
+        {
+            retries += 1;
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "agent-switch",
+                    &format!(
+                        "op=exit-retry provider={} n={} waited_ms={} tail=\"{}\"",
+                        provider,
+                        retries,
+                        waited,
+                        pty_tail_snippet(160)
+                    ),
+                );
+            }
+            let _ = pty_write_internal(app, state, "\x03", "agent-exit-retry-1");
+            std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
+            let _ = pty_write_internal(app, state, "\x03", "agent-exit-retry-2");
         }
         std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
     }
@@ -21373,7 +21498,54 @@ static AGENT_LAUNCH_PENDING_GEN: std::sync::atomic::AtomicU64 =
 // a routine whose generation is no longer the latest stops quietly.
 static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// session-groups (switch matrix 2026-10-28 04:50Z): when the newest launch
+// began, and the last agent state marker (OSC 7501 "state=<s>:app=<a>") an
+// agent printed, with its app and time. OpenCode prints one about 2 s after
+// it starts (`state=idle:app=opencode`), a readiness signal that doesn't
+// depend on reading its screen: its animated "/update to install v2.2.0"
+// notice filled the tail with fragments (tail=".0") and every screen marker
+// missed.
+static AGENT_LAUNCH_BEGAN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn agent_state_marker_cell() -> &'static Mutex<(String, i64)> {
+    static CELL: OnceLock<Mutex<(String, i64)>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new((String::new(), 0)))
+}
+
+fn note_agent_state_marker(chunk: &[u8]) {
+    const OSC: &[u8] = b"\x1b]7501;state=";
+    let Some(at) = chunk.windows(OSC.len()).rposition(|w| w == OSC) else {
+        return;
+    };
+    let rest = &chunk[at + OSC.len()..];
+    let end = rest
+        .iter()
+        .position(|b| *b == 0x1b || *b == 0x07)
+        .unwrap_or(rest.len());
+    let body = String::from_utf8_lossy(&rest[..end]);
+    let Some(app) = body
+        .split(':')
+        .find_map(|kv| kv.strip_prefix("app="))
+        .map(|a| a.to_string())
+    else {
+        return;
+    };
+    if let Ok(mut cell) = agent_state_marker_cell().lock() {
+        *cell = (app, unix_now_ms());
+    }
+}
+
+// Whether `provider` printed a state marker since the newest launch began.
+fn agent_state_marker_since_launch(provider: SessionProvider) -> bool {
+    let began = AGENT_LAUNCH_BEGAN_MS.load(std::sync::atomic::Ordering::SeqCst);
+    agent_state_marker_cell()
+        .lock()
+        .map(|g| g.0 == session_provider_label(provider) && g.1 >= began)
+        .unwrap_or(false)
+}
+
 fn begin_agent_launch() -> u64 {
+    AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms(), std::sync::atomic::Ordering::SeqCst);
     // codex-resume-false-working: a fresh launch hasn't shown its composer.
     CODEX_COMPOSER_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
     AGENT_LAUNCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
@@ -21542,8 +21714,26 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
         }
     };
     if l.gate {
-        match wait_for_shell_prompt_evidence() {
+        let gate = if matches!(l.source, "switch" | "reload" | "new-session") {
+            wait_for_shell_prompt_escalating(app, &state, l.provider, l.generation)
+        } else {
+            wait_for_shell_prompt_evidence()
+        };
+        match gate {
             Err(waited) => {
+                // launch-timeout-respects-supersede (2026-10-27 19:47Z): a
+                // switch whose interrupts didn't end OpenCode was replaced by
+                // a second click that launched Claude, and 45 s later this
+                // path still reported "Bram didn't start Claude". A replaced
+                // launch stops quietly here as it does before the write; the
+                // newer launch owns the banner and the boot hold.
+                if !agent_launch_is_current(l.generation) {
+                    trace(format!(
+                        "op=launch-superseded provider={} source={} stage=gate-timeout waited_ms={}",
+                        l.provider, l.source, waited
+                    ));
+                    return;
+                }
                 trace(format!(
                     "op=launch-timeout provider={} source={} waited_ms={}",
                     l.provider, l.source, waited
@@ -21885,8 +22075,31 @@ fn switch_agent(
             None
         }
     });
+    // session-groups (Jon, 2026-10-28): a switch never lands in another
+    // group's session. From inside a group, the group decides: its member for
+    // the target agent, or a new session made for the group. From a loose
+    // session, the target's most recent *loose* session, or a new one when
+    // every session it has is grouped. On 2026-10-28 04:00Z a switch from a
+    // new group fell back to the burndown group's OpenCode session, and one
+    // click on the offer moved and renamed it.
+    let leaving_group = leaving.as_ref().and_then(|(p, sid)| {
+        let conn = worklist_state_open(&app)?;
+        worklist_state::session_group(&conn, session_provider_label(*p), sid)
+            .ok()
+            .flatten()
+    });
     let pin = if provider_key == "codex" {
-        usable_codex_reload_target(&app)
+        usable_codex_reload_target(&app).filter(|t| {
+            worklist_state_open(&app)
+                .and_then(|conn| worklist_state::session_group(&conn, "codex", &t.id).ok())
+                .flatten()
+                .is_none()
+        })
+    } else {
+        None
+    };
+    let target_latest_loose = if partner.is_none() && leaving_group.is_none() && has_session {
+        latest_loose_session_id(&app, target_provider)
     } else {
         None
     };
@@ -21909,26 +22122,41 @@ fn switch_agent(
     // so a session already paired with one provider can still start its
     // first partner on another.
     let fresh_reason: Option<&'static str> = leaving.as_ref().and_then(|(p, sid)| {
+        if partner.is_some() {
+            return None;
+        }
+        // session-groups: the group has no session on this agent (or its
+        // member's file is gone), so it gets a new one.
+        if leaving_group.is_some() {
+            return Some("group");
+        }
         let conn = worklist_state_open(&app)?;
         let label = session_provider_label(*p);
-        if !worklist_state::session_never_paired(
+        let never = worklist_state::session_never_paired(
             &conn,
             label,
             sid,
             session_provider_label(target_provider),
         )
-        .ok()?
-        {
-            return None;
-        }
-        fresh_partner_reason(
-            worklist_state::session_born_from_new_session(&conn, label, sid).unwrap_or(false),
-            has_session,
-        )
+        .ok()?;
+        let reason = never
+            .then(|| {
+                fresh_partner_reason(
+                    worklist_state::session_born_from_new_session(&conn, label, sid)
+                        .unwrap_or(false),
+                    has_session,
+                )
+            })
+            .flatten();
+        // session-groups: every session the target has is in a group, so a
+        // new one is the only session this switch can mean.
+        reason.or_else(|| (has_session && target_latest_loose.is_none()).then_some("all-grouped"))
     });
     let wants_fresh = fresh_reason.is_some();
     let pair_source = match fresh_reason {
         Some("first-session") => "switch-first-session",
+        Some("group") => "switch-group",
+        Some("all-grouped") => "switch-all-grouped",
         _ => "switch-new-session-born",
     };
     let fresh: Option<(String, Option<String>)> = if switch_starts_fresh_partner(
@@ -21981,6 +22209,21 @@ fn switch_agent(
     } else {
         "fresh"
     };
+    // fallback-switch-offer-names-wrong-session: resolve "most recent" to an
+    // id and launch that id, so the terminal and the pair offer name the
+    // same session. Without an id (none found) it stays `--continue`.
+    // session-groups: only a loose session (with groups off, any).
+    let latest_target: Option<String> = if resume_reason == "latest" {
+        target_latest_loose
+            .clone()
+            .or_else(|| fallback_latest_session_id(&app, target_provider))
+    } else {
+        None
+    };
+    let base_command = match latest_target.as_deref() {
+        Some(id) => agent_resume_command(provider_key, id).unwrap_or(base_command),
+        None => base_command,
+    };
     let args = configured_agent_args(&app);
     let command = if args.trim().is_empty() {
         base_command
@@ -22010,6 +22253,7 @@ fn switch_agent(
                         .as_deref()
                         .or(partner.as_deref())
                         .or_else(|| pin.as_ref().map(|target| target.id.as_str()))
+                        .or(latest_target.as_deref())
                         .unwrap_or("latest-or-fresh")
                 },
                 resume_reason
@@ -22023,10 +22267,30 @@ fn switch_agent(
         "resume-pending" => pending_target.clone(),
         "partner" => partner.clone(),
         "pin" => pin.as_ref().map(|t| t.id.clone()),
-        "latest" => live_session_id(&app, target_provider),
+        "latest" => latest_target
+            .clone()
+            .or_else(|| live_session_id(&app, target_provider)),
         "fresh-for-new-session" => fresh.as_ref().and_then(|(_, sid)| sid.clone()),
         _ => None,
     };
+    // opencode-resume-marks-session-current: a switch that resumes OpenCode
+    // by id (partner, pin, resolved latest) makes that session current now.
+    if target_provider == SessionProvider::Opencode {
+        if let Some(id) = target_sid.as_deref() {
+            mark_opencode_session_current(&app, id, "switch");
+        }
+    }
+    // session-groups: the same for Codex, whose current session is its reload
+    // pin. 2026-10-28 05:25Z: a switch ran `codex resume 01a04c1d` but the pin
+    // still named the group's fresh partner 01a180f6, which an idle resume
+    // never displaces. Sessions marked the wrong one [current], and the next
+    // switch left from it, starting a duplicate OpenCode partner for its group.
+    // A pending target is pinned at launch below.
+    if target_provider == SessionProvider::Codex && resume_reason != "resume-pending" {
+        if let Some(id) = target_sid.as_deref() {
+            let _ = pin_codex_reload_target(&app, id);
+        }
+    }
     let pair_from = leaving.clone();
     // new-session-switch-starts-fresh-partner: queue the fresh partner's name
     // (applied when its session surfaces), and note the target's live session
@@ -22074,12 +22338,11 @@ fn switch_agent(
         live_session_id(&app, target_provider)
     } else if resume_reason == "fresh-for-new-session" {
         let baseline = live_session_id(&app, target_provider);
-        // opencode-partner-handoff: Bram can't rename an OpenCode session, so
-        // its fresh partner keeps OpenCode's own title; the pair still forms.
-        if let Some((title, sid)) = fresh
-            .as_ref()
-            .filter(|_| target_provider != SessionProvider::Opencode)
-        {
+        // fresh-partner-takes-partner-name: OpenCode's fresh partner is named
+        // like the others. It was skipped while Bram couldn't rename an
+        // OpenCode session (opencode-partner-handoff); 509deb8 made renames
+        // work, and on 2026-10-27 19:46Z the user had to Match name by hand.
+        if let Some((title, sid)) = fresh.as_ref() {
             write_pending_session_title(&app, provider_key, title, sid.clone(), "switch");
             if bram_trace_enabled() {
                 append_bram_trace_line(
@@ -22181,6 +22444,7 @@ fn switch_agent(
                                     baseline: fresh_baseline.clone(),
                                     at_ms: unix_now_ms(),
                                     source: pair_source,
+                                    generation,
                                 });
                             }
                         }
@@ -22190,12 +22454,12 @@ fn switch_agent(
                 // what it missed in the session being left, and offer the
                 // catch-up turn. Then mark the entered session. A fresh
                 // partner has missed everything, so it gets the latest turns.
+                // session-groups: a resumed group member gets one catch-up
+                // covering every other member, since it last caught up on each.
                 let digest = match resume_reason {
-                    "partner" | "fresh-for-new-session" => {
-                        pair_from.as_ref().and_then(|(p, id)| {
-                            write_session_digest(app, *p, id, resume_reason == "partner")
-                        })
-                    }
+                    "fresh-for-new-session" => pair_from
+                        .as_ref()
+                        .and_then(|(p, id)| write_session_digest(app, *p, id, false, None)),
                     _ => None,
                 };
                 // A fresh Codex session has no file, name or pair until its
@@ -22235,6 +22499,13 @@ fn switch_agent(
                     }
                     return;
                 }
+                if resume_reason == "partner" {
+                    if let Some(sid) = target_sid.as_ref() {
+                        let sources = group_catch_up(app, &(target_provider, sid.clone()));
+                        emit_group_catch_up_offer(app, Some(target_provider), sources);
+                        return;
+                    }
+                }
                 emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
                 return;
             }
@@ -22261,7 +22532,7 @@ fn switch_agent(
                 // banner, agent name and verb all switch instead of staying
                 // stale on the prior provider.
                 set_current_provider(app, session_provider, "switch");
-                schedule_cross_provider_pane_reload(app.clone());
+                schedule_cross_provider_status_reset(app.clone());
             }
         }),
     });
@@ -22290,6 +22561,13 @@ fn record_pair_for<R: tauri::Runtime>(
     };
     let result =
         worklist_state::record_session_pair(&conn, al, &a.1, bl, &b.1, unix_now_ms(), source);
+    // session-groups: whoever joined takes the group's name.
+    if matches!(result, Ok(true)) {
+        if let Ok(Some(group)) = worklist_state::session_group(&conn, al, &a.1) {
+            harmonize_group_names(app, &group, source);
+            emit_replayable_signal(app, "sessions-list-changed");
+        }
+    }
     if bram_trace_enabled() {
         let outcome = match &result {
             Ok(true) => "ok".to_string(),
@@ -22344,20 +22622,14 @@ fn pair_sessions_route<R: tauri::Runtime>(
     let [a, b] = sides.as_slice() else {
         return Err("two sessions of different providers required".to_string());
     };
-    record_pair_for(app, a, b, "offer-keep");
+    // session-groups: the session you switched away from anchors the join, so
+    // the one you arrived at moves into its group (or both start one).
+    let (anchor, arrived) = if from == Some(b.0) { (b, a) } else { (a, b) };
+    record_pair_for(app, anchor, arrived, "offer-keep");
     emit_pair_offer(app, None, None);
-    if let Some(fp) = from {
-        let target = if fp == a.0 {
-            Some((a.1.clone(), b.0))
-        } else if fp == b.0 {
-            Some((b.1.clone(), a.0))
-        } else {
-            None
-        };
-        if let Some((fid, tp)) = target {
-            let digest = write_session_digest(app, fp, &fid, true);
-            emit_catch_up_offer(app, Some(&(fp, fid)), Some(tp), digest);
-        }
+    if from.is_some() {
+        let sources = group_catch_up(app, arrived);
+        emit_group_catch_up_offer(app, Some(arrived.0), sources);
     }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
@@ -22379,13 +22651,205 @@ fn session_title_by_id<R: tauri::Runtime>(
             .ok()
             .and_then(|titles| titles.get(id).cloned())
             .or_else(|| codex_session_title(&path).ok().flatten()),
-        // The export carries OpenCode's title as a custom-title record.
-        SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
+        // session-groups: OpenCode's own database, as the Sessions list reads
+        // it. The export file's custom-title record is only a fallback: it
+        // goes stale after a rename until the session is exported again
+        // (2026-10-28 04:11Z: a renamed member still showed its old name in
+        // the group line, and group naming compared against it).
+        SessionProvider::Opencode => opencode_session_title_from_db(id)
+            .or_else(|| claude_session_title(&path).ok().flatten()),
     }
 }
 
-// provider-session-pair-offer: each /__sessions/list row whose session has a
-// partner gets `partner: {provider, id, title}` (computed, never stored).
+// opencode-model-from-database (2026-10-28 07:24Z): the footer said
+// "Deepseek" while OpenCode ran GPT-5.6 Luna. The model came from the tail of
+// Bram's export, which lags OpenCode until discovery re-exports it. Read the
+// newest assistant message's model from OpenCode's database instead, like the
+// title (opencode_session_title_from_db); the export tail is the fallback.
+fn main_session_model<R: tauri::Runtime>(app: &AppHandle<R>, session_path: &Path) -> String {
+    let is_opencode = opencode_export_dir(app)
+        .ok()
+        .is_some_and(|dir| is_opencode_export_path(session_path, &dir));
+    if is_opencode {
+        let sid = session_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if let Some(model) =
+            opencode_open_db().and_then(|conn| opencode_session_model_in(&conn, sid))
+        {
+            return model;
+        }
+    }
+    st_last_session_model(session_path)
+}
+
+// The model id of the session's newest assistant message that names one.
+fn opencode_session_model_in(conn: &rusqlite::Connection, sid: &str) -> Option<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT data FROM session_message WHERE session_id = ?1 AND type = 'assistant' \
+             ORDER BY seq DESC LIMIT 50",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map(rusqlite::params![sid], |r| r.get::<_, String>(0))
+        .ok()?;
+    for data in rows.flatten() {
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&data) else {
+            continue;
+        };
+        if let Some(m) = d
+            .pointer("/model/id")
+            .and_then(|v| v.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            return Some(m.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod opencode_model_tests {
+    use super::opencode_session_model_in;
+
+    // session_message in OpenCode 2.1.4's shape: the columns the export and
+    // this lookup read.
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (id TEXT, session_id TEXT, seq INTEGER, type TEXT, data TEXT);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn add(conn: &rusqlite::Connection, sid: &str, seq: i64, kind: &str, data: &str) {
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, seq, type, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![format!("m{}", seq), sid, seq, kind, data],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_newest_assistant_model_wins_and_other_sessions_dont_leak() {
+        let conn = db();
+        add(
+            &conn,
+            "ses_a",
+            1,
+            "assistant",
+            r#"{"model":{"id":"deepseek-v4.1-flash-free"}}"#,
+        );
+        add(&conn, "ses_a", 2, "user", r#"{"text":"switch models"}"#);
+        add(
+            &conn,
+            "ses_a",
+            3,
+            "assistant",
+            r#"{"model":{"id":"gpt-5.6-luna"}}"#,
+        );
+        // A newer assistant record with no model doesn't hide the last one that has it.
+        add(&conn, "ses_a", 4, "assistant", r#"{"content":[]}"#);
+        add(
+            &conn,
+            "ses_b",
+            9,
+            "assistant",
+            r#"{"model":{"id":"other-model"}}"#,
+        );
+        assert_eq!(
+            opencode_session_model_in(&conn, "ses_a").as_deref(),
+            Some("gpt-5.6-luna")
+        );
+        assert_eq!(opencode_session_model_in(&conn, "ses_none"), None);
+    }
+}
+
+fn opencode_session_title_from_db(id: &str) -> Option<String> {
+    let conn = opencode_open_db()?;
+    conn.query_row(
+        "SELECT COALESCE(title, '') FROM session_v2 WHERE id = ?1",
+        rusqlite::params![id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .map(|t| t.trim().to_string())
+    .filter(|t| !t.is_empty())
+}
+
+// session-groups: a group's name is the title of the session it started
+// with (another member's once that one has left), without an agent tag, or
+// that session's short id.
+fn session_group_name<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    group: &worklist_state::SessionGroup,
+) -> String {
+    group_title(app, group).unwrap_or_else(|| group.origin.1.chars().take(8).collect())
+}
+
+fn group_title<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    group: &worklist_state::SessionGroup,
+) -> Option<String> {
+    let title_of = |(p, id): &(String, String)| {
+        SessionProvider::from_str(p).and_then(|sp| session_title_by_id(app, sp, id))
+    };
+    let origin_member = group.members.contains(&group.origin);
+    origin_member
+        .then(|| title_of(&group.origin))
+        .flatten()
+        .or_else(|| group.members.iter().find_map(title_of))
+        .map(|t| strip_agent_tag(&t).to_string())
+}
+
+// session-groups (Jon, 2026-10-28: "When you join a group session, you adopt
+// its name"): rename every member whose title differs from the group's name.
+// Renaming inside a group is otherwise refused (the rename route).
+fn harmonize_group_names<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    group: &worklist_state::SessionGroup,
+    source: &str,
+) {
+    let Some(name) = group_title(app, group) else {
+        return;
+    };
+    for (p, id) in &group.members {
+        let Some(sp) = SessionProvider::from_str(p) else {
+            continue;
+        };
+        let current = session_title_by_id(app, sp, id);
+        if current.as_deref() == Some(name.as_str()) {
+            continue;
+        }
+        let result = rename_session(app, id, Some(sp), &name);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "state-mirror",
+                &format!(
+                    "op=group-name {}={} from={:?} to={:?} source={} result={}",
+                    p,
+                    id,
+                    current.unwrap_or_default(),
+                    name,
+                    source,
+                    match &result {
+                        Ok(_) => "ok".to_string(),
+                        Err(e) => format!("error detail={}", e),
+                    }
+                ),
+            );
+        }
+    }
+}
+
+// provider-session-pair-offer, session-groups: each /__sessions/list row whose
+// session is in a group gets `group: {id, name, members}` (the other members,
+// each {provider, id, title}) and, for older pane code, `partner`/`partners`
+// (computed, never stored).
 fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut serde_json::Value) {
     let Some(list) = rows.as_array_mut() else {
         return;
@@ -22393,6 +22857,19 @@ fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut ser
     let Some(conn) = worklist_state_open(app) else {
         return;
     };
+    let Ok(snap) = worklist_state::group_snapshot(&conn) else {
+        return;
+    };
+    // session-groups: the groups a loose session could join (none of their
+    // members is on its agent), each with the member that anchors the join.
+    let groups: Vec<(worklist_state::SessionGroup, String)> = snap
+        .groups()
+        .into_iter()
+        .map(|g| {
+            let name = session_group_name(app, &g);
+            (g, name)
+        })
+        .collect();
     for row in list.iter_mut() {
         let provider = row
             .get("provider")
@@ -22404,27 +22881,51 @@ fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut ser
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // opencode-partner-handoff: up to one partner per other provider.
-        let Ok(found) = worklist_state::session_partners(&conn, &provider, &id) else {
+        let Some(group) = snap.group_of(&provider, &id) else {
+            let joinable: Vec<serde_json::Value> = groups
+                .iter()
+                .filter(|(g, _)| !g.members.iter().any(|(p, _)| p == &provider))
+                .filter_map(|(g, name)| {
+                    let (ap, aid) = g.members.first()?;
+                    Some(serde_json::json!({
+                        "name": name,
+                        "anchorProvider": ap,
+                        "anchorId": aid,
+                        "provider": provider,
+                        "id": id,
+                    }))
+                })
+                .collect();
+            if !joinable.is_empty() {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("joinable".to_string(), serde_json::Value::Array(joinable));
+                }
+            }
             continue;
         };
-        let partners: Vec<serde_json::Value> = found
-            .into_iter()
+        let members: Vec<serde_json::Value> = group
+            .members
+            .iter()
+            .filter(|(p, mid)| !(p == &provider && mid == &id))
             .filter_map(|(label, pid)| {
                 let other = SessionProvider::from_str(label)?;
                 Some(serde_json::json!({
                     "provider": label,
                     "id": pid,
-                    "title": session_title_by_id(app, other, &pid),
+                    "title": session_title_by_id(app, other, pid),
                 }))
             })
             .collect();
-        let Some(first) = partners.first().cloned() else {
-            continue;
-        };
+        let name = session_group_name(app, &group);
         if let Some(obj) = row.as_object_mut() {
-            obj.insert("partner".to_string(), first);
-            obj.insert("partners".to_string(), serde_json::Value::Array(partners));
+            if let Some(first) = members.first().cloned() {
+                obj.insert("partner".to_string(), first);
+            }
+            obj.insert(
+                "group".to_string(),
+                serde_json::json!({ "id": group.id, "name": name, "members": members }),
+            );
+            obj.insert("partners".to_string(), serde_json::Value::Array(members));
         }
     }
 }
@@ -22438,38 +22939,38 @@ fn unpair_session<R: tauri::Runtime>(
 ) -> Result<Vec<u8>, String> {
     let provider = provider.ok_or("provider required")?;
     let conn = worklist_state_open(app).ok_or("state db unavailable")?;
-    let mine = session_provider_label(provider);
-    // opencode-partner-handoff: a session can have a partner on each other
-    // provider, and Unpair ends all of them.
-    let partners =
-        worklist_state::session_partners(&conn, mine, session_id).map_err(|e| e.to_string())?;
-    for (other, _) in partners {
-        let wrote = worklist_state::record_session_pair(
-            &conn,
-            mine,
-            session_id,
-            other,
-            "",
-            unix_now_ms(),
-            "unpair",
-        )
-        .map_err(|e| e.to_string())?;
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "state-mirror",
-                &format!(
-                    "op=pair-stamp {}={} {}= source=unpair result={}",
-                    mine,
-                    session_id,
-                    other,
-                    if wrote { "ok" } else { "unchanged" }
-                ),
-            );
-        }
-    }
+    end_session_pairs(app, &conn, provider, session_id, "unpair")?;
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
+}
+
+// session-groups: take (provider, session_id) out of its group. `source`
+// names why: "unpair" (the Sessions tab's Leave) or "delete"
+// (delete-live-session-leaves-stub).
+fn end_session_pairs<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    provider: SessionProvider,
+    session_id: &str,
+    source: &str,
+) -> Result<(), String> {
+    let mine = session_provider_label(provider);
+    let left = worklist_state::leave_group(conn, mine, session_id, unix_now_ms(), source)
+        .map_err(|e| e.to_string())?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "state-mirror",
+            &format!(
+                "op=group-leave {}={} source={} result={}",
+                mine,
+                session_id,
+                source,
+                if left { "ok" } else { "unchanged" }
+            ),
+        );
+    }
+    Ok(())
 }
 
 // provider-session-pair-offer: after a header switch that fell back to the
@@ -22482,16 +22983,18 @@ fn emit_pair_offer<R: tauri::Runtime>(
     to: Option<(SessionProvider, String)>,
 ) {
     let payload = match (from, to) {
-        (Some((fp, fid)), Some((tp, tid))) => serde_json::json!({
-            "active": true,
-            "fromProvider": session_provider_label(*fp),
-            "fromSessionId": fid,
-            "fromTitle": session_title_by_id(app, *fp, fid),
-            "toProvider": session_provider_label(tp),
-            "toSessionId": tid,
-            "toTitle": session_title_by_id(app, tp, &tid),
-            "atMs": unix_now_ms(),
-        }),
+        (Some((fp, fid)), Some((tp, tid))) => {
+            serde_json::json!({
+                "active": true,
+                "fromProvider": session_provider_label(*fp),
+                "fromSessionId": fid,
+                "fromTitle": session_title_by_id(app, *fp, fid),
+                "toProvider": session_provider_label(tp),
+                "toSessionId": tid,
+                "toTitle": session_title_by_id(app, tp, &tid),
+                "atMs": unix_now_ms(),
+            })
+        }
         _ => serde_json::json!({ "active": false, "atMs": unix_now_ms() }),
     };
     if bram_trace_enabled() {
@@ -22578,18 +23081,109 @@ fn codex_composer_ready(tail: &str) -> bool {
 
 // opencode-partner-handoff: OpenCode's idle screen ends with its key-hint
 // footer (2.1.4 specimen: "shift+tab agents  ctrl+p commands").
+// switch-matrix-harness (2026-10-27 23:12Z, from opencode-catch-up-held-tail's
+// logged tail): in a narrow pane OpenCode 2.1.4 drops those hints and shows
+// the cwd and its "/update to install v2.2.0" notice instead, so every fresh
+// partner's catch-up was held. The empty input box's placeholder, "Ask
+// anything…" with its ellipsis character, is drawn only while the composer
+// is idle and empty, so it counts too.
 fn opencode_composer_ready(tail: &str) -> bool {
     let squashed: String = tail
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
         .to_lowercase();
-    squashed.contains("ctrl+pcommands")
+    squashed.contains("ctrl+pcommands") || squashed.contains("askanything\u{2026}")
+}
+
+#[cfg(test)]
+mod opencode_composer_ready_tests {
+    use super::opencode_composer_ready;
+
+    #[test]
+    fn narrow_pane_composer_without_key_hints_is_ready() {
+        // Logged held tail, OpenCode 2.1.4, 2026-10-27 23:12:44Z.
+        let tail = "am-demo-instance /update to install v2.2.0 Ask anything\u{2026} \
+                    'What is the \u{2503} DeepSeek V4.1 F\u{2026} \u{b7} high \u{2579} \
+                    ~/bram-demo-instance/uv2/updatv2.2.0/update tv2.2.0";
+        assert!(opencode_composer_ready(tail));
+    }
+
+    #[test]
+    fn wide_pane_footer_is_still_ready() {
+        assert!(opencode_composer_ready(
+            "~/bram shift+tab agents  ctrl+p commands"
+        ));
+    }
+
+    #[test]
+    fn a_reply_quoting_the_words_without_the_ellipsis_is_not_ready() {
+        assert!(!opencode_composer_ready(
+            "the placeholder says ask anything... working"
+        ));
+    }
+}
+
+// claude-boot-hold-no-bounce: a freshly booted Claude's ready screen, read
+// from the output since its launch was typed. Claude 2.1.312 draws its
+// banner ("Claude Code v2.1.312"), then the composer: a rule, the `❯` input
+// row, a rule, and the footer ("⏵⏵ auto mode on (shift+tab to cycle) · ←
+// for agents ◐ medium · /effort"; "? for shortcuts" in default mode). The
+// banner keeps a repaint of the outgoing session's composer from passing;
+// anchoring the footer to the end keeps a reply quoting it from passing.
+// The footer is matched by its start ("⏵⏵" modes, "⏸" plan mode): Claude
+// truncates it to the pane width, and a 32-column pane drew only
+// "⏵⏵ auto mode on (shift+tab", so a full-hint match held the brief 30 s
+// (2026-10-27 20:56Z).
+fn claude_boot_composer_ready(text: &str) -> bool {
+    let s: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    if !s.contains("claudecodev") {
+        return false;
+    }
+    let footer = ["⏵⏵", "⏸", "?forshortcuts"]
+        .iter()
+        .filter_map(|m| s.rfind(m).map(|i| i + m.len()))
+        .max();
+    let Some(end) = footer else {
+        return false;
+    };
+    let after = &s[end..];
+    if after.chars().count() > 100 || after.contains('❯') || after.contains('─') {
+        return false;
+    }
+    let Some(prompt) = s[..end].rfind('❯') else {
+        return false;
+    };
+    s[..prompt].contains('─') && s[prompt..end].contains('─')
+}
+
+// session-groups (switch matrix 2026-10-28 03:35Z): Codex 0.165.0 drew its
+// composer, then printed usage warnings below it ("Heads up, you have less
+// than 25% of your 5h limit left", "5h limit: 14% left · /status"), so the
+// screen no longer ended with "? for shortcuts" and the fresh partner's
+// catch-up was held `no-composer`. For the catch-up only, the empty
+// composer's placeholder with its footer anywhere in the tail counts too; an
+// update or trust prompt is checked first and still holds. Idle detection
+// keeps the stricter codex_composer_ready.
+fn codex_catch_up_composer_ready(tail: &str) -> bool {
+    if codex_composer_ready(tail) {
+        return true;
+    }
+    let squashed: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    squashed.contains("askcodextodoanything") && squashed.contains("?forshortcuts")
 }
 
 fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
     match provider {
-        SessionProvider::Codex => codex_composer_ready(tail),
+        SessionProvider::Codex => codex_catch_up_composer_ready(tail),
         SessionProvider::Opencode => opencode_composer_ready(tail),
         SessionProvider::Claude => true,
     }
@@ -22629,23 +23223,57 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
         }
         true
     };
-    let readiness = loop {
+    let (readiness, last_tail) = loop {
         if superseded(unix_now_ms().saturating_sub(started)) {
             return;
         }
-        let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
-        let r = catch_up_readiness(&tail, target_provider, wait_for_composer);
+        // session-groups (switch matrix 2026-10-28 04:29Z): a fresh OpenCode
+        // partner was held with tail="" for the whole wait. An idle TUI draws
+        // its screen once, and a tail drain racing that draw leaves nothing
+        // to read; fall back to what the drain stashed, as terminal attention
+        // does. Each agent's composer markers are its own, so a stashed screen
+        // from the agent being left can't read as ready.
+        let tail = pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS);
+        let mut r = catch_up_readiness(&tail, target_provider, wait_for_composer);
+        // OpenCode's own state report since this launch began counts as its
+        // composer being up (this wait starts only after the launch is
+        // confirmed, ~8 s in). A prompt on screen still holds.
+        if r == CatchUpReadiness::Waiting
+            && target_provider == SessionProvider::Opencode
+            && agent_state_marker_since_launch(target_provider)
+        {
+            r = CatchUpReadiness::Ready;
+        }
         if r != CatchUpReadiness::Waiting
             || unix_now_ms().saturating_sub(started) >= CATCH_UP_COMPOSER_WAIT_MS
         {
-            break r;
+            break (r, tail);
         }
         std::thread::sleep(std::time::Duration::from_millis(CATCH_UP_COMPOSER_POLL_MS));
     };
     let waited_ms = unix_now_ms().saturating_sub(started);
+    // opencode-catch-up-held-tail: a no-composer hold records the end of the
+    // tail the check last read, so the next live hold names what was on
+    // screen instead of leaving the marker miss to be guessed. Fresh OpenCode
+    // specimens (2.1.4, 60-120 cols) all passed, so the cause is only seen
+    // live. pty_tail_snippet already turns `"` into `'`.
     let held_reason = match readiness {
         CatchUpReadiness::Prompt(shape) => Some(format!("prompt-on-screen shape={}", shape)),
-        CatchUpReadiness::Waiting => Some("no-composer".to_string()),
+        CatchUpReadiness::Waiting => {
+            let n = last_tail.chars().count();
+            let end: String = last_tail.chars().skip(n.saturating_sub(300)).collect();
+            // Which drain emptied the tail last, and how long ago.
+            let (site, at) = pty_tail_last_clear_cell()
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(("unknown", 0));
+            Some(format!(
+                "no-composer tail=\"{}\" last_clear={} clear_age_ms={}",
+                end,
+                site,
+                unix_now_ms().saturating_sub(at)
+            ))
+        }
         CatchUpReadiness::Ready => None,
     };
     if let Some(reason) = held_reason {
@@ -22740,6 +23368,19 @@ mod catch_up_readiness_tests {
     fn live_update_paint_holds_and_its_composer_is_not_ready() {
         assert_eq!(r(LIVE_UPDATE, CODEX, true), Prompt("codex-update"));
         assert!(!super::codex_composer_ready(LIVE_UPDATE));
+    }
+
+    // Codex 0.165.0 in a narrow pane, from the held catch-up's logged tail
+    // (switch matrix 2026-10-28 03:35Z): the composer, then usage warnings.
+    const LIVE_LIMIT_WARNING: &str = "\u{203a} Ask Codex to do anything ? for shortcuts ~/bram-demo-instanceGPT-6-Astra default\u{b7}~/bram-demo-instance\u{2190}agens \u{b7} ?forshortcutshigh \u{b7} ~/bram-demo-instance\u{26a0} Heads up, you have less than 25% of your 5h limit left. Run /status for a breakdown.\u{26a0} 5h limit: 14% left \u{b7} /statu";
+
+    #[test]
+    fn codex_composer_above_usage_warnings_is_ready_for_a_catch_up() {
+        assert_eq!(r(LIVE_LIMIT_WARNING, CODEX, true), Ready);
+        // Idle detection keeps its stricter end-of-screen rule.
+        assert!(!super::codex_composer_ready(LIVE_LIMIT_WARNING));
+        // A shell screen that merely mentions Codex is still waiting.
+        assert_eq!(r("$ codex --help ? for shortcuts", CODEX, true), Waiting);
     }
 
     #[test]
@@ -22845,20 +23486,12 @@ fn session_turns<R: tauri::Runtime>(
 }
 
 // Record a session's turn total as it is entered.
-fn record_session_published<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    provider: SessionProvider,
-    id: &str,
-    total: usize,
-) {
+fn record_session_published<R: tauri::Runtime>(app: &AppHandle<R>, key: &str, total: usize) {
     let Some(path) = session_digest_published_path(app) else {
         return;
     };
     let mut marks = read_session_digest_published(app);
-    marks.insert(
-        format!("{}-{}", session_provider_label(provider), id),
-        serde_json::json!(total),
-    );
+    marks.insert(key.to_string(), serde_json::json!(total));
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -22873,6 +23506,61 @@ fn digest_new_turns(total: usize, watermark: Option<usize>, window_len: usize) -
     match watermark {
         Some(m) if m <= total => total - m,
         _ => window_len,
+    }
+}
+
+#[cfg(test)]
+mod session_group_catch_up_tests {
+    use super::*;
+
+    // OpenCode 2.1.4's state marker, as it arrives in a PTY chunk.
+    #[test]
+    fn an_agent_state_marker_is_noted_with_its_app() {
+        AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms() - 1, std::sync::atomic::Ordering::SeqCst);
+        note_agent_state_marker(b"draw\x1b]7501;state=idle:app=opencode\x1b\\more");
+        assert!(agent_state_marker_since_launch(SessionProvider::Opencode));
+        assert!(!agent_state_marker_since_launch(SessionProvider::Codex));
+        // A launch after the marker: not seen since.
+        AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms() + 1000, std::sync::atomic::Ordering::SeqCst);
+        assert!(!agent_state_marker_since_launch(SessionProvider::Opencode));
+    }
+
+    // session-groups: counts are per (reader, source), so catching OpenCode up
+    // on Claude leaves Codex's count for Claude where it was.
+    #[test]
+    fn digest_counts_are_kept_per_reader() {
+        let oc = (SessionProvider::Opencode, "ses_o1".to_string());
+        let cx = (SessionProvider::Codex, "x1".to_string());
+        let a = session_digest_mark_key(Some(&oc), SessionProvider::Claude, "c1");
+        let b = session_digest_mark_key(Some(&cx), SessionProvider::Claude, "c1");
+        assert_eq!(a, "opencode-ses_o1|claude-c1");
+        assert_ne!(a, b);
+        // No reader: the source's own count, as pairs kept it.
+        assert_eq!(
+            session_digest_mark_key(None, SessionProvider::Claude, "c1"),
+            "claude-c1"
+        );
+    }
+
+    // A catch-up from several members is still recognized as a catch-up,
+    // so later digests leave the exchange out.
+    #[test]
+    fn a_group_catch_up_turn_is_a_catch_up_turn() {
+        let text = catch_up_group_turn_text(&[
+            (
+                "Claude session 'v0.8.0 burndown'".to_string(),
+                12,
+                "a.md".to_string(),
+            ),
+            (
+                "Codex session 'v0.8.0 burndown (Codex)'".to_string(),
+                1,
+                "b.md".to_string(),
+            ),
+        ]);
+        assert!(is_catch_up_turn(&text));
+        assert!(text.contains("(12 turns, `a.md`)"));
+        assert!(text.contains("(1 turn, `b.md`)"));
     }
 }
 
@@ -22965,16 +23653,36 @@ fn render_session_digest(
 // turns added since it was entered (the partner's catch-up); otherwise the
 // latest SESSION_DIGEST_CAP. Returns (relative path, turns written); None
 // when nothing new happened or the session can't be read.
+// session-groups: `reader` is the session the digest is for. Its count is
+// per (reader, source), "<reader>|<source>", so catching one member up
+// doesn't mark anything read for another; with no reader count yet it falls
+// back to the source's own count (how pairs kept it), so a migrated pair
+// resumes where it left off.
+fn session_digest_mark_key(
+    reader: Option<&(SessionProvider, String)>,
+    provider: SessionProvider,
+    id: &str,
+) -> String {
+    let source = format!("{}-{}", session_provider_label(provider), id);
+    match reader {
+        Some((rp, rid)) => format!("{}-{}|{}", session_provider_label(*rp), rid, source),
+        None => source,
+    }
+}
+
 fn write_session_digest<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: SessionProvider,
     id: &str,
     since_mark: bool,
+    reader: Option<&(SessionProvider, String)>,
 ) -> Option<(String, usize)> {
     let (total, window) = session_turns(app, provider, id)?;
     let mark = if since_mark {
-        read_session_digest_published(app)
-            .get(&format!("{}-{}", session_provider_label(provider), id))
+        let marks = read_session_digest_published(app);
+        marks
+            .get(&session_digest_mark_key(reader, provider, id))
+            .or_else(|| marks.get(&session_digest_mark_key(None, provider, id)))
             .and_then(|v| v.as_u64())
             .map(|m| m as usize)
     } else {
@@ -23019,27 +23727,28 @@ fn write_session_digest<R: tauri::Runtime>(
     std::fs::write(&file, body.as_bytes()).ok()?;
     // Published through `total`: the next digest starts here, however many
     // times the session is entered (switch, autostart, reload) before then.
-    record_session_published(app, provider, id, total);
+    record_session_published(app, &session_digest_mark_key(reader, provider, id), total);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
             "agent-switch",
             &format!(
-                "op=digest-written provider={} session={} turns={} bytes={} from={} total={}",
+                "op=digest-written provider={} session={} turns={} bytes={} from={} total={} reader={}",
                 session_provider_label(provider),
                 id,
                 take,
                 body.len(),
                 from,
-                total
+                total,
+                reader
+                    .map(|(p, r)| format!("{}={}", session_provider_label(*p), r))
+                    .unwrap_or_else(|| "none".to_string())
             ),
         );
     }
     Some((session_digest_rel_path(provider, id), take))
 }
 
-// The pane's "Catch <partner> up" notice. Replayable (a cross-provider switch
-// reloads the pane); any switch without a digest clears it.
 // "Claude session '<title>'", or the id's first 8 characters when untitled.
 fn catch_up_from_label(provider: SessionProvider, id: &str, title: Option<&str>) -> String {
     let who = session_provider_display(provider);
@@ -23049,25 +23758,116 @@ fn catch_up_from_label(provider: SessionProvider, id: &str, title: Option<&str>)
     }
 }
 
+// One source of a catch-up: a session, its digest path and its new turns.
+type CatchUpSource = ((SessionProvider, String), String, usize);
+
+// session-groups: what the rest of `reader`'s group did since `reader` last
+// caught up on each member, one digest per member with new turns.
+fn group_catch_up<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    reader: &(SessionProvider, String),
+) -> Vec<CatchUpSource> {
+    let Some(group) = worklist_state_open(app).and_then(|conn| {
+        worklist_state::session_group(&conn, session_provider_label(reader.0), &reader.1)
+            .ok()
+            .flatten()
+    }) else {
+        return Vec::new();
+    };
+    group
+        .members
+        .iter()
+        .filter_map(|(p, id)| {
+            let sp = SessionProvider::from_str(p)?;
+            if sp == reader.0 {
+                return None;
+            }
+            let (path, turns) = write_session_digest(app, sp, id, true, Some(reader))?;
+            (turns > 0).then(|| ((sp, id.clone()), path, turns))
+        })
+        .collect()
+}
+
+// The catch-up turn for several sources; starts like catch_up_turn_text so
+// is_catch_up_turn recognizes both.
+fn catch_up_group_turn_text(sources: &[(String, usize, String)]) -> String {
+    let parts: Vec<String> = sources
+        .iter()
+        .map(|(who, turns, path)| {
+            format!(
+                "{} ({} turn{}, `{}`)",
+                who,
+                turns,
+                if *turns == 1 { "" } else { "s" },
+                path
+            )
+        })
+        .collect();
+    format!(
+        "Your partner sessions {}: {}. Read each (its header names the full transcript if you need more), then tell me in a few lines what changed before we go on.",
+        CATCH_UP_TURN_MARK,
+        parts.join("; ")
+    )
+}
+
 fn emit_catch_up_offer<R: tauri::Runtime>(
     app: &AppHandle<R>,
     from: Option<&(SessionProvider, String)>,
     to: Option<SessionProvider>,
     digest: Option<(String, usize)>,
 ) {
-    let payload = match (from, to, digest) {
-        (Some((fp, fid)), Some(tp), Some((path, turns))) => {
-            let title = session_title_by_id(app, *fp, fid);
-            let from = catch_up_from_label(*fp, fid, title.as_deref());
+    let sources = match (from, digest) {
+        (Some(f), Some((path, turns))) => vec![(f.clone(), path, turns)],
+        _ => Vec::new(),
+    };
+    emit_group_catch_up_offer(app, to, sources);
+}
+
+// The pane's "Catch <agent> up" notice. Replayable (a cross-provider switch
+// reloads the pane); any switch without a digest clears it. The first
+// source's fields stay at the top level for the single-source case.
+fn emit_group_catch_up_offer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    to: Option<SessionProvider>,
+    sources: Vec<CatchUpSource>,
+) {
+    let payload = match (to, sources.first()) {
+        (Some(tp), Some(((fp, fid), path, turns))) => {
+            let listed: Vec<(serde_json::Value, (String, usize, String))> = sources
+                .iter()
+                .map(|((sp, sid), spath, sturns)| {
+                    let title = session_title_by_id(app, *sp, sid);
+                    let who = catch_up_from_label(*sp, sid, title.as_deref());
+                    (
+                        serde_json::json!({
+                            "provider": session_provider_label(*sp),
+                            "id": sid,
+                            "title": title,
+                            "path": spath,
+                            "turns": sturns,
+                        }),
+                        (who, *sturns, spath.clone()),
+                    )
+                })
+                .collect();
+            let turn_text = if listed.len() == 1 {
+                let (who, n, p) = &listed[0].1;
+                catch_up_turn_text(who, *n, p)
+            } else {
+                let parts: Vec<(String, usize, String)> =
+                    listed.iter().map(|(_, x)| x.clone()).collect();
+                catch_up_group_turn_text(&parts)
+            };
             serde_json::json!({
                 "active": true,
                 "fromProvider": session_provider_label(*fp),
                 "fromSessionId": fid,
-                "fromTitle": title,
+                "fromTitle": session_title_by_id(app, *fp, fid),
                 "toProvider": session_provider_label(tp),
                 "path": path,
                 "turns": turns,
-                "turnText": catch_up_turn_text(&from, turns, &path),
+                "sources": listed.into_iter().map(|(v, _)| v).collect::<Vec<_>>(),
+                "turnText": turn_text,
                 "atMs": unix_now_ms(),
             })
         }
@@ -23086,6 +23886,11 @@ struct PendingPair {
     at_ms: i64,
     // The pair-stamp source once it resolves.
     source: &'static str,
+    // fresh-partner-pending-pair-survives-reload: the launch that armed it.
+    // A newer launch (a reload, another switch) means the fresh session this
+    // waited for is never coming; on 2026-10-27 21:24Z the reload's own
+    // session change resolved it to an old OpenCode session instead.
+    generation: u64,
 }
 
 static PENDING_PAIR: Mutex<Option<PendingPair>> = Mutex::new(None);
@@ -23103,6 +23908,22 @@ fn resolve_pending_pair<R: tauri::Runtime>(app: &AppHandle<R>, provider: Session
         return;
     }
     if unix_now_ms().saturating_sub(pending.at_ms) > PENDING_PAIR_TTL_MS {
+        *guard = None;
+        return;
+    }
+    if !agent_launch_is_current(pending.generation) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=pending-pair-dropped reason=launch-superseded from={}={} to={}",
+                    session_provider_label(pending.from.0),
+                    pending.from.1,
+                    session_provider_label(pending.to)
+                ),
+            );
+        }
         *guard = None;
         return;
     }
@@ -23150,17 +23971,20 @@ fn fresh_partner_reason(
     }
 }
 
-// new-session-switch-starts-fresh-partner: the name of a fresh partner is the
-// session it goes with, tagged with the provider it runs on. A title already
-// tagged with the other provider swaps the tag rather than stacking a second.
-fn fresh_partner_title(from_title: &str, to: SessionProvider) -> String {
-    let base = from_title.trim();
-    let base = base
-        .strip_suffix(" (Claude)")
+// session-groups (Jon, 2026-10-28): a group's sessions share one name, so a
+// fresh partner takes the name of the session it goes with, without the
+// "(Codex)"-style tag partners once carried; the agent switcher says which
+// agent. A tag already on the name is dropped.
+fn strip_agent_tag(title: &str) -> &str {
+    let base = title.trim();
+    base.strip_suffix(" (Claude)")
         .or_else(|| base.strip_suffix(" (Codex)"))
         .or_else(|| base.strip_suffix(" (OpenCode)"))
-        .unwrap_or(base);
-    format!("{} ({})", base, session_provider_display(to))
+        .unwrap_or(base)
+}
+
+fn fresh_partner_title(from_title: &str, _to: SessionProvider) -> String {
+    strip_agent_tag(from_title).to_string()
 }
 
 // The provider's name as people write it.
@@ -23170,6 +23994,56 @@ fn session_provider_display(provider: SessionProvider) -> &'static str {
         SessionProvider::Codex => "Codex",
         SessionProvider::Opencode => "OpenCode",
     }
+}
+
+// fallback-switch-offer-names-wrong-session: the session a switch with no
+// partner resumes, chosen by Bram rather than by the CLI's own "most recent".
+// It reads the same discovery that orders the Sessions tab, and for OpenCode
+// deliberately skips the live-session cache: on 2026-10-27 21:27Z that cache
+// still held the session a reload had left (ses_e83a…) while `opencode
+// --continue` resumed another (ses_e80e…), and the pair offer named the wrong
+// one.
+fn fallback_latest_session_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+) -> Option<String> {
+    match provider {
+        SessionProvider::Claude => latest_claude_session_path(app)
+            .ok()
+            .flatten()
+            .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from)),
+        SessionProvider::Codex => latest_codex_session_path(app)
+            .ok()
+            .flatten()
+            .and_then(|p| codex_session_meta(&p).ok().flatten().map(|(id, _)| id)),
+        SessionProvider::Opencode => latest_opencode_session_path(app)
+            .ok()
+            .flatten()
+            .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p)),
+    }
+}
+
+// session-groups: the target's most recent session that is in no group.
+// Tries the usual "most recent" first (cheap, and the common case), then the
+// full list by modified time.
+fn latest_loose_session_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+) -> Option<String> {
+    let label = session_provider_label(provider);
+    let snap = worklist_state_open(app).and_then(|c| worklist_state::group_snapshot(&c).ok());
+    let loose = |id: &str| {
+        snap.as_ref()
+            .map_or(true, |s| s.group_of(label, id).is_none())
+    };
+    if let Some(id) = fallback_latest_session_id(app, provider) {
+        if loose(&id) {
+            return Some(id);
+        }
+    }
+    let (_, mut sessions) = sessions_for_provider(app, Some(provider), None).ok()?;
+    sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    sessions.into_iter().map(|s| s.id).find(|id| loose(id))
 }
 
 fn provider_switch_launch(
@@ -23471,27 +24345,26 @@ fn schedule_resync_transcript_to_session<R: tauri::Runtime>(
     });
 }
 
-// Auto-reload the agent pane after a cross-provider switch once the new agent
-// has settled. The surgical event-based sync handles same-provider switches,
-// but crossing Claude<->Codex leaves independent caches stale (banner provider
-// and verb from mainAgentStatus, etc.); a pane reload re-derives them all from
-// the now-flipped active-agent hint — the manual reload the user was doing,
-// automated. Only call this when actually crossing providers.
-fn schedule_cross_provider_pane_reload<R: tauri::Runtime>(app: AppHandle<R>) {
+// After a cross-provider switch, once the new agent has settled, reset the
+// agent status the banner shows, so the prior provider's verb doesn't persist
+// until the new agent emits. Only call this when actually crossing providers.
+//
+// session-groups: this used to reload the whole pane (1effe4a: a pane reload
+// re-derived the provider caches, "the manual reload the user was doing,
+// automated"), which flashed a blank white page mid-switch, worst in dark
+// tone. The pane now follows the switch through its pushed events instead:
+// enhance-status-changed refetches enhanceStatus and restarts the transcript
+// push for the new provider, agent-status-changed carries this reset, and
+// Sessions follows sessions-list-changed.
+fn schedule_cross_provider_status_reset<R: tauri::Runtime>(app: AppHandle<R>) {
     thread::spawn(move || {
         thread::sleep(std::time::Duration::from_millis(
-            AGENT_CROSS_PROVIDER_RELOAD_MS,
+            AGENT_CROSS_PROVIDER_RESET_MS,
         ));
-        // Clear the stale banner verb/provider before reloading — an iframe
-        // reload alone doesn't reset the host-side agent status, so the prior
-        // provider's verb would otherwise persist until the new agent emits.
         reset_agent_status(&app);
         if bram_trace_enabled() {
-            append_bram_trace_line(&app, "agent-switch", "op=cross-provider-pane-reload");
+            append_bram_trace_line(&app, "agent-switch", "op=cross-provider-status-reset");
         }
-        // force=true: a runtime cross-provider reload must fire regardless of the
-        // dev toolsPaneHotReload setting (still defers during an inflight cycle).
-        emit_or_defer_tools_pane_reload(&app, true);
     });
 }
 
@@ -23517,10 +24390,7 @@ fn reload_agent_session(
     clear_pending_session_title_for_resume(&app, session_provider, &session, "session-reload");
     cancel_agent_boot_hold(&app, "session-reload");
     // provider-session-counterparts: an explicit resume always wins over a
-    // pairing, and a cross-provider one re-pairs with the session being left.
-    let leaving = current_provider(&app)
-        .filter(|p| *p != session_provider)
-        .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
+    // grouping (session-groups: and no longer joins one).
     // agent-launch-shared-routine precondition: the session named must still
     // exist. Resuming a deleted one makes the CLI print an error and exit,
     // leaving a bare shell; start the provider fresh instead, as the switch
@@ -23559,11 +24429,12 @@ fn reload_agent_session(
     // opencode-sessions-browser: the resumed session is current from now,
     // before its next turn makes it the most recent.
     if session_provider == SessionProvider::Opencode && session_exists {
-        if let Ok(mut live) = opencode_live_session_cell().lock() {
-            *live = Some(session.clone());
-        }
+        mark_opencode_session_current(&app, &session, "reload");
     }
     let generation = begin_agent_launch();
+    // pair-offer-warns-before-replacing: a newer launch ends the situation the
+    // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
+    emit_pair_offer(&app, None, None);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
     // Dismiss any open agent menu/picker first so both Ctrl+C land on an empty
     // prompt and the agent actually exits (see switch_agent for the full
@@ -23590,14 +24461,9 @@ fn reload_agent_session(
         first_command: false,
         hook: Box::new(move |app, phase| {
             if phase == LaunchPhase::Confirmed {
-                if let (Some(from), true) = (leaving.as_ref(), session_exists) {
-                    record_pair_for(
-                        app,
-                        from,
-                        &(session_provider, session.clone()),
-                        "explicit-resume",
-                    );
-                }
+                // session-groups: a resume across agents no longer joins
+                // anything. Joining is the explicit "Add to '<group>'" on a
+                // loose session's row, or the switch offer's "Group these two".
                 return;
             }
             if phase != LaunchPhase::Written {
@@ -23623,7 +24489,7 @@ fn reload_agent_session(
                 // pane once the resumed agent settles so the banner/verb and
                 // other per-provider caches re-derive cleanly instead of
                 // staying stale on the old provider.
-                schedule_cross_provider_pane_reload(app.clone());
+                schedule_cross_provider_status_reset(app.clone());
             }
         }),
     });
@@ -23665,6 +24531,9 @@ fn start_agent_fresh(
         );
     }
     let generation = begin_agent_launch();
+    // pair-offer-warns-before-replacing: a newer launch ends the situation the
+    // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
+    emit_pair_offer(&app, None, None);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-start-fresh");
     pty_write_internal(&app, &state, "\x1b", "agent-fresh-escape")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
@@ -23691,7 +24560,7 @@ fn start_agent_fresh(
             set_current_provider(app, session_provider, "start-fresh");
             schedule_agent_switch_refresh(app.clone(), provider_key, "start-fresh");
             if crossing {
-                schedule_cross_provider_pane_reload(app.clone());
+                schedule_cross_provider_status_reset(app.clone());
             }
         }),
     });
@@ -23879,6 +24748,14 @@ fn pending_session_title_can_claim(
     if rec.session_id.as_deref() == Some(session_id) {
         return true; // A confirmed/reserved identity may retry its rename.
     }
+    // claude-pending-title-exact-id: Claude's id is pre-allocated
+    // (--session-id, #274), so a reserved Claude title belongs to that id
+    // alone. 2026-10-27 21:05Z: an outgoing Claude rewrote another session's
+    // file at exit, it read as newly created, and the title rebound to it.
+    // Rebinding stays for Codex, whose id surfaces only after launch.
+    if rec.provider == "claude" && rec.session_id.is_some() {
+        return false;
+    }
     allow_claim
         && rec.previous_session_id.as_deref() != Some(session_id)
         && created_ms.is_some_and(|created| created.saturating_add(2_000) >= rec.created_at_ms)
@@ -23958,10 +24835,12 @@ fn apply_pending_session_title<R: tauri::Runtime>(
         let rename_result = match provider {
             SessionProvider::Codex => pin_codex_reload_target(app, new_sid)
                 .and_then(|_| append_codex_session_title(new_sid, &rec.title)),
-            SessionProvider::Claude => {
+            // fresh-partner-takes-partner-name: an OpenCode fresh partner's
+            // queued name lands here once its session rotates in; the rename
+            // is a title UPDATE in OpenCode's database (509deb8).
+            SessionProvider::Claude | SessionProvider::Opencode => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
             }
-            SessionProvider::Opencode => Err("OpenCode sessions can't be renamed yet".to_string()),
         };
         match rename_result {
             Ok(_) => {
@@ -24061,6 +24940,40 @@ mod pending_session_title_tests {
             previous_session_id: Some("old-codex".into()),
             origin: None,
         }
+    }
+
+    // claude-pending-title-exact-id: a reserved Claude title never rebinds to
+    // a freshly created file inside the claim window; Codex still does.
+    #[test]
+    fn reserved_claude_title_claims_only_its_own_id() {
+        let rec = PendingSessionTitle {
+            provider: "claude".into(),
+            session_id: Some("reserved-claude".into()),
+            previous_session_id: Some("old-claude".into()),
+            ..pending_codex()
+        };
+        assert!(!pending_session_title_can_claim(
+            &rec,
+            "rewritten-at-exit",
+            true,
+            Some(10_001)
+        ));
+        assert!(pending_session_title_can_claim(
+            &rec,
+            "reserved-claude",
+            true,
+            Some(10_001)
+        ));
+        let codex = PendingSessionTitle {
+            session_id: Some("bootstrap-codex".into()),
+            ..pending_codex()
+        };
+        assert!(pending_session_title_can_claim(
+            &codex,
+            "fresh-codex",
+            true,
+            Some(10_001)
+        ));
     }
 
     #[test]
@@ -24348,14 +25261,14 @@ mod pending_session_title_tests {
     }
 
     #[test]
-    fn fresh_partner_title_names_the_target_provider_once() {
+    fn fresh_partner_title_is_the_shared_name_without_an_agent_tag() {
         assert_eq!(
             fresh_partner_title("General (Oct 8, 0.7.4)", SessionProvider::Codex),
-            "General (Oct 8, 0.7.4) (Codex)"
+            "General (Oct 8, 0.7.4)"
         );
         assert_eq!(
             fresh_partner_title("General (Oct 8, 0.7.4) (Codex)", SessionProvider::Claude),
-            "General (Oct 8, 0.7.4) (Claude)"
+            "General (Oct 8, 0.7.4)"
         );
     }
 
@@ -24418,6 +25331,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Codex,
             current: true,
             pending: false,
+            running: false,
         }];
         let pending = SessionEntry {
             id: "pending-2".to_string(),
@@ -24427,6 +25341,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Codex,
             current: true,
             pending: true,
+            running: false,
         };
 
         merge_pending_session_entry(&mut entries, pending, Some(20));
@@ -24452,6 +25367,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Claude,
             current: true,
             pending: false,
+            running: false,
         }];
         let pending = SessionEntry {
             id: "0192aabb-ccdd-4eef-8899-001122334455".to_string(),
@@ -24461,6 +25377,7 @@ mod pending_session_title_tests {
             provider: SessionProvider::Claude,
             current: true,
             pending: true,
+            running: false,
         };
 
         merge_pending_session_entry(&mut entries, pending, Some(20));
@@ -24493,10 +25410,12 @@ fn create_new_session(
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
-    // opencode-partner-handoff: OpenCode titles its own sessions and Bram
-    // can't rename them, so no name is queued for one; the session still
-    // starts, and a pair asked for still forms once its id surfaces.
-    let names_session = provider_key != "opencode";
+    // session-groups (2026-10-28 05:15Z): OpenCode is named like the others.
+    // This once skipped it ("Bram can't rename them"), but Bram writes
+    // OpenCode titles into its database (opencode-session-rename) and the
+    // queued name applies to OpenCode since fresh-partner-takes-partner-name;
+    // skipping it left a New session titled with its first message.
+    let names_session = true;
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
@@ -24553,9 +25472,12 @@ fn create_new_session(
     // provider-session-digest-for-codex: the new partner has no history, so
     // its brief points at the latest turns of the session it was created for.
     if let Some((p, id)) = pair_with.as_ref() {
-        let _ = write_session_digest(&app, *p, id, false);
+        let _ = write_session_digest(&app, *p, id, false, None);
     }
     let generation = begin_agent_launch();
+    // pair-offer-warns-before-replacing: a newer launch ends the situation the
+    // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
+    emit_pair_offer(&app, None, None);
     arm_agent_boot_hold(&app, provider_key);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
     pty_write_internal(&app, &state, "\x1b", "agent-new-escape")?;
@@ -24610,6 +25532,7 @@ fn create_new_session(
                             baseline: pair_baseline.clone(),
                             at_ms: unix_now_ms(),
                             source: "switch-new-session",
+                            generation,
                         });
                     }
                 }
@@ -28566,6 +29489,9 @@ struct SessionEntry {
     provider: SessionProvider,
     current: bool,
     pending: bool,
+    // delete-live-session-leaves-stub: the row is the session a CLI is
+    // running now (session_delete_refused), so the pane disables its ✕.
+    running: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
@@ -29860,6 +30786,30 @@ fn opencode_open_db() -> Option<rusqlite::Connection> {
     Some(conn)
 }
 
+// opencode-session-rename: the same database, writable. Titles live in
+// `session_v2.title`, so a rename is one UPDATE; everything else above stays
+// read-only. Same path resolution and busy timeout as `opencode_open_db`;
+// only the open flags differ. WAL is a property of the file, not a flag
+// requested here, so writes join the journal OpenCode is already using.
+fn opencode_open_db_rw() -> Option<rusqlite::Connection> {
+    let path = opencode_db_path().filter(|p| p.is_file())?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    // OpenCode writes while we write (WAL); wait briefly rather than fail.
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    Some(conn)
+}
+
+// search-index-opencode-sessions: whether an indexed session path is one of
+// Bram's OpenCode exports. Compared by path components (Path::starts_with),
+// not a "/"-joined substring, so it holds on Windows too.
+fn is_opencode_export_path(path: &std::path::Path, export_dir: &std::path::Path) -> bool {
+    path.starts_with(export_dir)
+}
+
 fn opencode_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let root = project_root(Some(app)).ok_or("could not resolve project root")?;
     let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
@@ -29913,6 +30863,58 @@ fn opencode_project_session_rows<R: tauri::Runtime>(
             Vec::new()
         }
     }
+}
+
+// opencode-session-rename: set this project's session title in OpenCode's own
+// database. Scoped to the project's rows (both spellings of the directory, as
+// `opencode_project_session_rows` reads them) so an id belonging to another
+// project can't be renamed through this project's window. `time_updated` is
+// left alone on purpose: the Sessions list sorts on it, and a rename should
+// not reorder the list. Zero rows changed means the id is not this project's
+// session, which is the caller's error, not a server fault.
+fn opencode_set_session_title<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    title: &str,
+) -> Result<(), String> {
+    let Some(project) = project_root(Some(app)) else {
+        return Err("could not resolve project root".to_string());
+    };
+    let canonical = canonical_path_string(&project);
+    let raw = project.to_string_lossy().into_owned();
+    let Some(conn) = opencode_open_db_rw() else {
+        return Err("OpenCode's database isn't available".to_string());
+    };
+    let changed = opencode_set_session_title_in(&conn, id, title, &canonical, &raw)?;
+    if changed == 0 {
+        return Err("session not found".to_string());
+    }
+    // search-index-opencode-sessions: a rename keeps time_updated, so the
+    // export would still look current and keep the old title. Drop it; the
+    // next discovery re-exports it, and the sessions pass sees a new file.
+    if let Ok(dir) = opencode_export_dir(app) {
+        let _ = std::fs::remove_file(dir.join(format!("{}.jsonl", id)));
+    }
+    search_index_request(IndexBucket::Sessions);
+    Ok(())
+}
+
+// The statement itself, split out of `opencode_set_session_title` so the tests
+// can pin the scoping against an in-memory copy of the table: one project's
+// window renames that project's row and never another's, and a rename leaves
+// `time_updated` where it was.
+fn opencode_set_session_title_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+    title: &str,
+    canonical: &str,
+    raw: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE session_v2 SET title = ?1 WHERE id = ?2 AND directory IN (?3, ?4)",
+        rusqlite::params![title, id, canonical, raw],
+    )
+    .map_err(|e| e.to_string())
 }
 
 // OpenCode tool names and arguments in the vocabulary the Transcript renders
@@ -30193,6 +31195,102 @@ fn opencode_session_path_for_id<R: tauri::Runtime>(
 }
 
 #[cfg(test)]
+mod opencode_rename_tests {
+    use super::opencode_set_session_title_in;
+
+    // The columns the statement touches, in OpenCode 2.1.4's shape: `title`,
+    // the `directory` the scoping reads, and `time_updated`, which a rename
+    // must leave alone so the Sessions list keeps its order.
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, title TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
+             INSERT INTO session_v2 VALUES ('ses_here', 'generated', '/work/app', 1000);
+             INSERT INTO session_v2 VALUES ('ses_raw', 'generated', '/work/../work/app', 2000);
+             INSERT INTO session_v2 VALUES ('ses_other', 'generated', '/work/elsewhere', 3000);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn title_of(conn: &rusqlite::Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT title FROM session_v2 WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn updated_of(conn: &rusqlite::Connection, id: &str) -> i64 {
+        conn.query_row(
+            "SELECT time_updated FROM session_v2 WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    // opencode-session-rename: the rename writes the row the export reads.
+    #[test]
+    fn renames_the_projects_session_and_leaves_its_timestamp() {
+        let conn = db();
+        let n = opencode_set_session_title_in(
+            &conn,
+            "ses_here",
+            "Fixed the guard",
+            "/work/app",
+            "/work/app",
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(title_of(&conn, "ses_here"), "Fixed the guard");
+        assert_eq!(
+            updated_of(&conn, "ses_here"),
+            1000,
+            "a rename must not reorder the Sessions list"
+        );
+    }
+
+    // Both spellings of the directory match, as opencode_project_session_rows
+    // reads them: a session stored under the un-canonicalized path is still
+    // this project's.
+    #[test]
+    fn matches_either_directory_spelling() {
+        let conn = db();
+        let n = opencode_set_session_title_in(
+            &conn,
+            "ses_raw",
+            "Renamed the other spelling",
+            "/work/app",
+            "/work/../work/app",
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(title_of(&conn, "ses_raw"), "Renamed the other spelling");
+    }
+
+    // A row belonging to another project is not this window's to rename, and
+    // an unknown id changes nothing: both report zero rows, which the caller
+    // turns into "session not found" rather than a false success.
+    #[test]
+    fn does_not_reach_another_projects_session() {
+        let conn = db();
+        assert_eq!(
+            opencode_set_session_title_in(&conn, "ses_other", "hijacked", "/work/app", "/work/app")
+                .unwrap(),
+            0
+        );
+        assert_eq!(title_of(&conn, "ses_other"), "generated");
+        assert_eq!(
+            opencode_set_session_title_in(&conn, "ses_missing", "x", "/work/app", "/work/app")
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
 mod opencode_export_tests {
     use super::{opencode_session_jsonl, session_id_is_safe, st_parse_lines_to_turns};
 
@@ -30314,6 +31412,67 @@ fn latest_opencode_session_path<R: tauri::Runtime>(
 
 // The session OpenCode's events last named (opencode-turn-lifecycle), so a
 // resumed older session reads as current before it is the most recent.
+// switch-matrix-harness: make a reserved Claude session current once its file
+// exists. Only the exact id a pending title reserves (claude-pending-title-
+// exact-id), so no other session can take this path.
+fn mark_reserved_claude_session_current<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(rec) = read_pending_session_title(app, SessionProvider::Claude) else {
+        return;
+    };
+    let Some(sid) = rec.session_id.as_deref() else {
+        return;
+    };
+    let Some(path) = session_path_for_id(app, SessionProvider::Claude, sid) else {
+        return;
+    };
+    let cache_cell = LIVE_CLAUDE_SESSION.get_or_init(|| Mutex::new(None));
+    let mut cached = match cache_cell.lock() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
+    if cached.as_ref().is_some_and(|(p, _)| *p == path) {
+        return;
+    }
+    *cached = Some((path, std::time::SystemTime::now()));
+    drop(cached);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=live-session-set provider=claude session={} source=reserved-id",
+                sid
+            ),
+        );
+    }
+}
+
+// opencode-resume-marks-session-current: an OpenCode session Bram resumes by
+// id is current from the launch, as Claude's explicit resume already is
+// (resume-marks-session-current). An idle resumed session emits no events, so
+// without this the "current" session fell back to the newest export, and on
+// 2026-10-27 21:39Z a partner switch to "v0.8.0 burndown" was labelled
+// "naming test" in Sessions, the footer and last-active.
+fn mark_opencode_session_current<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, source: &str) {
+    if id.is_empty() {
+        return;
+    }
+    if let Ok(mut live) = opencode_live_session_cell().lock() {
+        *live = Some(id.to_string());
+    }
+    remember_last_active_session(app, SessionProvider::Opencode, id);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=live-session-set provider=opencode session={} source=explicit-resume via={}",
+                id, source
+            ),
+        );
+    }
+}
+
 fn opencode_live_session_cell() -> &'static Mutex<Option<String>> {
     static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
@@ -30656,6 +31815,11 @@ fn worklist_state_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathB
 static WORKLIST_STATE_DB_OPENED_ONCE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// session-groups: the pairs-to-groups migration runs on the first open per
+// process (it is itself once-only per db).
+static SESSION_GROUPS_MIGRATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // state-mirror-divergence-tripwire: count of distinct (deduped)
 // `[state-mirror] op=divergence` lines emitted this process. Read by the
 // Status tab's "State Mirror" section ("Divergences (this process)") so
@@ -30685,6 +31849,44 @@ fn worklist_state_open<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<rusqlite
                         if existed { "existing" } else { "created" }
                     ),
                 );
+            }
+            // session-groups: convert the pairs still holding, once per db.
+            if !SESSION_GROUPS_MIGRATED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let outcome = worklist_state::migrate_pairs_to_groups(&conn, unix_now_ms());
+                if bram_trace_enabled() {
+                    let line = match &outcome {
+                        Ok(None) => None,
+                        Ok(Some(dropped)) => Some(format!(
+                            "op=group-migrate result=ok dropped={}",
+                            if dropped.is_empty() {
+                                "none".to_string()
+                            } else {
+                                dropped.join(",")
+                            }
+                        )),
+                        Err(e) => Some(format!("op=group-migrate result=error detail={}", e)),
+                    };
+                    if let Some(line) = line {
+                        append_bram_trace_line(app, "state-mirror", &line);
+                    }
+                }
+                // Converted groups take their names too, off this thread:
+                // renaming reads each agent's session list.
+                if matches!(outcome, Ok(Some(_))) {
+                    let app = app.clone();
+                    std::thread::spawn(move || {
+                        let Some(conn) = worklist_state_open(&app) else {
+                            return;
+                        };
+                        let Ok(snap) = worklist_state::group_snapshot(&conn) else {
+                            return;
+                        };
+                        for group in snap.groups() {
+                            harmonize_group_names(&app, &group, "migrate-pairs");
+                        }
+                        emit_replayable_signal(&app, "sessions-list-changed");
+                    });
+                }
             }
             Some(conn)
         }
@@ -31157,6 +32359,28 @@ fn claude_session_search_data(path: &Path) -> SessionSearchExtraction {
     data
 }
 
+fn opencode_export_change_token(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let ms = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+    };
+    let modified = ms(meta.modified());
+    let created = ms(meta.created());
+    modified.max(created)
+}
+
+// search-index-opencode-sessions: OpenCode exports are Claude-shaped but
+// rewritten whole on every change, so always a cold parse, never the
+// append-only cache claude_session_search_data keeps.
+fn opencode_session_search_data(path: &Path) -> SessionSearchExtraction {
+    match std::fs::read_to_string(path) {
+        Ok(content) => claude_incremental_extract(None, &content).1,
+        Err(_) => SessionSearchExtraction::default(),
+    }
+}
+
 /// Join the `text` fields of a Codex content/output array (`[{type, text}, …]`),
 /// or return a bare string as-is.
 fn codex_content_text(value: Option<&serde_json::Value>) -> String {
@@ -31491,6 +32715,69 @@ mod claude_title_incremental_tests {
         let f2 = format!("{}\n", user("fresh"));
         let (_, s2) = claude_incremental_title(Some((o1, &s1)), &f2);
         assert_eq!(s2.resolved().as_deref(), Some("fresh"));
+    }
+}
+
+#[cfg(test)]
+mod opencode_search_index_tests {
+    use super::*;
+
+    fn rec(role: &str, text: &str) -> String {
+        format!(
+            "{{\"type\":\"{}\",\"message\":{{\"content\":\"{}\"}}}}",
+            role, text
+        )
+    }
+
+    fn tool(id: &str, command: &str) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"{}\",\"name\":\"Bash\",\"input\":{{\"command\":\"{}\"}}}}]}}}}",
+            id, command
+        )
+    }
+
+    // An OpenCode export is rewritten whole: an earlier record can change
+    // while the file stays the same size or grows. The OpenCode extractor
+    // must match a cold parse; the append-only one keeps the stale text
+    // (which is why OpenCode no longer uses it).
+    #[test]
+    fn a_rewritten_export_indexes_like_a_cold_parse() {
+        let dir = std::env::temp_dir().join(format!("bram-oc-search-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ses_test.jsonl");
+        let v1 = format!("{}\n{}\n", rec("user", "alpha"), tool("t1", "rg one"));
+        std::fs::write(&path, &v1).unwrap();
+        let _ = claude_session_search_data(&path); // warm the append-only cache
+        for v2 in [
+            // same size: one record's text changed
+            format!("{}\n{}\n", rec("user", "omega"), tool("t1", "rg one")),
+            // grows: an earlier record changed and one was added
+            format!(
+                "{}\n{}\n{}\n",
+                rec("user", "delta"),
+                tool("t2", "rg two"),
+                rec("assistant", "more")
+            ),
+        ] {
+            std::fs::write(&path, &v2).unwrap();
+            let cold = claude_incremental_extract(None, &v2).1;
+            assert_eq!(opencode_session_search_data(&path), cold);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_paths_are_recognized_by_component() {
+        let dir = Path::new("/cache/opencode-sessions/-Users-me-proj");
+        assert!(is_opencode_export_path(&dir.join("ses_1.jsonl"), dir));
+        assert!(!is_opencode_export_path(
+            Path::new("/cache/opencode-sessions/-Users-me-proj-other/ses_1.jsonl"),
+            dir
+        ));
+        assert!(!is_opencode_export_path(
+            Path::new("/home/me/.claude/projects/x/abc.jsonl"),
+            dir
+        ));
     }
 }
 
@@ -31924,11 +33211,22 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             .collect();
     // opencode-sessions-browser: OpenCode's exports are Claude-shaped, so the
     // same extraction indexes them; only the provider label differs.
+    // search-index-opencode-sessions: the change token for an export is in
+    // milliseconds, the later of its modified time (the session's
+    // time_updated, opencode_export_session) and its creation time (each
+    // export is a fresh file via atomic_write_text). SessionRecord.mtime is
+    // seconds, so a same-size rewrite inside one second looked unchanged; and
+    // a rename keeps time_updated, so only the creation time shows a
+    // title-only re-export. The first pass with this token reindexes each
+    // export once.
     files_vec.extend(
         discover_opencode_sessions(app, None)
             .unwrap_or_default()
             .into_iter()
-            .map(|s| (s.path, s.mtime, s.size, s.id, SessionProvider::Opencode)),
+            .map(|s| {
+                let token = opencode_export_change_token(&s.path).unwrap_or(s.mtime * 1000);
+                (s.path, token, s.size, s.id, SessionProvider::Opencode)
+            }),
     );
     stats.discover_ms = discover_started.elapsed().as_millis();
     stats.files = files_vec.len();
@@ -31969,7 +33267,11 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         // full FTS5 rewrite, so withhold until the growth is worth it or the
         // staleness bound expires. Never applies to a forced pass.
         let mut live_delta_skip: Option<(i64, i64)> = None;
-        if needs_index && !forced {
+        // search-index-opencode-sessions: an OpenCode export changes only when
+        // a turn ends or the session is renamed (it is rewritten whole, never
+        // appended), so withholding its small final change would leave it
+        // stale with no later change to bring the pass back.
+        if needs_index && !forced && provider != SessionProvider::Opencode {
             if let Ok(Some((prev_size, indexed_at))) = search_index::indexed_meta(&conn, &path_str)
             {
                 let age = (unix_now_ms() / 1000) - indexed_at;
@@ -32014,7 +33316,14 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         let path_str = path.to_string_lossy().to_string();
         let extract_started = std::time::Instant::now();
         let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
-        let extracted = claude_session_search_data(&path);
+        // search-index-opencode-sessions: an export is rewritten whole, so
+        // earlier records can change while the file grows; the incremental
+        // (append-only) extractor would keep stale text. Parse it cold.
+        let extracted = if provider == SessionProvider::Opencode {
+            opencode_session_search_data(&path)
+        } else {
+            claude_session_search_data(&path)
+        };
         stats.indexed_bytes = stats
             .indexed_bytes
             .saturating_add(extracted.content.len() as u64);
@@ -32036,7 +33345,15 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
                 session_provider_label(provider),
                 size / 1024
             ),
-            date: mtime.to_string(),
+            // search-index-opencode-sessions: an OpenCode export's change
+            // token is in milliseconds; the row's date stays in seconds like
+            // every other session (a ms value read as seconds dated the
+            // burndown hit 58793-02-18).
+            date: if provider == SessionProvider::Opencode {
+                (mtime / 1000).to_string()
+            } else {
+                mtime.to_string()
+            },
             // Internal tab route; exact-session deep-link is deferred. The
             // expander derives id from the doc key (file basename) for /__turns.
             link: "/sessions".to_string(),
@@ -33039,6 +34356,10 @@ struct SearchIndexStatus {
     // passes are visibly active even on QuietUnlessAdded startup runs; cleared
     // at pass end and, as a safety net, by run_and_trace_index_pass.
     progress: Option<(String, usize, usize)>,
+    // search-index-opencode-sessions: a cycle is running, footer-quiet or not.
+    // The quiet startup cycle sets no active bucket, so before this flag a
+    // refusal during the first cycle read "holding" (2026-10-28 06:26Z).
+    cycle_running: bool,
 }
 
 // issue-316: the shared not-ready check for /__search and /__search/doc.
@@ -33054,11 +34375,13 @@ fn search_not_ready_reason(st: &SearchIndexStatus) -> Option<&'static str> {
     if st.last_cycle_ms != 0 {
         return None;
     }
-    Some(if st.progress.is_some() || !st.active_buckets.is_empty() {
-        "initial-scan"
-    } else {
-        "holding"
-    })
+    Some(
+        if st.progress.is_some() || !st.active_buckets.is_empty() || st.cycle_running {
+            "initial-scan"
+        } else {
+            "holding"
+        },
+    )
 }
 
 fn search_not_ready_refusal<R: tauri::Runtime>(
@@ -33141,6 +34464,7 @@ fn search_index_record_cycle<R: tauri::Runtime>(
 ) {
     if let Ok(mut s) = search_index_status_cell().lock() {
         s.active_buckets = Vec::new();
+        s.cycle_running = false;
         s.total = total;
         s.last_cycle_ms = unix_now_ms() as i64;
         if !added.is_empty() {
@@ -33497,6 +34821,9 @@ fn run_index_buckets<R: tauri::Runtime>(
     buckets: &[IndexBucket],
     display: IndexRunDisplay,
 ) {
+    if let Ok(mut s) = search_index_status_cell().lock() {
+        s.cycle_running = true;
+    }
     let live_names = live_index_bucket_names(buckets, display);
     let live_started = if live_names.is_empty() {
         None
@@ -34225,6 +35552,8 @@ fn list_sessions<R: tauri::Runtime>(
 ) -> Result<Vec<SessionEntry>, String> {
     let (provider, sessions) = sessions_for_provider(app, preferred, limit)?;
     let live_id = live_session_id(app, provider);
+    let provider_is_current = current_provider(app) == Some(provider);
+    let sf = shell_foreground();
     let mut entries: Vec<SessionEntry> = sessions
         .into_iter()
         .map(|session| {
@@ -34240,9 +35569,50 @@ fn list_sessions<R: tauri::Runtime>(
                 provider: session.provider,
                 current,
                 pending: false,
+                running: session_delete_refused(
+                    provider_is_current,
+                    current,
+                    sf.seen,
+                    sf.at_prompt,
+                ),
             }
         })
         .collect();
+    // session-groups: the [current] row comes first. Rows are newest-modified
+    // first, and a Codex or OpenCode session resumed by id isn't modified
+    // until its next turn (Claude's resume touches its file). On 2026-10-28
+    // 05:47Z the Codex member of Claude's group was current but fifth, below
+    // the fold, so the group looked one-sided. When the limit cut it off
+    // entirely, find it in the full list.
+    if let Some(index) = entries.iter().position(|e| e.current) {
+        let row = entries.remove(index);
+        entries.insert(0, row);
+    } else if let (Some(live), Some(limit)) = (live_id.as_deref(), limit) {
+        let found = sessions_for_provider(app, Some(provider), None)
+            .ok()
+            .and_then(|(_, all)| all.into_iter().find(|s| s.id == live));
+        if let Some(session) = found {
+            entries.insert(
+                0,
+                SessionEntry {
+                    id: session.id,
+                    mtime: session.mtime,
+                    size: session.size,
+                    title: session.title,
+                    provider: session.provider,
+                    current: true,
+                    pending: false,
+                    running: session_delete_refused(
+                        provider_is_current,
+                        true,
+                        sf.seen,
+                        sf.at_prompt,
+                    ),
+                },
+            );
+            entries.truncate(limit);
+        }
+    }
     if let Some(pending) = pending_session_entry(app, provider) {
         merge_pending_session_entry(&mut entries, pending, limit);
     }
@@ -34283,6 +35653,7 @@ fn pending_session_entry<R: tauri::Runtime>(
         provider,
         current: true,
         pending: true,
+        running: false,
     })
 }
 
@@ -34377,17 +35748,105 @@ fn delete_session<R: tauri::Runtime>(
         return Err("invalid session id".to_string());
     }
     let (provider, sessions) = sessions_for_provider(app, preferred, None)?;
-    // opencode-sessions-browser: the file is Bram's export; the session itself
-    // lives in OpenCode's database and would come straight back.
-    if provider == SessionProvider::Opencode {
-        return Err("Delete OpenCode sessions from inside OpenCode.".to_string());
-    }
     let session = sessions
         .into_iter()
         .find(|session| session.id == id)
         .ok_or("session not found")?;
-    std::fs::remove_file(&session.path).map_err(|e| e.to_string())?;
+    // delete-live-session-leaves-stub (2026-10-27 20:49Z): deleting the
+    // session its CLI was running let the CLI rewrite the file at exit, a
+    // 1 KB stub that its partner then resumed into "No conversation found".
+    let sf = shell_foreground();
+    if session_delete_refused(
+        current_provider(app) == Some(provider),
+        live_session_id(app, provider).as_deref() == Some(id),
+        sf.seen,
+        sf.at_prompt,
+    ) {
+        return Err(SESSION_DELETE_LIVE_REFUSAL.to_string());
+    }
+    // opencode-session-delete: the file is only Bram's export; the session
+    // lives in OpenCode's database, so OpenCode deletes it (child sessions
+    // too) with its own CLI, run without a shell from the project root.
+    // Then the export goes, so the list doesn't show it until the next scan.
+    if provider == SessionProvider::Opencode {
+        opencode_delete_session(app, id)?;
+        let _ = std::fs::remove_file(&session.path);
+    } else {
+        std::fs::remove_file(&session.path).map_err(|e| e.to_string())?;
+    }
+    // A deleted session can't be resumed, so its pairs end with it: a
+    // partner switch then finds no partner instead of resuming a ghost.
+    if let Some(conn) = worklist_state_open(app) {
+        let _ = end_session_pairs(app, &conn, provider, id, "delete");
+    }
+    emit_replayable_signal(app, "sessions-list-changed");
     Ok(b"{\"ok\":true}".to_vec())
+}
+
+// opencode-session-delete: `opencode session delete <id>` (OpenCode 2.1.4,
+// "Delete a session and its child sessions"). The id is already checked by
+// session_id_is_safe and is passed as one argument, never through a shell.
+fn opencode_delete_session<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let out = std::process::Command::new("opencode")
+        .args(["session", "delete", id])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run opencode: {}", e))?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "sessions",
+            &format!(
+                "op=opencode-delete session={} status={}",
+                id,
+                out.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            ),
+        );
+    }
+    if out.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        Err(format!("opencode session delete failed: {}", err.trim()))
+    }
+}
+
+const SESSION_DELETE_LIVE_REFUSAL: &str =
+    "This session is running. Switch away from it before deleting it.";
+
+// delete-live-session-leaves-stub: the running session is the current
+// provider's live session while its CLI is up. Once the shell reports its
+// prompt the CLI has exited, so a leftover (like that stub) can be deleted.
+fn session_delete_refused(
+    provider_is_current: bool,
+    id_is_live: bool,
+    shell_seen: bool,
+    shell_at_prompt: bool,
+) -> bool {
+    provider_is_current && id_is_live && !(shell_seen && shell_at_prompt)
+}
+
+#[cfg(test)]
+mod session_delete_refusal_tests {
+    use super::session_delete_refused;
+
+    #[test]
+    fn only_the_running_session_is_refused() {
+        // Current provider, live id, CLI up (shell not at its prompt).
+        assert!(session_delete_refused(true, true, true, false));
+        // No shell markers yet: assume the CLI may be running.
+        assert!(session_delete_refused(true, true, false, false));
+        // The CLI exited (shell at its prompt): a leftover can go.
+        assert!(!session_delete_refused(true, true, true, true));
+        // Not the live id, or another provider's session.
+        assert!(!session_delete_refused(true, false, true, false));
+        assert!(!session_delete_refused(false, true, true, false));
+    }
 }
 
 // Format `SystemTime::now()` as an RFC3339 string in UTC (seconds precision,
@@ -34469,7 +35928,8 @@ fn append_codex_title_record(id: &str, title: &str, reassert: bool) -> Result<()
 // to the session JSONL so claude_session_title picks it up on next read. For
 // Codex: append `{id, thread_name, updated_at}` to session_index.jsonl
 // (append-only, last entry wins). Codex contract verified against
-// codex-rs/rollout/src/session_index.rs.
+// codex-rs/rollout/src/session_index.rs. For OpenCode: write `session_v2.title`
+// in OpenCode's database (opencode-session-rename).
 fn rename_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id: &str,
@@ -34504,7 +35964,9 @@ fn rename_session<R: tauri::Runtime>(
             append_codex_session_title(&session.id, trimmed)?;
         }
         SessionProvider::Opencode => {
-            return Err("OpenCode sessions can't be renamed yet".to_string());
+            // opencode-session-rename: OpenCode keeps titles in its own
+            // database, so the rename is a single UPDATE there.
+            opencode_set_session_title(app, &session.id, trimmed)?;
         }
     }
     Ok(b"{\"ok\":true}".to_vec())
@@ -34711,7 +36173,7 @@ fn latest_session_path<R: tauri::Runtime>(
     let path = match provider {
         SessionProvider::Claude => latest_claude_session_path(app)?,
         SessionProvider::Codex => latest_codex_session_path(app)?,
-        SessionProvider::Opencode => latest_opencode_session_path(app)?,
+        SessionProvider::Opencode => current_opencode_session_path(app)?,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -34736,8 +36198,29 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
     match provider {
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
-        SessionProvider::Opencode => latest_opencode_session_path(app),
+        SessionProvider::Opencode => current_opencode_session_path(app),
     }
+}
+
+// opencode-model-from-database (2026-10-28 07:31Z): "the current OpenCode
+// session" is the one Bram launched (its live-session record), not OpenCode's
+// most recently updated one. The footer named "v0.8.0 burndown" from the
+// Sessions list but took its model from the roster, which picked "GO
+// subscription help", 33 s newer and on DeepSeek. Bram chooses the session
+// (docs/decisions/2026-10-27-bram-chooses-the-session.md); most-recent is only
+// the fallback when Bram hasn't launched one.
+fn current_opencode_session_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<PathBuf>, String> {
+    let live = opencode_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    if let Some(path) = live.and_then(|id| session_path_for_id(app, SessionProvider::Opencode, &id))
+    {
+        return Ok(Some(path));
+    }
+    latest_opencode_session_path(app)
 }
 
 fn system_time_ms(t: std::time::SystemTime) -> Option<i64> {
@@ -40859,7 +42342,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         serde_json::to_vec(&serde_json::json!({
             "sid": sid,
             "agents": [],
-            "mainModel": st_last_session_model(&session_path),
+            "mainModel": main_session_model(app, &session_path),
         }))
         .map_err(|e| e.to_string())
     };
@@ -40914,7 +42397,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     let body = serde_json::json!({
         "sid": sid,
         "agents": agents,
-        "mainModel": st_last_session_model(&session_path),
+        "mainModel": main_session_model(app, &session_path),
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
@@ -41334,6 +42817,23 @@ struct SendLedgerEntry {
     // Observe-only for now: used to emit `would-suppress-strand` in the
     // mechanical-strand branch, no behavior change yet.
     session_path_at_inject: String,
+    // send-ledger-false-strand-opencode-export: is this entry's session corpus
+    // REBUILT rather than appended? True for OpenCode, whose "session JSONL" is
+    // an export Bram regenerates from SQLite (`opencode_export_session` ->
+    // `atomic_write_text` over every `session_message` row). A byte offset into
+    // such a file does not stay addressable: records are re-serialized, so a
+    // record that gained a field pushes later content forward, and the offset
+    // is itself taken from a path lookup that REGENERATES the export, so it can
+    // land after the delivering record was already written. Landing detection
+    // for a rebuilt corpus therefore gates on each candidate record's own
+    // timestamp instead of on the offset boundary.
+    session_rebuilt: bool,
+    // The rebuilt corpus's newest record when this send was recorded
+    // (`session_last_record_uuid`). Delivery is sought AFTER that record:
+    // identity survives a rebuild where a byte offset does not. Empty for
+    // append-only corpora, and empty-but-rebuilt means the corpus had no
+    // records yet, so everything now in it postdates this send.
+    session_anchor_uuid: String,
     state: &'static str, // "injected" | "landed" | "stranded"
     resolved_at_ms: i64,
     via_queue: bool,
@@ -41995,7 +43495,7 @@ mod send_ledger_unresolved_reason_tests {
 // them.
 #[cfg(test)]
 mod send_ledger_killed_turn_race_tests {
-    use super::{send_ledger_resolve_delivery, send_ledger_unresolved_reason};
+    use super::{send_ledger_resolve_delivery, send_ledger_unresolved_reason, SendLedgerAnchor};
 
     const A: &str = "Propose a worklist item to address #3859";
     const B: &str = "Propose a worklist item to address #3847";
@@ -42036,7 +43536,8 @@ mod send_ledger_killed_turn_race_tests {
         // Everything after the offset is what arrived post-injection: the
         // delayed completion bookkeeping for A, then B's real user record.
         let text = prefix + &item_completed_record(A) + &user_record(B);
-        let (delivered, from_inject) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        let (delivered, from_inject) =
+            send_ledger_resolve_delivery(B, (&text, offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             delivered,
             Some(false),
@@ -42052,7 +43553,8 @@ mod send_ledger_killed_turn_race_tests {
         let prefix = user_record(A) + &assistant_record("done with A");
         let offset = prefix.len();
         let text = prefix + &item_completed_record(B);
-        let (delivered, _) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        let (delivered, _) =
+            send_ledger_resolve_delivery(B, (&text, offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             delivered, None,
             "item_completed carries the text but is not a delivery record"
@@ -42075,14 +43577,16 @@ mod send_ledger_killed_turn_race_tests {
         let c_offset = mid.len();
         let text = mid + &user_record(C);
 
-        let (c_delivered, _) = send_ledger_resolve_delivery(C, (&text, c_offset), None);
+        let (c_delivered, _) =
+            send_ledger_resolve_delivery(C, (&text, c_offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             c_delivered,
             Some(false),
             "C resolves on its own offset and needle"
         );
 
-        let (b_delivered, _) = send_ledger_resolve_delivery(B, (&text, b_offset), None);
+        let (b_delivered, _) =
+            send_ledger_resolve_delivery(B, (&text, b_offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             b_delivered, None,
             "B is genuinely absent — but it did not affect C"
@@ -42100,7 +43604,8 @@ mod send_ledger_killed_turn_race_tests {
         let earlier = user_record(B);
         let offset = earlier.len();
         let text = earlier + &assistant_record("answered the first one");
-        let (delivered, _) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        let (delivered, _) =
+            send_ledger_resolve_delivery(B, (&text, offset), None, SendLedgerAnchor::Offset);
         assert_eq!(
             delivered, None,
             "the only occurrence precedes this entry's offset"
@@ -42108,9 +43613,93 @@ mod send_ledger_killed_turn_race_tests {
     }
 }
 
-fn send_ledger_find_delivery(text: &str, rel_offset: usize, needle: &str) -> Option<bool> {
-    let start = char_floor(text, rel_offset);
-    let suffix = &text[start..];
+// Where delivery may be sought within one candidate corpus. The choice is a
+// property of the CORPUS, not of this send: an append-only JSONL keeps a byte
+// offset addressable forever, a rebuilt export does not.
+#[derive(Clone, Copy)]
+enum SendLedgerAnchor<'a> {
+    // Append-only corpus (Claude, Codex): the recorded inject offset is the
+    // boundary. Exact and free.
+    Offset,
+    // Rebuilt corpus (OpenCode): the IDENTITY of the corpus's newest record
+    // when the send was recorded. `None` means the corpus held no records
+    // then, so everything now in it postdates the send.
+    //
+    // Identity rather than position because a rebuild re-serializes earlier
+    // records: a step gaining `stop_reason` lengthens its own line, which
+    // moves every byte after it. Measured on the live false strand — the
+    // record for a send recorded at offset 889,853 read back at 889,797,
+    // 56 bytes EARLIER — while the file as a whole only ever grew. Record
+    // ORDER is the provider's `seq` order and survives that; a uuid is the
+    // record's name for itself.
+    AfterRecord(Option<&'a str>),
+}
+
+// End of the line carrying `uuid`, so the search can begin after it. The
+// anchor is looked up by value: uuids are the provider's own identifiers and
+// occur nowhere but in their record.
+fn send_ledger_anchor_line_end(text: &str, uuid: &str) -> Option<usize> {
+    if uuid.is_empty() {
+        return None;
+    }
+    let pos = text.find(uuid)?;
+    Some(
+        text[pos..]
+            .find('\n')
+            .map(|i| pos + i + 1)
+            .unwrap_or(text.len()),
+    )
+}
+
+// The identity of a rebuilt corpus's newest record, read at send time. Any
+// record that certainly EXISTED when the send was recorded will do — a lagging
+// anchor still puts the delivering record after it, and a leading one is
+// impossible — which is why the scan needs no completeness guarantee.
+fn session_last_record_uuid(path: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|record| {
+            record
+                .get("uuid")
+                .and_then(|u| u.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default()
+}
+
+// Walk every needle occurrence in `text`, accepting only a line whose record
+// SEMANTICS constitute delivery (text presence alone is not delivery — queue
+// records carry the text at enqueue time, and assistant records can quote it
+// back). `anchor` decides where the search may begin.
+//
+// One documented fallback: a rebuilt corpus whose anchor record is no longer
+// in the searched text (a rebuild dropped it, or the session changed under the
+// entry) reverts to the recorded byte offset — the rule this replaced. That is
+// a known exception, not a design: the evidence we are waiting for is a trace
+// line reading `rebuilt_anchor=absent`, which has not been observed. Failing
+// that way round keeps the repeated-prose guard (`an identical earlier send
+// must not false-land a later entry`) in force.
+fn send_ledger_find_delivery(
+    text: &str,
+    rel_offset: usize,
+    needle: &str,
+    anchor: SendLedgerAnchor<'_>,
+) -> Option<bool> {
+    let start = match anchor {
+        SendLedgerAnchor::Offset => char_floor(text, rel_offset),
+        SendLedgerAnchor::AfterRecord(None) => 0,
+        SendLedgerAnchor::AfterRecord(Some(uuid)) => {
+            match send_ledger_anchor_line_end(text, uuid) {
+                Some(end) => end,
+                None => char_floor(text, rel_offset),
+            }
+        }
+    };
+    let suffix = &text[start.min(text.len())..];
     let mut search_from = 0usize;
     while let Some(rel) = suffix[search_from..].find(needle) {
         let pos = search_from + rel;
@@ -42135,16 +43724,21 @@ fn send_ledger_find_delivery(text: &str, rel_offset: usize, needle: &str) -> Opt
 // of scope) the inject-session candidate. Returns (delivered_via_queue,
 // landed_in_inject_session) — the second drives the audit-line choice
 // (`inject-session-land` vs `cross-session-land`) and never both.
+//
+// `anchor` applies to BOTH candidates: a rebuild changes the inject file as
+// much as the current one, and when the session changed the anchor simply
+// isn't there, which lands on the documented offset fallback.
 fn send_ledger_resolve_delivery(
     needle: &str,
     current: (&str, usize),
     inject: Option<(&str, usize)>,
+    anchor: SendLedgerAnchor<'_>,
 ) -> (Option<bool>, bool) {
-    if let Some(v) = send_ledger_find_delivery(current.0, current.1, needle) {
+    if let Some(v) = send_ledger_find_delivery(current.0, current.1, needle, anchor) {
         return (Some(v), false);
     }
     if let Some((text, rel)) = inject {
-        if let Some(v) = send_ledger_find_delivery(text, rel, needle) {
+        if let Some(v) = send_ledger_find_delivery(text, rel, needle, anchor) {
             return (Some(v), true);
         }
     }
@@ -42153,7 +43747,7 @@ fn send_ledger_resolve_delivery(
 
 #[cfg(test)]
 mod send_ledger_resolve_delivery_tests {
-    use super::send_ledger_resolve_delivery;
+    use super::{send_ledger_resolve_delivery, SendLedgerAnchor};
 
     const DELIVERING: &str = "{\"type\":\"user\",\"text\":\"probe for 307\"}\n";
     const UNRELATED: &str = "{\"type\":\"other\",\"text\":\"nothing here\"}\n";
@@ -42163,16 +43757,24 @@ mod send_ledger_resolve_delivery_tests {
         // The #307 harmful variant: current (post-switch) session shows no
         // delivery, inject session does — must resolve landed, flagged as
         // an inject-session land, never fall through to the strand path.
-        let (delivered, in_inject) =
-            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), Some((DELIVERING, 0)));
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (UNRELATED, 0),
+            Some((DELIVERING, 0)),
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, Some(false));
         assert!(in_inject);
     }
 
     #[test]
     fn current_session_wins_and_is_not_flagged_as_inject_land() {
-        let (delivered, in_inject) =
-            send_ledger_resolve_delivery("probe for 307", (DELIVERING, 0), Some((DELIVERING, 0)));
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (DELIVERING, 0),
+            Some((DELIVERING, 0)),
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, Some(false));
         assert!(
             !in_inject,
@@ -42182,22 +43784,31 @@ mod send_ledger_resolve_delivery_tests {
 
     #[test]
     fn found_in_neither_session_strands() {
-        let (delivered, in_inject) =
-            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), Some((UNRELATED, 0)));
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (UNRELATED, 0),
+            Some((UNRELATED, 0)),
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, None);
         assert!(!in_inject);
     }
 
     #[test]
     fn no_switch_means_no_second_candidate() {
-        let (delivered, _) = send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), None);
+        let (delivered, _) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (UNRELATED, 0),
+            None,
+            SendLedgerAnchor::Offset,
+        );
         assert_eq!(delivered, None);
     }
 }
 
 #[cfg(test)]
 mod send_ledger_find_delivery_tests {
-    use super::send_ledger_find_delivery;
+    use super::{send_ledger_find_delivery, SendLedgerAnchor};
 
     #[test]
     fn delivering_user_line_is_found_and_quoting_lines_are_not() {
@@ -42207,12 +43818,17 @@ mod send_ledger_find_delivery_tests {
         );
         // The assistant quote alone does not deliver; the user line does.
         assert_eq!(
-            send_ledger_find_delivery(text, 0, "hello world probe"),
+            send_ledger_find_delivery(text, 0, "hello world probe", SendLedgerAnchor::Offset),
             Some(false)
         );
         let quotes_only = "{\"type\":\"assistant\",\"text\":\"hello world probe\"}\n";
         assert_eq!(
-            send_ledger_find_delivery(quotes_only, 0, "hello world probe"),
+            send_ledger_find_delivery(
+                quotes_only,
+                0,
+                "hello world probe",
+                SendLedgerAnchor::Offset
+            ),
             None
         );
     }
@@ -42222,9 +43838,178 @@ mod send_ledger_find_delivery_tests {
         let first = "{\"type\":\"user\",\"text\":\"hello world probe\"}\n";
         let text = format!("{}{}", first, "{\"type\":\"other\"}\n");
         assert_eq!(
-            send_ledger_find_delivery(&text, first.len(), "hello world probe"),
+            send_ledger_find_delivery(
+                &text,
+                first.len(),
+                "hello world probe",
+                SendLedgerAnchor::Offset
+            ),
             None,
             "occurrences before the offset are out of scope"
+        );
+    }
+}
+
+// send-ledger-false-strand-opencode-export: the addressing rule for a corpus
+// Bram REBUILDS (OpenCode's export) versus one the CLI appends to. The fixtures
+// replay the shape the live ledger recorded — a delivering record that reads
+// back BEFORE the byte offset taken at inject, because a rebuild re-serialized
+// earlier records — and the case that boundary must still refuse: an identical
+// earlier payload. What separates the two is CONTENT (the identity of the
+// newest record when the send was recorded), not a byte count and not a clock.
+#[cfg(test)]
+mod send_ledger_rebuilt_corpus_tests {
+    use super::{
+        send_ledger_find_delivery, send_ledger_resolve_delivery, session_last_record_uuid,
+        SendLedgerAnchor,
+    };
+
+    const SENT: &str = "approved: {\"items\":[{\"id\":\"probe\"}]}";
+    const ANCHOR: &str = "msg_anchor";
+    const DELIVERING: &str = "msg_delivering";
+    const EARLIER: &str = "msg_earlier";
+
+    fn export_user_record(uuid: &str, text: &str) -> String {
+        let mut line = serde_json::json!({
+            "message": { "content": text },
+            "sessionId": "ses_probe",
+            "timestamp": "2026-10-27T09:05:51.961Z",
+            "type": "user",
+            "uuid": uuid,
+        })
+        .to_string();
+        line.push('\n');
+        line
+    }
+
+    // The ledger's needle is the JSON-ESCAPED payload (`send_ledger_needle`),
+    // which is what the export's own serialization stores. A fixture that
+    // searched for the raw text would fail for the right reason but read as a
+    // bug in the resolver.
+    fn escaped_needle() -> String {
+        let quoted = serde_json::Value::String(SENT.to_string()).to_string();
+        quoted[1..quoted.len() - 1].to_string()
+    }
+
+    fn after(uuid: &str) -> SendLedgerAnchor<'_> {
+        SendLedgerAnchor::AfterRecord(Some(uuid))
+    }
+
+    #[test]
+    fn rebuilt_corpus_lands_a_record_that_sits_before_the_recorded_offset() {
+        // The live shape: the delivering record precedes the offset the ledger
+        // recorded, so an offset-bounded search starts inside the record and
+        // matches nothing. The anchor puts the whole record in scope.
+        let text = export_user_record(ANCHOR, "the turn before")
+            + &export_user_record(DELIVERING, SENT)
+            + &export_user_record("msg_after", "the turn after");
+        let offset = text.len();
+        let (delivered, in_inject) =
+            send_ledger_resolve_delivery(&escaped_needle(), (&text, offset), None, after(ANCHOR));
+        assert_eq!(delivered, Some(false));
+        assert!(!in_inject);
+    }
+
+    #[test]
+    fn append_only_corpus_keeps_the_offset_boundary() {
+        // Same bytes under the Claude/Codex rule: the record still sits before
+        // the offset, so it stays out of scope. The proven path is untouched.
+        let text =
+            export_user_record(ANCHOR, "the turn before") + &export_user_record(DELIVERING, SENT);
+        let offset = text.len();
+        let (delivered, _) = send_ledger_resolve_delivery(
+            &escaped_needle(),
+            (&text, offset),
+            None,
+            SendLedgerAnchor::Offset,
+        );
+        assert_eq!(delivered, None);
+    }
+
+    #[test]
+    fn rebuilt_corpus_refuses_an_identical_payload_before_the_anchor() {
+        // The case the boundary exists to prevent, preserved without a clock:
+        // user prose repeats, so an older identical payload must not land a
+        // send that was genuinely lost.
+        let text = export_user_record(EARLIER, SENT) + &export_user_record(ANCHOR, "after it");
+        let (delivered, _) =
+            send_ledger_resolve_delivery(&escaped_needle(), (&text, 0), None, after(ANCHOR));
+        assert_eq!(delivered, None);
+    }
+
+    #[test]
+    fn rebuilt_corpus_walks_past_a_payload_before_the_anchor() {
+        // A refused occurrence must not stop the search: the delivering record
+        // after the anchor is this send.
+        let text = export_user_record(EARLIER, SENT)
+            + &export_user_record(ANCHOR, "the turn before")
+            + &export_user_record(DELIVERING, SENT);
+        let (delivered, _) =
+            send_ledger_resolve_delivery(&escaped_needle(), (&text, 0), None, after(ANCHOR));
+        assert_eq!(delivered, Some(false));
+    }
+
+    #[test]
+    fn rebuilt_corpus_with_no_records_at_send_time_searches_all_of_it() {
+        // An empty corpus at inject means everything now in it postdates the
+        // send, so there is no boundary to apply.
+        let text = export_user_record(DELIVERING, SENT);
+        let (delivered, _) = send_ledger_resolve_delivery(
+            &escaped_needle(),
+            (&text, 0),
+            None,
+            SendLedgerAnchor::AfterRecord(None),
+        );
+        assert_eq!(delivered, Some(false));
+    }
+
+    #[test]
+    fn missing_anchor_falls_back_to_the_recorded_offset() {
+        // Documented exception: a rebuild dropped the anchor record (or the
+        // session changed under the entry), so the content boundary cannot be
+        // located and the old byte rule applies. The first `rebuilt_anchor=absent`
+        // in a trace is the evidence a rebuild did this.
+        let text = export_user_record(DELIVERING, SENT);
+        let offset = text.len();
+        assert_eq!(
+            send_ledger_find_delivery(&text, offset, &escaped_needle(), after("msg_gone")),
+            None,
+            "fallback keeps the repeated-prose guard"
+        );
+        assert_eq!(
+            send_ledger_find_delivery(&text, 0, &escaped_needle(), after("msg_gone")),
+            Some(false),
+            "the fallback is the offset, not the anchor: from 0 the same bytes land"
+        );
+    }
+
+    #[test]
+    fn last_record_uuid_skips_lines_that_are_not_records() {
+        // The export ends with a `custom-title` line carrying no uuid, and the
+        // anchor must be the newest RECORD, not that.
+        let path = std::env::temp_dir().join(format!(
+            "bram-anchor-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let body = export_user_record("msg_one", "first")
+            + &export_user_record("msg_two", "second")
+            + &serde_json::json!({ "type": "custom-title", "customTitle": "a title" }).to_string()
+            + "\n";
+        std::fs::write(&path, body).expect("fixture writes");
+        let uuid = session_last_record_uuid(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(uuid, "msg_two");
+    }
+
+    #[test]
+    fn last_record_uuid_of_a_missing_file_is_empty_not_an_error() {
+        assert_eq!(
+            session_last_record_uuid(std::path::Path::new("/nonexistent/session.jsonl")),
+            ""
         );
     }
 }
@@ -42591,6 +44376,11 @@ static AGENT_BOOT_EVIDENCE_OPEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static AGENT_BOOT_EVIDENCE_IGNORED: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
+// claude-boot-hold-no-bounce: PTY bytes read since boot evidence opened, so
+// the composer check reads only what the new CLI (and the shell's echo of
+// its launch) drew, never the outgoing session's last screen.
+static AGENT_BOOT_BYTES_SINCE_OPEN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 // boot-settle-wait-for-claude-bounce: Claude Code enables its TUI modes,
 // turns them off, and turns them on again before its input is live. The
 // 400 ms quiet window guessed at that and lost at 2026-09-30 22:10Z, when
@@ -42781,6 +44571,7 @@ fn open_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
     if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
         carry.clear();
     }
+    AGENT_BOOT_BYTES_SINCE_OPEN.store(0, std::sync::atomic::Ordering::Relaxed);
     AGENT_BOOT_EVIDENCE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
     set_boot_modes(true, BootModes::default());
     if bram_trace_enabled() {
@@ -42936,9 +44727,35 @@ fn reset_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) 
     }
 }
 
+// claude-boot-hold-no-bounce: Claude 2.1.312 turns focus reporting on once
+// and never bounces (2026-10-27 specimen; four briefs expired that day), so
+// a Claude hold also releases when its ready composer is on screen.
+fn claude_boot_composer_drawn() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !boot_hold_is_claude() || !AGENT_BOOT_EVIDENCE_OPEN.load(Relaxed) {
+        return false;
+    }
+    let since_open = AGENT_BOOT_BYTES_SINCE_OPEN.load(Relaxed);
+    if since_open == 0 {
+        return false;
+    }
+    let raw = match pty_tail_cell().lock() {
+        Ok(g) => {
+            let start = g.len().saturating_sub(since_open);
+            g[start..].to_vec()
+        }
+        Err(_) => return false,
+    };
+    claude_boot_composer_ready(&String::from_utf8_lossy(&strip_ansi(&raw)))
+}
+
 // Release the hold once the settle window has passed quietly. Called from
 // the drain tick and after each scanned chunk.
 fn poll_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if agent_boot_hold_active() && claude_boot_composer_drawn() {
+        release_agent_boot_hold(app, "composer");
+        return;
+    }
     let deadline = AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed);
     if deadline == 0 || deadline == i64::MAX || unix_now_ms() < deadline {
         return;
@@ -43127,6 +44944,63 @@ mod agent_boot_evidence_tests {
             Some("focus-reporting")
         );
     }
+    // claude-boot-hold-no-bounce: Claude Code 2.1.312 started as New session
+    // starts it (`claude --name 'specimen boot' --session-id <uuid>`), 100x61
+    // PTY, 12 s, no input, 2026-10-27. One ?1004h and no bounce; it is ready.
+    const CLAUDE_2_1_312_BOOT: &[u8] =
+        include_bytes!("../tests/fixtures/macos-pty/claude-2.1.312-boot-raw.txt");
+
+    fn stripped(raw: &[u8]) -> String {
+        String::from_utf8_lossy(&super::strip_ansi(raw)).into_owned()
+    }
+
+    #[test]
+    fn claude_2_1_312_boot_never_bounces_but_draws_its_composer() {
+        use super::{boot_focus_toggles, claude_boot_composer_ready};
+        assert_eq!(boot_focus_toggles(CLAUDE_2_1_312_BOOT, 0), vec![true]);
+        assert!(claude_boot_composer_ready(&stripped(CLAUDE_2_1_312_BOOT)));
+    }
+
+    #[test]
+    fn a_partial_boot_paint_is_not_ready() {
+        use super::claude_boot_composer_ready as ready;
+        let text = stripped(CLAUDE_2_1_312_BOOT);
+        let cut = text.find('❯').expect("prompt row");
+        assert!(!ready(&text[..cut]), "banner only, no composer yet");
+        assert!(!ready(&text[cut..]), "composer with no fresh banner");
+    }
+
+    #[test]
+    fn a_reply_quoting_the_composer_followed_by_more_output_is_not_ready() {
+        use super::claude_boot_composer_ready as ready;
+        let quoting = "Claude Code v2.1.312 Its composer is ─── ❯ ─── then \
+            ⏵⏵ auto mode on (shift+tab to cycle), and the reply keeps going for \
+            a good while after that, long past where any footer would end, \
+            because a reply is prose and a footer is a few short hints.";
+        assert!(!ready(quoting));
+        let no_rules = "Claude Code v2.1.312 type at ❯ and press shift+tab to cycle \
+            ⏵⏵ auto mode on (shift+tab to cycle)";
+        assert!(!ready(no_rules));
+        let default_mode = "Claude Code v2.1.312 ─── ❯ ─── ? for shortcuts";
+        assert!(ready(default_mode));
+    }
+
+    // A 32-column pane, 2026-10-27 20:56Z (send-capture rows): Claude cut its
+    // footer at the pane width, so "(shift+tab to cycle)" was never drawn.
+    #[test]
+    fn a_footer_truncated_by_a_narrow_pane_is_ready() {
+        use super::claude_boot_composer_ready as ready;
+        let narrow = "           Claude Code v2.1.312\n\
+            ▗ ▗   ▖ ▖  Opus 5.5\n           Claude Max\n ▘▘   ▝▝   ~/bram\n\n\n\
+            ──────────────────── boot test ─\n\
+            ❯ Try \"create a util logging.py…\n\
+            ────────────────────────────────\n\
+            \u{20}\u{20}⏵⏵ auto mode on (shift+tab\n\n";
+        assert!(ready(narrow));
+        let plan = "Claude Code v2.1.312 ─── ❯ ─── ⏸ plan mode on (shift+";
+        assert!(ready(plan));
+    }
+
     #[test]
     fn synchronized_output_never_resets_the_settle_window() {
         use super::agent_boot_settle_toggle as t;
@@ -44502,6 +46376,18 @@ fn schedule_send_ledger_sweep<R: tauri::Runtime>(app: &AppHandle<R>) {
     });
 }
 
+// send-ledger-false-strand-opencode-export: is this path a corpus Bram
+// REGENERATES from a provider database rather than one the CLI appends to?
+// Only the OpenCode export directory answers yes. Tested by path rather than
+// by provider so an entry recorded while the provider was ambiguous (or while
+// a switch was in flight) still classifies by what the file actually is.
+fn session_corpus_is_rebuilt<R: tauri::Runtime>(app: &AppHandle<R>, path: &Path) -> bool {
+    match opencode_export_dir(app) {
+        Ok(dir) => path.starts_with(&dir),
+        Err(_) => false,
+    }
+}
+
 fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
     let now = unix_now_ms();
     let session_path = active_session_path(app).ok().flatten();
@@ -44514,6 +46400,24 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // send-ledger-false-strand-opencode-export: recorded per entry because the
+    // landing rule differs by corpus shape — a rebuilt export cannot be
+    // addressed by offset, an append-only JSONL is best addressed by one.
+    let session_rebuilt = session_path
+        .as_deref()
+        .map(|p| session_corpus_is_rebuilt(app, p))
+        .unwrap_or(false);
+    // Content boundary for a rebuilt corpus, taken HERE rather than at the
+    // sweep: this runs before the payload reaches the PTY, so the delivering
+    // record cannot already be in the corpus. See `SendLedgerAnchor`.
+    let session_anchor_uuid = if session_rebuilt {
+        session_path
+            .as_deref()
+            .map(session_last_record_uuid)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let trimmed = payload.trim_start();
     let (mode, body) = match trimmed.strip_prefix("skip-worklist:") {
         Some(rest) => ("skip-worklist", rest.trim_start()),
@@ -44537,6 +46441,8 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             injected_at_ms: now,
             jsonl_offset_at_inject: jsonl_offset,
             session_path_at_inject: session_path_at_inject.clone(),
+            session_rebuilt,
+            session_anchor_uuid: session_anchor_uuid.clone(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -44559,6 +46465,8 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             injected_at_ms: now,
             jsonl_offset_at_inject: jsonl_offset,
             session_path_at_inject: session_path_at_inject.clone(),
+            session_rebuilt,
+            session_anchor_uuid: session_anchor_uuid.clone(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -44583,12 +46491,18 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             app,
             "send-ledger",
             &format!(
-                "op=inject id={} kind={} mode={} bytes={} jsonl_offset={}",
+                "op=inject id={} kind={} mode={} bytes={} jsonl_offset={} rebuilt={} anchor={}",
                 entry.id,
                 entry.kind,
                 entry.mode,
                 payload.len(),
                 jsonl_offset,
+                entry.session_rebuilt,
+                if entry.session_anchor_uuid.is_empty() {
+                    "-"
+                } else {
+                    entry.session_anchor_uuid.as_str()
+                },
             ),
         );
     }
@@ -44860,8 +46774,24 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
             } else {
                 None
             };
-            let (delivered, landed_in_inject_session) =
-                send_ledger_resolve_delivery(&needle, (search_text, rel_offset), inject_candidate);
+            // send-ledger-false-strand-opencode-export: a rebuilt corpus is
+            // addressed by the identity of its newest record at send time,
+            // not by the inject offset.
+            let anchor = if !entry.session_rebuilt {
+                SendLedgerAnchor::Offset
+            } else if entry.session_anchor_uuid.is_empty() {
+                // No records existed when this send was recorded, so every
+                // record present now postdates it.
+                SendLedgerAnchor::AfterRecord(None)
+            } else {
+                SendLedgerAnchor::AfterRecord(Some(entry.session_anchor_uuid.as_str()))
+            };
+            let (delivered, landed_in_inject_session) = send_ledger_resolve_delivery(
+                &needle,
+                (search_text, rel_offset),
+                inject_candidate,
+                anchor,
+            );
             // issue-335 phase 1: classified against the PRIMARY candidate only.
             // When the session re-anchored, `search_text` is the current
             // session and the inject session was searched as a fallback, so
@@ -45066,14 +46996,54 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 // the interesting signal (e.g. offset-past-end settling into
                 // needle-absent once the provider writes).
                 entry.last_unresolved_reason = unresolved_reason;
+                // send-ledger-false-strand-opencode-export: `needle-absent`
+                // alone cannot distinguish "outside the window we searched"
+                // from "not in the corpus at all" — the ambiguity that cost
+                // this item its own investigation. Answer it here, once per
+                // distinct reason, by asking the whole file. `base_offset`
+                // says where the searched slice started, so a window miss is
+                // readable without knowing which caller swept.
+                let needle_in_file = if !current_session_path.is_empty() {
+                    match current_session_full_text.as_deref() {
+                        Some(t) => Some(t.contains(&needle)),
+                        None => std::fs::read_to_string(&current_session_path)
+                            .ok()
+                            .map(|t| t.contains(&needle)),
+                    }
+                } else {
+                    None
+                };
+                // Where the boundary came from, and whether it was actually
+                // found: `absent` is the documented fallback to the byte
+                // offset, so its first appearance in a trace is the evidence
+                // a rebuild dropped an anchor record.
+                let rebuilt_anchor = if !entry.session_rebuilt {
+                    "none"
+                } else if entry.session_anchor_uuid.is_empty() {
+                    "start"
+                } else if send_ledger_anchor_line_end(search_text, &entry.session_anchor_uuid)
+                    .is_some()
+                {
+                    "found"
+                } else {
+                    "absent"
+                };
                 transitions.push(format!(
-                    "op=unresolved id={} reason={} needle_len={} rel_offset={} text_len={} sid_changed={}",
+                    "op=unresolved id={} reason={} needle_len={} rel_offset={} base_offset={} text_len={} sid_changed={} rebuilt={} rebuilt_anchor={} needle_in_file={}",
                     entry.id,
                     unresolved_reason,
                     needle.len(),
                     rel_offset,
+                    base_offset,
                     search_text.len(),
                     sid_changed,
+                    entry.session_rebuilt,
+                    rebuilt_anchor,
+                    match needle_in_file {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "unknown",
+                    },
                 ));
             }
         }
@@ -63180,6 +65150,8 @@ mod session_turn_tests {
             injected_at_ms: 0,
             jsonl_offset_at_inject: 0,
             session_path_at_inject: String::new(),
+            session_rebuilt: false,
+            session_anchor_uuid: String::new(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -63226,6 +65198,8 @@ mod session_turn_tests {
             injected_at_ms: 1000,
             jsonl_offset_at_inject: 0,
             session_path_at_inject: String::new(),
+            session_rebuilt: false,
+            session_anchor_uuid: String::new(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -70712,16 +72686,31 @@ fn route_request<R: tauri::Runtime>(
             .unwrap_or_default()
         };
         let enrich_started = std::time::Instant::now();
+        // search-index-opencode-sessions: OpenCode sessions are indexed from
+        // Bram's exports of them, which live in its cache, not under ~/.codex/,
+        // so they were labeled Claude (and their Switch went to Claude).
+        let opencode_dir = opencode_export_dir(app).ok();
         let enriched_hits = hits
             .iter()
             .map(|h| {
                 // Session doc key is the JSONL path. Recover the provider
-                // (Codex sessions live under ~/.codex/) and the session id
-                // the expander needs: Claude's is the file stem, but a
-                // Codex id lives inside the file (codex_session_meta).
+                // (Codex sessions live under ~/.codex/, OpenCode exports in
+                // Bram's cache) and the session id the expander needs:
+                // Claude's and OpenCode's is the file stem, but a Codex id
+                // lives inside the file (codex_session_meta).
                 let (provider, id) = if h.kind == "session" {
                     let path = std::path::Path::new(&h.key);
-                    if h.key.contains("/.codex/") {
+                    if opencode_dir
+                        .as_deref()
+                        .is_some_and(|dir| is_opencode_export_path(path, dir))
+                    {
+                        let id = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        ("opencode".to_string(), id)
+                    } else if h.key.contains("/.codex/") {
                         let id = codex_session_meta(path)
                             .ok()
                             .flatten()
@@ -70739,10 +72728,17 @@ fn route_request<R: tauri::Runtime>(
                 } else {
                     (String::new(), String::new())
                 };
+                // search-index-opencode-sessions: rows indexed by the first
+                // build of this item stored an OpenCode date in milliseconds;
+                // anything past ~5138 AD as seconds is ms.
+                let date = match h.date.parse::<i64>() {
+                    Ok(d) if d > 100_000_000_000 => (d / 1000).to_string(),
+                    _ => h.date.clone(),
+                };
                 serde_json::json!({
                     "type": h.kind,
                     "source": h.source,
-                    "date": h.date,
+                    "date": date,
                     "link": h.link,
                     "snippet": h.snippet,
                     "rank": h.rank,
@@ -72022,9 +74018,24 @@ fn route_request<R: tauri::Runtime>(
                 delete_session(app, &session_id, provider),
             )
         } else if rest == "rename" {
+            // session-groups: a grouped session takes its group's name; the
+            // pane's ✎ is disabled there, and this refuses it too.
+            let grouped = provider.is_some_and(|p| {
+                worklist_state_open(app)
+                    .and_then(|conn| {
+                        worklist_state::session_group(&conn, session_provider_label(p), &session_id)
+                            .ok()
+                    })
+                    .flatten()
+                    .is_some()
+            });
             // provider-session-pair-offer: refresh the list after a rename, so
-            // Match name (and the ✎ rename) show the new title without a reload.
-            let r = rename_session(app, &session_id, provider, &title);
+            // the ✎ rename shows the new title without a reload.
+            let r = if grouped {
+                Err("this session is in a group; leave the group to rename it".to_string())
+            } else {
+                rename_session(app, &session_id, provider, &title)
+            };
             if r.is_ok() {
                 emit_replayable_signal(app, "sessions-list-changed");
             }
@@ -72039,7 +74050,17 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, content_type, bytes),
             Err(e) => {
                 eprintln!("[http /__sessions/{}] {}", rest, e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
+                // session-rename-refusal-status: a refusal about the caller's
+                // argument (an id Bram can't find, a title it won't take) is
+                // not a server fault. Reporting 500 for it is what made an
+                // unsupported provider read as a crash in the pane.
+                let status = match e.as_str() {
+                    "session not found" => 404,
+                    "empty title" | "invalid session id" => 400,
+                    SESSION_DELETE_LIVE_REFUSAL => 409,
+                    _ => 500,
+                };
+                (status, "text/plain; charset=utf-8", e.into_bytes())
             }
         };
     }
@@ -81115,6 +83136,10 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
         .map(|(_, _, input)| input);
     agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
     clear_opencode_prompt_claims(app, "opencode-turn-ended", None);
+    // search-index-opencode-sessions: no watcher sees OpenCode's database, so
+    // a finished turn asks for a sessions pass (which re-exports the changed
+    // session and indexes it).
+    search_index_request(IndexBucket::Sessions);
     clear_proposing_flag(app, "turn-finished");
     end_turn_context_unless_fresh(app, "opencode-turn-end");
     let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
@@ -81829,6 +83854,80 @@ mod query_route_tests {
     }
 }
 
+// switch-matrix-harness: test-drive routes for scripts/switch-matrix.py. The
+// switch, reload and New session paths are Tauri commands the pane reaches
+// over IPC, so nothing outside the pane could drive them, and every check of
+// the session-switching matrix took a person clicking. With BRAM_TEST_DRIVE=1
+// (set only by the harness, for a disposable demo instance; never by ./bram)
+// `POST /__test/{switch,reload,new-session}` call the same command functions.
+// Off, they answer 404. docs/authorization.md records the condition.
+static TEST_DRIVE_APP: OnceLock<AppHandle> = OnceLock::new();
+
+fn test_drive_enabled() -> bool {
+    std::env::var("BRAM_TEST_DRIVE").is_ok_and(|v| v == "1")
+}
+
+fn handle_test_drive(path: &str, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let Some(app) = TEST_DRIVE_APP.get() else {
+        return (404, "text/plain; charset=utf-8", b"not found".to_vec());
+    };
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let opt = |k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from);
+    let result = match path {
+        "__test/switch" => switch_agent(app.clone(), s("provider"), app.state::<AppState>()),
+        "__test/reload" => {
+            reload_agent_session(app.clone(), s("provider"), s("id"), app.state::<AppState>())
+        }
+        "__test/new-session" => create_new_session(
+            app.clone(),
+            s("provider"),
+            s("title"),
+            opt("pairWithProvider"),
+            opt("pairWithSession"),
+            app.state::<AppState>(),
+        ),
+        // The New session dialog's brief is typed by the pane (toTurn), not
+        // by create_new_session, so a test-drive New session needs this to
+        // send the first message the dialog would. Same queue, same boot hold.
+        "__test/turn" => queue_pty_intent_inner(
+            app,
+            serde_json::json!({ "kind": "toTurn", "data": s("text"), "source": "test-drive" }),
+            &app.state::<AppState>(),
+        ),
+        _ => return (404, "text/plain; charset=utf-8", b"not found".to_vec()),
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "test-drive",
+            &format!(
+                "op=call route={} body={} result={}",
+                path,
+                String::from_utf8_lossy(body).replace('\n', " "),
+                match &result {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("err:{}", e),
+                }
+            ),
+        );
+    }
+    match result {
+        Ok(()) => (
+            200,
+            "application/json; charset=utf-8",
+            b"{\"ok\":true}".to_vec(),
+        ),
+        Err(e) => (
+            409,
+            "application/json; charset=utf-8",
+            serde_json::json!({ "ok": false, "error": e })
+                .to_string()
+                .into_bytes(),
+        ),
+    }
+}
+
 fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Request) {
     let url = request.url().to_string();
     let method = request.method().as_str().to_uppercase();
@@ -81919,6 +84018,17 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_draft_save(app, &buf)
+        }
+    } else if path.starts_with("__test/") {
+        // switch-matrix-harness: 404 unless BRAM_TEST_DRIVE=1 set it up.
+        if !test_drive_enabled() || TEST_DRIVE_APP.get().is_none() {
+            (404, "text/plain; charset=utf-8", b"not found".to_vec())
+        } else if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_test_drive(&path, &buf)
         }
     } else if path == "__worklist/mutate" {
         if method != "POST" {
@@ -82736,6 +84846,11 @@ pub fn run() {
             whisper_preflight,
         ])
         .setup(move |app| {
+            // switch-matrix-harness: test-drive routes, only on request.
+            if test_drive_enabled() {
+                let _ = TEST_DRIVE_APP.set(app.handle().clone());
+                append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");
+            }
             // issue-405: SIGTERM/SIGINT/SIGHUP run shutdown_children, so a
             // `kill` hangs up the terminal's jobs instead of orphaning them.
             #[cfg(unix)]
@@ -85116,6 +87231,12 @@ mod search_not_ready_tests {
         st.active_buckets.clear();
         st.progress = Some(("commits".into(), 1, 10));
         assert_eq!(search_not_ready_reason(&st), Some("initial-scan"));
+        // A quiet startup cycle names no bucket but is still a scan.
+        st.progress = None;
+        st.cycle_running = true;
+        assert_eq!(search_not_ready_reason(&st), Some("initial-scan"));
+        st.cycle_running = false;
+        st.progress = Some(("commits".into(), 1, 10));
         // A completed cycle — even over zero documents — is ready: [] is
         // then the genuine empty (verified live: 200 [] with total=0).
         st.last_cycle_ms = 1;

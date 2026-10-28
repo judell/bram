@@ -70,7 +70,7 @@
 
   <VStack padding="$space-4" gap="$space-4" width="*">
     <HStack verticalAlignment="center" gap="$space-2">
-      <Heading level="h2" value="Awaiting You" />
+      <Heading level="h2" value="Alerts" />
       <Button
         when="{lanesReady &amp;&amp; inbox.value.notes &amp;&amp; inbox.value.notes.length > 0}"
         label="ⓘ"

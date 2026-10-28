@@ -14,7 +14,7 @@
        evaluates in this scope, so typeColors resolves here.
        https://docs.xmlui.org/howto/pass-a-template-slot-to-a-component -->
   <variable name="typeColors"
-    value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
+    value="{{ session: 'blue', claude: 'blue', codex: 'blue', opencode: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
   <ResultList
     data="{$props.hits}"
     query="{$props.query}"
@@ -25,10 +25,20 @@
         <VStack gap="$space-0_5" width="7rem">
           <!-- Compact row metadata; facet badges remain at the default size.
                https://docs.xmlui.org/howto/theme-badge-colors-and-sizes -->
-          <Theme fontSize-Badge="0.7rem"
-            paddingHorizontal-Badge="$space-0_5" paddingVertical-Badge="0">
-            <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
-          </Theme>
+          <HStack gap="$space-1" verticalAlignment="center">
+            <Theme fontSize-Badge="0.7rem"
+              paddingHorizontal-Badge="$space-0_5" paddingVertical-Badge="0">
+              <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
+            </Theme>
+            <!-- search-session-hit-switch-to: the Sessions tab's switch
+                 button, on session hits. /__search carries provider and id;
+                 ResultList's __bramRowClickHit skips BUTTON clicks, so this
+                 doesn't also open the detail modal. -->
+            <Button when="{$item.type === 'session'}"
+              icon="swap" variant="ghost" size="xs"
+              tooltip="Switch to this session (restarts the agent on it)"
+              onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
+          </HStack>
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.dateLabel}" />
         </VStack>
         <VStack width="*" gap="$space-0_5">

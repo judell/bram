@@ -6155,8 +6155,11 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     // text scrolls out of the tail after a minute or so: this holds early
     // sends, and OpenCode's own permission.asked event is the lasting signal
     // (opencode-permission-menu).
-    const OPENCODE_PERMISSION_MARKERS: &[&str] =
-        &["permission required", "allow once", "always allow"];
+    // #453 review: "Always allow" is drawn only when the request carries
+    // `save` patterns (opencode_permission_request_to_menu's two-row case), so
+    // requiring it missed a save-less prompt and left pane sends unheld there,
+    // where a paste plus Enter confirms "Allow once". "Reject" is on both forms.
+    const OPENCODE_PERMISSION_MARKERS: &[&str] = &["permission required", "allow once", "reject"];
     // opencode-question-card: the footer under every OpenCode form, its
     // question tool's ("Questions ┃ Pick a city ┃ 1. Paris … 3. Type your own
     // answer ┃ ↑↓ select enter submit esc dismiss", 2.1.4 spike, 2026-10-27)
@@ -45976,6 +45979,20 @@ mod opencode_prompt_tests {
             pane_input_blocking_prompt(PERMISSION, OPENCODE),
             Some("opencode-permission")
         );
+    }
+
+    // #453 review: a request without `save` patterns draws no "Always allow"
+    // row (Allow once / Reject). Derived from PERMISSION by removing that row,
+    // not separately captured; the builder's two-row test pins the same form.
+    #[test]
+    fn the_two_row_permission_prompt_holds_sends_too() {
+        let two_row = PERMISSION.replace("Always allow ", "");
+        assert!(!two_row.contains("Always allow"));
+        assert_eq!(
+            pane_input_blocking_prompt(&two_row, OPENCODE),
+            Some("opencode-permission")
+        );
+        assert!(super::opencode_permission_on_screen(&two_row));
     }
 
     // opencode-permission-menu: the pane's card waits for this screen.

@@ -21303,7 +21303,7 @@ fn sanitize_pty_turn_payload(data: &str) -> String {
         .collect()
 }
 
-// The bytes that clear whatever sits in the agent's composer before a turn
+// Fallback bytes that clear whatever sits in the agent's composer before a turn
 // payload goes in. Escape first, then Ctrl-U: Ctrl-U clears a traditional
 // readline composer, while Claude Code's Ink/React input ignores Ctrl-U and
 // treats Escape as "discard current input". Belt and suspenders, because
@@ -21317,6 +21317,15 @@ fn sanitize_pty_turn_payload(data: &str) -> String {
 // "Ctrl+Y to paste deleted text" hint in the settle frame. The two branches
 // drifted because the Escape was added here in a later fix and never mirrored.
 const COMPOSER_CLEAR: &str = "\x1b\x15";
+
+fn windows_turn_composer_clear(provider: Option<SessionProvider>) -> &'static str {
+    match provider {
+        // Captured with Codex 0.165.0 under ConPTY, 2026-10-28 (#455):
+        // ESC + Ctrl-U inserts a literal 'u'; Ctrl-U alone clears the input.
+        Some(SessionProvider::Codex) => "\x15",
+        _ => COMPOSER_CLEAR,
+    }
+}
 
 // split-paste-cr-and-submit-nudge: NO trailing CR here. The paste
 // (with terminator) and the submitting CR ride separate PTY writes —
@@ -21336,12 +21345,12 @@ fn inject_turn_payload<R: tauri::Runtime>(
     data: &str,
 ) -> Result<(), String> {
     if cfg!(windows) {
-        // The payload rides raw rather than bracketed here (#300), but the
-        // clear is the same on every platform — see COMPOSER_CLEAR.
+        // The payload rides raw rather than bracketed here (#300).
+        // Codex's Windows input decoder requires Ctrl-U without Escape.
         pty_write_internal(
             app,
             state,
-            COMPOSER_CLEAR,
+            windows_turn_composer_clear(current_provider(app)),
             "pty-intent-toTurn-windows-clear",
         )?;
         pty_write_internal(app, state, data, "pty-intent-toTurn-windows-payload")?;
@@ -65107,14 +65116,10 @@ mod session_turn_tests {
         assert_eq!(wrapped.matches("\x1b[201~").count(), 1);
     }
 
-    // windows-send-clear-loses-text: the two platforms must agree on the
-    // clear. They drifted once — Windows sent Ctrl-U alone, the key Claude
-    // Code's Ink input ignores — and the result was a composer that did not
-    // clear and user text truncated on its way to the agent. Pin both the
-    // bytes and the fact that the bracketed path is built from the same
-    // constant the Windows path writes.
+    // Preserve the fallback for Claude's Ink input, which ignores Ctrl-U.
+    // Windows Codex has a separate regression test for its input decoder.
     #[test]
-    fn composer_clear_is_escape_then_ctrl_u_on_every_platform() {
+    fn fallback_composer_clear_is_escape_then_ctrl_u() {
         assert_eq!(
             super::COMPOSER_CLEAR,
             "\x1b\x15",
@@ -65124,6 +65129,24 @@ mod session_turn_tests {
             bracketed_paste_turn_payload("x").starts_with(super::COMPOSER_CLEAR),
             "the bracketed paste must carry the same clear the raw path writes"
         );
+    }
+
+    #[test]
+    fn windows_codex_clear_does_not_send_the_escape_that_inserts_u() {
+        assert_eq!(
+            super::windows_turn_composer_clear(Some(super::SessionProvider::Codex)),
+            "\x15"
+        );
+        for provider in [
+            None,
+            Some(super::SessionProvider::Claude),
+            Some(super::SessionProvider::Opencode),
+        ] {
+            assert_eq!(
+                super::windows_turn_composer_clear(provider),
+                super::COMPOSER_CLEAR
+            );
+        }
     }
 
     #[test]

@@ -19,22 +19,29 @@ if ($launching) {
   # old yardstick, HEAD's commit time, refused after scripts- or docs-only
   # commits and missed uncommitted Rust edits (demo-launcher-staleness-from-
   # rust-sources; demo_instance.py's assert_binary_current is the twin).
-  $tracked = @(& git -C $repoRoot ls-files src-tauri 2>$null)
-  if ($LASTEXITCODE -eq 0 -and $tracked.Count) {
-    $newestRel = $null
-    $newestTime = [datetime]::MinValue
-    foreach ($rel in $tracked) {
-      $full = Join-Path $repoRoot $rel
-      if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }  # deleted in the worktree
-      $t = (Get-Item -LiteralPath $full).LastWriteTime
-      if ($t -gt $newestTime) { $newestTime = $t; $newestRel = $rel }
-    }
-    $exeInfo = Get-Item -LiteralPath $exe
-    if ($newestRel -and $exeInfo.LastWriteTime -lt $newestTime) {
-      $pids = if ($running.Count) { $running.Id -join ", " } else { "none" }
-      $when = $newestTime.ToString("yyyy-MM-dd HH:mm")
-      throw "Stale bram.exe: older than $newestRel (changed $when). Running Bram PIDs: $pids. Stop only the intended PID, then rebuild with .\build.ps1."
-    }
+  # demo-launcher-stale-check-fails-closed: refuse when git can't list them.
+  # Skipping the check there let a stale binary launch wherever git couldn't
+  # run (Codex's sandbox, 2026-10-28).
+  # Under "Stop", Windows PowerShell 5.1 turns git's stderr into a
+  # terminating error even with 2>$null; catch it so the message below is
+  # the one that reaches the user.
+  try { $tracked = @(& git -C $repoRoot ls-files src-tauri 2>$null) } catch { $tracked = @() }
+  if ($LASTEXITCODE -ne 0 -or -not $tracked.Count) {
+    throw "Can't check for a stale bram.exe: git ls-files src-tauri failed or listed nothing in $repoRoot. Fix git access and retry."
+  }
+  $newestRel = $null
+  $newestTime = [datetime]::MinValue
+  foreach ($rel in $tracked) {
+    $full = Join-Path $repoRoot $rel
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }  # deleted in the worktree
+    $t = (Get-Item -LiteralPath $full).LastWriteTime
+    if ($t -gt $newestTime) { $newestTime = $t; $newestRel = $rel }
+  }
+  $exeInfo = Get-Item -LiteralPath $exe
+  if ($newestRel -and $exeInfo.LastWriteTime -lt $newestTime) {
+    $pids = if ($running.Count) { $running.Id -join ", " } else { "none" }
+    $when = $newestTime.ToString("yyyy-MM-dd HH:mm")
+    throw "Stale bram.exe: older than $newestRel (changed $when). Running Bram PIDs: $pids. Stop only the intended PID, then rebuild with .\build.ps1."
   }
   if (Test-Path -LiteralPath $guard -PathType Leaf) {
     $guardInfo = Get-Item -LiteralPath $guard

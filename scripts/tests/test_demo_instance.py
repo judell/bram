@@ -293,8 +293,30 @@ class DemoInstanceTests(unittest.TestCase):
         fake.write_text("#!/bin/sh\nexit 0\n")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         os.utime(fake, (1, 1))
-        with self.assertRaisesRegex(demo.DemoError, "stale Bram binary"):
+        # Anchored: the can't-check refusal also says "stale Bram binary".
+        with self.assertRaisesRegex(demo.DemoError, "^stale Bram binary:"):
             demo.assert_binary_current(fake)
+
+    def test_binary_check_refuses_when_git_cannot_list_sources(self) -> None:
+        # demo-launcher-stale-check-fails-closed: a folder git can't list
+        # stands in for Codex's sandbox, where git couldn't read its config.
+        fake = Path(self.temp.name) / "any-bram"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        not_a_repo = Path(self.temp.name) / "not-a-repo"
+        not_a_repo.mkdir()
+        old_root = demo.SOURCE_ROOT
+        old_ceiling = os.environ.get("GIT_CEILING_DIRECTORIES")
+        try:
+            demo.SOURCE_ROOT = not_a_repo
+            os.environ["GIT_CEILING_DIRECTORIES"] = self.temp.name
+            with self.assertRaisesRegex(demo.DemoError, "can't check for a stale Bram binary"):
+                demo.assert_binary_current(fake)
+        finally:
+            demo.SOURCE_ROOT = old_root
+            if old_ceiling is None:
+                os.environ.pop("GIT_CEILING_DIRECTORIES", None)
+            else:
+                os.environ["GIT_CEILING_DIRECTORIES"] = old_ceiling
 
     @unittest.skipIf(os.name == "nt", "the PowerShell launcher is smoked on Windows")
     def test_launch_smoke_records_exact_pid_scrubbed_env_and_stderr(self) -> None:

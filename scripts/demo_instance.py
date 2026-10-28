@@ -1211,12 +1211,22 @@ def scrub_agent_environment(env: Mapping[str, str]) -> dict[str, str]:
     return clean
 
 
-def newest_rust_source(root: Path) -> tuple[float, str] | None:
+def newest_rust_source(root: Path) -> tuple[float, str]:
     """The newest modification time among git-tracked files under src-tauri/,
     and that file. Under the ./bram symlink launch the binary depends only on
     src-tauri/ (app/** is served from disk), so this is the yardstick for a
-    stale binary. None when git can't list the files."""
-    listing = run_git(root, "ls-files", "-z", "src-tauri", check=False)
+    stale binary.
+
+    demo-launcher-stale-check-fails-closed: raises when git can't list the
+    files. This used to return None, and the caller then skipped the check, so
+    wherever git couldn't run (Codex's sandbox, 2026-10-28: "unable to access
+    .../.config/git/ignore: Permission denied") a stale binary launched."""
+    try:
+        listing = run_git(root, "ls-files", "-z", "src-tauri")
+    except DemoError as e:
+        raise DemoError(
+            f"can't check for a stale Bram binary: {e}; fix git access and retry"
+        ) from e
     newest: tuple[float, str] | None = None
     for rel in filter(None, listing.split("\0")):
         try:
@@ -1225,6 +1235,10 @@ def newest_rust_source(root: Path) -> tuple[float, str] | None:
             continue  # deleted in the worktree
         if newest is None or mtime > newest[0]:
             newest = (mtime, rel)
+    if newest is None:
+        raise DemoError(
+            f"can't check for a stale Bram binary: git lists no src-tauri/ files under {root}"
+        )
     return newest
 
 
@@ -1236,10 +1250,7 @@ def assert_binary_current(binary: Path) -> None:
     uncommitted Rust edit, which never moves HEAD, slipped through. Comparing
     against the newest tracked file under src-tauri/ catches committed and
     uncommitted Rust changes and ignores everything else."""
-    newest = newest_rust_source(SOURCE_ROOT)
-    if newest is None:
-        return
-    newest_mtime, newest_path = newest
+    newest_mtime, newest_path = newest_rust_source(SOURCE_ROOT)
     if binary.stat().st_mtime < newest_mtime:
         changed = time.strftime("%Y-%m-%d %H:%M", time.localtime(newest_mtime))
         raise DemoError(

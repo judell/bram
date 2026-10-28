@@ -1,5 +1,5 @@
 <Component name="Transcript"
-  var.orientSent="{false}"
+  var.orientSent="{window.__bramOrientSent()}"
   var.fullscreenImage="{null}"
   var.worklistOpen="{window.__bramRestoreTranscriptWorklistOpen()}">
   <!-- (#427: the List now sits at height="100%" inside the measured
@@ -248,7 +248,7 @@
       <Text fontSize="$fontSize-sm" width="*"
         value="New here? Get an overview and architecture diagrams of this repo, every claim cited to the code. It starts as a Worklist item, so nothing is written until you click Start. If Claude is new to this repo, open the terminal first and answer its trust prompt." />
       <Button label="Orient me" size="sm"
-        onClick="toTurn('Orient in this repo: read and follow .claude/bram-reference/orientation.md'); orientSent = true; worklistOpen = worklistOpen || window.__bramToggleTranscriptWorklistOpen(false)" />
+        onClick="toTurn('Orient in this repo: read and follow .claude/bram-reference/orientation.md'); orientSent = true; window.__bramMarkOrientSent(); worklistOpen = worklistOpen || window.__bramToggleTranscriptWorklistOpen(false)" />
     </HStack>
     <Text
       when="{events.length === 0}"

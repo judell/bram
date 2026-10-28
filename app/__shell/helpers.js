@@ -2199,6 +2199,20 @@ window.__bramProjectScopedKey = function (base) {
   return projectKey ? base + ":" + projectKey : null;
 };
 
+// orient-me-stays-gone-once-used: Orient me hides once clicked in this
+// project, across pane reloads, tab switches and relaunches. A decision
+// ("I've oriented in this repo"), scoped to the project, so localStorage.
+window.__bramOrientSent = function () {
+  var key = window.__bramProjectScopedKey("bram.orientSent");
+  if (!key) return false;
+  try { return window.localStorage.getItem(key) === "1"; } catch (e) { return false; }
+};
+window.__bramMarkOrientSent = function () {
+  var key = window.__bramProjectScopedKey("bram.orientSent");
+  if (!key) return;
+  try { window.localStorage.setItem(key, "1"); } catch (e) {}
+};
+
 // message-box-on-draft-editor-pattern: the message box's unsent draft is
 // saved by the host, like the Queue. POST /__draft/save writes
 // resources/.bram-message-draft.json in this project, so it's per project by

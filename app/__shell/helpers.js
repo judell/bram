@@ -9779,6 +9779,10 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     if (value && value.shape === "codex-login") {
       return "Codex is asking you to sign in. Open the terminal to sign in.";
     }
+    // v080-codex-session-lock: Bram never picks retry or fork for the user.
+    if (value && value.shape === "codex-session-lock") {
+      return "Codex says this conversation is open in another app. Open the terminal to retry, fork or exit.";
+    }
     // opencode-terminal-prompts.
     if (value && value.shape === "opencode-dialog") {
       return "OpenCode has a dialog open in the terminal. Press Esc there to close it.";

@@ -6127,6 +6127,20 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     const CLAUDE_LOGIN_WINDOW: usize = 60;
     const CODEX_LOGIN_MARKERS: &[&str] = &["sign in with chatgpt", "provide your own api key"];
     const CODEX_LOGIN_FOOTER: &str = "press enter to continue";
+    // v080-codex-session-lock: resuming a session that another Codex process
+    // (an old shared server) still owns draws "This conversation is open in
+    // another app … r retry f fork esc/ctrl+c/q exit". Its keys are bare
+    // letters, so pasted text answers it: a queued test message's "f" forked
+    // the session. Specimen: the demo's send-capture at 2026-10-28
+    // 17:34:51Z, a narrow pane after the --no-daemon switch. Any one marker
+    // (Codex repaints only changed cells, as at codex-update) plus the exit
+    // hint, which "ctrl+t transcript" follows.
+    const CODEX_SESSION_LOCK_MARKERS: &[&str] = &[
+        "this conversation is open in another app",
+        "press r to continue here",
+        "r retry f fork",
+    ];
+    const CODEX_SESSION_LOCK_FOOTER: &str = "esc/ctrl+c/q exit";
     // opencode-terminal-prompts: OpenCode 2.1.4's list dialogs and its
     // permission prompt. Specimens: OpenCode 2.1.4 under a 120x40 PTY in a
     // scratch folder, 2026-10-26, tails built as pty_tail_snippet builds them
@@ -6219,6 +6233,11 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     }
     if CODEX_LOGIN_MARKERS.iter().any(|m| has(m)) && ends_with_footer(CODEX_LOGIN_FOOTER) {
         return Some("codex-login");
+    }
+    if CODEX_SESSION_LOCK_MARKERS.iter().any(|m| has(m))
+        && ends_with_footer(CODEX_SESSION_LOCK_FOOTER)
+    {
+        return Some("codex-session-lock");
     }
     if OPENCODE_DIALOG_HEADERS.iter().any(|m| has(m))
         || (has(OPENCODE_SESSION_LIST.0) && has(OPENCODE_SESSION_LIST.1))
@@ -6733,6 +6752,55 @@ mod terminal_attention_login_tests {
         assert_eq!(
             pane_input_blocking_prompt(CODEX_SIGN_IN, Some(SessionProvider::Claude)),
             None
+        );
+    }
+}
+
+// v080-codex-session-lock: the demo's send-capture rows, 2026-10-28
+// 17:34:51Z (Codex after the --no-daemon switch, a ~25-column pane), joined
+// as the tail holds them.
+#[cfg(test)]
+mod codex_session_lock_tests {
+    use super::{pane_input_blocking_prompt, terminal_attention_prompt_shape, SessionProvider};
+    const LOCKED: &str = "\u{2022} DONE   Worked for 54s \u{2022} 10:27   AM \
+        \u{26a0} Heads up, you have less   than 50% of your 5h   limit left. Run /status   \
+        for a breakdown.            \u{26a0} 5h 30% left   \u{1f512}  This conversation   \
+        is open in another   app   r to retry       Close it there       and press R to       \
+        continue here.    r retry   f fork   esc/ctrl+c/q exit   ctrl+t transcript";
+
+    #[test]
+    fn the_lock_dialog_classifies_and_holds_codex_sends() {
+        assert_eq!(
+            terminal_attention_prompt_shape(LOCKED),
+            Some("codex-session-lock")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(LOCKED, Some(SessionProvider::Codex)),
+            Some("codex-session-lock")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(LOCKED, Some(SessionProvider::Claude)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reply_quoting_the_dialog_at_the_composer_is_not_the_dialog() {
+        let quoting = "Codex may say This conversation is open in another app, with \
+            r retry f fork esc/ctrl+c/q exit. \u{203a} Ask Codex to do anything ? for shortcuts";
+        assert_eq!(terminal_attention_prompt_shape(quoting), None);
+        assert_eq!(
+            pane_input_blocking_prompt(quoting, Some(SessionProvider::Codex)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_fresh_partner_catch_up_is_held_at_the_dialog() {
+        use super::{catch_up_readiness, CatchUpReadiness};
+        assert_eq!(
+            catch_up_readiness(LOCKED, SessionProvider::Codex, true),
+            CatchUpReadiness::Prompt("codex-session-lock")
         );
     }
 }
@@ -46079,7 +46147,11 @@ const SUBMIT_NUDGE_AFTER_MS: i64 = 5_000;
 fn codex_only_prompt_shape(shape: &str) -> bool {
     matches!(
         shape,
-        "hooks-trust" | "codex-hooks-manage" | "codex-update" | "codex-login"
+        "hooks-trust"
+            | "codex-hooks-manage"
+            | "codex-update"
+            | "codex-login"
+            | "codex-session-lock"
     )
 }
 
@@ -46125,11 +46197,13 @@ fn pane_input_blocking_prompt(
             // prompt Enter confirms the highlighted choice.
             // opencode-question-card: in one of its forms Enter submits the
             // highlighted answer.
+            // v080-codex-session-lock: there a bare r retries and f forks.
             "folder-trust"
                 | "hooks-trust"
                 | "codex-hooks-manage"
                 | "codex-update"
                 | "codex-login"
+                | "codex-session-lock"
                 | "claude-login"
                 | "opencode-dialog"
                 | "opencode-permission"

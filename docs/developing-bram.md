@@ -566,6 +566,35 @@ Run it on demand, not in CI: like `scripts/setup-harness.sh` and the
 membership starter check, it needs a machine that can build, which is
 not what the workflows have.
 
+### When builds get slow, check `target/debug/deps` first
+
+Cargo never deletes old build artifacts, and `rustc`, the linker and
+`cargo check` list `target/debug/deps` on every invocation. On
+2026-10-27 that directory held 982,330 files (119 GB), and it, not the
+code, was why builds had crept from seconds to half a minute (#452). The
+library rebuild used 4.3 s of CPU in 10.8 s of wall time. Neither
+`-Z time-passes` nor `-Z self-profile` sees that gap, because both time
+work, not waiting. macOS `sample` on the running `rustc` found it in
+`__getdirentries64` under `rustc_session::search_paths`.
+
+`cargo clean --manifest-path src-tauri/Cargo.toml --profile dev` fixed it.
+The full rebuild afterwards took 40 s, and then:
+
+| | before | after |
+|---|---|---|
+| library rebuild | 10.6–10.9 s | 2.4 s |
+| incremental (appended) | 24–34 s | 3–8 s |
+| relink only | 7–8.5 s | 0.5 s |
+| check only | 16–20 s | 1.5 s |
+
+The directory grows back by about 360 files per build. `scripts/build.sh`
+logs the count as `deps_files` and prints a warning past 100,000 files
+(set `BRAM_DEPS_WARN` to change that). It never cleans on its own,
+because a clean forces a full rebuild. Earlier build-time numbers in this
+section, and any profile or crate-split argument resting on them, were
+measured on the polluted directory: re-measure on a clean one before
+relying on them.
+
 ## Hand-testing the Worklist gate
 
 The gate's selection matrix — which buttons light for which combination of

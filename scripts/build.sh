@@ -15,6 +15,11 @@
 #   other_cargo              cargo/rustc processes already running at start
 #   load                     1-minute load average at start
 #   caller                   the parent process's command name
+#   deps_files               files in target/debug/deps after the build
+#
+# Past BRAM_DEPS_WARN files (default 100000) in deps, it prints one warning
+# line to stderr. It never cleans: a clean forces a full rebuild, which is
+# someone's choice to make (build-deps-growth-guard, #452).
 #
 # Why (build-log-real-builds, #452): scripts/build-timings.sh times synthetic
 # edits on a quiet tree. On 2026-10-27 it measured 24.68 s (appended line) and
@@ -71,6 +76,17 @@ if prev and prev.get("tree") and tree:
             lock_changed = True
     lines_changed = added + removed
 
+# Cargo never deletes old artifacts, and rustc lists this directory on every
+# invocation; at 982,330 files it cost a library rebuild ~8 s of waiting (#452).
+target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(root, "src-tauri", "target")
+deps = os.path.join(target, "debug", "deps")
+deps_files = None
+try:
+    with os.scandir(deps) as it:
+        deps_files = sum(1 for _ in it)
+except OSError:
+    pass
+
 rec = {
     "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(t0))),
     "seconds": round(float(t1) - float(t0), 2),
@@ -83,8 +99,19 @@ rec = {
     "load": round(os.getloadavg()[0], 2),
     "caller": caller,
     "tree": tree,
+    "deps_files": deps_files,
 }
 with open(log, "a") as f:
     f.write(json.dumps(rec) + "\n")
+
+try:
+    limit = int(os.environ.get("BRAM_DEPS_WARN", "100000"))
+except ValueError:
+    limit = 100000
+if deps_files is not None and deps_files > limit:
+    sys.stderr.write(
+        "[build.sh] target/debug/deps has %d files; builds slow down as it grows (#452). "
+        "Run: cargo clean --manifest-path src-tauri/Cargo.toml --profile dev\n" % deps_files
+    )
 PY
 exit "$status"

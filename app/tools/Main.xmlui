@@ -615,6 +615,16 @@
              thumb and padding all scale from --xmlui-fontSize (vendored CSS),
              so a scoped fontSize shrinks it in proportion.
              https://www.xmlui.org/docs/howto/override-a-components-theme-vars -->
+        <!-- header-toolbar-even-spacing (Jon, 2026-10-28: "poor spacing"):
+             one row with one gap. Ghost buttons carried their own
+             paddingHorizontal-Button-sm ($space-4) while the switch and the
+             Inspector had none, so the gaps depended on which two controls
+             were neighbours. Inside this row the padding hugs each label and
+             the gap does the spacing.
+             https://www.xmlui.org/docs/reference/components/Stack#gap
+             https://www.xmlui.org/docs/howto/override-a-components-theme-vars -->
+        <Theme paddingHorizontal-Button-sm="$space-1">
+        <HStack gap="$space-3" verticalAlignment="center">
         <Theme fontSize="$fontSize-sm">
           <ToneSwitch
             tooltip="Switch between light and dark tone" />
@@ -647,6 +657,8 @@
           tooltip="Increase app font size"
           onClick="window.setAppFontSize(window.getAppFontSize() + 1)" />
         <Inspector src="{'/__vendor/xs-diff.html?v=' + window.APP_VERSION}" />
+        </HStack>
+        </Theme>
       </HStack>
     </Theme>
   </AppHeader>

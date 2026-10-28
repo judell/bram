@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -41,7 +42,15 @@ SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 import demo_instance  # noqa: E402
 
-LAUNCHER = SCRIPTS / "demo-instance.sh"
+# switch-matrix-runs-on-windows: Windows can't execute the .sh, and its
+# launcher (junction + binary checks, then the same engine) is the .ps1.
+if os.name == "nt":
+    LAUNCHER = [
+        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", str(SCRIPTS / "demo-instance.ps1"),
+    ]
+else:
+    LAUNCHER = [str(SCRIPTS / "demo-instance.sh")]
 KEEP_BOARDS = 3  # passing check-* boards kept after a run
 FRESH = re.compile(r"\[claim-interval\] op=membership paths=\d+ .*cached=false fresh=true")
 # A compute that gave up: `paths=0 … cached=false fresh=false`, with a
@@ -57,7 +66,7 @@ MEMBERSHIP = re.compile(r"\[claim-interval\] op=membership paths=")
 
 def run(repo: Path, *args: str, tolerate: str = "") -> None:
     proc = subprocess.run(
-        [str(LAUNCHER), "--repo", str(repo), *args], capture_output=True, text=True
+        [*LAUNCHER, "--repo", str(repo), *args], capture_output=True, text=True
     )
     if proc.returncode != 0 and not (tolerate and tolerate in proc.stdout + proc.stderr):
         sys.exit(f"demo-instance {' '.join(args)} failed:\n{proc.stdout}{proc.stderr}")

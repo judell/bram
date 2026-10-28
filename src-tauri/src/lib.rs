@@ -30839,6 +30839,44 @@ fn opencode_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf,
         .join(encode_path_for_filename(&abs)))
 }
 
+fn opencode_directory_spellings(canonical: &str, raw: &str) -> [String; 4] {
+    let normalized = |path: &str| {
+        if cfg!(windows) {
+            // OpenCode 2.1.4 stores Windows directories with forward slashes.
+            path.strip_prefix(r"\\?\")
+                .unwrap_or(path)
+                .replace('\\', "/")
+        } else {
+            path.to_string()
+        }
+    };
+    [
+        canonical.into(),
+        raw.into(),
+        normalized(canonical),
+        normalized(raw),
+    ]
+}
+
+fn opencode_project_session_rows_in(
+    conn: &rusqlite::Connection,
+    canonical: &str,
+    raw: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<(String, String, i64)>> {
+    let paths = opencode_directory_spellings(canonical, raw);
+    let mut stmt = conn.prepare(
+        "SELECT id, COALESCE(title, ''), time_updated FROM session_v2 \
+         WHERE parent_id IS NULL AND time_archived IS NULL AND directory IN (?1, ?2, ?3, ?4) \
+         ORDER BY time_updated DESC LIMIT ?5",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![paths[0], paths[1], paths[2], paths[3], limit],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    rows.collect()
+}
+
 // (id, title, time_updated ms), newest first: this project's top-level,
 // unarchived sessions. Subagent sessions (parent_id) belong to their parent.
 fn opencode_project_session_rows<R: tauri::Runtime>(
@@ -30852,22 +30890,7 @@ fn opencode_project_session_rows<R: tauri::Runtime>(
     let canonical = canonical_path_string(&project);
     let raw = project.to_string_lossy().into_owned();
     let limit = limit.map(|l| l as i64).unwrap_or(-1);
-    let rows = conn
-        .prepare(
-            "SELECT id, COALESCE(title, ''), time_updated FROM session_v2 \
-             WHERE parent_id IS NULL AND time_archived IS NULL AND directory IN (?1, ?2) \
-             ORDER BY time_updated DESC LIMIT ?3",
-        )
-        .and_then(|mut stmt| {
-            stmt.query_map(rusqlite::params![canonical, raw, limit], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()
-        });
+    let rows = opencode_project_session_rows_in(conn, &canonical, &raw, limit);
     match rows {
         Ok(rows) => rows,
         Err(e) => {
@@ -30930,9 +30953,10 @@ fn opencode_set_session_title_in(
     canonical: &str,
     raw: &str,
 ) -> Result<usize, String> {
+    let paths = opencode_directory_spellings(canonical, raw);
     conn.execute(
-        "UPDATE session_v2 SET title = ?1 WHERE id = ?2 AND directory IN (?3, ?4)",
-        rusqlite::params![title, id, canonical, raw],
+        "UPDATE session_v2 SET title = ?1 WHERE id = ?2 AND directory IN (?3, ?4, ?5, ?6)",
+        rusqlite::params![title, id, paths[0], paths[1], paths[2], paths[3]],
     )
     .map_err(|e| e.to_string())
 }
@@ -31217,6 +31241,32 @@ fn opencode_session_path_for_id<R: tauri::Runtime>(
 #[cfg(test)]
 mod opencode_rename_tests {
     use super::opencode_set_session_title_in;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_forward_slash_sessions_are_discovered_and_renamed_with_project_scope() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE session_v2 (id TEXT, title TEXT, directory TEXT, time_updated INTEGER, parent_id TEXT, time_archived INTEGER);
+            INSERT INTO session_v2 VALUES ('here', 'old', 'C:/Users/jon/bram-demo-instance', 2000, NULL, NULL);
+            INSERT INTO session_v2 VALUES ('other', 'other', 'C:/Users/jon/other', 3000, NULL, NULL);
+            INSERT INTO session_v2 VALUES ('child', 'child', 'C:/Users/jon/bram-demo-instance', 4000, 'here', NULL);
+            INSERT INTO session_v2 VALUES ('archived', 'archived', 'C:/Users/jon/bram-demo-instance', 5000, NULL, 1);").unwrap();
+        let canonical = r"\\?\C:\Users\jon\bram-demo-instance";
+        let raw = r"C:\Users\jon\bram-demo-instance";
+        let rows = super::opencode_project_session_rows_in(&conn, canonical, raw, -1).unwrap();
+        assert_eq!(rows, vec![("here".into(), "old".into(), 2000)]);
+        assert_eq!(
+            opencode_set_session_title_in(&conn, "here", "new", canonical, raw).unwrap(),
+            1
+        );
+        assert_eq!(title_of(&conn, "here"), "new");
+        assert_eq!(updated_of(&conn, "here"), 2000);
+        assert_eq!(
+            opencode_set_session_title_in(&conn, "other", "wrong", canonical, raw).unwrap(),
+            0
+        );
+        assert_eq!(title_of(&conn, "other"), "other");
+    }
 
     // The columns the statement touches, in OpenCode 2.1.4's shape: `title`,
     // the `directory` the scoping reads, and `time_updated`, which a rename

@@ -23984,7 +23984,10 @@ fn codex_catch_up_composer_ready(tail: &str) -> bool {
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
         .to_lowercase();
-    squashed.contains("askcodextodoanything") && squashed.contains("?forshortcuts")
+    // codex-catch-up-composer-narrow-pane: a narrow pane cuts the placeholder
+    // at its width ("Ask Codex to do anythi", Windows matrix 2026-10-28
+    // 19:06Z), so only its start is required.
+    squashed.contains("askcodexto") && squashed.contains("?forshortcuts")
 }
 
 fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
@@ -24187,6 +24190,21 @@ mod catch_up_readiness_tests {
         assert!(!super::codex_composer_ready(LIVE_LIMIT_WARNING));
         // A shell screen that merely mentions Codex is still waiting.
         assert_eq!(r("$ codex --help ? for shortcuts", CODEX, true), Waiting);
+    }
+
+    // codex-catch-up-composer-narrow-pane: Codex 0.165.0 in the Windows demo's
+    // narrow pane, the held catch-up's logged tail (switch matrix 2026-10-28
+    // 19:06:28Z). The placeholder is cut at the pane's width.
+    const NARROW_LIMIT_WARNING: &str = "ing \u{203a} Ask Codex to do anythi ? for shortcuts ~\\bram-demo-instance GPT-6.1-Sol default \u{b7} \u{2026}\u{26a0} Heads up, you have less than 25% of your 5h limit left. Run /status for a breakdown. \u{26a0} 5h 12% left \u{26a0} 1 \u{b7} f2\u{26a0} Heads up, you have less than 10% of your 5h limit left. Run /status for a breakdown. \u{26a0} 5h 10% left 2";
+
+    #[test]
+    fn a_narrow_pane_codex_composer_is_ready_for_a_catch_up() {
+        assert_eq!(r(NARROW_LIMIT_WARNING, CODEX, true), Ready);
+        // A shell line that only quotes the placeholder's start still waits.
+        assert_eq!(
+            r("PS C:\\> echo 'Ask Codex to' ; codex", CODEX, true),
+            Waiting
+        );
     }
 
     #[test]

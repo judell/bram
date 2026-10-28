@@ -10081,6 +10081,66 @@ fn opencode_form_on_screen(menu: &PtyMenu, question: &str, description: &str, ta
     })
 }
 
+// opencode-question-grid-screen-match: why a form check failed, for the
+// trace. On 2026-10-28 18:56Z a three-choice question was refused as
+// choices-differ, and nothing recorded what the screen held; a capture of the
+// same form at 100 columns matched. Returns the reason and, for differing
+// rows, short excerpts of what was expected and what was drawn from the first
+// differing character (unframed, so whitespace and ┃ are gone).
+fn opencode_form_mismatch(
+    menu: &PtyMenu,
+    question: &str,
+    description: &str,
+    tail: &str,
+) -> (&'static str, String) {
+    const EXCERPT: usize = 60;
+    let s = opencode_unframed(tail);
+    let q = opencode_unframed(question);
+    if q.is_empty() {
+        return ("no-question", String::new());
+    }
+    let Some(at) = s.rfind(&q) else {
+        let n = s.chars().count();
+        let end: String = s.chars().skip(n.saturating_sub(EXCERPT)).collect();
+        return ("question-not-drawn", format!("tail_end=\"{}\"", end));
+    };
+    let rest = &s[at + q.len()..];
+    let d = opencode_unframed(description);
+    let rest = rest
+        .strip_prefix(d.as_str())
+        .filter(|_| !d.is_empty())
+        .unwrap_or(rest);
+    let rows: String = menu
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            format!(
+                "{}.{}{}",
+                i + 1,
+                opencode_unframed(&o.label),
+                opencode_unframed(o.description.as_deref().unwrap_or(""))
+            )
+        })
+        .collect();
+    let first_diff = rows
+        .chars()
+        .zip(rest.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let expected: String = rows.chars().skip(first_diff).take(EXCERPT).collect();
+    let drawn: String = rest.chars().skip(first_diff).take(EXCERPT).collect();
+    (
+        "choices-differ",
+        format!(
+            "at={} expected=\"{}\" drawn=\"{}\"",
+            first_diff,
+            expected.replace('"', "'"),
+            drawn.replace('"', "'")
+        ),
+    )
+}
+
 // The card a claim may show once its prompt is on screen. A question card is
 // shown as built, its digits being absolute; a permission card names only what
 // the prompt draws, and offers Always allow only when the prompt does.
@@ -10096,6 +10156,12 @@ fn opencode_card_for_screen(
         } => {
             if opencode_form_on_screen(menu, question, description, tail) {
                 Ok(menu.clone())
+            } else if opencode_form_mismatch(menu, question, description, tail).0
+                == "question-not-drawn"
+            {
+                // opencode-question-grid-screen-match: "choices-differ" also
+                // covered a question absent from the tail (2026-10-28 18:56Z).
+                Err("question-not-drawn")
             } else {
                 Err("choices-differ")
             }
@@ -47376,12 +47442,72 @@ mod opencode_prompt_tests {
         asked["fields"][0]["description"] = serde_json::json!("");
         let mut short = city();
         short["fields"][0]["options"][0]["description"] = serde_json::json!("The French capital.");
-        for form in [swapped, asked, short] {
+        for form in [swapped, short] {
             assert_eq!(
                 question_card(NARROW_QUESTION, &form).err(),
                 Some("choices-differ")
             );
         }
+        // opencode-question-grid-screen-match: a question that isn't on screen
+        // is named as such, not as differing choices.
+        assert_eq!(
+            question_card(NARROW_QUESTION, &asked).err(),
+            Some("question-not-drawn")
+        );
+    }
+
+    // opencode-question-grid-screen-match: the form refused live on
+    // 2026-10-28 18:56Z (choices-differ), recaptured with OpenCode 2.1.4 at
+    // 100 columns, as pty_tail_snippet reads it (`"` becomes `'`): long
+    // descriptions with arrows and apostrophes, one wrapped, then the footer
+    // and the title spinner's repaints.
+    const AUTH_QUESTION: &str = "Questions ┃ ┃ What would you like me to do for 'testing authentication'? ┃ ┃ 1. Test Bram worklist auth flow ┃ Verify the proposed → approved → applied/commit lifecycle is wired correctly in this ┃ repo ┃ 2. Test an app's auth ┃ There's a target app in this project whose sign-in/authentication needs checking ┃ 3. Just a general message ┃ This wasn't a task; I'm confirming chat works and nothing should be done ┃ 4. Type your own answer ┃ ┃ ↑↓ select enter submit esc dismiss ┃ ? Testing authentication int ? Testing authentication int ? Testing authentication int ? Testing ataton ? Testing aci";
+
+    fn auth() -> serde_json::Value {
+        // The question tool's input from that session, as a form.
+        serde_json::json!({"id": "frm_183ded16f0016TRP35OXDGpcd3", "sessionID": "ses_e7c214de0ffe6u8xFjq94a89ag", "title": "Questions",
+            "metadata": {"kind": "question", "tool": {"messageID": "msg_x", "id": "call_x"}},
+            "fields": [{"key": "q0", "title": "What would you like me to do for \"testing authentication\"?", "description": "Clarify intent", "type": "string",
+                "options": [
+                    {"value": "Test Bram worklist auth flow", "label": "Test Bram worklist auth flow", "description": "Verify the proposed → approved → applied/commit lifecycle is wired correctly in this repo"},
+                    {"value": "Test an app's auth", "label": "Test an app's auth", "description": "There's a target app in this project whose sign-in/authentication needs checking"},
+                    {"value": "Just a general message", "label": "Just a general message", "description": "This wasn't a task; I'm confirming chat works and nothing should be done"}],
+                "custom": true}]})
+    }
+
+    #[test]
+    fn the_refused_auth_question_matches_its_recaptured_screen() {
+        assert!(question_card(AUTH_QUESTION, &auth()).is_ok());
+        assert!(super::opencode_question_on_screen(AUTH_QUESTION));
+        // Near miss: one choice's label changed.
+        let mut other = auth();
+        other["fields"][0]["options"][1]["label"] = serde_json::json!("Test the app's auth");
+        assert_eq!(
+            question_card(AUTH_QUESTION, &other).err(),
+            Some("choices-differ")
+        );
+    }
+
+    #[test]
+    fn a_failed_form_check_says_where_the_rows_part() {
+        let form = auth();
+        let menu = super::opencode_form_to_menu(&form).unwrap();
+        let q = "What would you like me to do for \"testing authentication\"?";
+        let mut other = menu.clone();
+        other.options[1].label = "Test the app's auth".to_string();
+        let (reason, detail) =
+            super::opencode_form_mismatch(&other, q, "Clarify intent", AUTH_QUESTION);
+        assert_eq!(reason, "choices-differ");
+        assert!(detail.contains("expected=\"the"), "{detail}");
+        assert!(detail.contains("drawn=\"an"), "{detail}");
+        let (reason, detail) = super::opencode_form_mismatch(
+            &menu,
+            q,
+            "Clarify intent",
+            "? Testing authentication int",
+        );
+        assert_eq!(reason, "question-not-drawn");
+        assert!(detail.starts_with("tail_end="), "{detail}");
     }
 }
 
@@ -84866,6 +84992,9 @@ fn schedule_opencode_prompt_display<R: tauri::Runtime>(
         // the claim. Kept until the wait runs out, since the prompt may still
         // be painting.
         let mut mismatch: Option<&'static str> = None;
+        // opencode-question-grid-screen-match: the last failed form check's
+        // excerpts, traced with the refusal (opencode_form_mismatch).
+        let mut mismatch_detail = String::new();
         let mut dropped_shown = false;
         let result = loop {
             let (mine, sole) = menu_hook_claims_cell()
@@ -84909,7 +85038,17 @@ fn schedule_opencode_prompt_display<R: tauri::Runtime>(
                         }
                         break "shown";
                     }
-                    Err(reason) => mismatch = Some(reason),
+                    Err(reason) => {
+                        mismatch = Some(reason);
+                        if let Some(OpencodeScreenCheck::Question {
+                            question: q,
+                            description,
+                        }) = check.as_ref()
+                        {
+                            mismatch_detail =
+                                opencode_form_mismatch(&menu, q, description, &tail).1;
+                        }
+                    }
                 }
             }
             if started.elapsed().as_millis() >= OPENCODE_PROMPT_SEEN_WAIT_MS {
@@ -84941,6 +85080,9 @@ fn schedule_opencode_prompt_display<R: tauri::Runtime>(
                     if question { "question" } else { "permission" },
                     result,
                     match mismatch {
+                        Some(reason) if result == "mismatch" && !mismatch_detail.is_empty() => {
+                            format!(" reason={} {}", reason, mismatch_detail)
+                        }
                         Some(reason) if result == "mismatch" => format!(" reason={}", reason),
                         _ => String::new(),
                     },

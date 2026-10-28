@@ -51854,9 +51854,15 @@ fn normalize_codex_hook_block_for_currentness(block: &str) -> String {
 const CODEX_BRAM_HOOK_EVENTS: &[&str] = &["pre_tool_use", "permission_request", "post_tool_use"];
 
 fn codex_hooks_state_key(line: &str) -> Option<&str> {
-    line.trim()
-        .strip_prefix("[hooks.state.\"")?
-        .strip_suffix("\"]")
+    let key = line
+        .trim()
+        .strip_prefix("[hooks.state.")?
+        .strip_suffix(']')?;
+    // Codex writes Windows paths as TOML literal strings so backslashes
+    // need no escaping. Both quote styles are valid hook-state keys.
+    key.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| key.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
 }
 
 fn codex_key_is_bram_event(key: &str) -> bool {
@@ -52013,6 +52019,29 @@ fn codex_untrusted_bram_hooks(config: &str) -> Vec<&'static str> {
 mod codex_hook_trust_tests {
     use super::*;
     const STATE: &str = "[hooks.state]\n\n[hooks.state.\"/Users/example/.codex/config.toml:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:pre\"\n\n[hooks.state.\"/Users/example/.codex/config.toml:permission_request:0:0\"]\ntrusted_hash = \"sha256:perm\"\n\n[hooks.state.\"/Users/example/.codex/config.toml:post_tool_use:0:0\"]\ntrusted_hash = \"sha256:post\"";
+
+    #[test]
+    fn windows_literal_keys_report_trust_and_disabled_hooks() {
+        // Shape captured from Jon's Windows config, 2026-10-28 (#455).
+        let state = r#"[hooks.state.'C:\Users\jon\.codex\config.toml:pre_tool_use:0:0']
+trusted_hash = "sha256:pre"
+enabled = false
+[hooks.state.'C:\Users\jon\.codex\config.toml:permission_request:0:0']
+trusted_hash = "sha256:perm"
+[hooks.state.'C:\Users\jon\.codex\config.toml:post_tool_use:0:0']
+trusted_hash = "sha256:post"
+"#;
+        assert!(codex_untrusted_bram_hooks(state).is_empty());
+        assert_eq!(codex_disabled_bram_hooks(state).len(), 1);
+        let repaired = strip_disabled_bram_hook_flags(state);
+        assert!(codex_disabled_bram_hooks(&repaired).is_empty());
+        assert!(codex_untrusted_bram_hooks(&repaired).is_empty());
+        let partial = state.replace("trusted_hash = \"sha256:post\"", "");
+        assert_eq!(codex_untrusted_bram_hooks(&partial), vec!["post_tool_use"]);
+        assert_eq!(codex_hooks_state_tables(state), state.trim_end());
+        assert!(codex_hooks_state_key("[hooks.state.'mismatched\"]").is_none());
+        assert!(codex_hooks_state_key("[hooks.state.unquoted]").is_none());
+    }
 
     fn block_with_state() -> String {
         let link = PathBuf::from("/Users/example/.bram/bram-guard");

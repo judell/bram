@@ -979,6 +979,11 @@ struct HookMenuClaim {
     // click time so deferred-clear traces measure the real binding delay.
     answered_label: Option<String>,
     answered_at_ms: Option<i64>,
+    // opencode-card-keys-from-screen: an OpenCode claim's card shows only
+    // once its terminal draws what this names, and until then the claim
+    // isn't selectable (selectable_hook_claims). None for the hook paths.
+    opencode_screen: Option<OpencodeScreenCheck>,
+    opencode_card_checked: bool,
 }
 // TTL backstop for claims whose clears were lost; a queued-but-undisplayed
 // claim is inert (it only surfaces when the grid shows its labels), so the
@@ -1044,6 +1049,7 @@ fn selectable_hook_claims(claims: &[HookMenuClaim]) -> Vec<HookMenuClaim> {
     claims
         .iter()
         .filter(|claim| !claim.answered)
+        .filter(|claim| claim.opencode_screen.is_none() || claim.opencode_card_checked)
         .cloned()
         .collect()
 }
@@ -2066,6 +2072,8 @@ mod grid_rescue_candidate_tests {
             answered: false,
             answered_label: None,
             answered_at_ms: None,
+            opencode_screen: None,
+            opencode_card_checked: false,
         }
     }
 
@@ -4717,7 +4725,23 @@ mod claim_label_join_tests {
             answered: false,
             answered_label: None,
             answered_at_ms: None,
+            opencode_screen: None,
+            opencode_card_checked: false,
         }
+    }
+
+    // opencode-card-keys-from-screen: an OpenCode claim isn't selectable
+    // until its card has been checked against the screen.
+    #[test]
+    fn an_unchecked_opencode_claim_is_not_selectable() {
+        let mut claim = claim_with_labels(&["Allow once", "Reject"]);
+        claim.opencode_screen = Some(super::OpencodeScreenCheck::Permission {
+            action: "shell".to_string(),
+            resources: vec!["ls".to_string()],
+        });
+        assert!(selectable_hook_claims(std::slice::from_ref(&claim)).is_empty());
+        claim.opencode_card_checked = true;
+        assert_eq!(selectable_hook_claims(&[claim]).len(), 1);
     }
 
     fn grid(labels: &[&str]) -> Vec<String> {
@@ -6164,16 +6188,25 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     ];
     const OPENCODE_SESSION_LIST: (&str, &str) = ("esc search", "delete ctrl+d rename ctrl+r");
     // The permission prompt, drawn mid-turn ("△ Permission required … Allow
-    // once Always allow Reject … enter confirm"); Enter confirms the
-    // highlighted choice. OpenCode keeps animating a spinner under it, so its
-    // text scrolls out of the tail after a minute or so: this holds early
-    // sends, and OpenCode's own permission.asked event is the lasting signal
-    // (opencode-permission-menu).
-    // #453 review: "Always allow" is drawn only when the request carries
-    // `save` patterns (opencode_permission_request_to_menu's two-row case), so
-    // requiring it missed a save-less prompt and left pane sends unheld there,
-    // where a paste plus Enter confirms "Allow once". "Reject" is on both forms.
-    const OPENCODE_PERMISSION_MARKERS: &[&str] = &["permission required", "allow once", "reject"];
+    // once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm");
+    // Enter confirms the highlighted choice. OpenCode keeps animating a
+    // spinner under it, so its text scrolls out of the tail after a minute or
+    // so: this holds early sends, and OpenCode's own permission.asked event is
+    // the lasting signal (opencode-permission-menu).
+    // opencode-permission-markers: only what every captured layout draws
+    // (2.1.4, 2026-10-27, at 24, 40, 60, 80 and 120 columns, with and without
+    // save patterns; pinned). The "Always allow" row appears only when the
+    // request carries save patterns, which 2.1.4's own tools always send but a
+    // plugin's permission.assert or the HTTP create route need not. Narrow
+    // terminals clip "Reject" and the footer's "enter confirm", the footer
+    // already at 80 columns with three rows. Its "⇆ select" hint is drawn in
+    // all of them (the TUI's prompt; `opencode run`'s differs), and a reply
+    // quoting the rows doesn't carry it, so requiring it keeps such a reply
+    // from holding sends. Matched with the prompt's ┃ frame removed: at 24
+    // columns the title wraps inside it. The #453 review found the save-less
+    // gap too and required "reject" in place of "always allow"; "⇆ select"
+    // replaces that, since narrow terminals clip "Reject".
+    const OPENCODE_PERMISSION_MARKERS: &[&str] = &["permission required", "allow once", "⇆ select"];
     // opencode-question-card: the footer under every OpenCode form, its
     // question tool's ("Questions ┃ Pick a city ┃ 1. Paris … 3. Type your own
     // answer ┃ ↑↓ select enter submit esc dismiss", 2.1.4 spike, 2026-10-27)
@@ -6244,7 +6277,11 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     {
         return Some("opencode-dialog");
     }
-    if OPENCODE_PERMISSION_MARKERS.iter().all(|m| has(m)) {
+    let unframed = tail.replace('┃', "");
+    if OPENCODE_PERMISSION_MARKERS
+        .iter()
+        .all(|m| unframed.contains(&squash(m)))
+    {
         return Some("opencode-permission");
     }
     if has(OPENCODE_FORM_FOOTER) {
@@ -9418,8 +9455,29 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
 // [{file, patch, …}]} on edits, source: {type: "tool", messageID, id}}.
 // OpenCode's prompt shows Allow once, Always allow (only when `save` is
 // non-empty) and Reject on one row. The selection starts on the first, Right
-// moves it and Enter confirms, so an option's keys are Right times its index,
-// then Enter. The spike confirmed each as a single write.
+// moves it and Enter confirms. The spike confirmed each answer as one write.
+// opencode-card-keys-from-screen: the keys don't depend on the payload, which
+// anyone who can reach the route can post (docs/menu.md). Allow once is Enter,
+// on the row the selection starts on; Reject is Esc, which OpenCode answers as
+// Reject whichever rows are drawn (its prompt's escapeKey, 2.1.4, and the
+// 2026-10-27 spike on both layouts); Always allow is Right then Enter, kept
+// only once the screen shows it second (opencode_card_for_screen).
+const OPENCODE_ALLOW_ONCE_KEYS: &str = "\r";
+const OPENCODE_ALWAYS_ALLOW_KEYS: &str = "\x1b[C\r";
+const OPENCODE_REJECT_KEYS: &str = "\x1b";
+
+fn opencode_permission_text(tool: &str, shown: &[String]) -> (String, Option<String>) {
+    let detail = shown.join(", ");
+    if detail.is_empty() {
+        (format!("{} requires approval", tool), None)
+    } else {
+        (
+            format!("{}: {}", tool, detail),
+            Some(format!("{}({})", tool, detail)),
+        )
+    }
+}
+
 fn opencode_permission_request_to_menu(data: &serde_json::Value) -> Option<PtyMenu> {
     let action = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
     if action.is_empty() {
@@ -9439,31 +9497,30 @@ fn opencode_permission_request_to_menu(data: &serde_json::Value) -> Option<PtyMe
         other => other,
     }
     .to_string();
-    let detail = resources.join(", ");
-    let text = if detail.is_empty() {
-        format!("{} requires approval", tool)
-    } else {
-        format!("{}: {}", tool, detail)
-    };
+    let resources: Vec<String> = resources.into_iter().map(String::from).collect();
+    let (text, tool_call_signature) = opencode_permission_text(&tool, &resources);
     // The labels are OpenCode's own; "Always allow" carries the scope its
     // prompt states under the option ("This will always allow …").
-    let mut labels = vec!["Allow once".to_string()];
+    let mut labels = vec![("Allow once".to_string(), OPENCODE_ALLOW_ONCE_KEYS)];
     if !save.is_empty() {
         let scope = if save.as_slice() == ["*"] {
             action.to_string()
         } else {
             save.join(", ")
         };
-        labels.push(format!("Always allow {} for this project", scope));
+        labels.push((
+            format!("Always allow {} for this project", scope),
+            OPENCODE_ALWAYS_ALLOW_KEYS,
+        ));
     }
-    labels.push("Reject".to_string());
+    labels.push(("Reject".to_string(), OPENCODE_REJECT_KEYS));
     let options = labels
         .into_iter()
         .enumerate()
-        .map(|(i, label)| MenuOption {
+        .map(|(i, (label, keys))| MenuOption {
             key: (i + 1).to_string(),
             label,
-            answer_keys: Some(format!("{}\r", "\x1b[C".repeat(i))),
+            answer_keys: Some(keys.to_string()),
             description: None,
         })
         .collect();
@@ -9485,7 +9542,7 @@ fn opencode_permission_request_to_menu(data: &serde_json::Value) -> Option<PtyMe
         })
         .unwrap_or_default();
     Some(PtyMenu {
-        tool_call_signature: (!detail.is_empty()).then(|| format!("{}({})", tool, detail)),
+        tool_call_signature,
         tool,
         text,
         options,
@@ -9548,7 +9605,7 @@ mod opencode_permission_menu_tests {
             vec![
                 ("Allow once", "\r"),
                 ("Always allow echo * for this project", "\x1b[C\r"),
-                ("Reject", "\x1b[C\x1b[C\r"),
+                ("Reject", "\x1b"),
             ]
         );
         assert_eq!(m.tool_call_diff, None);
@@ -9565,15 +9622,13 @@ mod opencode_permission_menu_tests {
         );
     }
 
+    // opencode-card-keys-from-screen: Reject stays Esc, whatever the rows.
     #[test]
-    fn without_save_patterns_there_is_no_always_and_reject_moves_up() {
+    fn without_save_patterns_there_is_no_always_and_reject_is_still_esc() {
         let mut v = shell();
         v.as_object_mut().unwrap().remove("save");
         let m = menu(&v).unwrap();
-        assert_eq!(
-            options(&m),
-            vec![("Allow once", "\r"), ("Reject", "\x1b[C\r")]
-        );
+        assert_eq!(options(&m), vec![("Allow once", "\r"), ("Reject", "\x1b")]);
     }
 
     #[test]
@@ -9727,6 +9782,338 @@ mod opencode_question_menu_tests {
         let mut v = color();
         v["fields"][0]["custom"] = serde_json::json!(false);
         assert_eq!(menu(&v).unwrap().text, "Pick a color");
+    }
+}
+
+// opencode-card-keys-from-screen: OpenCode's plugin posts its requests to a
+// route with no token (docs/menu.md), so the payload only describes a
+// request. What the card says must be what the terminal's prompt draws, and
+// is checked against it before the card shows (opencode_card_for_screen).
+#[derive(Clone, Debug)]
+enum OpencodeScreenCheck {
+    // permission.asked's action and resources.
+    Permission {
+        action: String,
+        resources: Vec<String>,
+    },
+    // The form's one question, as the card states it, and its field's
+    // description, which the form may draw under it.
+    Question {
+        question: String,
+        description: String,
+    },
+}
+
+fn opencode_permission_screen_check(data: &serde_json::Value) -> OpencodeScreenCheck {
+    OpencodeScreenCheck::Permission {
+        action: data
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        resources: data
+            .get("resources")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+// The card's question is the field's title, else its description
+// (opencode_form_to_menu).
+fn opencode_question_screen_check(form: &serde_json::Value) -> OpencodeScreenCheck {
+    let field_text = |k: &str| {
+        form.pointer(&format!("/fields/0/{}", k))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let description = field_text("description");
+    OpencodeScreenCheck::Question {
+        question: Some(field_text("title"))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| description.clone()),
+        description,
+    }
+}
+
+// The tail as these checks read it: whitespace and the prompt's ┃ frame
+// removed, so a row wrapped inside the frame reads whole, and `"` as `'`, as
+// pty_tail_snippet hands it over. Case is kept: a command's is its own.
+fn opencode_unframed(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '┃')
+        .map(|c| if c == '"' { '\'' } else { c })
+        .collect()
+}
+
+// How much of a cut-off resource must be drawn for the card to name it: enough
+// to say which command it is. The card names only the part drawn, then "…".
+// At the demo's 24 columns the prompt keeps about 60 characters of a long
+// command (2026-10-27).
+const OPENCODE_CLIPPED_MIN_CHARS: usize = 16;
+
+fn opencode_clipped(resource: &str, drawn: usize) -> String {
+    let mut n = 0;
+    let mut end = resource.len();
+    for (i, c) in resource.char_indices() {
+        if n == drawn {
+            end = i;
+            break;
+        }
+        if !c.is_whitespace() && c != '┃' {
+            n += 1;
+        }
+    }
+    format!("{}…", resource[..end].trim_end())
+}
+
+// The permission prompt as 2.1.4 draws it (the y_ prompt and bj's layouts):
+// "△ Permission required", a body that says what is asked, then the answers.
+// The prompt is at most 15 rows tall and the body gives way first, so a long
+// body is cut off at its end. "Always allow" is drawn only for a request with
+// save patterns, always second, and at 24 columns clipped to "Always".
+struct OpencodePermissionScreen {
+    body: String,
+    always: bool,
+}
+
+fn opencode_permission_screen(tail: &str) -> Option<OpencodePermissionScreen> {
+    const TITLE: &str = "Permissionrequired";
+    const ROWS: &str = "Allowonce";
+    let s = opencode_unframed(tail);
+    let after = &s[s.rfind(TITLE)? + TITLE.len()..];
+    let rows = after.rfind(ROWS)?;
+    Some(OpencodePermissionScreen {
+        body: after[..rows].to_string(),
+        always: after[rows + ROWS.len()..].starts_with("Always"),
+    })
+}
+
+// Resources drawn one per line as "- <resource>", in order and nothing else:
+// a shell request with no tool call behind it, and external_directory's
+// patterns. The last drawn may be cut off by the prompt's height.
+fn opencode_listed(part: &str, resources: &[&String]) -> Result<Vec<String>, &'static str> {
+    let mut rest = part;
+    let mut shown = Vec::new();
+    for r in resources {
+        let line = format!("-{}", opencode_unframed(r));
+        if let Some(after) = rest.strip_prefix(line.as_str()) {
+            shown.push((*r).clone());
+            rest = after;
+        } else if rest.len() > 1 && line.starts_with(rest) {
+            let drawn = rest.chars().count() - 1;
+            if drawn < OPENCODE_CLIPPED_MIN_CHARS {
+                return Err("not-drawn");
+            }
+            shown.push(opencode_clipped(r, drawn));
+            return Ok(shown);
+        } else {
+            return Err("not-drawn");
+        }
+    }
+    if rest.is_empty() {
+        Ok(shown)
+    } else {
+        Err("not-drawn")
+    }
+}
+
+// A shell tool call draws its whole command line after "$", while its
+// resources are the commands in it as written (2.1.4's scanner: one per
+// command, nested ones too, `cd` left out). Each must be found in the line,
+// and what none of them covers may only be the punctuation joining them, so a
+// short resource can't stand for a longer command it happens to occur in. A
+// line cut off by the prompt's height may end in the start of a command; the
+// card names that part, and none after it.
+fn opencode_commands_cover(line: &str, resources: &[&String]) -> Result<Vec<String>, &'static str> {
+    let glue = |c: char| matches!(c, '&' | '|' | ';' | '(' | ')' | '{' | '}' | '!');
+    let drawn: Vec<char> = line.chars().collect();
+    let mut covered = vec![false; drawn.len()];
+    let mut whole = vec![false; resources.len()];
+    for (k, r) in resources.iter().enumerate() {
+        let want: Vec<char> = opencode_unframed(r).chars().collect();
+        if want.len() > drawn.len() {
+            continue;
+        }
+        let starts: Vec<usize> = (0..=drawn.len() - want.len())
+            .filter(|&i| drawn[i..i + want.len()] == want[..])
+            .collect();
+        // A repeated command takes its next occurrence; a nested one may lie
+        // inside one already covered.
+        let at = starts
+            .iter()
+            .find(|&&i| covered[i..i + want.len()].iter().any(|c| !c))
+            .or(starts.first());
+        if let Some(&i) = at {
+            covered[i..i + want.len()]
+                .iter_mut()
+                .for_each(|c| *c = true);
+            whole[k] = true;
+        }
+    }
+    let mut cut = None;
+    if whole.iter().any(|w| !w) {
+        let from = covered.iter().rposition(|c| *c).map_or(0, |i| i + 1);
+        let start = (from..drawn.len())
+            .find(|&i| !glue(drawn[i]))
+            .ok_or("not-drawn")?;
+        let rest = &drawn[start..];
+        let k = (0..resources.len())
+            .find(|&k| {
+                !whole[k]
+                    && opencode_unframed(resources[k])
+                        .chars()
+                        .take(rest.len())
+                        .eq(rest.iter().copied())
+            })
+            .filter(|_| rest.len() >= OPENCODE_CLIPPED_MIN_CHARS)
+            .ok_or("not-drawn")?;
+        covered[start..].iter_mut().for_each(|c| *c = true);
+        cut = Some((k, rest.len()));
+    }
+    if drawn.iter().zip(&covered).any(|(c, cov)| !cov && !glue(*c)) {
+        return Err("not-drawn");
+    }
+    Ok(resources
+        .iter()
+        .enumerate()
+        .filter_map(|(k, r)| match cut {
+            Some((at, n)) if at == k => Some(opencode_clipped(r, n)),
+            _ if whole[k] => Some((*r).clone()),
+            _ => None,
+        })
+        .collect())
+}
+
+// What the card may say a request is about: each resource where bj draws it
+// for the action, or the request gets no card. The layouts below are the
+// captured ones (2.1.4, 2026-10-26/27); for any other action the terminal asks
+// alone.
+fn opencode_resources_on_screen(
+    action: &str,
+    resources: &[String],
+    body: &str,
+) -> Result<Vec<String>, &'static str> {
+    let resources: Vec<&String> = resources
+        .iter()
+        .filter(|r| !opencode_unframed(r).is_empty())
+        .collect();
+    let first = resources.first().ok_or("no-resources")?;
+    let titled = |verb: &str| {
+        body.strip_prefix('→')
+            .and_then(|b| b.strip_prefix(verb))
+            .and_then(|b| b.strip_prefix(opencode_unframed(first).as_str()))
+    };
+    match action {
+        // "$ <command>" for a tool call, "- <resource>" lines without one.
+        "shell" => match body.strip_prefix('$') {
+            Some(line) => opencode_commands_cover(line, &resources),
+            None => opencode_listed(body, &resources),
+        },
+        // "→ Edit <path>" over the diff. The title names the first file of a
+        // patch; the card says how many more there are.
+        "edit" => {
+            titled("Edit").ok_or("not-drawn")?;
+            let mut shown = vec![(*first).clone()];
+            if resources.len() > 1 {
+                shown.push(format!("{} more", resources.len() - 1));
+            }
+            Ok(shown)
+        }
+        // "→ Read <path>" then "Path: <path>", which narrow terminals cut off.
+        "read" | "list" => {
+            let rest = titled(if action == "read" { "Read" } else { "List" }).ok_or("not-drawn")?;
+            if rest.is_empty() || rest.starts_with("Path:") {
+                Ok(vec![(*first).clone()])
+            } else {
+                Err("not-drawn")
+            }
+        }
+        // "← Access external directory <dir>", then the patterns as lines.
+        "external_directory" => {
+            let lines = body
+                .strip_prefix("←Accessexternaldirectory")
+                .and_then(|b| b.rfind("Patterns").map(|i| &b[i + "Patterns".len()..]))
+                .ok_or("not-drawn")?;
+            opencode_listed(lines, &resources)
+        }
+        _ => Err("unchecked-action"),
+    }
+}
+
+// The form as 2.1.4 draws it: the question, perhaps its field's description,
+// then each choice as "<n>. <label>" over its own description, one after
+// another, and after them the "Type your own answer" or "Skip" row, or the
+// footer.
+fn opencode_form_on_screen(menu: &PtyMenu, question: &str, description: &str, tail: &str) -> bool {
+    let s = opencode_unframed(tail);
+    let q = opencode_unframed(question);
+    let Some(at) = s.rfind(&q).filter(|_| !q.is_empty()) else {
+        return false;
+    };
+    let rest = &s[at + q.len()..];
+    let d = opencode_unframed(description);
+    let rest = rest
+        .strip_prefix(d.as_str())
+        .filter(|_| !d.is_empty())
+        .unwrap_or(rest);
+    let rows: String = menu
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            format!(
+                "{}.{}{}",
+                i + 1,
+                opencode_unframed(&o.label),
+                opencode_unframed(o.description.as_deref().unwrap_or(""))
+            )
+        })
+        .collect();
+    rest.strip_prefix(rows.as_str()).is_some_and(|after| {
+        after.is_empty() || after.starts_with(|c: char| c.is_ascii_digit() || c == '↑')
+    })
+}
+
+// The card a claim may show once its prompt is on screen. A question card is
+// shown as built, its digits being absolute; a permission card names only what
+// the prompt draws, and offers Always allow only when the prompt does.
+fn opencode_card_for_screen(
+    menu: &PtyMenu,
+    check: &OpencodeScreenCheck,
+    tail: &str,
+) -> Result<PtyMenu, &'static str> {
+    match check {
+        OpencodeScreenCheck::Question {
+            question,
+            description,
+        } => {
+            if opencode_form_on_screen(menu, question, description, tail) {
+                Ok(menu.clone())
+            } else {
+                Err("choices-differ")
+            }
+        }
+        OpencodeScreenCheck::Permission { action, resources } => {
+            let screen = opencode_permission_screen(tail).ok_or("no-prompt")?;
+            let shown = opencode_resources_on_screen(action, resources, &screen.body)?;
+            let mut card = menu.clone();
+            (card.text, card.tool_call_signature) = opencode_permission_text(&card.tool, &shown);
+            if !screen.always {
+                card.options
+                    .retain(|o| o.answer_keys.as_deref() != Some(OPENCODE_ALWAYS_ALLOW_KEYS));
+            }
+            for (i, o) in card.options.iter_mut().enumerate() {
+                o.key = (i + 1).to_string();
+            }
+            Ok(card)
+        }
     }
 }
 
@@ -10216,6 +10603,8 @@ fn handle_permission_menu<R: tauri::Runtime>(
                 answered: false,
                 answered_label: None,
                 answered_at_ms: None,
+                opencode_screen: None,
+                opencode_card_checked: false,
             });
             q.len()
         }
@@ -10354,6 +10743,105 @@ const OPENCODE_ESC_COUNT_WINDOW_MS: i64 = 5_000;
 // single "\x1b\x1b" write did not interrupt in the 2026-10-26 spike, two
 // writes 100 ms apart did.
 const OPENCODE_ESC_PRESS_GAP_MS: u64 = 100;
+// opencode-esc-off-main-thread: set from the first press until the second is
+// written (schedule_opencode_second_esc). Pane sends queued meanwhile wait
+// for it, so they still reach OpenCode after both presses.
+static OPENCODE_SECOND_ESC_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// The pane's second Esc for a running OpenCode turn, the gap after the first.
+// queue_pty_intent is a plain command, so it runs on the main thread, and
+// sleeping there for the gap stalled the app at the busiest point of a turn
+// (#453 review). It stays a plain command on purpose: an async one runs on a
+// pool, where two quick pane sends could reach the terminal out of order. The
+// flag is cleared whether or not the write succeeds, so a failed press can't
+// hold the queue.
+//
+// #456 review: the second press is written only if the launch that took the
+// first is still current and OpenCode is still the agent. A switch, reload or
+// New session in the gap takes a new launch generation (begin_agent_launch),
+// and an unchecked Esc would land in its interrupt sequence or the next agent.
+// Held sends drain either way.
+fn second_esc_still_wanted(
+    generation_then: u64,
+    generation_now: u64,
+    provider_now: Option<SessionProvider>,
+) -> Result<(), &'static str> {
+    if generation_now != generation_then {
+        return Err("launch-superseded");
+    }
+    if provider_now != Some(SessionProvider::Opencode) {
+        return Err("provider-changed");
+    }
+    Ok(())
+}
+
+fn schedule_opencode_second_esc<R: tauri::Runtime>(app: &AppHandle<R>) {
+    OPENCODE_SECOND_ESC_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let generation = AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(OPENCODE_ESC_PRESS_GAP_MS));
+        let state = app.state::<AppState>();
+        let Ok(_drain_guard) = pty_intent_lock().lock() else {
+            OPENCODE_SECOND_ESC_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        };
+        if let Err(reason) = second_esc_still_wanted(
+            generation,
+            AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
+            current_provider(&app),
+        ) {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "send-gate",
+                    &format!("op=esc-doubled-skipped provider=opencode reason={}", reason),
+                );
+            }
+            OPENCODE_SECOND_ESC_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = drain_pty_intents(&app, &state);
+            return;
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "send-gate",
+                "op=esc-doubled provider=opencode reason=running-turn",
+            );
+        }
+        let wrote = pty_write_internal(&app, &state, "\x1b", "pty-intent-sendKeys");
+        OPENCODE_SECOND_ESC_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Err(e) = wrote {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "send-gate",
+                    &format!("op=esc-doubled-failed provider=opencode error={}", e),
+                );
+            }
+        }
+        let _ = drain_pty_intents(&app, &state);
+    });
+}
+
+#[cfg(test)]
+mod second_esc_still_wanted_tests {
+    use super::{second_esc_still_wanted, SessionProvider};
+
+    #[test]
+    fn only_the_same_launch_under_opencode_gets_the_second_press() {
+        let oc = Some(SessionProvider::Opencode);
+        assert_eq!(second_esc_still_wanted(7, 7, oc), Ok(()));
+        // A switch, reload or New session in the gap.
+        assert_eq!(second_esc_still_wanted(7, 8, oc), Err("launch-superseded"));
+        assert_eq!(
+            second_esc_still_wanted(7, 7, Some(SessionProvider::Claude)),
+            Err("provider-changed")
+        );
+        assert_eq!(second_esc_still_wanted(7, 7, None), Err("provider-changed"));
+    }
+}
 
 // Whether a user Esc should wait for the agent's own interrupt report. Only
 // OpenCode reports one, and only through Bram's plugin: without a current
@@ -20351,12 +20839,20 @@ fn drain_pty_intents<R: tauri::Runtime>(
         current_provider(app),
     );
     let mut prompt_restores: Vec<(String, String)> = Vec::new();
+    let mut esc_held: usize = 0;
 
     for line in content.lines() {
         if line.is_empty() {
             continue;
         }
         if drain_error.is_some() {
+            remaining.push(line.to_string());
+            continue;
+        }
+        // opencode-esc-off-main-thread: everything queued after the pane's
+        // first Esc waits for its second, and drains after it.
+        if OPENCODE_SECOND_ESC_PENDING.load(std::sync::atomic::Ordering::SeqCst) {
+            esc_held += 1;
             remaining.push(line.to_string());
             continue;
         }
@@ -20550,27 +21046,12 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 } else if data == "\x1b" && pane_esc_presses_now(app) == 2 {
                     // opencode-esc-interrupt: the button means stop, and a
                     // running OpenCode turn stops only on a second press.
-                    // #453 review: the gap is slept on a spawned thread, not
-                    // here. queue_pty_intent is a sync command, so it runs on
-                    // the main thread (the issue-395-claim-capture-timed
-                    // receipt), and it stays sync so pane sends keep their order.
-                    pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys").map(|_| {
-                        let app = app.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                OPENCODE_ESC_PRESS_GAP_MS,
-                            ));
-                            if bram_trace_enabled() {
-                                append_bram_trace_line(
-                                    &app,
-                                    "send-gate",
-                                    "op=esc-doubled provider=opencode reason=running-turn",
-                                );
-                            }
-                            let state = app.state::<AppState>();
-                            let _ = pty_write_internal(&app, &state, "\x1b", "pty-intent-sendKeys");
-                        });
-                    })
+                    // opencode-esc-off-main-thread: which comes from a thread.
+                    let r = pty_write_internal(app, state, "\x1b", "pty-intent-sendKeys");
+                    if r.is_ok() {
+                        schedule_opencode_second_esc(app);
+                    }
+                    r
                 } else {
                     let r = pty_write_internal(app, state, data, "pty-intent-sendKeys");
                     if r.is_ok()
@@ -20749,6 +21230,14 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 &format!("op=flush wrote={} held_ms={}", wrote, held_ms),
             );
         }
+    }
+
+    if esc_held > 0 && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!("op=hold count={} reason=esc-second-press", esc_held),
+        );
     }
 
     if remaining.is_empty() {
@@ -46317,6 +46806,24 @@ mod opencode_prompt_tests {
     // Mid-turn, in a project whose opencode.json asks before bash. Excerpt:
     // the spinner frames that keep coming after it are trimmed.
     const PERMISSION: &str = "+Thought ┃ ┃ ⠋ Writing command… ┃ ! New session · 808ms⠋echo bram-permission-specimen┃ ┃ △ Permission required ┃ ┃ $ echo bram-permission-specimen ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New session ! New session ! New sessi ⠙ ! New sessi!New sessio ⠹ Press ctrl+b to move running work to the background⠧⠇⠏⠋⠙⠹⠸⠼⠴⠦";
+    // opencode-permission-markers: a request without save patterns, created
+    // over OpenCode's HTTP route (2026-10-27), so no "Always allow" row and
+    // the resource reads "- …". Excerpt from the prompt on: before it, the
+    // tail held the spike's own message quoting the rows.
+    const SAVELESS_PERMISSION: &str = "! New sess ┃ ┃ △ Permission required ┃ ┃ - printf bram-saveless-specimen ┃ ┃ ┃ Allow once Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses !New !New s ! Ne sesi wNwss es ! Nw ! e e ! New s w s !New s ! Newsei ! New s ew ses !New s ! Nwess ! New s Newse ! N News ! Nses ! Nw ssew";
+    // The same requests in narrower terminals (`opencode --continue`, 2.1.4,
+    // 2026-10-27), excerpts from the prompt on. At 80 columns with three rows
+    // the footer is clipped to "enter con"; at 24 the title wraps inside the
+    // frame, the footer loses "enter confirm", and with three rows "Reject" is
+    // clipped too.
+    const NARROW_PERMISSIONS: [&str; 3] = [
+        "! New sess ┃ ┃ △ Permission required ┃ ┃ - printf bram-narrow-withsave ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter con┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses ! New !New s ! Ne sei ! swNwss ! News e e ! New ss ! New s ! Ne sei ! ew s !News ! Ne se ! Nwses ! ew s !New ses ! e New s ! ese ! Nw sssew",
+        "! New sess ┃ ┃ △ Permission ┃ required ┃ ┃ - printf bram- ┃ narrow-saveless ┃ ┃┃ Allow once Reject┃┃ ctrl+f ⇆ select┃ fullscreen ┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses New eNew s ! Ne sesi wNwss ! News e e ! New ss ! New s ! Ne si ! ew se ! News ! Ne se ! Newses ! ew s ! New ses ! e New s ! ese Nw s !ssew",
+        "! New sess ┃ ┃ △ Permission ┃ required ┃ ┃ - printf bram- ┃ narrow-withsave ┃ ┃┃ Allow once Always┃┃ ctrl+f ⇆ select┃ fullscreen ┃ ! Ne ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses ! New esNew s ! Ne sesi wNwss ! News ! e e ! New ss ! New s ! Ne sei ! ew se ! News ! Ne se ! Nwses ! ew s !New ses ! e New s ! Neses ! Nw ssew",
+    ];
+    // A real reply quoting the prompt's rows, then the composer's chrome
+    // (2026-10-27). Excerpt: the repeated "• New session" frames are trimmed.
+    const QUOTED_PERMISSION: &str = "⬝⬝⬝⬝⬝⬝⬝⬝⠇n s ⠸⬝⬝⬝⬝⬝⬝⬝⬝ion s ⠏on ⬝⬝⬝⬝⬝⬝⬝⬝ i ⠼⬝⬝⬝⬝⬝⬝⬝⬝n +Thought · 439msPermission required. Choose Allow once, Always allow, or Reject. o ⬝⬝⬝⬝⬝⬝⬝⬝⠋ ⬝⬝⬝⬝⬝⬝⬝⬝n • New session Build · DeepSeek V4.1 Flash Free · 1.6s · 65.5 tok/s/…/-…/2f52906f-64d8-4313-bbf6-f2afda62b881/scratchpad/oc-ctrlc/proj-saveless:main 8.1K (4%) • New session Users-a…/2f52906f-64d8-4313-bbf6-f2afda62b881/scrathpad/oc-ctrlc/proj-aveless:main • New session • New session • New session • New session";
     // opencode-question-card: the question tool's form (2.1.4 spike,
     // 2026-10-27), drawn after the previous answer's reply.
     const QUESTION: &str = "+ Thought ⠋Asking questions… ? New session ┃ ┃Use your question tool to ask me exactly one single-choice question, 'Pick a fruit', with the options apple, ┃ banana and cherry. Then tell me which one I picked. ┃ ┃ ┃ # Questions ┃┃Pick a fruit ┃Cherry ┃ You picked cherry. Build · DeepSeek V4.1 Flash Free · 5.3s · 35.7 tok/s ┃ ┃Use your question tool to ask me exactly one single-choice question, 'Pick a city', with the options Paris and ┃ Rome, allowing a custom answer. Then tell me what I answered. ┃ + Thought · 417ms → Asked 1 question ┃ ┃Questions┃ ┃ Pick a city ┃ ┃ 1. Paris ┃ Paris, France. ┃ 2. Rome ┃ Rome, Italy. ┃ 3. Type your own answer ┃ ┃ ↑↓ select enter submit esc dismiss ┃ ? New session ? New session ? New session ? New sessio ? New sessio ? New session ? New session ? New session ? New sessn ? New sessin ? New sessio ? New sessio ? New sessi ? New session ? New sesion ? New session ? Newsession ? New sesson ? New session ? New session ? New sessn ? New session ? New session ? New sess ? New session ? New se ? New ession ? New session ? New s ? New session ? News ? New session ? ? New s?ew session ?? ? New ses?ssion";
@@ -46345,10 +46852,16 @@ mod opencode_prompt_tests {
 
     #[test]
     fn the_permission_prompt_holds_sends_under_opencode() {
-        assert_eq!(
-            pane_input_blocking_prompt(PERMISSION, OPENCODE),
-            Some("opencode-permission")
-        );
+        for tail in [PERMISSION, SAVELESS_PERMISSION]
+            .into_iter()
+            .chain(NARROW_PERMISSIONS)
+        {
+            assert_eq!(
+                pane_input_blocking_prompt(tail, OPENCODE),
+                Some("opencode-permission"),
+                "{tail}"
+            );
+        }
     }
 
     // #453 review: a request without `save` patterns draws no "Always allow"
@@ -46369,10 +46882,21 @@ mod opencode_prompt_tests {
     #[test]
     fn the_permission_card_needs_the_prompt_on_screen() {
         assert!(super::opencode_permission_on_screen(PERMISSION));
+        assert!(super::opencode_permission_on_screen(SAVELESS_PERMISSION));
+        for narrow in NARROW_PERMISSIONS {
+            assert!(super::opencode_permission_on_screen(narrow), "{narrow}");
+        }
         for not_asking in [PALETTE_OPEN, PALETTE_CLOSED, STATUS_VIEW_OPEN, ""] {
             assert!(!super::opencode_permission_on_screen(not_asking));
         }
         assert!(!super::opencode_permission_on_screen(QUESTION));
+    }
+
+    // opencode-permission-markers: the rows' words without the prompt's footer.
+    #[test]
+    fn a_reply_quoting_the_permission_prompt_is_not_one() {
+        assert_eq!(terminal_attention_prompt_shape(QUOTED_PERMISSION), None);
+        assert!(!super::opencode_permission_on_screen(QUOTED_PERMISSION));
     }
 
     // opencode-question-card: a form holds sends, and its card waits for it.
@@ -46409,6 +46933,281 @@ mod opencode_prompt_tests {
         let apart =
             format!("Open the commands palette, press esc to leave, then search again.{chrome}");
         assert_eq!(terminal_attention_prompt_shape(&apart), None);
+        // opencode-permission-markers: a reply naming a dialog's title and
+        // both its hints, as prose punctuates them.
+        let titled = format!(
+            "Ctrl+X m opens Select model: esc closes it, and Search filters the list.{chrome}"
+        );
+        assert_eq!(terminal_attention_prompt_shape(&titled), None);
+    }
+
+    // opencode-card-keys-from-screen: more prompts (2.1.4, 2026-10-26/27),
+    // excerpts from the prompt on. Those created over OpenCode's HTTP route
+    // have no tool call behind them, so a shell request lists its resources
+    // as "- …" lines. The prompt is at most 15 rows tall: at 24 columns a long
+    // command is cut off after about 60 characters, a read's "Path:" line is
+    // cut off, and an external directory's patterns aren't drawn at all.
+    const LONG_PERMISSION_24: &str = "! New sess ┃ ┃ △ Permission ┃ required ┃ ┃ - printf word00- ┃ abcdefgh word01- ┃ abcdefgh word02- ┃ abcdefgh word03- ┃ ┃┃ Allow once Always┃┃ ctrl+f ⇆ select┃ fullscreen ┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses New eNew s ! N";
+    const LONG_PERMISSION_120: &str = "! New sess ┃ ┃ △ Permission required ┃ ┃ - printf word00-abcdefgh word01-abcdefgh word02-abcdefgh word03-abcdefgh word04-abcdefgh word05-abcdefgh ┃ word06-abcdefgh word07-abcdefgh word08-abcdefgh word09-abcdefgh word10-abcdefgh word11-abcdefgh word12- ┃ abcdefgh word13-abcdefgh word14-abcdefgh word15-abcdefgh word16-abcdefgh word17-abcdefgh word18-abcdefgh ┃ word19-abcdefgh word20-abcdefgh word21-abcdefgh word22-abcdefgh word23-abcdefgh word24-abcdefgh word25- ┃ abcdefgh word26-abcdefgh word27-abcdefgh word28-abcdefgh word29-abcdefgh ┃ ┃ ┃ Allow once Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New ! New ses ! New sessi ! New sessi ! New sess ! New sessi ! New sessi ! New ses ! New ! New s";
+    const TWO_RESOURCES: &str = "! New sess ┃ ┃ △ Permission required ┃ ┃ - printf bram-first-resource ┃ - printf bram-second-resource ┃ ┃ ┃ Allow once Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! Ne ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New sess ! New esNew s";
+    const EXTERNAL_DIRECTORY_24: &str = "! New sess ┃ ┃ △ Permission ┃ required ┃ ← Access ┃ external ┃ directory / ┃ private/tmp/ ┃ bram- ┃ outside- ┃┃ Allow once Reject┃┃ ctrl+f ⇆ select┃ fullscreen ┃ ! New ! New ses ! New sessi ! New sessi ! New sessi ! New sess ! New sessi ! New ses ! New ! New s";
+    const EXTERNAL_DIRECTORY_120: &str = "! New sess ┃ ┃ △ Permission required ┃ ← Access external directory /private/tmp/bram-outside-specimen ┃ ┃ Patterns ┃ ┃ - /private/tmp/bram-outside-specimen/* ┃ ┃ ┃ Allow once Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses !New !New s !";
+    const READ_24: &str = "! New sess ┃ ┃ △ Permission ┃ required ┃ → Read config/ ┃ bram- ┃ specimen.env ┃ ┃ Path: config/ ┃ ┃┃ Allow once Always┃┃ ctrl+f ⇆ select┃ fullscreen ┃ ! New s ! New ses ! New sessi ! New sessi ! New sessi ! New sess ! New sessi ! New sesNwe ! New ss";
+    const READ_120: &str = "! New sess ┃ ┃ △ Permission required ┃ → Read config/bram-specimen.env ┃ ┃ Path: config/bram-specimen.env ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New ! New ses ! New sessi ! New sess ! New sessi ! New sessi ! New sessi ! New ses ! New ! New s";
+    // The edit tool's request (opencode-permission-menu's spike, 2026-10-26),
+    // under its tool line; its payload is opencode_permission_menu_tests'
+    // edit().
+    const EDIT_PERMISSION: &str = "← Write spike.txt ┃ ┃ △ Permission required ┃ → Edit spike.txt ┃┃ 1 + hi ┃┃ ┃ ┃ ┃ ┃ ┃ ┃ ┃ Allow once Always allow Reject ctrl+f fullscreen ⇆ select enter confirm ┃ ! New session ! New session ! New sessi ! New sessi ! New sess ! New sss ! New se ! New sess ! New";
+    // The question tool's form at 24 columns (2026-10-27). Its footer is
+    // drawn in columns there, so the opencode-question shape doesn't see it.
+    const NARROW_QUESTION: &str = "→ed 1 question ┃ ┃ Questions ┃ ┃ Pick a city ┃ ┃ 1. Paris ┃ The French ┃ capital, ┃ known for the ┃ Eiffel Tower ┃ and world- ┃ class ┃ museums. ┃ 2. Rome ┃ Italy's ┃ capital, ┃ famous for ┃ ancient ruins ┃ and ┃ incredible ┃ food. ┃ 3. Type your own ┃ answer ┃ ┃ ↑↓ enter esc ┃ sele submi dismi ┃ ct t ss ┃ ┃ ? New session ? New session ? New session ? New sessin ? New sess ? New sessio ? New ses ? New se";
+
+    fn permission_card(
+        tail: &str,
+        payload: serde_json::Value,
+    ) -> Result<super::PtyMenu, &'static str> {
+        let menu = super::opencode_permission_request_to_menu(&payload).unwrap();
+        super::opencode_card_for_screen(
+            &menu,
+            &super::opencode_permission_screen_check(&payload),
+            tail,
+        )
+    }
+
+    fn shell(resources: &[&str], save: bool) -> serde_json::Value {
+        let mut v = serde_json::json!({"id": "per_x", "action": "shell", "resources": resources});
+        if save {
+            v["save"] = serde_json::json!(["printf *"]);
+        }
+        v
+    }
+
+    fn answers(m: &super::PtyMenu) -> Vec<(&str, &str, &str)> {
+        m.options
+            .iter()
+            .map(|o| {
+                (
+                    o.key.as_str(),
+                    o.label.as_str(),
+                    o.answer_keys.as_deref().unwrap_or(""),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_card_names_the_command_the_prompt_draws() {
+        let card = permission_card(
+            PERMISSION,
+            serde_json::json!({"action": "shell", "resources": ["echo bram-permission-specimen"], "save": ["echo *"]}),
+        )
+        .unwrap();
+        assert_eq!(card.text, "Shell: echo bram-permission-specimen");
+        assert_eq!(
+            answers(&card),
+            vec![
+                ("1", "Allow once", "\r"),
+                ("2", "Always allow echo * for this project", "\x1b[C\r"),
+                ("3", "Reject", "\x1b"),
+            ]
+        );
+        let listed = permission_card(
+            TWO_RESOURCES,
+            shell(
+                &["printf bram-first-resource", "printf bram-second-resource"],
+                false,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            listed.text,
+            "Shell: printf bram-first-resource, printf bram-second-resource"
+        );
+    }
+
+    // The forged payload the review described: no save patterns, over a real
+    // three-row prompt. The card offers no "Always allow", and its Reject is
+    // Esc, not the Right+Enter that would land on the real "Always allow".
+    #[test]
+    fn the_answer_rows_follow_the_prompt_not_the_payload() {
+        let forged =
+            permission_card(PERMISSION, shell(&["echo bram-permission-specimen"], false)).unwrap();
+        assert_eq!(
+            answers(&forged),
+            vec![("1", "Allow once", "\r"), ("2", "Reject", "\x1b")]
+        );
+        // And save patterns over a two-row prompt don't add one.
+        let saved = permission_card(
+            SAVELESS_PERMISSION,
+            shell(&["printf bram-saveless-specimen"], true),
+        )
+        .unwrap();
+        assert_eq!(
+            answers(&saved),
+            vec![("1", "Allow once", "\r"), ("2", "Reject", "\x1b")]
+        );
+        // At 24 columns the row reads "Allow once Always": still offered.
+        let narrow = permission_card(
+            NARROW_PERMISSIONS[2],
+            shell(&["printf bram-narrow-withsave"], true),
+        )
+        .unwrap();
+        assert_eq!(answers(&narrow)[1].2, "\x1b[C\r");
+    }
+
+    #[test]
+    fn a_request_naming_another_command_gets_no_card() {
+        for resources in [
+            vec!["echo something-else"],
+            // A part of the command doesn't stand for all of it.
+            vec!["echo"],
+            vec!["echo bram-permission-specimen", "rm -rf ."],
+        ] {
+            assert_eq!(
+                permission_card(PERMISSION, shell(&resources, true)).err(),
+                Some("not-drawn"),
+                "{resources:?}"
+            );
+        }
+        // Listed lines must be exactly the payload's.
+        assert!(
+            permission_card(SAVELESS_PERMISSION, shell(&["printf bram-saveless"], false)).is_err()
+        );
+        assert!(
+            permission_card(TWO_RESOURCES, shell(&["printf bram-first-resource"], false)).is_err()
+        );
+        // A reply quoting the prompt names nothing. (The opencode-permission
+        // shape already keeps it from getting this far.)
+        assert!(permission_card(QUOTED_PERMISSION, shell(&["printf x"], false)).is_err());
+        assert_eq!(
+            permission_card("", shell(&["printf x"], false)).err(),
+            Some("no-prompt")
+        );
+    }
+
+    #[test]
+    fn a_command_cut_off_by_the_prompt_is_named_as_far_as_drawn() {
+        let long = format!(
+            "printf {}",
+            (0..30)
+                .map(|i| format!("word{i:02}-abcdefgh"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let card = permission_card(LONG_PERMISSION_24, shell(&[&long], true)).unwrap();
+        assert_eq!(
+            card.text,
+            "Shell: printf word00-abcdefgh word01-abcdefgh word02-abcdefgh word03-…"
+        );
+        assert_eq!(answers(&card).len(), 3);
+        let wide = permission_card(LONG_PERMISSION_120, shell(&[&long], false)).unwrap();
+        assert_eq!(wide.text, format!("Shell: {long}"));
+        // What's drawn must still begin the payload's command.
+        assert!(permission_card(
+            LONG_PERMISSION_24,
+            shell(&["printf word00-abcdefgh word01-other"], true)
+        )
+        .is_err());
+    }
+
+    // Modeled from the tool-call specimen: a compound command, whose
+    // resources are its commands (2.1.4's scanner).
+    #[test]
+    fn a_compound_command_is_covered_by_its_commands() {
+        let tail = PERMISSION.replace(
+            "$ echo bram-permission-specimen",
+            "$ cat bram.log | grep -c bram && echo done",
+        );
+        let card = permission_card(
+            &tail,
+            shell(&["cat bram.log", "grep -c bram", "echo done"], true),
+        )
+        .unwrap();
+        assert_eq!(card.text, "Shell: cat bram.log, grep -c bram, echo done");
+        assert!(permission_card(&tail, shell(&["grep -c bram"], true)).is_err());
+        // `cd` isn't among a request's resources, so the line isn't covered
+        // and the terminal asks alone.
+        let cd = PERMISSION.replace("$ echo bram-permission-specimen", "$ cd sub && make");
+        assert!(permission_card(&cd, shell(&["make"], true)).is_err());
+    }
+
+    #[test]
+    fn edits_reads_and_directories_are_checked_by_their_titles() {
+        let edit = serde_json::json!({"action": "edit", "resources": ["spike.txt"], "save": ["*"],
+            "metadata": {"files": [{"file": "spike.txt", "patch": "--- spike.txt\n+++ spike.txt\n@@ -0,0 +1,1 @@\n+hi\n"}]}});
+        let card = permission_card(EDIT_PERMISSION, edit.clone()).unwrap();
+        assert_eq!(card.text, "Edit: spike.txt");
+        assert!(card.tool_call_diff.is_some());
+        let mut other = edit;
+        other["resources"] = serde_json::json!(["other.txt"]);
+        assert!(permission_card(EDIT_PERMISSION, other).is_err());
+
+        let read =
+            |path: &str| serde_json::json!({"action": "read", "resources": [path], "save": ["*"]});
+        for tail in [READ_120, READ_24] {
+            assert_eq!(
+                permission_card(tail, read("config/bram-specimen.env"))
+                    .unwrap()
+                    .text,
+                "read: config/bram-specimen.env"
+            );
+            assert!(permission_card(tail, read("config/bram-specimen")).is_err());
+        }
+
+        let dir = serde_json::json!({"action": "external_directory", "resources": ["/private/tmp/bram-outside-specimen/*"]});
+        assert!(permission_card(EXTERNAL_DIRECTORY_120, dir.clone()).is_ok());
+        // Its patterns aren't drawn at 24 columns.
+        assert_eq!(
+            permission_card(EXTERNAL_DIRECTORY_24, dir).err(),
+            Some("not-drawn")
+        );
+
+        let fetch = serde_json::json!({"action": "webfetch", "resources": ["https://example.org"], "save": ["*"]});
+        assert_eq!(
+            permission_card(PERMISSION, fetch).err(),
+            Some("unchecked-action")
+        );
+    }
+
+    fn city() -> serde_json::Value {
+        // form.created's form for NARROW_QUESTION, verbatim.
+        serde_json::json!({"id": "frm_180313d84001h7FdLgmZTA3GGG", "sessionID": "ses_e7fceca2affeqQDkYZcBHQzJ9C", "title": "Questions",
+            "metadata": {"kind": "question", "tool": {"messageID": "msg_180313620001e8sSGyWSx7O33O", "id": "chatcmpl-tool-8fb0365582910f5f"}},
+            "fields": [{"key": "q0", "title": "Pick a city", "description": "Pick a city", "type": "string",
+                "options": [{"value": "Paris", "label": "Paris", "description": "The French capital, known for the Eiffel Tower and world-class museums."},
+                            {"value": "Rome", "label": "Rome", "description": "Italy's capital, famous for ancient ruins and incredible food."}],
+                "custom": true}]})
+    }
+
+    fn question_card(tail: &str, form: &serde_json::Value) -> Result<super::PtyMenu, &'static str> {
+        let menu = super::opencode_form_to_menu(form).unwrap();
+        super::opencode_card_for_screen(&menu, &super::opencode_question_screen_check(form), tail)
+    }
+
+    #[test]
+    fn a_question_card_shows_only_the_choices_drawn() {
+        assert!(question_card(NARROW_QUESTION, &city()).is_ok());
+        // QUESTION's form, as drawn at 120 columns.
+        let mut wide = city();
+        wide["fields"][0]["options"][0]["description"] = serde_json::json!("Paris, France.");
+        wide["fields"][0]["options"][1]["description"] = serde_json::json!("Rome, Italy.");
+        assert!(question_card(QUESTION, &wide).is_ok());
+        // A label over another's digit, another question, or a shortened
+        // description: no card.
+        let mut swapped = city();
+        swapped["fields"][0]["options"][0]["label"] = serde_json::json!("Rome");
+        swapped["fields"][0]["options"][1]["label"] = serde_json::json!("Paris");
+        let mut asked = city();
+        asked["fields"][0]["title"] = serde_json::json!("Pick a country");
+        asked["fields"][0]["description"] = serde_json::json!("");
+        let mut short = city();
+        short["fields"][0]["options"][0]["description"] = serde_json::json!("The French capital.");
+        for form in [swapped, asked, short] {
+            assert_eq!(
+                question_card(NARROW_QUESTION, &form).err(),
+                Some("choices-differ")
+            );
+        }
     }
 }
 
@@ -52657,11 +53456,16 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // opencode-worklist-guard: OpenCode's install is the project plugin plus
     // the `instructions` entry in .opencode/opencode.json
     // (opencode-signature-and-conventions). Only where OpenCode can run;
-    // elsewhere neither is seeded.
-    let opencode_plugin_current = opencode_plugin_current(app, &proj);
+    // elsewhere neither is seeded. A user's own plugin needs no Setup, which
+    // would keep it anyway (opencode-review-small-fixes).
+    let opencode_plugin_state = opencode_plugin_state(app, &proj);
+    let opencode_plugin_current = opencode_plugin_state == OpencodePluginState::Current;
+    let opencode_plugin_custom = opencode_plugin_state == OpencodePluginState::Custom;
     let opencode_instructions_current = opencode_instructions_current(&proj, is_source_repo);
     let opencode_needs_setup = opencode_plugin_wanted(app, &proj)
-        && (!core_installed || !opencode_plugin_current || !opencode_instructions_current);
+        && (!core_installed
+            || !(opencode_plugin_current || opencode_plugin_custom)
+            || !opencode_instructions_current);
     let provider_needs_setup = provider_needs_setup_for(
         active_provider,
         claude_needs_setup,
@@ -52766,6 +53570,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "codexNeedsSetup": codex_needs_setup,
         "opencodeNeedsSetup": opencode_needs_setup,
         "opencodePluginCurrent": opencode_plugin_current,
+        "opencodePluginCustom": opencode_plugin_custom,
         "opencodeInstructionsCurrent": opencode_instructions_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
@@ -53548,19 +54353,48 @@ fn opencode_plugin_bundle<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Vec<u
     serve_app_file(Some(app), ENHANCE_OPENCODE_PLUGIN_BUNDLE_REL).map(|(bytes, _mime)| bytes)
 }
 
-fn opencode_plugin_current<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
-    match (
-        std::fs::read(proj.join(ENHANCE_OPENCODE_PLUGIN_REL)),
-        opencode_plugin_bundle(app),
-    ) {
-        (Ok(disk), Some(bundle)) => disk == bundle,
-        _ => false,
+// Ownership as for bundled skills: a plugin file without Setup's marker is
+// the user's own.
+fn opencode_plugin_is_users(disk: &[u8]) -> bool {
+    !String::from_utf8_lossy(disk).contains(OPENCODE_PLUGIN_MARKER)
+}
+
+// opencode-review-small-fixes: `Custom` is the user's own file, which Setup
+// keeps (seed_opencode_plugin). Reading it as stale would fail the self-test
+// and raise the Setup banner for good, since no Setup run can change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpencodePluginState {
+    Missing,
+    Current,
+    Stale,
+    Custom,
+}
+
+fn opencode_plugin_state_of(disk: Option<&[u8]>, bundle: Option<&[u8]>) -> OpencodePluginState {
+    match disk {
+        None => OpencodePluginState::Missing,
+        Some(d) if Some(d) == bundle => OpencodePluginState::Current,
+        Some(d) if opencode_plugin_is_users(d) => OpencodePluginState::Custom,
+        Some(_) => OpencodePluginState::Stale,
     }
 }
 
-// Ownership as for bundled skills: Setup writes or refreshes only a file
-// carrying its marker, and a user's own `.opencode/plugins/bram.js` is kept
-// and reported in `skipped`.
+fn opencode_plugin_state<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+) -> OpencodePluginState {
+    let disk = std::fs::read(proj.join(ENHANCE_OPENCODE_PLUGIN_REL)).ok();
+    opencode_plugin_state_of(disk.as_deref(), opencode_plugin_bundle(app).as_deref())
+}
+
+// Bram's own plugin, as the bundle has it: what the Esc wait needs, since only
+// that plugin reports OpenCode's interrupts.
+fn opencode_plugin_current<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    opencode_plugin_state(app, proj) == OpencodePluginState::Current
+}
+
+// Setup writes or refreshes only a file carrying its marker, and a user's own
+// `.opencode/plugins/bram.js` is kept and reported in `skipped`.
 fn seed_opencode_plugin<R: tauri::Runtime>(
     app: &AppHandle<R>,
     proj: &Path,
@@ -53576,12 +54410,12 @@ fn seed_opencode_plugin<R: tauri::Runtime>(
     match std::fs::read(&dest) {
         Ok(existing) if existing == bytes => {}
         Ok(existing) => {
-            if String::from_utf8_lossy(&existing).contains(OPENCODE_PLUGIN_MARKER) {
+            if opencode_plugin_is_users(&existing) {
+                skipped.push(dest.display().to_string());
+            } else {
                 std::fs::write(&dest, &bytes)
                     .map_err(|e| format!("write {}: {}", dest.display(), e))?;
                 wrote.push(dest.display().to_string());
-            } else {
-                skipped.push(dest.display().to_string());
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -53596,6 +54430,33 @@ fn seed_opencode_plugin<R: tauri::Runtime>(
         Err(e) => return Err(format!("read {}: {}", dest.display(), e)),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod opencode_plugin_state_tests {
+    use super::{opencode_plugin_state_of as state, OpencodePluginState::*};
+
+    const BUNDLE: &[u8] = include_bytes!("../../app/__shell/opencode/bram-plugin.js");
+
+    #[test]
+    fn current_stale_custom_and_missing() {
+        assert_eq!(state(Some(BUNDLE), Some(BUNDLE)), Current);
+        // An older copy of Bram's own plugin still carries the marker, so
+        // Setup refreshes it.
+        let older = [BUNDLE, b"\n// a line this build dropped\n"].concat();
+        assert_eq!(state(Some(&older), Some(BUNDLE)), Stale);
+        let users = b"export default { id: \"mine\", setup() {} };\n";
+        assert_eq!(state(Some(users), Some(BUNDLE)), Custom);
+        assert_eq!(state(None, Some(BUNDLE)), Missing);
+    }
+
+    // A build that can't serve the bundle can't call Bram's copy current, and
+    // a user's file is still theirs.
+    #[test]
+    fn without_the_bundle() {
+        assert_eq!(state(Some(BUNDLE), None), Stale);
+        assert_eq!(state(Some(b"mine"), None), Custom);
+    }
 }
 
 // The files OpenCode should load, relative to the project. The source repo
@@ -76526,12 +77387,23 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     // Setup seeds (.opencode/plugins/bram.js), checked wherever OpenCode is
     // wanted (opencode_plugin_wanted, the rule Setup and opencodeNeedsSetup
     // use), so a project that never runs OpenCode isn't failed for lacking it.
-    let (opencode_wanted, opencode_ok) = project_root(Some(app))
+    // A user's own plugin isn't failed either: Setup keeps it, so no Setup run
+    // could make the check pass. It is reported as `custom` instead
+    // (opencode-review-small-fixes).
+    let (opencode_wanted, opencode_state) = project_root(Some(app))
         .map(|proj| {
-            let wanted = opencode_plugin_wanted(app, &proj);
-            (wanted, !wanted || opencode_plugin_current(app, &proj))
+            (
+                opencode_plugin_wanted(app, &proj),
+                opencode_plugin_state(app, &proj),
+            )
         })
-        .unwrap_or((false, true));
+        .unwrap_or((false, OpencodePluginState::Missing));
+    let opencode_custom = opencode_wanted && opencode_state == OpencodePluginState::Custom;
+    let opencode_ok = !opencode_wanted
+        || matches!(
+            opencode_state,
+            OpencodePluginState::Current | OpencodePluginState::Custom
+        );
     if !opencode_ok {
         failed.push("opencode-registration".to_string());
     }
@@ -76588,7 +77460,7 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                 "extra": extra,
             },
             "codex": { "ok": codex_ok },
-            "opencode": { "ok": opencode_ok, "wanted": opencode_wanted },
+            "opencode": { "ok": opencode_ok, "wanted": opencode_wanted, "custom": opencode_custom },
         },
         "ranAtMs": unix_now_ms(),
     })
@@ -83689,6 +84561,7 @@ fn opencode_permission_asked<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde
     let Some(menu) = opencode_permission_request_to_menu(data).filter(|_| !id.is_empty()) else {
         return;
     };
+    let check = opencode_permission_screen_check(data);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -83709,7 +84582,7 @@ fn opencode_permission_asked<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde
             ),
         );
     }
-    queue_opencode_prompt_claim(app, id, menu);
+    queue_opencode_prompt_claim(app, id, menu, check);
 }
 
 // opencode-question-card: form.created carries `{form}`. A form the card can't
@@ -83737,6 +84610,7 @@ fn opencode_form_created<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde_jso
             return;
         }
     };
+    let check = opencode_question_screen_check(form);
     if bram_trace_enabled() {
         // Not the payload: a form's fields can carry text the user typed
         // before (defaults, earlier answers).
@@ -83749,10 +84623,15 @@ fn opencode_form_created<R: tauri::Runtime>(app: &AppHandle<R>, data: &serde_jso
             ),
         );
     }
-    queue_opencode_prompt_claim(app, id, menu);
+    queue_opencode_prompt_claim(app, id, menu, check);
 }
 
-fn queue_opencode_prompt_claim<R: tauri::Runtime>(app: &AppHandle<R>, id: String, menu: PtyMenu) {
+fn queue_opencode_prompt_claim<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: String,
+    menu: PtyMenu,
+    check: OpencodeScreenCheck,
+) {
     let id_key = format!("{}{}", OPENCODE_PROMPT_CLAIM_PREFIX, id);
     let at_ms = unix_now_ms();
     let (depth, dropped) = {
@@ -83774,6 +84653,8 @@ fn queue_opencode_prompt_claim<R: tauri::Runtime>(app: &AppHandle<R>, id: String
             answered: false,
             answered_label: None,
             answered_at_ms: None,
+            opencode_screen: Some(check),
+            opencode_card_checked: false,
         });
         (q.len(), dropped)
     };
@@ -83794,6 +84675,10 @@ fn queue_opencode_prompt_claim<R: tauri::Runtime>(app: &AppHandle<R>, id: String
 // request. With several, OpenCode shows one at a time and nothing here says
 // which, so a card already up comes down (its keys could answer the other
 // request); the next reply re-runs this for whichever is left.
+// opencode-card-keys-from-screen: and only if the prompt drawn is the one the
+// claim describes (opencode_card_for_screen), which also trims the card to
+// what the prompt shows. A claim that never matches is dropped as `mismatch`,
+// and the terminal asks alone.
 fn schedule_opencode_prompt_display<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id_key: String,
@@ -83803,20 +84688,26 @@ fn schedule_opencode_prompt_display<R: tauri::Runtime>(
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
         let mut question = false;
+        // opencode-card-keys-from-screen: why the prompt drawn doesn't match
+        // the claim. Kept until the wait runs out, since the prompt may still
+        // be painting.
+        let mut mismatch: Option<&'static str> = None;
+        let mut dropped_shown = false;
         let result = loop {
-            let (queued, sole) = menu_hook_claims_cell()
+            let (mine, sole) = menu_hook_claims_cell()
                 .lock()
                 .map(|q| {
                     let mine = q
                         .iter()
-                        .find(|c| c.id_key == id_key && c.at_ms == at_ms && !c.answered);
-                    question = mine.is_some_and(|c| c.menu.tool == OPENCODE_QUESTION_TOOL);
-                    (mine.is_some(), claim_remained_sole(&q, &id_key, at_ms))
+                        .find(|c| c.id_key == id_key && c.at_ms == at_ms && !c.answered)
+                        .map(|c| (c.menu.clone(), c.opencode_screen.clone()));
+                    (mine, claim_remained_sole(&q, &id_key, at_ms))
                 })
-                .unwrap_or((false, false));
-            if !queued {
+                .unwrap_or((None, false));
+            let Some((menu, check)) = mine else {
                 break "gone";
-            }
+            };
+            question = menu.tool == OPENCODE_QUESTION_TOOL;
             let tail = pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS);
             let on_screen = if question {
                 opencode_question_on_screen(&tail)
@@ -83824,13 +84715,44 @@ fn schedule_opencode_prompt_display<R: tauri::Runtime>(
                 opencode_permission_on_screen(&tail)
             };
             if on_screen {
-                break if sole { "shown" } else { "not-sole" };
+                if !sole {
+                    break "not-sole";
+                }
+                match check
+                    .as_ref()
+                    .ok_or("no-check")
+                    .and_then(|c| opencode_card_for_screen(&menu, c, &tail))
+                {
+                    Ok(card) => {
+                        if let Ok(mut q) = menu_hook_claims_cell().lock() {
+                            if let Some(c) = q
+                                .iter_mut()
+                                .find(|c| c.id_key == id_key && c.at_ms == at_ms)
+                            {
+                                c.menu = card;
+                                c.opencode_card_checked = true;
+                            }
+                        }
+                        break "shown";
+                    }
+                    Err(reason) => mismatch = Some(reason),
+                }
             }
             if started.elapsed().as_millis() >= OPENCODE_PROMPT_SEEN_WAIT_MS {
                 if let Ok(mut q) = menu_hook_claims_cell().lock() {
                     q.retain(|c| c.id_key != id_key);
                 }
-                break "unseen";
+                // opencode-card-keys-from-screen: a card already up for this
+                // request (shown for the claim a same-id re-post replaced)
+                // comes down with it; no reply would find it to clear.
+                dropped_shown = menu_hook_displayed_cell()
+                    .lock()
+                    .is_ok_and(|d| hook_display_matches_id(d.as_ref(), &id_key));
+                break if mismatch.is_some() {
+                    "mismatch"
+                } else {
+                    "unseen"
+                };
             }
             std::thread::sleep(std::time::Duration::from_millis(
                 OPENCODE_PROMPT_SEEN_POLL_MS,
@@ -83841,9 +84763,13 @@ fn schedule_opencode_prompt_display<R: tauri::Runtime>(
                 &app,
                 "hook-menu",
                 &format!(
-                    "op=opencode-{}-display result={} id_key={} waited_ms={}",
+                    "op=opencode-{}-display result={}{} id_key={} waited_ms={}",
                     if question { "question" } else { "permission" },
                     result,
+                    match mismatch {
+                        Some(reason) if result == "mismatch" => format!(" reason={}", reason),
+                        _ => String::new(),
+                    },
                     id_key,
                     started.elapsed().as_millis()
                 ),
@@ -83854,6 +84780,7 @@ fn schedule_opencode_prompt_display<R: tauri::Runtime>(
             // Not "claim-coalesced", so selection shows nothing and dismisses
             // any card up.
             "not-sole" => select_hook_claim_display(&app, "opencode-ambiguous"),
+            _ if dropped_shown => select_hook_claim_display(&app, "opencode-dropped"),
             _ => {}
         }
     });

@@ -36644,12 +36644,44 @@ fn delete_session<R: tauri::Runtime>(
 // session_id_is_safe and is passed as one argument, never through a shell.
 fn opencode_delete_session<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let root = project_root(Some(app)).ok_or("could not resolve project root")?;
-    let out = std::process::Command::new("opencode")
-        .args(["session", "delete", id])
+    // windows-opencode-delete-via-npm-shim: npm installs OpenCode as
+    // opencode.cmd, which Command::new cannot run directly (the Windows
+    // matrix's delete got a silent 500, 2026-10-28 19:13Z). The id is
+    // already letters, digits, - and _, so cmd has nothing to interpret.
+    #[cfg(windows)]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd.exe");
+        command.args(["/d", "/c", "opencode", "session", "delete", id]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = std::process::Command::new("opencode");
+        command.args(["session", "delete", id]);
+        command
+    };
+    let out = match command
         .current_dir(&root)
         .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|e| format!("could not run opencode: {}", e))?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "sessions",
+                    &format!(
+                        "op=opencode-delete session={} status=spawn-failed detail={}",
+                        id, e
+                    ),
+                );
+            }
+            return Err(format!("could not run opencode: {}", e));
+        }
+    };
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,

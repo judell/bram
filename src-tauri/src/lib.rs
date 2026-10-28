@@ -9846,11 +9846,44 @@ fn kill_current_claude_turn_with_finished<R: tauri::Runtime>(
     if let Ok(mut g) = last_killed_user_ts_ms_cell().lock() {
         *g = current_ts;
     }
-    let provider = match current_provider(app) {
-        Some(SessionProvider::Codex) => "codex",
-        _ => "claude",
-    };
+    let provider = pty_turn_provider_label(current_provider(app));
     schedule_pty_turn_finished(app, provider.to_string(), current_ts, verb, elapsed_text);
+}
+
+// turn-finished-names-opencode (2026-10-28 07:23:57Z): this was "Codex, else
+// Claude", written for two agents, so an OpenCode turn ending in the terminal
+// was announced as Claude's and the header's switcher moved to Claude while
+// OpenCode kept running. Unknown keeps the old Claude default.
+fn pty_turn_provider_label(provider: Option<SessionProvider>) -> &'static str {
+    match provider {
+        Some(SessionProvider::Codex) => "codex",
+        Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Claude) | None => "claude",
+    }
+}
+
+#[cfg(test)]
+mod pty_turn_provider_label_tests {
+    use super::*;
+
+    // Every agent names itself; an exhaustive match keeps a fourth from
+    // falling through to Claude without a compile error.
+    #[test]
+    fn each_agent_names_itself() {
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Claude)),
+            "claude"
+        );
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Codex)),
+            "codex"
+        );
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Opencode)),
+            "opencode"
+        );
+        assert_eq!(pty_turn_provider_label(None), "claude");
+    }
 }
 
 fn schedule_pty_turn_finished<R: tauri::Runtime>(
@@ -22149,6 +22182,113 @@ fn session_title_by_id<R: tauri::Runtime>(
         // the group line, and group naming compared against it).
         SessionProvider::Opencode => opencode_session_title_from_db(id)
             .or_else(|| claude_session_title(&path).ok().flatten()),
+    }
+}
+
+// opencode-model-from-database (2026-10-28 07:24Z): the footer said
+// "Deepseek" while OpenCode ran GPT-5.6 Luna. The model came from the tail of
+// Bram's export, which lags OpenCode until discovery re-exports it. Read the
+// newest assistant message's model from OpenCode's database instead, like the
+// title (opencode_session_title_from_db); the export tail is the fallback.
+fn main_session_model<R: tauri::Runtime>(app: &AppHandle<R>, session_path: &Path) -> String {
+    let is_opencode = opencode_export_dir(app)
+        .ok()
+        .is_some_and(|dir| is_opencode_export_path(session_path, &dir));
+    if is_opencode {
+        let sid = session_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if let Some(model) =
+            opencode_open_db().and_then(|conn| opencode_session_model_in(&conn, sid))
+        {
+            return model;
+        }
+    }
+    st_last_session_model(session_path)
+}
+
+// The model id of the session's newest assistant message that names one.
+fn opencode_session_model_in(conn: &rusqlite::Connection, sid: &str) -> Option<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT data FROM session_message WHERE session_id = ?1 AND type = 'assistant' \
+             ORDER BY seq DESC LIMIT 50",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map(rusqlite::params![sid], |r| r.get::<_, String>(0))
+        .ok()?;
+    for data in rows.flatten() {
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&data) else {
+            continue;
+        };
+        if let Some(m) = d
+            .pointer("/model/id")
+            .and_then(|v| v.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            return Some(m.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod opencode_model_tests {
+    use super::opencode_session_model_in;
+
+    // session_message in OpenCode 2.1.4's shape: the columns the export and
+    // this lookup read.
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (id TEXT, session_id TEXT, seq INTEGER, type TEXT, data TEXT);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn add(conn: &rusqlite::Connection, sid: &str, seq: i64, kind: &str, data: &str) {
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, seq, type, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![format!("m{}", seq), sid, seq, kind, data],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_newest_assistant_model_wins_and_other_sessions_dont_leak() {
+        let conn = db();
+        add(
+            &conn,
+            "ses_a",
+            1,
+            "assistant",
+            r#"{"model":{"id":"deepseek-v4.1-flash-free"}}"#,
+        );
+        add(&conn, "ses_a", 2, "user", r#"{"text":"switch models"}"#);
+        add(
+            &conn,
+            "ses_a",
+            3,
+            "assistant",
+            r#"{"model":{"id":"gpt-5.6-luna"}}"#,
+        );
+        // A newer assistant record with no model doesn't hide the last one that has it.
+        add(&conn, "ses_a", 4, "assistant", r#"{"content":[]}"#);
+        add(
+            &conn,
+            "ses_b",
+            9,
+            "assistant",
+            r#"{"model":{"id":"other-model"}}"#,
+        );
+        assert_eq!(
+            opencode_session_model_in(&conn, "ses_a").as_deref(),
+            Some("gpt-5.6-luna")
+        );
+        assert_eq!(opencode_session_model_in(&conn, "ses_none"), None);
     }
 }
 
@@ -35557,7 +35697,7 @@ fn latest_session_path<R: tauri::Runtime>(
     let path = match provider {
         SessionProvider::Claude => latest_claude_session_path(app)?,
         SessionProvider::Codex => latest_codex_session_path(app)?,
-        SessionProvider::Opencode => latest_opencode_session_path(app)?,
+        SessionProvider::Opencode => current_opencode_session_path(app)?,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -35582,8 +35722,29 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
     match provider {
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
-        SessionProvider::Opencode => latest_opencode_session_path(app),
+        SessionProvider::Opencode => current_opencode_session_path(app),
     }
+}
+
+// opencode-model-from-database (2026-10-28 07:31Z): "the current OpenCode
+// session" is the one Bram launched (its live-session record), not OpenCode's
+// most recently updated one. The footer named "v0.8.0 burndown" from the
+// Sessions list but took its model from the roster, which picked "GO
+// subscription help", 33 s newer and on DeepSeek. Bram chooses the session
+// (docs/decisions/2026-10-27-bram-chooses-the-session.md); most-recent is only
+// the fallback when Bram hasn't launched one.
+fn current_opencode_session_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<PathBuf>, String> {
+    let live = opencode_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    if let Some(path) = live.and_then(|id| session_path_for_id(app, SessionProvider::Opencode, &id))
+    {
+        return Ok(Some(path));
+    }
+    latest_opencode_session_path(app)
 }
 
 fn system_time_ms(t: std::time::SystemTime) -> Option<i64> {
@@ -41705,7 +41866,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         serde_json::to_vec(&serde_json::json!({
             "sid": sid,
             "agents": [],
-            "mainModel": st_last_session_model(&session_path),
+            "mainModel": main_session_model(app, &session_path),
         }))
         .map_err(|e| e.to_string())
     };
@@ -41760,7 +41921,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     let body = serde_json::json!({
         "sid": sid,
         "agents": agents,
-        "mainModel": st_last_session_model(&session_path),
+        "mainModel": main_session_model(app, &session_path),
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }

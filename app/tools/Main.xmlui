@@ -679,7 +679,7 @@
     <NavLink label="Commits" to="/commits" tooltip="Recent commits, and pushing them" />
     <NavLink label="Queue" to="/queue" tooltip="Notes you&apos;re holding to send the agent when it&apos;s free" />
     <NavLink label="Search" to="/search" tooltip="Search the project&apos;s history: sessions, commits, issues, worklist" />
-    <NavLink label="Awaiting You" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
+    <NavLink label="Alerts" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
     <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
     <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
     <NavLink label="Settings" to="/settings" tooltip="Project and personal settings for Bram" />

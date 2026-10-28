@@ -798,7 +798,7 @@ build?"; thread and model give evidential standing (an orchestrator
 held the design discussion, a subagent saw only its brief) and
 attribution; os and machine distinguish sessions of the same owner's
 same agent across machines. The hostname also makes the signature
-machine-readable provenance: Awaiting You classifies a same-account
+machine-readable provenance: Alerts classifies a same-account
 comment by it — unsigned means the human typed it, this host's name
 means this machine's agent, any other means your agent elsewhere moved.
 
@@ -821,7 +821,7 @@ the session; the reminder carries it across.
   (`reminder-revendor-after-xmlui-release`); after the prefix the
   ordinary id rules apply. When the gate is a **date**, put it at the
   end of the id (`reminder-rerun-census-after-2026-09-19`). The rule is
-  mechanical on purpose: surfaces such as the Awaiting You inbox key on
+  mechanical on purpose: surfaces such as the Alerts inbox key on
   the prefix. Ids are immutable, so an older reminder keeps its name;
   the only conversion is the user Dropping it and you re-proposing it
   verbatim under a `reminder-` id. Don't push that, but say plainly

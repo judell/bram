@@ -163,7 +163,7 @@ someone else's commit.
 A **reminder** carries an action already decided but gated on an external
 condition (an upstream merge, a release, another agent's verdict) past the
 end of this session. Its id **begins with `reminder-`**; surfaces such as
-the Awaiting You inbox key on that prefix.
+the Alerts inbox key on that prefix.
 
 - **Proposing, approving or dropping a reminder** → read `.claude/bram-reference/worklist-mechanics.md` (§Reminder items).
 

@@ -278,21 +278,28 @@ registration. Verified that way for this change: removing `Bash` from a demo
 instance's registration made the self-test report `missing: ["Bash"]`.
 OpenCode's registration is the plugin Setup seeds, `.opencode/plugins/bram.js`,
 and its cases run the `opencode-worklist` hook the plugin calls
-(opencode-guard-selftest). Verified the same way on 2026-10-26: moving the
-plugin out of a demo instance made the self-test report
-`failed: ["opencode-registration"]`, a Setup run reseeded it byte-identical,
-and the self-test went green again. There are 17 cases: 15 from that change,
-plus two OpenCode MCP cases from opencode-mcp-guard (an uncovered and a
-covered `write_file`). They're shaped as the plugin sends them: OpenCode 2.1.4 runs MCP tools
-through code mode, and each call reaches the plugin as `<server>_<tool>`. The
-plugin names the server when the tool's namespace is one `api.mcp.list()`
-reports, because built-ins have namespaces too. The guard then judges the call
-as `mcp__<server>__<tool>`, in Claude's MCP branch. That lookup fails open: if
-`api.mcp.list()` can't resolve the namespace, the call reaches the guard as an
-unknown `<server>_<tool>` tool, which is allowed, the same as before
-opencode-mcp-guard (#453 review). Code mode's `execute` itself
-couldn't write a file through Node's `fs` when tested, so the guard sees every
-write as a tool call.
+(opencode-guard-selftest). Verified the same way on 2026-10-26: every case
+passed, moving the plugin out of a demo instance made the self-test report
+`failed: ["opencode-registration"]`, and a Setup run then reseeded it
+byte-identical and the self-test went green again. A `bram.js` without Setup's
+`bram-managed` marker is the user's own plugin, which Setup keeps. The
+self-test doesn't fail it, since no Setup run could change it, and reports
+`custom: true` instead; Bram's checks don't run there
+(opencode-review-small-fixes). opencode-mcp-guard added two OpenCode MCP
+cases, an uncovered and a covered `write_file`, for 17 cases in all. They're
+shaped as the plugin sends them: OpenCode 2.1.4 runs MCP tools through code
+mode, and each call reaches the plugin as `<server>_<tool>`. The plugin names
+the server when the tool's namespace is one `api.mcp.list()` reports, because
+built-ins have namespaces too. The guard then judges the call as
+`mcp__<server>__<tool>`, in Claude's MCP branch. If that lookup throws, the
+plugin sends the call under its OpenCode name, which the guard allows as a tool
+it has no rule for, the same as before opencode-mcp-guard (#453 review). That
+was chosen so a failing lookup can't block every tool call, and it leaves that
+one call outside the MCP branch. The lookup is cheap:
+timed from a plugin in 2.1.4 on 2026-10-27, about 0.01 ms a call (40 calls,
+the slowest 0.03 ms), and 2.5–9 ms for the first call after a project loads.
+Code mode's `execute` itself couldn't write a file through Node's `fs` when
+tested, so the guard sees every write as a tool call.
 
 ## Ranked action plan
 

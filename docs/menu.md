@@ -86,40 +86,68 @@ OpenCode has no hook for its permission prompt. Its event bus does:
 `permission.asked`, then `permission.replied` once the prompt is answered.
 Bram's seeded plugin (`app/__shell/opencode/bram-plugin.js`) forwards both
 for this project's top-level sessions to `/__opencode/event`
-(opencode-permission-menu). The plugin runs in OpenCode's shared background
-service, which can be days old. A green `opencode-registration` after Setup
-says the plugin *file* is current, not that the running service loaded it, so
-after an upgrade the first session may show no cards until that service
-restarts. The host builds the menu
+(opencode-permission-menu). The host builds the menu
 (`opencode_permission_request_to_menu`) and queues it as a claim keyed by
 OpenCode's `per_…` request id. A reply removes the claim, and so does the
 end of the turn.
 
 Two things differ from the hook path:
 
-- **No token.** The plugin runs in OpenCode's shared background service
-  (`opencode serve --service`), started by whichever OpenCode ran first, so it
-  can't carry this launch's `BRAM_MENU_TOKEN`. Instead the card waits until
-  Bram's own terminal draws OpenCode's permission prompt (the
-  `opencode-permission` shape) and is dropped if that doesn't happen within
-  5 s. This also keeps a prompt from another OpenCode window on the same
-  project out of the pane. It doesn't authenticate the payload:
-  `/__opencode/event` takes unauthenticated loopback POSTs, and each row's
-  answer keys come from the posted JSON. So a same-user local process, or an
-  agent in the project with a shell and the loopback port, could post a
-  crafted `permission.asked` while a real prompt is up and relabel the rows
-  (a "Reject" row whose keys are Allow once's). That is the same-user
-  loopback residual [security.md](security.md) accepts under #113 (H6), here
-  with keystrokes at stake. The follow-up is to derive each row's position
-  from the terminal's own drawn row, making the payload advisory (#453
-  review).
-- **No grid.** OpenCode draws its options in one row (Allow once, Always
-  allow, Reject) with no numbered cursor for the grid to join, so the claim's
-  own options are shown. Each option's keys are Right × its position, then
-  Enter, which OpenCode 2.1.4 accepts as one write. With two requests open,
-  nothing says which one the terminal shows, and a card's keys answer
-  whichever it is. So a second request takes the card down, and the one left
-  shows once the other is answered.
+- **No token, so the payload only describes the request.**
+  `/__opencode/event` is unauthenticated. The plugin runs in OpenCode's shared
+  background service (`opencode serve --service`), started by whichever
+  OpenCode ran first, so it can't carry this launch's `BRAM_MENU_TOKEN`. Any
+  same-user process that can read `resources/.bram-port` can post to the
+  route, an agent working in the project included. That is the same-user
+  loopback residual [security.md](security.md) accepts under H6 (#113). When
+  each row's keys came from the posted JSON, a crafted `permission.asked` sent
+  while a real prompt was up could relabel its rows: a "Reject" row whose keys
+  were Allow once's (#453 review). So neither what a click sends nor what the
+  card says is taken from the payload alone (opencode-card-keys-from-screen):
+  - The card waits until Bram's own terminal draws OpenCode's permission
+    prompt (the `opencode-permission` shape), and is dropped as `unseen` if
+    that doesn't happen within 5 s. This also keeps a prompt from another
+    OpenCode window on the same project out of the pane.
+  - It then shows only if the prompt drawn is the one the payload describes
+    (`opencode_card_for_screen`), and it names only what the prompt draws.
+    Each resource is checked where OpenCode 2.1.4 lays it out for the action:
+    - a shell tool call's commands must make up its `$` line, apart from the
+      punctuation joining them. A line with a `cd` in it gets no card, since
+      OpenCode leaves `cd` out of the request's resources;
+    - resources listed as `- …` lines must be exactly the payload's;
+    - an edit's title must begin `→ Edit <first path>`, and a read's must be
+      `→ Read <path>`;
+    - an external directory's patterns must be its lines.
+
+    A body cut off by the prompt's height (15 rows at most; at 24 columns a
+    long command keeps about 60 characters) is named as far as it is drawn,
+    then "…". Any other action, or a prompt that doesn't match, gets no card
+    (`result=mismatch`), and the terminal asks alone. Until its card is
+    checked, a claim can't be picked for display by any other path. A claim
+    dropped this way also takes down a card already up for the same request,
+    so a re-post with a request's id can't leave a card standing that no reply
+    will clear.
+  - What this proves: the card describes the prompt on screen, so it can't
+    name a command that prompt doesn't. What it doesn't prove: who posted the
+    payload; an edit's diff, which comes from the payload (only the path is
+    checked, as the start of the title); and the scope "Always allow" would
+    store, which comes from the payload's save patterns, because OpenCode
+    states it only while that answer is highlighted.
+- **No grid, and keys that don't depend on the payload.** OpenCode draws its
+  answers in one row (Allow once, Always allow, Reject) with no numbered
+  cursor for the grid to join, so the claim's own options are shown. Their
+  keys follow the prompt:
+  - Allow once is Enter, on the row OpenCode's selection starts on.
+  - Reject is Esc, which OpenCode answers as Reject whichever rows are drawn.
+    Esc goes through `pty_menu_clear`'s displayed-menu branch like any
+    answer, so it fails the in-flight approval closed, as a rejection should.
+  - Always allow is Right then Enter, offered only when the prompt draws it
+    second.
+
+  OpenCode 2.1.4 takes each as one write. With two requests open, nothing says
+  which one the terminal shows, and a card's keys answer whichever it is. So a
+  second request takes the card down, and the one left shows once the other
+  is answered.
 
 **Questions** (opencode-question-card). OpenCode's question tool asks through
 a form: `form.created`, then `form.replied` or `form.cancelled`, forwarded the
@@ -127,11 +155,26 @@ same way. `opencode_form_to_menu` builds a card for a one-question form of
 up to nine choices, keyed by the form's `frm_…` id. It waits for the form's
 footer ("↑↓ select enter submit esc dismiss", the `opencode-question` shape),
 and each choice answers with its digit, which OpenCode takes at once whichever
-row is highlighted. Free text ("Type your own answer") stays in the terminal,
+row is highlighted. The digits are absolute, but the labels come from the
+payload, so the card shows only if the form drawn asks the card's question
+with the card's choices, in order, each as "`<n>. <label>`" over its
+description (`opencode_form_on_screen`, opencode-card-keys-from-screen).
+Otherwise there's no card (`reason=choices-differ`). Free text ("Type your own answer") stays in the terminal,
 and the card says so: Claude's card types free text through pane code that is
 AskUserQuestion's own. A form with several questions, a multi-select, or an
 MCP server's form gets no card, but the shape still holds pane sends while it
 is drawn.
+
+**If cards stop appearing.** The self-test's `opencode-registration` check
+proves the plugin file is current, not that the running service has loaded
+it, and that service can be days old (#453 review). OpenCode 2.1.4's service
+watches the file: in a scratch project it re-ran an edited plugin's `setup`
+153 ms after the edit, with no OpenCode window attached
+(opencode-review-small-fixes, 2026-10-27). Nothing promises that in other
+versions, and an upgrade doesn't restart a service already running. If cards
+or the edit warning stop appearing after Setup refreshes the plugin or
+OpenCode is upgraded, run `opencode service restart`. The service is shared
+by every OpenCode window on the machine, not only this project's.
 
 ### `menus.parseAndDisplay` is off by default
 

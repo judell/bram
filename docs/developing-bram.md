@@ -376,6 +376,48 @@ can't go (hard freezes, remote machines, semantic attribution) — but
 the ordering lesson stands: category attribution before semantic
 attribution.
 
+### Standing health check: `scripts/ui-health.py`
+
+Run it periodically, and whenever the window feels slow. It's read-only and
+needs no instance:
+
+```sh
+python3 -I scripts/ui-health.py                          # the live trace
+python3 -I scripts/ui-health.py --trend 2026-10-27 2026-10-28   # one row per day
+```
+
+It reports the trace's responsiveness gauges for a window:
+
+- the pane: heartbeat drift by focus state, long tasks, input latency by route
+- the parent: `xterm-liveness` stalls and slow `terminal-write-batch` writes
+- transcript projection times
+- the slowest host routes
+
+It also splits spikes by whether an agent turn was running. For each idle
+spike, it lists the host emits and routes in the 2.5 seconds before it. That
+correlation is the cheap first step: it names *what else was happening*.
+When it names nothing obvious, record a Timeline (above) to find out *where*
+the main thread's time went.
+
+The baseline on Jon's machine:
+
+- **After the 2026-07-22 fix** (`250503cf`): heartbeat avg 6–14 ms, max
+  81–141 ms, no spikes.
+- **July to October daily trend:** 0.3–3 focused spikes over 1 s per active
+  hour, input-latency p50 104–185 ms.
+
+A run well above that is a finding. Record the before and after with this
+script, so a fix's claim has numbers.
+
+The first standing run (2026-10-29) found 89 spikes in 23 minutes, against
+4 and 0 on either side. The idle-spike column named `subagents-changed` →
+`/__agents` for all 31 idle spikes. The writes came from another project's
+subagents: the watcher took any `subagents/` path under
+`~/.claude/projects/` as this project's (`foreign-subagent-writes-refetch-roster`).
+A real subagent run in this project still costs up to a second per roster
+refetch (the 2026-10-28 04:00 hour had 141 spikes). That's open, and it
+starts with a Timeline.
+
 ## Build vs. reload boundary
 
 **Settled 2026-08-26 (the helpers.js-needs-rebuild mantra was wrong,

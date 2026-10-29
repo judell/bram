@@ -62579,6 +62579,16 @@ fn is_subagent_transcript_path(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "subagents")
 }
 
+// foreign-subagent-writes-refetch-roster: the watcher sees every project's
+// sessions (it registers the stable ~/.claude/projects/ parent, #212), so a
+// subagent write only concerns this window when it's under this project's own
+// sessions leaf. Without the leaf test, another project's four simulated
+// subagents drove 748 roster refetches and 89 >1s heartbeat spikes here in
+// 23 minutes (2026-10-29 health check).
+fn is_own_subagent_transcript_path(path: &Path, sessions_dir: Option<&Path>) -> bool {
+    is_subagent_transcript_path(path) && sessions_dir.map_or(false, |sd| path.starts_with(sd))
+}
+
 // JSONL-driven turn-end detection (#91 follow-up, broadened by #153).
 // Durable session output is the primary independent completion signal:
 // Claude writes assistant `stop_reason:"end_turn"`; Codex writes
@@ -66343,9 +66353,43 @@ mod turn_completion_tests {
         claude_jsonl_completion_decision, claude_jsonl_user_after_nonfinal_assistant,
         codex_jsonl_completion_decision, codex_killed_turn_suppresses_jsonl_working,
         codex_latest_user_message_ts_ms, codex_session_has_real_user_activity,
-        is_subagent_transcript_path, jsonl_completion_provider_for_path,
+        is_own_subagent_transcript_path, is_subagent_transcript_path,
+        jsonl_completion_provider_for_path,
     };
     use std::path::Path;
+
+    #[test]
+    fn only_this_projects_subagent_writes_concern_this_window() {
+        let leaf = Path::new("/home/user/.claude/projects/-home-user-bram");
+        assert!(is_own_subagent_transcript_path(
+            Path::new("/home/user/.claude/projects/-home-user-bram/sid/subagents/agent-x.jsonl"),
+            Some(leaf)
+        ));
+        // Another project's subagent, under the same watched parent.
+        assert!(!is_own_subagent_transcript_path(
+            Path::new(
+                "/home/user/.claude/projects/-private-tmp-bram-demo/sid/subagents/agent-demo1.jsonl"
+            ),
+            Some(leaf)
+        ));
+        // A sibling leaf that merely shares the prefix text.
+        assert!(!is_own_subagent_transcript_path(
+            Path::new(
+                "/home/user/.claude/projects/-home-user-bram-demo/sid/subagents/agent-x.jsonl"
+            ),
+            Some(leaf)
+        ));
+        // This project's own non-subagent transcript.
+        assert!(!is_own_subagent_transcript_path(
+            Path::new("/home/user/.claude/projects/-home-user-bram/sid.jsonl"),
+            Some(leaf)
+        ));
+        // No sessions leaf known: nothing is ours.
+        assert!(!is_own_subagent_transcript_path(
+            Path::new("/home/user/.claude/projects/-home-user-bram/sid/subagents/agent-x.jsonl"),
+            None
+        ));
+    }
 
     #[test]
     fn subagent_transcript_classification_uses_directory_not_filename() {
@@ -88116,10 +88160,9 @@ pub fn run() {
                     // next moved (2026-07-05: second chip missing until the
                     // user's next turn). The footer roster, Transcript
                     // subagent viewport, and SubagentPeek refetch on this.
-                    let is_subagent_event = event
-                        .paths
-                        .iter()
-                        .any(|p| is_subagent_transcript_path(p));
+                    let is_subagent_event = event.paths.iter().any(|p| {
+                        is_own_subagent_transcript_path(p, claude_sessions_dir.as_deref())
+                    });
                     if is_subagent_event {
                         trace_dispatch("subagents", &[]);
                         // watcher-coalesce: defer to the trailing-edge fire.

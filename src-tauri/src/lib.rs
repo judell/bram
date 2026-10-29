@@ -4620,6 +4620,17 @@ struct DismissedMenu {
 // value so the parent can stamp grid reports with exact provenance.
 static PTY_OUT_OFFSET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// issue-457: which pty_spawn is current. Each spawn takes the next value; its
+// reader and ticker threads stop when it moves on, so a replaced terminal's
+// in-flight output can't touch the shared turn, status, menu and offset
+// state. Deliberately not AGENT_LAUNCH_GENERATION, which moves on every agent
+// launch or switch inside one terminal.
+static PTY_SPAWN_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn pty_spawn_is_current(generation: u64) -> bool {
+    PTY_SPAWN_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation
+}
+
 // The post-dismiss fence decision, pure so `cargo test` exercises it
 // against the live specimens before a commit (causal-menu-staleness +
 // flicker-robust-absence-fence). Inputs: whether the grid has reported
@@ -19201,6 +19212,18 @@ fn pty_spawn(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // issue-457: a reload spawns again. Retire the terminal being replaced
+    // first: move the generation on (its reader and ticker stop), hang up its
+    // shell and agent, and clear the state its dead turn leaves behind.
+    let generation = PTY_SPAWN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let replaced = match state.0.lock() {
+        Ok(mut g) => g.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+    if let Some(old) = replaced {
+        hangup_replaced_pty(&app, old);
+        reset_state_after_pty_replace(&app);
+    }
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -19334,6 +19357,16 @@ fn pty_spawn(
             let mut guard_link_last_ensure_ms: i64 = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
+                // issue-457: one ticker per terminal. A reload's spawn
+                // replaced this one, so stop rather than run beside it.
+                if !pty_spawn_is_current(generation) {
+                    append_bram_trace_line(
+                        &app_for_throughput,
+                        "pty",
+                        &format!("op=stale-ticker-exit generation={}", generation),
+                    );
+                    break;
+                }
                 {
                     let now = unix_now_ms();
                     if now.saturating_sub(guard_link_last_ensure_ms) >= 60_000 {
@@ -19754,6 +19787,22 @@ fn pty_spawn(
                     break;
                 }
                 Ok(n) => {
+                    // issue-457: a replaced terminal's reader drops what it
+                    // still holds. Everything below moves shared state (the
+                    // shell-foreground record, turn and header status, the
+                    // pending cancel, the frame offset), so the check comes
+                    // first.
+                    if !pty_spawn_is_current(generation) {
+                        append_bram_trace_line(
+                            &app_for_thread,
+                            "pty",
+                            &format!(
+                                "op=stale-reader-exit generation={} dropped_bytes={}",
+                                generation, n
+                            ),
+                        );
+                        break;
+                    }
                     // #transcript-nav-activity-sparkline: meter output volume
                     // for the activity row (unconditional — not gated on
                     // tracing). The ticker thread converts this to intensity.
@@ -88605,6 +88654,21 @@ fn hangup_pty_jobs<R: tauri::Runtime>(app: &AppHandle<R>, via: &str) {
         guard.take()
     };
     let Some(pty) = taken else { return };
+    let groups = sighup_pty_groups(app, &pty, "exit-hangup", via);
+    kill_surviving_pty_groups(app, &groups, "exit-kill", via);
+    drop(pty);
+}
+
+// issue-405 / issue-457: SIGHUP the terminal's foreground group and the
+// shell's group, never Bram's own group, 0 or 1. Returns the groups signalled
+// so the caller can SIGKILL survivors after a grace.
+#[cfg(unix)]
+fn sighup_pty_groups<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pty: &PtyState,
+    op: &str,
+    via: &str,
+) -> Vec<libc::pid_t> {
     let own = unsafe { libc::getpgrp() };
     let fg = pty.master.process_group_leader();
     let shell_pgid = pty
@@ -88625,10 +88689,23 @@ fn hangup_pty_jobs<R: tauri::Runtime>(app: &AppHandle<R>, via: &str) {
         app,
         "pty",
         &format!(
-            "op=exit-hangup via={} shell_pid={:?} fg_pgid={:?} groups={:?}",
-            via, pty.shell_pid, fg, groups
+            "op={} via={} shell_pid={:?} fg_pgid={:?} groups={:?}",
+            op, via, pty.shell_pid, fg, groups
         ),
     );
+    groups
+}
+
+// The grace after a SIGHUP: up to 300 ms for the groups to exit, then
+// SIGKILL whatever is left. Blocking, so the replace path runs it off the
+// main thread.
+#[cfg(unix)]
+fn kill_surviving_pty_groups<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    groups: &[libc::pid_t],
+    op: &str,
+    via: &str,
+) {
     let alive = |g: libc::pid_t| unsafe { libc::killpg(g, 0) == 0 };
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
     while std::time::Instant::now() < deadline && groups.iter().any(|g| alive(*g)) {
@@ -88644,16 +88721,65 @@ fn hangup_pty_jobs<R: tauri::Runtime>(app: &AppHandle<R>, via: &str) {
         append_bram_trace_line(
             app,
             "pty",
-            &format!("op=exit-kill via={} groups={:?}", via, survivors),
+            &format!("op={} via={} groups={:?}", op, via, survivors),
         );
     }
-    drop(pty);
+}
+
+// issue-457: a parent-window reload calls pty_spawn again. The shell it
+// replaces (and the agent in its foreground) must not keep running: its
+// reader would keep moving the one process-wide shell-foreground record, and
+// a resumed session would have two writers. SIGHUP now; the grace and any
+// SIGKILL run on their own thread, because pty_spawn is a sync command on the
+// main thread and a 300 ms wait would freeze the reloading window.
+#[cfg(unix)]
+fn hangup_replaced_pty<R: tauri::Runtime>(app: &AppHandle<R>, pty: PtyState) {
+    let groups = sighup_pty_groups(app, &pty, "replace-hangup", "pty-spawn");
+    let app = app.clone();
+    thread::spawn(move || {
+        kill_surviving_pty_groups(&app, &groups, "replace-kill", "pty-spawn");
+        drop(pty);
+    });
 }
 
 // Windows: closing the pseudo-console ends its attached processes; left
 // alone here until checked on Windows (issue-405 stays open for that).
 #[cfg(not(unix))]
 fn hangup_pty_jobs<R: tauri::Runtime>(_app: &AppHandle<R>, _via: &str) {}
+
+#[cfg(not(unix))]
+fn hangup_replaced_pty<R: tauri::Runtime>(_app: &AppHandle<R>, pty: PtyState) {
+    drop(pty);
+}
+
+// issue-457: the replaced shell's turn died with it, and nothing will report
+// its end (no Stop, no end_turn). Clear what it leaves behind so the reloaded
+// pane doesn't open on a spinner for a turn that no longer exists: the
+// execution claim (the authorization stays, so the next turn re-arms it),
+// the header's working status and turn state, and the shell-foreground
+// record, which the new shell's first prompt marker re-establishes.
+fn reset_state_after_pty_replace<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some((ids, _)) = inflight_claim_ids_and_claimed_at(app) {
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!(
+                "op=clear-at-pty-replace ids={}",
+                serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+            ),
+        );
+        clear_inflight_claim_sentinel(app, &ids);
+    }
+    let provider = match current_provider(app) {
+        Some(SessionProvider::Codex) => "codex",
+        Some(SessionProvider::Opencode) => "opencode",
+        _ => "claude",
+    };
+    agent_status_emit_finished(app, provider, None, None, "pty-replace");
+    if let Ok(mut g) = shell_foreground_cell().lock() {
+        *g = (ShellForeground::default(), Vec::new());
+    }
+}
 
 // issue-405: route SIGTERM, SIGINT and SIGHUP through shutdown_children.
 // Without a handler the default action ends the process at once and no

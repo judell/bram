@@ -5052,18 +5052,21 @@ window.__bramClaimantCell = function (item, rowId) {
 // and baffling for a user looking at the file they just made.
 window.__bramIgnoredDeclaredPaths = function (item) {
   return ((item && item.changedFiles) || [])
-    .filter(function (f) { return f && f.status === "ignored"; })
+    .filter(function (f) { return f && f.status === "ignored" && !f.ignoredSummary; })
     .map(function (f) { return f.path; });
 };
 window.__bramIgnoredDeclaredPhrase = function (paths) {
   if (!paths || !paths.length) return "";
   var more = paths.length > 1 ? " and " + (paths.length - 1) + " more" : "";
-  return paths[0] + more + " exist" + (paths.length > 1 ? "" : "s") + ", but .gitignore hides " +
-    (paths.length > 1 ? "them" : "it") + " from git";
+  return paths[0] + more + " stay" + (paths.length > 1 ? "" : "s") + " local (ignored by git)";
 };
 
 window.__bramFileChangesCell = function (rec, rowBegun) {
-  if (rec && rec.status === "ignored") return "hidden by .gitignore";
+  if (rec && rec.ignoredSummary) {
+    if (rec.listingIncomplete) return rec.ignoredMore ? "+" + rec.ignoredMore + " or more (ignored)" : "more files not listed";
+    if (rec.ignoredMore) return "+" + rec.ignoredMore + " more (ignored)";
+  }
+  if (rec && rec.status === "ignored") return "stays local (ignored)";
   if (!rec || rec.status === "unchanged") return "";
   var suffix =
     rec.status === "new" ? " (new)" : rec.status === "deleted" ? " (deleted)" : "";
@@ -5196,8 +5199,7 @@ window.__bramFileChangesExplain = function (rec, item, items, claim) {
   var title = "Changes in " + path;
   var lines = [];
   if (rec && rec.status === "ignored") {
-    lines.push("**" + path + "** exists on disk, but `.gitignore` hides it from git, so git sees no change and there is nothing to commit.");
-    lines.push("To commit it, add a `!` exception to `.gitignore`, or force-stage it (`git add -f`).");
+    lines.push("**" + path + "** stays local because git ignores it. Its contents can be previewed, but it does not count toward planned changes or Commit.");
     return { title: title, body: lines.join("\n\n") };
   }
   if (!__bramNonzero(rec)) {
@@ -5273,6 +5275,7 @@ window.__bramFileSharedExplain = function (rec, item, items, claim) {
 };
 
 window.__bramSharedWithBegun = function (file, items, claim) {
+  if (file && file.ignored) return [];
   var sharers = (file && file.sharedWith) || [];
   // "done": a sharer that actually wrote lines here.
   var owners = file && window.__bramMembershipOwners(file.path);
@@ -5294,6 +5297,7 @@ window.__bramSharedWithBegun = function (file, items, claim) {
 // Start decision still needs them, and the row marks the tense (`· planned`)
 // so the credit lie d1798ca fixed cannot return through this door.
 window.__bramSharedWithPlanned = function (file, items, claim) {
+  if (file && file.ignored) return [];
   var sharers = (file && file.sharedWith) || [];
   // "planned": everyone who declares it but has written nothing here yet,
   // begun or not, so a begun-but-idle declarant appears in one column.
@@ -16207,6 +16211,16 @@ window.__bramDiffForPath = function (item, path) {
   return null;
 };
 
+// Ignored files have no git diff. Build a new-file preview only after the
+// existing bounded local-file-preview route has read the expanded file.
+window.__bramIgnoredFilePatch = function (path, preview) {
+  if (!preview || !preview.ok || !preview.content) return "";
+  var text = String(preview.content).replace(/\r\n/g, "\n");
+  var lines = text.replace(/\n$/, "").split("\n");
+  return "diff --git a/" + path + " b/" + path + "\nnew file mode 100644\n--- /dev/null\n+++ b/" + path +
+    "\n@@ -0,0 +1," + lines.length + " @@\n" + lines.map(function (line) { return "+" + line; }).join("\n") + "\n";
+};
+
 // Expansion is keyed by "<itemId>::<path>", never by position. ExpandableItem's
 // own state is positional, so inside a loop whose membership changes -- and this
 // list changes as work proceeds -- an open row silently transfers to whatever
@@ -16421,7 +16435,10 @@ window.__bramDiffToggleTooltip = function (keys, itemId, path) {
   return window.__bramDiffExpanded(keys, itemId, path) ? "Hide this file's diff" : "Show this file's diff";
 };
 window.__bramDiffDisclosure = function (keys, itemId, path, begun, item) {
-  if (!begun || !window.__bramDiffForPath(item, path)) return "";
+  var ignored = ((item && item.changedFiles) || []).some(function (f) {
+    return f && f.path === path && f.ignored && !f.ignoredSummary;
+  });
+  if (!ignored && (!begun || !window.__bramDiffForPath(item, path))) return "";
   // Full-size ▼ / ▶, sized in markup to match the row's checkbox (the small
   // ▾ / ▸ read as specks: "They need to be as big as the checkbox").
   return window.__bramDiffExpanded(keys, itemId, path) ? "\u25BC" : "\u25B6";

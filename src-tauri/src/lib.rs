@@ -76379,6 +76379,9 @@ fn route_request<R: tauri::Runtime>(
         }
         let board_started = std::time::Instant::now();
         let change_index = worklist_change_index(app, &union_paths);
+        if let Some(idx) = change_index.as_ref() {
+            trace_worklist_ignored_entries(app, &doc, idx);
+        }
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
@@ -76670,6 +76673,9 @@ fn route_request<R: tauri::Runtime>(
                     continue;
                 };
                 for rec in records {
+                    if rec.get("ignored").and_then(|v| v.as_bool()) == Some(true) {
+                        continue;
+                    }
                     let Some(path) = rec.get("path").and_then(|v| v.as_str()).map(String::from)
                     else {
                         continue;
@@ -79465,6 +79471,8 @@ struct WorklistChangeIndex {
     // git status never reports them and they would otherwise read as
     // "unchanged" ("With the agent · nothing to do", with no hint why).
     ignored_paths: std::collections::HashSet<String>,
+    // Display-only disk listings; never used as commit pathspecs or membership input.
+    ignored_entries: std::collections::HashMap<String, WorklistIgnoredEntry>,
     spawns: usize,
 }
 
@@ -79484,6 +79492,7 @@ mod precheck_content_hash_tests {
             diff_by_path: HashMap::new(),
             head_diff_by_path: head,
             ignored_paths: std::collections::HashSet::new(),
+            ignored_entries: std::collections::HashMap::new(),
             spawns: 0,
         }
     }
@@ -79537,6 +79546,7 @@ fn worklist_change_index<R: tauri::Runtime>(
         diff_by_path: std::collections::HashMap::new(),
         head_diff_by_path: std::collections::HashMap::new(),
         ignored_paths: std::collections::HashSet::new(),
+        ignored_entries: std::collections::HashMap::new(),
         spawns: 0,
     };
     if all_paths.is_empty() {
@@ -79607,20 +79617,31 @@ fn worklist_change_index<R: tauri::Runtime>(
         idx.diff_by_path.insert(path.to_string(), body);
     }
 
-    // issue-438: a declared file git status never mentioned but that exists
-    // on disk is either tracked-and-unchanged or ignored. One check-ignore
-    // over just those tells them apart; it runs only when such a file exists.
+    worklist_add_ignored_entries(&mut idx, all_paths);
+    Some(idx)
+}
+
+fn worklist_add_ignored_entries(idx: &mut WorklistChangeIndex, all_paths: &[String]) {
+    // A declared entry with no git-reported changes may be ignored. Probe
+    // existing files AND directories, only after index-derived expansion
+    // has had its say (#374 includes directories deleted from disk).
     let candidates: Vec<String> = all_paths
         .iter()
         .filter(|p| !idx.status_by_path.contains_key(p.as_str()))
-        .filter(|p| idx.root.join(p.as_str()).is_file())
+        .filter(|p| worklist_index_children(&idx, p).is_empty())
+        .filter(|p| idx.root.join(p.as_str()).exists())
         .cloned()
         .collect();
     if !candidates.is_empty() {
         idx.ignored_paths = worklist_ignored_declared(&idx.root, &candidates);
         idx.spawns += 1;
+        for entry in &idx.ignored_paths {
+            if let Some(listing) = worklist_ignored_entry(&idx.root, entry) {
+                idx.ignored_entries.insert(entry.clone(), listing);
+                idx.spawns += 1;
+            }
+        }
     }
-    Some(idx)
 }
 
 // issue-438: which of `candidates` git ignores. Without `--no-index`, a
@@ -79660,6 +79681,151 @@ fn worklist_ignored_declared(
         .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect()
+}
+
+const WORKLIST_IGNORED_FILE_LIMIT: usize = 200;
+const WORKLIST_IGNORED_SCAN_LIMIT: usize = 10_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorklistIgnoredEntry {
+    files: Vec<String>,
+    more: usize,
+    incomplete: bool,
+}
+
+// Enumerate ignored disk files through git, which also excludes tracked files
+// that happen to sit beneath an ignored directory. Stream the names so a large
+// tree cannot allocate an unbounded response. No file contents are read here;
+// the existing local-file-preview route serves those on expansion.
+fn worklist_ignored_entry(root: &Path, entry: &str) -> Option<WorklistIgnoredEntry> {
+    worklist_ignored_entry_with_limits(
+        root,
+        entry,
+        WORKLIST_IGNORED_FILE_LIMIT,
+        WORKLIST_IGNORED_SCAN_LIMIT,
+    )
+}
+
+fn worklist_ignored_entry_with_limits(
+    root: &Path,
+    entry: &str,
+    file_limit: usize,
+    scan_limit: usize,
+) -> Option<WorklistIgnoredEntry> {
+    use std::io::BufRead;
+    let root_canon = root.canonicalize().ok()?;
+    let target = root.join(entry).canonicalize().ok()?;
+    if !target.starts_with(&root_canon) {
+        return None;
+    }
+    let mut child = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            entry,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut files = Vec::new();
+    let mut count = 0usize;
+    let mut incomplete = false;
+    let output = child.stdout.take()?;
+    for (n, name) in std::io::BufReader::new(output).split(0).enumerate() {
+        if n >= scan_limit {
+            incomplete = true;
+            break;
+        }
+        let Ok(name) = name else {
+            incomplete = true;
+            break;
+        };
+        let Ok(path) = String::from_utf8(name) else {
+            continue;
+        };
+        if path.is_empty() || path.split('/').any(|part| part == ".git") {
+            continue;
+        }
+        let absolute = root.join(&path);
+        // Skip symlinks and special files; never follow an ignored directory
+        // out of the project or expose a nested repository's metadata.
+        if !std::fs::symlink_metadata(&absolute)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+            || !absolute
+                .canonicalize()
+                .map(|p| p.starts_with(&root_canon))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        count += 1;
+        if files.len() < file_limit {
+            files.push(path);
+        }
+    }
+    if incomplete {
+        let _ = child.kill();
+    }
+    let status = child.wait().ok()?;
+    if !incomplete && !status.success() {
+        return None;
+    }
+    files.sort();
+    Some(WorklistIgnoredEntry {
+        more: count.saturating_sub(files.len()),
+        files,
+        incomplete,
+    })
+}
+
+fn trace_worklist_ignored_entries<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    doc: &serde_json::Value,
+    idx: &WorklistChangeIndex,
+) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    static LAST: OnceLock<Mutex<HashMap<(String, String), WorklistIgnoredEntry>>> = OnceLock::new();
+    let mut current = HashMap::new();
+    for item in doc
+        .get("items")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        for entry in worklist_item_files(item) {
+            if let Some(listing) = idx.ignored_entries.get(&entry) {
+                current.insert((id.to_string(), entry), listing.clone());
+            }
+        }
+    }
+    if let Ok(mut last) = LAST.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        for ((id, entry), listing) in &current {
+            if last.get(&(id.clone(), entry.clone())) != Some(listing) {
+                append_bram_trace_line(
+                    app,
+                    "worklist",
+                    &format!(
+                        "op=ignored-entry-listed id={} entry={} files={} capped={}",
+                        id,
+                        entry,
+                        listing.files.len() + listing.more,
+                        listing.more > 0 || listing.incomplete,
+                    ),
+                );
+            }
+        }
+        *last = current;
+    }
 }
 
 // issue-374: a declared entry naming a DIRECTORY never matches an exact key,
@@ -79734,6 +79900,24 @@ fn worklist_change_activity_for(
     let (mut add_sum, mut rem_sum, mut changed_n) = (0i64, 0i64, 0usize);
     let mut last_ms: i64 = 0;
     for p in file_paths {
+        if idx.ignored_paths.contains(p) {
+            if let Some(listing) = idx.ignored_entries.get(p) {
+                for path in &listing.files {
+                    changed_files.push(serde_json::json!({
+                        "path": path, "status": "ignored", "ignored": true,
+                        "added": 0, "removed": 0, "label": format!("{}  (stays local, ignored)", path),
+                    }));
+                }
+                if listing.more > 0 || listing.incomplete || listing.files.is_empty() {
+                    changed_files.push(serde_json::json!({
+                        "path": p, "status": "ignored", "ignored": true, "ignoredSummary": true,
+                        "ignoredMore": listing.more, "listingIncomplete": listing.incomplete,
+                        "added": 0, "removed": 0,
+                    }));
+                }
+                continue;
+            }
+        }
         let status = idx.status_by_path.get(p.as_str()).copied().unwrap_or(
             // issue-438: on disk but hidden from git. Still nothing to
             // commit, so it counts like "unchanged" below; only the status
@@ -79769,7 +79953,7 @@ fn worklist_change_activity_for(
         let label = if status == "unchanged" {
             p.clone()
         } else if status == "ignored" {
-            format!("{}  (ignored by .gitignore)", p)
+            format!("{}  (stays local, ignored)", p)
         } else {
             let marker = match status {
                 "new" => " (new)",
@@ -79780,9 +79964,17 @@ fn worklist_change_activity_for(
         };
         changed_files.push(serde_json::json!({
             "path": p, "status": status, "added": a, "removed": r, "label": label,
+            "ignored": status == "ignored",
         }));
     }
-    let total = file_paths.len();
+    // Directory and explicit-file declarations may overlap. Keep one table
+    // row per path (the table's identity), including display-only children.
+    let mut seen = std::collections::HashSet::new();
+    changed_files.retain(|row| seen.insert(row["path"].as_str().unwrap_or("").to_string()));
+    let total = file_paths
+        .iter()
+        .filter(|p| !idx.ignored_paths.contains(p.as_str()))
+        .count();
     let disk_label = if changed_n == 0 {
         "no changes yet".to_string()
     } else {
@@ -88610,6 +88802,7 @@ mod worklist_change_projection_tests {
             diff_by_path: HashMap::new(),
             head_diff_by_path: HashMap::new(),
             ignored_paths: std::collections::HashSet::new(),
+            ignored_entries: std::collections::HashMap::new(),
             spawns: 0,
         }
     }
@@ -88677,14 +88870,18 @@ mod worklist_change_projection_tests {
     // issue-438: a declared file on disk that git ignores reads "ignored",
     // says why, and still counts as nothing to commit.
     #[test]
-    fn an_ignored_declared_file_says_so_and_counts_as_unchanged() {
+    fn an_ignored_declared_file_says_so_and_is_not_planned() {
         let mut i = idx(&[("edited.rs", "modified", 2, 1, 1)]);
         i.ignored_paths.insert("NOTICES.md".to_string());
         let files = vec!["NOTICES.md".to_string(), "edited.rs".to_string()];
         let (rows, sum) = worklist_change_activity_for(&i, &files).unwrap();
         assert_eq!(field(&sum, "changed"), 1, "only edited.rs changed");
         assert_eq!(field(&sum, "added"), 2);
-        assert_eq!(field(&sum, "total"), 2);
+        assert_eq!(
+            field(&sum, "total"),
+            1,
+            "ignored files are not planned git changes"
+        );
         let notices = &rows[0];
         assert_eq!(
             notices.get("status").and_then(|v| v.as_str()),
@@ -88692,7 +88889,7 @@ mod worklist_change_projection_tests {
         );
         assert_eq!(
             notices.get("label").and_then(|v| v.as_str()),
-            Some("NOTICES.md  (ignored by .gitignore)")
+            Some("NOTICES.md  (stays local, ignored)")
         );
         // Alone, it leaves the item with nothing to commit.
         let (_, alone) = worklist_change_activity_for(&i, &["NOTICES.md".to_string()]).unwrap();
@@ -88739,6 +88936,125 @@ mod worklist_change_projection_tests {
             "tracked files are visible to git"
         );
         assert!(!got.contains("plain.rs"));
+    }
+
+    #[test]
+    fn ignored_folder_lists_disk_files_without_changing_commit_scope() {
+        let root = super::membership_port_support::scratch_repo("ignored-folder");
+        std::fs::create_dir_all(root.join("orientation/diagrams")).unwrap();
+        std::fs::create_dir_all(root.join("orientation/.git")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "/orientation/\n").unwrap();
+        for path in [
+            "orientation/OVERVIEW.md",
+            "orientation/diagrams/map.svg",
+            "orientation/.git/private",
+        ] {
+            std::fs::write(root.join(path), "local contents\n").unwrap();
+        }
+        let declared = vec!["orientation/".to_string(), "edited.rs".to_string()];
+        let mut i = idx(&[("edited.rs", "modified", 2, 1, 1)]);
+        i.root = root.clone();
+        super::worklist_add_ignored_entries(&mut i, &declared);
+        let paths = worklist_expand_declared_paths(&i, &declared);
+        assert_eq!(
+            paths, declared,
+            "ignored display files do not expand the git scope"
+        );
+        let (rows, sum) = worklist_change_activity_for(&i, &paths).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["path"], "orientation/OVERVIEW.md");
+        assert_eq!(rows[1]["path"], "orientation/diagrams/map.svg");
+        assert!(rows[..2]
+            .iter()
+            .all(|r| r["ignored"] == true && r["added"] == 0));
+        assert_eq!(field(&sum, "total"), 1);
+        assert_eq!(field(&sum, "changed"), 1);
+        assert_eq!(field(&sum, "added"), 2);
+        let (_, local_only) = worklist_change_activity_for(&i, &declared[..1]).unwrap();
+        assert_eq!(field(&local_only, "total"), 0);
+        assert_eq!(field(&local_only, "changed"), 0);
+        let item =
+            serde_json::json!({"id":"orientation", "files":["orientation/"], "changedFiles":rows});
+        assert_eq!(super::worklist_item_files(&item), vec!["orientation/"]);
+        // A directory containing a tracked child is no longer reported as
+        // ignored by check-ignore. Even if queried directly, its disk listing
+        // must exclude the tracked child rather than label it local-only.
+        std::fs::write(root.join("orientation/tracked.md"), "tracked\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["add", "-f", "orientation/tracked.md"])
+            .status()
+            .unwrap()
+            .success());
+        let listing = super::worklist_ignored_entry(&root, "orientation/").unwrap();
+        assert_eq!(listing.files.len(), 2);
+        assert!(!listing.files.iter().any(|p| p.ends_with("tracked.md")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ignored_folder_caps_rows_and_reports_remaining_files() {
+        let root = super::membership_port_support::scratch_repo("ignored-cap");
+        std::fs::create_dir_all(root.join("generated")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "/generated/\n").unwrap();
+        for n in 0..205 {
+            std::fs::write(root.join(format!("generated/{n:03}.txt")), "x\n").unwrap();
+        }
+        let declared = vec!["generated/".to_string()];
+        let mut i = idx(&[]);
+        i.root = root.clone();
+        super::worklist_add_ignored_entries(&mut i, &declared);
+        let listing = &i.ignored_entries["generated/"];
+        assert_eq!(listing.files.len(), 200);
+        assert_eq!(listing.more, 5);
+        assert!(!listing.incomplete);
+        let (rows, sum) = worklist_change_activity_for(&i, &declared).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 201);
+        assert_eq!(rows[200]["ignoredMore"], 5);
+        assert_eq!(rows[200]["ignoredSummary"], true);
+        assert_eq!(field(&sum, "total"), 0);
+        assert_eq!(field(&sum, "changed"), 0);
+        let limited = super::worklist_ignored_entry_with_limits(&root, "generated/", 3, 5).unwrap();
+        assert_eq!(limited.files.len(), 3);
+        assert_eq!(limited.more, 2);
+        assert!(
+            limited.incomplete,
+            "do not claim an exact remainder after a bounded scan"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_and_nonignored_folders_keep_the_existing_projection() {
+        let root = super::membership_port_support::scratch_repo("ignored-missing");
+        std::fs::create_dir_all(root.join("ordinary")).unwrap();
+        std::fs::write(root.join("ordinary/file.txt"), "x\n").unwrap();
+        let declared = vec!["missing/".to_string(), "ordinary/".to_string()];
+        let mut i = idx(&[]);
+        i.root = root.clone();
+        super::worklist_add_ignored_entries(&mut i, &declared);
+        assert!(i.ignored_entries.is_empty());
+        assert!(i.ignored_paths.is_empty());
+        let (rows, sum) = worklist_change_activity_for(&i, &declared).unwrap();
+        assert_eq!(rows[0]["status"], "unchanged");
+        assert_eq!(rows[1]["status"], "unchanged");
+        assert_eq!(field(&sum, "total"), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignored_listing_does_not_follow_symlinks_out_of_the_project() {
+        let root = super::membership_port_support::scratch_repo("ignored-symlink");
+        std::fs::create_dir_all(root.join("local")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "/local/\n").unwrap();
+        std::fs::write(root.join("local/plain.txt"), "x\n").unwrap();
+        std::os::unix::fs::symlink(std::env::temp_dir(), root.join("local/escape")).unwrap();
+        let listing = super::worklist_ignored_entry(&root, "local/").unwrap();
+        assert_eq!(listing.files, vec!["local/plain.txt"]);
+        assert!(super::worklist_ignored_entry(&root, "local/escape").is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

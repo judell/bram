@@ -730,6 +730,7 @@
                        the Context tab's ghost-button pattern; one shared
                        dialog takes the text as its open() parameter. -->
                   <Button label="ⓘ" variant="ghost" size="xs"
+                    when="{!$item.ignored}"
                     tooltip="Explain these changes"
                     onClick="fileCellInfoDialog.open(window.__bramFileChangesExplain($item, rowItem, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))" />
                 </HStack>
@@ -753,7 +754,7 @@
                      progress, while the column is about lines in this file:
                      an item whose lines were all rewritten by another read
                      `planned:`, as if it had never started. -->
-                <HStack gap="$space-1" verticalAlignment="center">
+                <HStack when="{!$item.ignored}" gap="$space-1" verticalAlignment="center">
                 <VStack gap="$space-0" width="*">
                   <Text
                     when="{window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
@@ -774,6 +775,22 @@
               when="{$item.changedFiles}"
               data="{$item.changedFiles}">
               <VStack gap="$space-0" width="100%">
+                <!-- Display-only ignored files use the existing bounded local
+                     preview, fetched on expand. Conditional rendering follows
+                     https://www.xmlui.org/docs/howto/hide-an-element-until-its-datasource-is-ready -->
+                <VStack
+                  when="{$item.ignored &amp;&amp; !$item.ignoredSummary &amp;&amp; window.__bramDiffExpanded(diffKeys, rowId, $item.path)}"
+                  gap="$space-1" paddingBottom="$space-2">
+                  <Text variant="caption" value="Local contents — ignored by git; these lines will not be committed." />
+                  <DataSource id="ignoredPreview" url="/__local-file-preview" queryParams="{{ path: $item.path }}" />
+                  <Text when="{ignoredPreview.inProgress}" variant="caption" value="Loading file…" />
+                  <Text when="{ignoredPreview.value &amp;&amp; !ignoredPreview.value.ok}" value="{ignoredPreview.value.error}" />
+                  <Text when="{ignoredPreview.value &amp;&amp; ignoredPreview.value.ok &amp;&amp; !ignoredPreview.value.content}" variant="caption" value="Empty file." />
+                  <Text when="{ignoredPreview.value &amp;&amp; ignoredPreview.value.truncated}" variant="caption" value="Preview limited to the first 200 KB." />
+                  <DiffView
+                    when="{ignoredPreview.value &amp;&amp; ignoredPreview.value.ok &amp;&amp; !!ignoredPreview.value.content}"
+                    text="{cappedDiffText(window.__bramIgnoredFilePatch($item.path, ignoredPreview.value))}" />
+                </VStack>
                 <!-- Gated on rowBegun, carried down from the section that used
                      to hold the single Diff view: a plan row that has begun
                      nothing must offer no diffs, or it would display a

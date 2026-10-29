@@ -22961,9 +22961,32 @@ fn switch_agent(
     // switch falls back to today's order.
     let target_provider =
         SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
-    let leaving = current_provider(&app)
+    // fresh-partner-empty-digest-leaves-session-pending: a New session with no
+    // message yet has no file, so the latest file is the session before it.
+    // Demo 2026-10-29 00:33Z: leaving an empty "test-session" resumed the
+    // previous session's Codex partner, and test-session stayed requested.
+    let reserved = current_provider(&app)
         .filter(|p| *p != target_provider)
-        .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
+        .and_then(|p| reserved_new_session(&app, p).map(|r| (p, r)));
+    if let (Some((p, (sid, _))), true) = (reserved.as_ref(), bram_trace_enabled()) {
+        append_bram_trace_line(
+            &app,
+            "agent-switch",
+            &format!(
+                "op=leaving-reserved provider={} sid={}",
+                session_provider_label(*p),
+                sid
+            ),
+        );
+    }
+    let leaving = reserved
+        .as_ref()
+        .map(|(p, (sid, _))| (*p, sid.clone()))
+        .or_else(|| {
+            current_provider(&app)
+                .filter(|p| *p != target_provider)
+                .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)))
+        });
     let partner = leaving.as_ref().and_then(|(p, sid)| {
         let conn = worklist_state_open(&app)?;
         let id = worklist_state::session_partner(
@@ -23057,8 +23080,11 @@ fn switch_agent(
         let reason = never
             .then(|| {
                 fresh_partner_reason(
-                    worklist_state::session_born_from_new_session(&conn, label, sid)
-                        .unwrap_or(false),
+                    // A reserved New session is recorded as born only once
+                    // it is named, after its first message.
+                    reserved.is_some()
+                        || worklist_state::session_born_from_new_session(&conn, label, sid)
+                            .unwrap_or(false),
                     has_session,
                 )
             })
@@ -23083,6 +23109,7 @@ fn switch_agent(
         leaving
             .as_ref()
             .and_then(|(p, sid)| session_title_by_id(&app, *p, sid))
+            .or_else(|| reserved.as_ref().map(|(_, (_, title))| title.clone()))
             .map(|title| {
                 // Claude takes a pre-allocated id (#274); Codex's surfaces later.
                 let sid = (provider_key == "claude").then(|| uuid::Uuid::new_v4().to_string());
@@ -23371,12 +23398,16 @@ fn switch_agent(
                 // partner has missed everything, so it gets the latest turns.
                 // session-groups: a resumed group member gets one catch-up
                 // covering every other member, since it last caught up on each.
-                let digest = match resume_reason {
-                    "fresh-for-new-session" => pair_from
-                        .as_ref()
-                        .and_then(|(p, id)| write_session_digest(app, *p, id, false, None)),
-                    _ => None,
+                // fresh-partner-empty-digest-leaves-session-pending (#459): a
+                // fresh partner is briefed from the whole group of the session
+                // being left, not that session alone.
+                let members = match (resume_reason, pair_from.as_ref()) {
+                    ("fresh-for-new-session", Some(from)) => {
+                        fresh_partner_members(app, from, target_provider)
+                    }
+                    _ => Vec::new(),
                 };
+                let sources = fresh_partner_sources(app, &members);
                 // A fresh Codex session has no file, name or pair until its
                 // first message, so the catch-up is sent rather than offered:
                 // the partner gets its context and surfaces at once, before
@@ -23399,18 +23430,12 @@ fn switch_agent(
                         target_provider,
                         SessionProvider::Codex | SessionProvider::Opencode
                     ) {
-                        let (app2, from, d) = (app.clone(), pair_from.clone(), digest.clone());
+                        let app2 = app.clone();
                         std::thread::spawn(move || {
-                            fresh_partner_catch_up(&app2, target_provider, from, d, true)
+                            fresh_partner_catch_up(&app2, target_provider, members, sources, true)
                         });
                     } else {
-                        fresh_partner_catch_up(
-                            app,
-                            target_provider,
-                            pair_from.clone(),
-                            digest,
-                            false,
-                        );
+                        fresh_partner_catch_up(app, target_provider, members, sources, false);
                     }
                     return;
                 }
@@ -23421,7 +23446,7 @@ fn switch_agent(
                         return;
                     }
                 }
-                emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
+                emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), None);
                 return;
             }
             if phase != LaunchPhase::Written {
@@ -24110,11 +24135,106 @@ fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
 const CATCH_UP_COMPOSER_WAIT_MS: i64 = 30_000;
 const CATCH_UP_COMPOSER_POLL_MS: u64 = 250;
 
+// fresh-partner-empty-digest-leaves-session-pending (#459): the group members
+// a fresh partner is briefed on: the session being left first, then the rest
+// of its group, minus any on the target's own agent.
+fn fresh_partner_members<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    from: &(SessionProvider, String),
+    target: SessionProvider,
+) -> Vec<(SessionProvider, String)> {
+    let mut members = vec![from.clone()];
+    let group = worklist_state_open(app).and_then(|conn| {
+        worklist_state::session_group(&conn, session_provider_label(from.0), &from.1)
+            .ok()
+            .flatten()
+    });
+    for (p, id) in group.map(|g| g.members).unwrap_or_default() {
+        let Some(sp) = SessionProvider::from_str(&p) else {
+            continue;
+        };
+        if sp == target || members.iter().any(|(mp, mid)| *mp == sp && *mid == id) {
+            continue;
+        }
+        members.push((sp, id));
+    }
+    members
+}
+
+// Each member's latest turns, minus catch-up exchanges; members with none
+// left are skipped. Claude -> Codex -> OpenCode on 2026-10-28 23:46Z: the
+// Codex member held only its own catch-up (turns=0), and the Claude member,
+// which held the real context, was never read.
+fn fresh_partner_sources<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    members: &[(SessionProvider, String)],
+) -> Vec<CatchUpSource> {
+    members
+        .iter()
+        .filter_map(|(p, id)| {
+            let (path, turns) = write_session_digest(app, *p, id, false, None)?;
+            Some(((*p, id.clone()), path, turns))
+        })
+        .collect()
+}
+
+// The first message for a fresh partner whose group left nothing to digest.
+// It still has to be sent: a Codex or OpenCode session doesn't exist, take its
+// queued name or pair until its first message. Worded as a catch-up turn so
+// drop_catch_up_exchanges keeps it out of later digests.
+fn fresh_partner_minimal_turn_text<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    members: &[(SessionProvider, String)],
+) -> String {
+    let parts: Vec<String> = members
+        .iter()
+        .map(|(p, id)| {
+            let title = session_title_by_id(app, *p, id);
+            let who = catch_up_from_label(*p, id, title.as_deref());
+            match session_path_for_id(app, *p, id) {
+                Some(path) => format!("{} (`{}`)", who, path.display()),
+                None => who,
+            }
+        })
+        .collect();
+    minimal_catch_up_turn_text(&parts)
+}
+
+fn minimal_catch_up_turn_text(parts: &[String]) -> String {
+    format!(
+        "Your partner sessions {}, with nothing new to digest: {}. Read a transcript if you need its context, then say in a line that you're ready and wait for my next message.",
+        CATCH_UP_TURN_MARK,
+        parts.join("; ")
+    )
+}
+
+// The catch-up turn for one or more sources, as the pane's offer words it.
+fn catch_up_sources_turn_text<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sources: &[CatchUpSource],
+) -> String {
+    let parts: Vec<(String, usize, String)> = sources
+        .iter()
+        .map(|((sp, sid), spath, sturns)| {
+            let title = session_title_by_id(app, *sp, sid);
+            (
+                catch_up_from_label(*sp, sid, title.as_deref()),
+                *sturns,
+                spath.clone(),
+            )
+        })
+        .collect();
+    match parts.as_slice() {
+        [(who, n, p)] => catch_up_turn_text(who, *n, p),
+        _ => catch_up_group_turn_text(&parts),
+    }
+}
+
 fn fresh_partner_catch_up<R: tauri::Runtime>(
     app: &AppHandle<R>,
     target_provider: SessionProvider,
-    pair_from: Option<(SessionProvider, String)>,
-    digest: Option<(String, usize)>,
+    members: Vec<(SessionProvider, String)>,
+    sources: Vec<CatchUpSource>,
     wait_for_composer: bool,
 ) {
     let provider = session_provider_label(target_provider);
@@ -24205,16 +24325,18 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
                 ),
             );
         }
-        emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
+        // A held prompt still offers rather than types. With no sources the
+        // offer is inactive; the user's own first message surfaces the session.
+        emit_group_catch_up_offer(app, Some(target_provider), sources);
         return;
     }
-    if let (Some((fp, fid)), Some((path, turns))) = (pair_from.as_ref(), digest.as_ref()) {
-        let title = session_title_by_id(app, *fp, fid);
-        let text = catch_up_turn_text(
-            &catch_up_from_label(*fp, fid, title.as_deref()),
-            *turns,
-            path,
-        );
+    if !members.is_empty() {
+        let (text, kind) = if sources.is_empty() {
+            (fresh_partner_minimal_turn_text(app, &members), "minimal")
+        } else {
+            (catch_up_sources_turn_text(app, &sources), "digest")
+        };
+        let turns: usize = sources.iter().map(|(_, _, n)| *n).sum();
         if superseded(waited_ms) {
             return;
         }
@@ -24233,8 +24355,10 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
                 app,
                 "agent-switch",
                 &format!(
-                    "op=fresh-partner-catch-up provider={} turns={} waited_ms={} result={}",
+                    "op=fresh-partner-catch-up provider={} kind={} sources={} turns={} waited_ms={} result={}",
                     provider,
+                    kind,
+                    sources.len(),
                     turns,
                     waited_ms,
                     match &queued {
@@ -24248,8 +24372,19 @@ fn fresh_partner_catch_up<R: tauri::Runtime>(
             emit_catch_up_offer(app, None, None, None);
             return;
         }
+    } else if bram_trace_enabled() {
+        // #460: this exit used to be silent. Reached only with no session
+        // to brief from (no session was being left).
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=fresh-partner-catch-up provider={} result=offered reason=no-source waited_ms={}",
+                provider, waited_ms
+            ),
+        );
     }
-    emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
+    emit_group_catch_up_offer(app, Some(target_provider), sources);
 }
 
 #[cfg(test)]
@@ -24494,6 +24629,23 @@ mod session_group_catch_up_tests {
         assert!(is_catch_up_turn(&text));
         assert!(text.contains("(12 turns, `a.md`)"));
         assert!(text.contains("(1 turn, `b.md`)"));
+    }
+
+    // #459: a fresh partner with nothing to digest still gets a first
+    // message, and that exchange stays out of later digests too.
+    #[test]
+    fn a_minimal_fresh_partner_turn_is_a_catch_up_turn() {
+        let text = minimal_catch_up_turn_text(&[
+            "Claude session 'post v0.8.0' (`/x/c.jsonl`)".to_string(),
+            "Codex session 'post v0.8.0' (`/x/r.jsonl`)".to_string(),
+        ]);
+        assert!(is_catch_up_turn(&text));
+        assert!(text.contains("nothing new to digest"));
+        let turns = vec![
+            serde_json::json!({"role": "user", "text": text}),
+            serde_json::json!({"role": "assistant", "text": "Ready."}),
+        ];
+        assert!(drop_catch_up_exchanges(&turns).is_empty());
     }
 }
 
@@ -25556,6 +25708,24 @@ fn write_pending_session_title<R: tauri::Runtime>(
 // dialog's names mark a session as started with New session.
 fn pending_title_marks_new_session(origin: Option<&str>) -> bool {
     origin == Some("new-session")
+}
+
+// A New session's reserved id and name, while no session file has claimed it:
+// the session the user is in, though nothing on disk says so yet. Claude only
+// in practice, since Codex and OpenCode ids aren't known before their files.
+fn reserved_new_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+) -> Option<(String, String)> {
+    let rec = read_pending_session_title(app, provider)?;
+    if !pending_title_marks_new_session(rec.origin.as_deref()) {
+        return None;
+    }
+    let sid = rec.session_id?;
+    if session_path_for_id(app, provider, &sid).is_some() {
+        return None;
+    }
+    Some((sid, rec.title))
 }
 
 fn read_pending_session_title<R: tauri::Runtime>(

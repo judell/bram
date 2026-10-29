@@ -1,0 +1,11 @@
+{
+ "type": "agent-turn-complete",
+ "thread-id": "01a185de-db25-7650-b458-a8d4361b963b",
+ "turn-id": "01a185de-fa28-7330-b7de-8d5fa9282a90",
+ "cwd": "<workspace>",
+ "client": "codex-tui",
+ "input-messages": [
+  "Reply with the single word ok3. Do not use any tools."
+ ],
+ "last-assistant-message": "ok3"
+}

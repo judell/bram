@@ -1,0 +1,21 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+
+  Run the shell command: echo hello-declined > declined.txt
+
+
+  I'll run that command now.
+
+  $ echo hello-declined > declined.txt Waiting for approval...
+
+
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ │ $  echo hello-declined > declined.txt in .                                                                         │
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+  → Tell the agent what to do instead (Enter to send, empty to skip, Esc to cancel)                     ctrl+c to stop

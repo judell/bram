@@ -1,0 +1,16 @@
+{"type": "custom-title", "customTitle": "specimen-align-2", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "agent-name", "agentName": "specimen-align-2", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "mode", "mode": "normal", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "permission-mode", "permissionMode": "default", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "last-prompt", "lastPrompt": "Run the shell command: echo hello-specimen > specimen.txt", "leafUuid": "26953680-687c-4a1a-b8a5-4e97249b48bf", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "custom-title", "customTitle": "specimen-align-2", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "agent-name", "agentName": "specimen-align-2", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "mode", "mode": "normal", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "permission-mode", "permissionMode": "default", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "tools-used", "tools": ["Bash"], "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "last-prompt", "lastPrompt": "Run the shell command: echo hello-specimen > specimen.txt", "leafUuid": "9f92dd3a-8ec8-407a-8437-957b079aeaab", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "custom-title", "customTitle": "specimen-align-2", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "agent-name", "agentName": "specimen-align-2", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "mode", "mode": "normal", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "permission-mode", "permissionMode": "default", "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}
+{"type": "tools-used", "tools": ["Bash"], "sessionId": "4f97c209-f8d2-4280-813c-201aa3d49752"}

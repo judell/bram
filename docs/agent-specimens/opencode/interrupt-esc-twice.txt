@@ -1,0 +1,39 @@
+   Shell command echo specimen     Shell command output request    Shell sleep command           +
+
+  ┃
+  ┃  Run the shell command: sleep 20
+  ┃
+
+  ┃
+  ┃  $ sleep 20
+  ┃
+  ┃  Tool execution interrupted
+  ┃
+
+     Build · DeepSeek V4 Pro (New) · 13.9s · 25.7 tok/s · interrupted
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  <workspace>:main  7.9K (1%) · $0.00  ctrl+p commands

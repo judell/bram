@@ -1,0 +1,22 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Hit shift+tab to enable Plan Mode for large or complex changes.
+
+
+  Run this shell command and show me its output: curl -4 -sS http://127.0.0.1:51251/
+
+
+  I'll run that curl command now and show you the output.
+
+  $ curl -4 -sS http://127.0.0.1:51251/ Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  curl -4 -sS http://127.0.0.1:51251/ in .
+
+ Run this command outside the sandbox?
+ Hook requested approval
+  → Run outside sandbox (once) (y)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)

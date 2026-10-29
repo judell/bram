@@ -1,0 +1,26 @@
+{
+  "id": "evt_185d6e957001hXP7dFDutvwSbq",
+  "created": 1793246816599,
+  "type": "session.tool.failed",
+  "durable": {
+    "aggregateID": "ses_e7a294d48ffeylnVDPyMKeYVJq",
+    "seq": 12,
+    "version": 2
+  },
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "sessionID": "ses_e7a294d48ffeylnVDPyMKeYVJq",
+    "assistantMessageID": "msg_185d6b303001ofZNkA5rnmwber",
+    "id": "call_hkt3s2h8wbxbf38ujc8fkh11",
+    "error": {
+      "type": "aborted",
+      "message": "Tool execution interrupted"
+    },
+    "metadata": {
+      "shellID": "sh_185d6ce0a001F8nKyF27EhIQAg"
+    },
+    "executed": false
+  }
+}

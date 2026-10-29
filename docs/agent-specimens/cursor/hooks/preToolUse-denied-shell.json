@@ -1,0 +1,21 @@
+{
+  "conversation_id": "d43f4cda-cf27-4be4-9b59-5e0c3b0d7268",
+  "generation_id": "d98799d2-ce99-468a-95d8-4e212a29c4c5",
+  "model": "default",
+  "tool_name": "Shell",
+  "tool_input": {
+    "command": "echo DENYME-shell",
+    "cwd": "",
+    "timeout": 30000
+  },
+  "tool_use_id": "5a5172d5-0c84-4c38-981f-2dfbaa80df1c",
+  "cwd": "",
+  "session_id": "d43f4cda-cf27-4be4-9b59-5e0c3b0d7268",
+  "hook_event_name": "preToolUse",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": null
+}

@@ -1,0 +1,39 @@
+   Shell comman   Shell comman   Shell sleep    Shell comman   Shell echo c   Running echo   Shell command echo outpu +
+
+  ┃
+  ┃  Run the shell command: echo hello-specimen
+  ┃
+
+     + Thought · 442ms
+
+  ┃
+  ┃  $ echo hello-specimen
+  ┃
+  ┃  Permission denied: shell
+  ┃
+
+     + Thought · 1.4s
+
+     The shell command was rejected due to permissions. The shell tool isn't allowed in this environment.
+
+     If you'd like, I can run the equivalent using the execute tool (Code Mode), which can call tools through tools —
+     though it also doesn't have direct shell access. Or, if you can grant permission for the shell tool, I can retry
+     echo hello-specimen directly.
+
+     Build · DeepSeek V4 Pro (New) · 5.2s · 31.6 tok/s
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  <workspace>:main  8.1K (1%) · $0.00  ctrl+p commands

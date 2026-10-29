@@ -1,0 +1,8 @@
+{
+  "session_id": "4f97c209-f8d2-4280-813c-201aa3d49752",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/4f97c209-f8d2-4280-813c-201aa3d49752.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/4f97c209-f8d2-4280-813c-201aa3d49752/scratchpad",
+  "hook_event_name": "SessionEnd",
+  "reason": "prompt_input_exit"
+}

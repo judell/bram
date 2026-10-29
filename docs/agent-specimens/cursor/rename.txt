@@ -1,0 +1,22 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Try Cursor Grok 4.7 via /model, frontier intelligence at a fraction of the cost.
+
+
+  Reply with the single word OK.
+
+
+  OK
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 4.7%
+  <workspace> · main
+
+  Renamed chat to specimen-title-8841

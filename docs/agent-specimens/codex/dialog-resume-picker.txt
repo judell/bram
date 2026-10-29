@@ -1,0 +1,39 @@
+ Resume a previous session
+
+ Filter:  Cwd  All    Status:  Active  Archived    Sort:  Updated  Created
+
+ Type to search
+
+  › 38s ago     Append hello-update to README.md
+    1m ago      Append hello-update to README.md
+    2m ago      Create patch specimen
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────── 1 / 3 · 100% ─
+ enter resume   ⌃a archive   esc start new   ⌃c quit   tab focus sort/filter   ←/→ change option
+ ⌃o comfortable view   ⌃t transcript   ⌃e expand   ↑/↓ browse

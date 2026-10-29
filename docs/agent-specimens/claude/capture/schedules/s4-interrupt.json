@@ -1,0 +1,1 @@
+[[8,"Run exactly this shell command in the foreground, no background: python3 -c 'import time; time.sleep(30)'",null],[9,"\r",null],[14,null,"interrupt-pre"],[15,"\r",null],[20,null,"interrupt-working"],[20.5,"\u001b",null],[24,null,"interrupt-esc"],[26,null,null]]

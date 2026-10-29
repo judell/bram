@@ -1,0 +1,39 @@
+   Shell co   Shell co   Shell sl   Shell co   Shell ec   Running    Shell co   Red or b   Red or blue preference     +
+
+  ┃
+  ┃  Use the question tool to ask me whether I prefer red or blue, then wait for my answer.
+  ┃
+
+  ┃
+  ┃  # Questions
+  ┃
+  ┃  Do you prefer red or blue?
+  ┃  Red
+  ┃
+
+     You chose Red! 🔴
+
+     Build · DeepSeek V4 Pro (New) · 12.8s · 23.5 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  <workspace>:main  8.1K (1%) · $0.00  ctrl+p commands

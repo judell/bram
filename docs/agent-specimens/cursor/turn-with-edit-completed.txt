@@ -1,0 +1,27 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /config to customize Cursor settings and behavior.
+
+
+  Create a file named notes.txt containing the single line edit-specimen. Use your file edit tool, not the
+  shell.
+
+
+  I'll create notes.txt with the Write tool.
+
+    Edited notes.txt +1
+
+    ▎+ edit-specimen
+
+  Created notes.txt with the single line edit-specimen.
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 4.7% · 1 file edited
+  <workspace> · main

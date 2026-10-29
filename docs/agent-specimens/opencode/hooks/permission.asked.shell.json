@@ -1,0 +1,24 @@
+{
+  "id": "evt_185db79990024dHire6MmQtvPk",
+  "created": 1793247115673,
+  "type": "permission.asked",
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "id": "per_185db7999001j8kolBawO5NAsi",
+    "sessionID": "ses_e7a249155ffevCKHdxMhUNecCx",
+    "action": "shell",
+    "resources": [
+      "echo hello-specimen"
+    ],
+    "save": [
+      "echo *"
+    ],
+    "source": {
+      "type": "tool",
+      "messageID": "msg_185db6ef7001g8rxAO3oj9C21I",
+      "id": "call_hw3qcql51aejxce05lht69rc"
+    }
+  }
+}

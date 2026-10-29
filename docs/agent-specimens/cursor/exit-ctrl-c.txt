@@ -1,0 +1,26 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Type ? in the prompt bar to show in-app hints.
+
+
+  Run the shell command: echo hello-specimen > specimen.txt
+
+
+  I'll run that command now.
+
+  $ echo hello-specimen > specimen.txt 5.1s
+
+  Done. specimen.txt now contains hello-specimen.
+
+
+
+
+  → Add a follow-up
+
+
+
+  Press Ctrl+C again to exit
+
+  To resume this session: agent --resume=6aa19187-3b62-45ae-a817-a8e0d17ffa1f

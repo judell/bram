@@ -1,0 +1,19 @@
+{
+  "conversation_id": "2d405cfa-c811-427f-860f-de9d0fb1f3c6",
+  "generation_id": "cda6162e-28d0-4c6a-b1f9-a6f6850a7c5b",
+  "model": "default",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "<workspace>/notes.txt",
+    "content": "edit-specimen\n"
+  },
+  "tool_use_id": "call-35cec43b-9796-4868-b3e6-7e7c83f8d75a-0\nfc_b94c96c9-3f34-90d9-945d-bc92ff8925c1_0",
+  "session_id": "2d405cfa-c811-427f-860f-de9d0fb1f3c6",
+  "hook_event_name": "preToolUse",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "~/.cursor/projects/<munged-workspace>/agent-transcripts/2d405cfa-c811-427f-860f-de9d0fb1f3c6/2d405cfa-c811-427f-860f-de9d0fb1f3c6.jsonl"
+}

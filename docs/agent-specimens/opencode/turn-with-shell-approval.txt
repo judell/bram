@@ -1,0 +1,39 @@
+   Shell    Shell    Shell    Shell    Shell    Runnin   Shell    Red or   Red or   Greeti ! Shell echo command       +
+
+  ┃
+  ┃  Run the shell command: echo hello-specimen
+  ┃
+
+     + Thought · 373ms
+
+  ┃
+  ┃  ⠏ echo hello-specimen
+  ┃
+
+     Press ctrl+b to move running work to the background
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  △ Permission required
+  ┃
+  ┃  $ echo hello-specimen
+  ┃
+  ┃
+  ┃   Allow once   Always allow   Reject                                 ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃

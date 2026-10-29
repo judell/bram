@@ -39,3 +39,8 @@ timeout = 10
 type = "command"
 command = "<scripts>/log-hook.sh Stop"
 timeout = 10
+
+# Added for the 2026-10-28 alignment: other events used in captures.
+# SubagentStart / SubagentStop / SessionEnd take no matcher.
+# notify is a top-level key, not a hook: notify = ["bash", "<scripts>/notify.sh"]
+# (notify.sh appended its first argument, the JSON payload, to a log file).

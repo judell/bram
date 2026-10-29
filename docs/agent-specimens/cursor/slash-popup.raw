@@ -1,0 +1,29 @@
+[>1u]11;?[2K[G
+
+  Cursor Agent
+  [2mv2026.10.22-27dcf5f[22m
+  [2mTip: Use /skills to give Cursor specialized knowledge for tasks.[22m
+
+
+
+ [48;5;233m                                                                                                                      [49m
+ [48;5;233m [2m→ [22m[7mP[27m[2mlan, search, build anything[22m                                                                                       [49m
+ [48;5;233m                                                                                                                      [49m
+
+  [2mAuto[22m
+  [2m<workspace> · main[22m
+[?25l[?2004h]0;Cursor Agent[?2031h[?1004h[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G [48;5;233m → /[7m [27m                                                                                                                 [49m
+ [48;5;233m                                                                                                                      [49m
+
+  [2mAuto[22m
+  [2m<workspace> · main[22m
+[2K[1A[2K[1A[2K[G   → [1m/model [filter][22m           [1mSelect model (Tab to edit)[22m
+   [2m  /goal [objective][22m         [2mStart a durable goal that continues while idle[22m
+   [2m  /add-dir [path][22m           [2mAdd a directory to the current workspace[22m
+   [2m  /save-workspace <name>[22m    [2mPersist the current workspace directories[22m
+   [2m  /load-workspace <name>[22m    [2mLoad a saved workspace by name[22m
+   [2m  /run-everything[22m           [2mToggle Run Everything (currently disabled)[22m
+   [2m  /auto-review[22m              [2mToggle Auto-review (currently disabled)[22m
+   [2m  /plan [prompt][22m            [2mCreate a plan or show existing plan with options[22m
+   [2m  /ask[22m                      [2mToggle ask mode (Q&A, read-only; no edits or command execution)[22m
+     [2m↓ more below[22m

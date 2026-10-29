@@ -1,0 +1,39 @@
+   Shell command echo specimen   Shell command output reque   Shell sleep command          Shell command echo output  +
+
+  ┃
+  ┃  Run the shell command: echo hello-specimen
+  ┃
+
+  ┃
+  ┃  $ echo hello-specimen
+  ┃
+  ┃  The user declined this tool call
+  ┃
+
+     Build · DeepSeek V4 Pro (New) · 8.8s · 27.1 tok/s · interrupted
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  <workspace>:main  8.0K (1%) · $0.00  ctrl+p commands

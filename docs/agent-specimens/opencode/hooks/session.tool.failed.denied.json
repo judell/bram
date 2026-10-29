@@ -1,0 +1,23 @@
+{
+  "id": "evt_185d8bf4c001R0dUzkRxGTQjKU",
+  "created": 1793246936908,
+  "type": "session.tool.failed",
+  "durable": {
+    "aggregateID": "ses_e7a2749aeffeu0hPyTZoVKEGYV",
+    "seq": 14,
+    "version": 2
+  },
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "sessionID": "ses_e7a2749aeffeu0hPyTZoVKEGYV",
+    "assistantMessageID": "msg_185d8b69c001Ki2M0gtff5LE7A",
+    "id": "call_02fetn61fo7lqvadrzz7voxc",
+    "error": {
+      "type": "permission.rejected",
+      "message": "Permission denied: shell"
+    },
+    "executed": false
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "session_id": "4f97c209-f8d2-4280-813c-201aa3d49752",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/4f97c209-f8d2-4280-813c-201aa3d49752.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/4f97c209-f8d2-4280-813c-201aa3d49752/scratchpad",
+  "prompt_id": "716e10d3-e607-4eb8-b4b1-0125e21e204d",
+  "permission_mode": "default",
+  "agent_id": "ae3fb2df9de52ea71",
+  "agent_type": "",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "~/.claude/projects/<munged-workspace>/4f97c209-f8d2-4280-813c-201aa3d49752/subagents/agent-ae3fb2df9de52ea71.jsonl",
+  "last_assistant_message": "cat specimen.txt",
+  "background_tasks": [],
+  "session_crons": []
+}

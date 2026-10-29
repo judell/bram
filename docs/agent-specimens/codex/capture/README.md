@@ -82,3 +82,38 @@ links. A fake Codex executable exercised the launcher through a real PTY,
 parsed its TOML overrides, invoked all six hook loggers, and produced a
 snapshot that the recovered renderer read correctly. The check covered
 paths with spaces and macOS path aliases. No real model turn was run.
+
+## Alignment additions — 2026-10-28
+
+Signed: Claude subagent (Sonnet), delegated by Jon's Claude main thread.
+`drive.py`, `render.py` and `../hooks/run.sh` are unchanged. New schedules
+(all run through `run.sh REPO OUTDIR SCHEDULE [codex args]` in a scratch repo,
+real `~/.codex` login; back up and restore `~/.codex/config.toml` around them):
+
+| Schedule | Extra codex args | Produces |
+|---|---|---|
+| `s4-apply-patch.json` | none | `turn-with-apply-patch-completed`, `PreToolUse`/`PostToolUse-apply_patch` |
+| `s5-apply-patch-approval.json` | `-a on-request -s read-only` | `turn-with-apply-patch-approval`, `PermissionRequest-apply_patch` |
+| `s6-dialogs.json` | none | `dialog-slash-popup` (snapshot `slash2`), `dialog-model-picker` (`model2`) |
+| `s7-picker-and-agents.json` | `resume` or `agents` | `dialog-resume-picker`, `agents-overview` (snapshot `a`) |
+| `s8-resume-and-clear.json` | `resume <id>` | `SessionStart` `resume` and `clear`, `resume-then-clear` |
+| `s9-subagent.json` | `-c hooks.SubagentStart=[...] -c hooks.SubagentStop=[...]` pointing at `log-hook.sh` | `turn-with-subagent`, `SubagentStart`/`SubagentStop` |
+| `s10-notify-and-session-end.json` | `-c notify=["bash", <script>] -c hooks.SessionEnd=[...]` | `notify-agent-turn-complete`, `SessionEnd` |
+
+Notes learned:
+
+- **A snapshot is saved before the same entry's keys are sent**, so a snapshot
+  named for the screen you want must be scheduled *after* the key that opens it
+  (the `slash` vs `slash2` and `model` vs `model2` pairs: only the second of each is the dialog).
+- **Hook trust:** the first launch with any new hook shows `Hooks need review`;
+  schedules `s9`/`s10` open with `Down`, `Enter` (choose "Trust all and continue")
+  before typing. With the folder already trusted in the config, no folder
+  prompt appears. Do **not** type prose into that screen: spaces and Enter toggle
+  hooks in the review menu (one Bram hook was toggled off by an early probe;
+  restoring the config undid it).
+- **Latency:** an approval prompt for `apply_patch` took 25-35 s to appear in the
+  Bram-hooks-enabled setup; `s5` waits 38 s before pressing Enter.
+- The schedules hold Enter on `Trust all` only because the logger hooks must run;
+  they are not screen-aware.
+- Redaction (`<workspace>` etc.) was applied afterwards by a throwaway script
+  that is not retained; `.raw` redaction is by plain byte replacement.

@@ -1,0 +1,13 @@
+{
+  "session_id": "4f97c209-f8d2-4280-813c-201aa3d49752",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/4f97c209-f8d2-4280-813c-201aa3d49752.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/4f97c209-f8d2-4280-813c-201aa3d49752/scratchpad",
+  "hook_event_name": "SessionStart",
+  "source": "resume",
+  "session_title": "specimen-align-2",
+  "seconds_since_last_response": 53,
+  "context_tokens": 43102,
+  "prompt_cache_likely_expired": false,
+  "estimated_cache_write_usd": 0.3448
+}

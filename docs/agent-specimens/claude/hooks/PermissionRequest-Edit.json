@@ -1,0 +1,26 @@
+{
+  "session_id": "766894ba-177c-40e7-834e-57ecf0da24f6",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/766894ba-177c-40e7-834e-57ecf0da24f6.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/766894ba-177c-40e7-834e-57ecf0da24f6/scratchpad",
+  "prompt_id": "40c373c6-0221-49b9-85b3-874b4ce7ca24",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "<workspace>/edit-specimen.txt",
+    "old_string": "hi",
+    "new_string": "hello",
+    "replace_all": false
+  },
+  "permission_suggestions": [
+    {
+      "type": "setMode",
+      "mode": "acceptEdits",
+      "destination": "session"
+    }
+  ]
+}

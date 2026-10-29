@@ -1,0 +1,13 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   <workspace>
+
+
+❯ Run the shell command: echo hello-specimen > specimen.txt
+
+✢ Bloviating…
+
+───────────────────────────────────────────────────────────────────────────────────────────────────── specimen-align-1 ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt · ← for agents                                                ◐ medium · /effort

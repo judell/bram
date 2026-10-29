@@ -1,0 +1,22 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /config to customize Cursor settings and behavior.
+
+
+  Run the shell command: sleep 20 && echo slept
+
+
+  Running that command now.
+
+  $ sleep 20 && echo slept Cancelled • 5.0s
+
+
+
+
+  → Add a follow-up
+
+
+
+  Press Ctrl+C again to exit

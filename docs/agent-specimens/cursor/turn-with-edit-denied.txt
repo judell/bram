@@ -1,0 +1,27 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /plan to plan execution and reach the right outcome faster.
+
+
+  Create a file named DENYME.txt containing hi. Use your file edit tool. If it is blocked, quote verbatim any
+  reason you were given.
+
+
+  I'll try creating DENYME.txt with the file edit tool now.
+
+    Edited DENYME.txt Edit rejected
+
+  Blocked. Reason given:
+
+  Blocked by specimen hook (user_message).
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 4.9%
+  <workspace> · main

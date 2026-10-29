@@ -1,0 +1,14 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Try Cursor Grok 4.7 via /model, frontier intelligence at a fraction of the cost.
+
+
+
+
+  → Plan, search, build anything
+
+
+
+  Press Ctrl+C again to exit

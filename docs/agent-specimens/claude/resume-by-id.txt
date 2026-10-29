@@ -1,0 +1,18 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   <workspace>
+
+
+❯ Run the shell command: echo hello-specimen > specimen.txt
+
+⏺ Bash(echo hello-specimen > specimen.txt)
+  ⎿  (No output)
+
+⏺ I ran the command, so specimen.txt in the working directory now contains hello-specimen.
+
+✻ Sautéed for 2s · done 9:06 PM
+
+───────────────────────────────────────────────────────────────────────────────────────────────────── specimen-align-2 ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents                                                 ◐ medium · /effort

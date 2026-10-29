@@ -1,7 +1,9 @@
-// Specimen logger: writes the events and tool hooks Bram's plugin uses, one JSON per type.
+// Specimen logger: writes the events and tool hooks Bram's plugin uses, one JSON per type (first of each).
+// Also saves session.tool.failed / session.step.failed, which Bram does not forward but which carry the blocked-tool errors.
+// Set SPECIMEN_EVENTS_DIR; the default below is the redacted path.
 import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 const OUT = process.env.SPECIMEN_EVENTS_DIR || "<workspace>/events";
-const FORWARDED = new Set(["session.created","session.execution.started","session.inbox.delivered","session.step.ended","session.execution.succeeded","session.execution.failed","session.execution.interrupted","permission.asked","permission.replied","form.created","form.replied","form.cancelled"]);
+const FORWARDED = new Set(["session.created","session.execution.started","session.inbox.delivered","session.step.ended","session.execution.succeeded","session.execution.failed","session.execution.interrupted","permission.asked","permission.replied","form.created","form.replied","form.cancelled","session.tool.failed","session.step.failed"]);
 const seen = new Set();
 function dump(name, obj) {
   mkdirSync(OUT, { recursive: true });

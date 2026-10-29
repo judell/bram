@@ -1,0 +1,15 @@
+{
+  "id": "evt_185d9f3a2001Pq0fS3OFIhQS5v",
+  "created": 1793247015842,
+  "type": "form.replied",
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "id": "frm_185d9e41c001KrymJVEa1srqMO",
+    "sessionID": "ses_e7a263769ffeAoFr5frD0w3TaC",
+    "answer": {
+      "q0": "Red"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "conversation_id": "6aa19187-3b62-45ae-a817-a8e0d17ffa1f",
+  "generation_id": "1ddae892-a52a-4ec4-b7e9-9e0c3c44aa78",
+  "model": "default",
+  "tool_name": "Shell",
+  "tool_input": {
+    "command": "echo hello-specimen > specimen.txt",
+    "cwd": "",
+    "timeout": 30000
+  },
+  "tool_output": "{\"output\":\"\",\"exitCode\":0}",
+  "duration": 4752.825,
+  "tool_use_id": "bcf8141a-c408-4af3-bb8c-cd40b113f0ee",
+  "cwd": "",
+  "session_id": "6aa19187-3b62-45ae-a817-a8e0d17ffa1f",
+  "hook_event_name": "postToolUse",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "~/.cursor/projects/<munged-workspace>/agent-transcripts/6aa19187-3b62-45ae-a817-a8e0d17ffa1f/6aa19187-3b62-45ae-a817-a8e0d17ffa1f.jsonl"
+}

@@ -1,0 +1,22 @@
+{
+  "conversation_id": "1a4dcbdc-0ba3-4b7d-8329-d34c16c55173",
+  "generation_id": "c2f87f14-63af-413c-97e5-722ac6d6a376",
+  "model": "default",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "<workspace>/DENYME.txt"
+  },
+  "error_message": "Blocked by specimen hook (user_message).",
+  "failure_type": "permission_denied",
+  "duration": 0,
+  "tool_use_id": "call-896216fe-bb50-4f73-bd53-c08c9fd95709-0\nfc_cef6f5c8-a100-99e3-97c0-fb77c1e10d73_0",
+  "is_interrupt": false,
+  "session_id": "1a4dcbdc-0ba3-4b7d-8329-d34c16c55173",
+  "hook_event_name": "postToolUseFailure",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "~/.cursor/projects/<munged-workspace>/agent-transcripts/1a4dcbdc-0ba3-4b7d-8329-d34c16c55173/1a4dcbdc-0ba3-4b7d-8329-d34c16c55173.jsonl"
+}

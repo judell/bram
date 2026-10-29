@@ -1,0 +1,23 @@
+{
+  "id": "evt_185d763f6002sMNI9VuIvxRcNi",
+  "created": 1793246847990,
+  "type": "session.tool.failed",
+  "durable": {
+    "aggregateID": "ses_e7a28bea1ffeW9iuM8yr5tWNPb",
+    "seq": 12,
+    "version": 2
+  },
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "sessionID": "ses_e7a28bea1ffeW9iuM8yr5tWNPb",
+    "assistantMessageID": "msg_185d741d8001rO7cOkWR2i0WGg",
+    "id": "call_et0azkjl4oarezw7emtwb1wa",
+    "error": {
+      "type": "aborted",
+      "message": "The user declined this tool call"
+    },
+    "executed": false
+  }
+}

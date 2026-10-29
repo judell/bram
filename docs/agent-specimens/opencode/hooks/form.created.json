@@ -1,0 +1,43 @@
+{
+  "id": "evt_185d9e41c002kH5kX24IOx3w92",
+  "created": 1793247011868,
+  "type": "form.created",
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "form": {
+      "id": "frm_185d9e41c001KrymJVEa1srqMO",
+      "sessionID": "ses_e7a263769ffeAoFr5frD0w3TaC",
+      "title": "Questions",
+      "metadata": {
+        "kind": "question",
+        "tool": {
+          "messageID": "msg_185d9c8e0001MyKReXIt0NSPR3",
+          "id": "call_12nnb9u2mvvinodorhzjazij"
+        }
+      },
+      "fields": [
+        {
+          "key": "q0",
+          "title": "Color preference",
+          "description": "Do you prefer red or blue?",
+          "type": "string",
+          "options": [
+            {
+              "value": "Red",
+              "label": "Red",
+              "description": "You prefer the color red"
+            },
+            {
+              "value": "Blue",
+              "label": "Blue",
+              "description": "You prefer the color blue"
+            }
+          ],
+          "custom": true
+        }
+      ]
+    }
+  }
+}

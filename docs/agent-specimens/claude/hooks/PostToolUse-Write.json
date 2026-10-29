@@ -1,0 +1,27 @@
+{
+  "session_id": "766894ba-177c-40e7-834e-57ecf0da24f6",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/766894ba-177c-40e7-834e-57ecf0da24f6.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/766894ba-177c-40e7-834e-57ecf0da24f6/scratchpad",
+  "prompt_id": "c2540528-f05f-4d2f-9076-a07000f18b78",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "<workspace>/edit-specimen.txt",
+    "content": "hi"
+  },
+  "tool_response": {
+    "type": "create",
+    "filePath": "<workspace>/edit-specimen.txt",
+    "content": "hi",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
+  },
+  "tool_use_id": "toolu_01DTkszneZpYvc8pbKzNeYiz",
+  "duration_ms": 32
+}

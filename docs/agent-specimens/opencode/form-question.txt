@@ -1,0 +1,39 @@
+   Shell co   Shell co   Shell sl   Shell co   Shell ec   Running    Shell co   Red or b ? Red or blue preference     +
+
+  ┃
+  ┃  Use the question tool to ask me whether I prefer red or blue, then wait for my answer.
+  ┃
+
+     → Asked 1 question
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  Questions
+  ┃
+  ┃  Do you prefer red or blue?
+  ┃
+  ┃  1. Red
+  ┃     You prefer the color red
+  ┃  2. Blue
+  ┃     You prefer the color blue
+  ┃  3. Type your own answer
+  ┃
+  ┃  ↑↓ select  enter submit  esc dismiss
+  ┃

@@ -1,0 +1,12 @@
+{
+  "id": "evt_185d970ef001eRN3VyG92kLkzt",
+  "created": 1793246982383,
+  "type": "form.cancelled",
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "id": "frm_185d955700018ljeiBs6TwZrlj",
+    "sessionID": "ses_e7a26dd1bffevzr86HbtTEv3i6"
+  }
+}

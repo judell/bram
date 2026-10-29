@@ -1,0 +1,17 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   <workspace>
+
+
+❯ Run exactly this shell command in the foreground, no background: python3 -c 'import time; time.sleep(30)'
+
+⏺ Bash(python3 -c 'import time; time.sleep(30)')
+  ⎿  Running… (4s)
+     (ctrl+b to run in background)
+
+✢ Meandering… (7s · ↓ 99 tokens)
+
+───────────────────────────────────────────────────────────────────────────────────────────────────── specimen-align-4 ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt                                                               ◐ medium · /effort

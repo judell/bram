@@ -1,0 +1,18 @@
+{
+  "session_id": "f2345fc8-a2ce-492c-973f-d7bd38dee58c",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/f2345fc8-a2ce-492c-973f-d7bd38dee58c.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/f2345fc8-a2ce-492c-973f-d7bd38dee58c/scratchpad",
+  "prompt_id": "4d3471e6-64ad-4da9-b750-0216789a01b1",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python3 -c 'import time; time.sleep(30)'",
+    "description": "Sleep for 30 seconds via Python"
+  },
+  "tool_use_id": "toolu_01Ky6vAe6pf89q5XAWkuyNFz"
+}

@@ -1,0 +1,2 @@
+{"type":"turn_ended","status":"success"}
+{"type":"turn_ended","status":"aborted","error":"User aborted/interrupted manually."}

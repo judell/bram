@@ -1,0 +1,4 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wednesday, Oct 28, 2026, 9:09 PM (UTC-7)</timestamp>\n<user_query>\nRun the shell command: echo hello-declined > declined.txt\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"I'll run that command now."},{"type":"tool_use","name":"Shell","input":{"command":"echo hello-declined > declined.txt","description":"Write hello-declined to declined.txt"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"The command was declined (not executed), so `declined.txt` was not written."}]}}
+{"type":"turn_ended","status":"success"}

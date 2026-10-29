@@ -1,0 +1,15 @@
+{
+  "conversation_id": "6809fee3-dd73-4c7d-8d12-c9b3f7f3b00b",
+  "generation_id": "d707a76f-cab1-4dd0-9500-ab116accac0e",
+  "model": "default",
+  "status": "error",
+  "loop_count": 0,
+  "session_id": "6809fee3-dd73-4c7d-8d12-c9b3f7f3b00b",
+  "hook_event_name": "stop",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "~/.cursor/projects/<munged-workspace>/agent-transcripts/6809fee3-dd73-4c7d-8d12-c9b3f7f3b00b/6809fee3-dd73-4c7d-8d12-c9b3f7f3b00b.jsonl"
+}

@@ -1,0 +1,21 @@
+{
+  "id": "evt_185d9d3e6002H3vRWBUBN7tdki",
+  "created": 1793247007718,
+  "type": "permission.asked",
+  "location": {
+    "directory": "<workspace>"
+  },
+  "data": {
+    "id": "per_185d9d3e60018NrQ6ZD5bcV14L",
+    "sessionID": "ses_e7a263769ffeAoFr5frD0w3TaC",
+    "action": "question",
+    "resources": [
+      "*"
+    ],
+    "source": {
+      "type": "tool",
+      "messageID": "msg_185d9c8e0001MyKReXIt0NSPR3",
+      "id": "call_12nnb9u2mvvinodorhzjazij"
+    }
+  }
+}

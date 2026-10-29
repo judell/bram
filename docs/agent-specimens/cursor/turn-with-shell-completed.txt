@@ -1,0 +1,24 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Hit shift+tab to enable Plan Mode for large or complex changes.
+
+
+  Run the shell command: echo hello-specimen > specimen.txt
+
+
+  I'll run that command now.
+
+  $ echo hello-specimen > specimen.txt 5.1s
+
+  Done. specimen.txt now contains hello-specimen.
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 4.7%
+  <workspace> · main

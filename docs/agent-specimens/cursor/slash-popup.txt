@@ -1,0 +1,22 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /skills to give Cursor specialized knowledge for tasks.
+
+
+
+
+  → /
+
+
+   → /model [filter]           Select model (Tab to edit)
+     /goal [objective]         Start a durable goal that continues while idle
+     /add-dir [path]           Add a directory to the current workspace
+     /save-workspace <name>    Persist the current workspace directories
+     /load-workspace <name>    Load a saved workspace by name
+     /run-everything           Toggle Run Everything (currently disabled)
+     /auto-review              Toggle Auto-review (currently disabled)
+     /plan [prompt]            Create a plan or show existing plan with options
+     /ask                      Toggle ask mode (Q&A, read-only; no edits or command execution)
+     ↓ more below

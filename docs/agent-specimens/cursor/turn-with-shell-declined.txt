@@ -1,0 +1,24 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /debug to instrument and debug complex problems.
+
+
+  Run the shell command: echo hello-declined > declined.txt
+
+
+  I'll run that command now.
+
+  $ echo hello-declined > declined.txt Rejected
+
+  The command was declined (not executed), so declined.txt was not written.
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 4.7%
+  <workspace> · main

@@ -1,0 +1,14 @@
+{
+ "session_id": "01a185d7-6842-7e71-b7cf-e7bcd9781ce5",
+ "turn_id": "01a185d7-8f71-79d0-8f1f-b03f46235853",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T21-07-29-01a185d7-6842-7e71-b7cf-e7bcd9781ce5.jsonl",
+ "cwd": "<workspace>",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "tool_name": "apply_patch",
+ "tool_input": {
+  "command": "*** Begin Patch\n*** Add File: <workspace>/patch-specimen.txt\n+hello-patch\n*** End Patch"
+ },
+ "tool_use_id": "exec-9353ba24-9d34-442b-babf-d03baaec9a93"
+}

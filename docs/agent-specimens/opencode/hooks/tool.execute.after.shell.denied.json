@@ -1,0 +1,34 @@
+{
+  "tool": "shell",
+  "sessionID": "ses_e7a2749aeffeu0hPyTZoVKEGYV",
+  "agent": "build",
+  "messageID": "msg_185d8b69c001Ki2M0gtff5LE7A",
+  "id": "call_02fetn61fo7lqvadrzz7voxc",
+  "input": {
+    "command": "echo hello-specimen"
+  },
+  "status": "error",
+  "error": {
+    "_tag": "Tool.Error",
+    "message": "Unable to execute command: echo hello-specimen",
+    "error": {
+      "_tag": "Permission.BlockedError",
+      "rules": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "echo *",
+          "effect": "deny"
+        }
+      ],
+      "permission": "shell",
+      "resources": [
+        "echo hello-specimen"
+      ]
+    }
+  }
+}

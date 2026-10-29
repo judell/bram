@@ -1,0 +1,13 @@
+{
+ "session_id": "01a185d9-0e3a-7f91-a134-3fb3fca0f7a0",
+ "turn_id": "01a185d9-33fa-7130-a083-cc7573a2d112",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T21-09-17-01a185d9-0e3a-7f91-a134-3fb3fca0f7a0.jsonl",
+ "cwd": "<workspace>",
+ "hook_event_name": "PermissionRequest",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "tool_name": "apply_patch",
+ "tool_input": {
+  "command": "*** Begin Patch\n*** Update File: <workspace>/README.md\n@@\n+hello-update\n*** End Patch"
+ }
+}

@@ -1,0 +1,40 @@
+  Agent command center  Group: Project  g
+   All 10   Needs you 0   Working 0   Ready 0   Inactive 10                                            tab/⇧tab filter
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+      Tasks                                           Status         Updated  │ Task details
+  <other project>  1                                                                   │
+    ○ <other-project task>                   Inactive       41m ago  │ Append hello-update to README.md
+                                                                              │ ○ Inactive
+  <other project>  2                                                     │
+    ○ <other-project task>                           Inactive        3h ago  │ Model: gpt-6-astra
+    ○ <other-project task>                Inactive        3h ago  │ Reasoning: high
+                                                                              │
+  <workspace>  3          │ Project
+  › ○ Append hello-update to README.md                Inactive       56s ago  │ <workspace>
+    ○ Append hello-update to README.md                Inactive        2m ago  │ 
+    ○ Create patch specimen                           Inactive        3m ago  │ 
+                                                                              │
+  <workspace-earlier-run>  4                │
+    ○ Run echo command                                Inactive       55m ago  │ Branch
+    ○ Run echo command                                Inactive       57m ago  │ main
+    ○ Create outside marker file                      Inactive       58m ago  │
+    ○ Run echo hello-specimen                         Inactive       58m ago  │ Last message
+                                                                              │ Appended hello-update to README.md.
+      Show more                                                               │
+                                                                              │ Prompt
+                                                                              │ Do not read any other files. Use the
+                                                                              │ …
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+                                                                              │
+  ? help  esc back  ↑/↓ move  enter open  n new

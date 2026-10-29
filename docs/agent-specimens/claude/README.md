@@ -8,7 +8,9 @@ come from captures like these, never from guesses
 
 - **CLI:** `claude`, version `2.1.312` (Claude Code)
 - **Platform:** macOS (arm64), 2026-10-28
-- **Capture:** `scripts/capture-terminal-specimen.py`, 120×40 pseudo-terminal,
+- **Capture:** `scripts/capture-terminal-specimen.py` for the first pass; the
+  scheduled-keystroke driver in [`capture/`](capture/README.md) (adapted from
+  Codex's) for the 2026-10-28 alignment pass. Both: 120×40 pseudo-terminal,
   run in a scratch git repo, `CLAUDE_CODE_*` markers and `ANTHROPIC_API_KEY`
   unset. Logged-out and first-run screens used throwaway `CLAUDE_CONFIG_DIR`s;
   the turns used the real account (a throwaway dir has no login).
@@ -31,6 +33,19 @@ come from captures like these, never from guesses
 | `idle-composer` | `claude --name specimen-idle --session-id <uuid>` | Header (`Claude Code v2.1.312`, model, plan `Claude Max`, path, `◐ medium · /effort`), the name on the input rule (`── specimen-idle ─`), `❯ Try "fix typecheck errors"`, footer `⏵⏵ auto mode on (shift+tab to cycle) · ← for agents`. |
 | `turn-with-shell-readonly` | `claude --permission-mode default "Run the shell command: echo hello-specimen"` | The spinner line (`✢ Stewing… (running PreToolUse hooks… 0/2 · 2s)`, later `(2s · ↓25 tokens)`), `⏺ Bash(echo hello-specimen)`, `⎿ Waiting…`, result, `✻ Worked for 3s`. **No permission prompt**: `echo` is read-only and runs unprompted even in `default` mode. |
 | `turn-with-shell` | same, with `echo hello-specimen > specimen.txt` | The permission prompt: `Bash command` / the command / `Do you want to proceed?` / `❯ 1. Yes` / `2. Yes, and always allow access to <workspace> from this project` / `3. Yes, and switch to auto mode` / `4. No` / `Esc to cancel · Tab to amend`. **Enter runs the command** (option 1 is preselected). Not approved; the process was ended at the capture deadline. |
+| `turn-with-shell-working` | prompt `Run the shell command: echo hello-specimen > specimen.txt`, Enter | Before the dialog: `❯ <prompt>`, a spinner line (`✢ Bloviating…`, verb varies), and the footer `⏸ manual mode on · esc to interrupt · ← for agents`. |
+| `turn-with-shell-approval` | same, `--permission-mode default`, snapshot ~7 s in | `⏺ Bash(echo hello-specimen > specimen.txt)` / `⎿ Waiting…` / `Bash command` / a `Tip:` line / the model's one-line description / the command between dashed rules / `Do you want to proceed?` / `❯ 1. Yes`, `2. Yes, and always allow access to <workspace> from this project`, `3. Yes, and switch to auto mode`, `4. No` / `Esc to cancel · Tab to amend`. **Enter runs the command.** This is `turn-with-shell` re-captured on the same schedule as the other phases. |
+| `turn-with-shell-declined` | Esc at that dialog | `⎿ Interrupted · What should Claude do instead?` / `✻ Churned for 1s · done 9:05 PM`, and an empty composer. The turn ends on screen, but **no `Stop` hook fired** (nor `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`). |
+| `turn-with-shell-completed` | Enter at the dialog | `⎿ (No output)` / the assistant's reply / `✻ Sautéed for 2s · done 9:06 PM`; the composer then shows a dim suggested next prompt (`cat specimen.txt`). |
+| `resume-by-id` | `claude --resume <id>` (the `-completed` session) | The whole conversation replays above a fresh composer: `❯ <prompt>`, `⏺ Bash(...)`, the reply, `✻ Sautéed for 2s`, the name on the rule (`── specimen-align-2 ─`). `SessionStart` fires with `source: "resume"`. |
+| `exit-ctrl-c` | Ctrl-C twice at an idle composer | The first press only shows `Press Ctrl-C again to exit` (it reverts after about a second; presses 2 s apart did not exit). The second exits and the shell gets `Resume this session with:` / `claude --resume <session-id>`. This is the full stream (`_all.raw`), since the child exited. |
+| `interrupt-approval` | prompt asking for `python3 -c 'import time; time.sleep(30)'` | The dialog again, with `This command requires approval` and option 2 reading `Yes, and don’t ask again for: python3 *`. (A bare `sleep 20` is not run in the foreground: Claude says foreground sleep is blocked and backgrounds it, `Running in the background (↓ to manage)`.) |
+| `interrupt-working` | Enter at the dialog, snapshot 5 s later | `⏺ Bash(...)` / `⎿ Running… (4s)` / `(ctrl+b to run in background)` / `✢ Meandering… (7s · ↓ 99 tokens)`, footer `esc to interrupt`. |
+| `interrupt-esc` | Esc mid-run | `⎿ Interrupted · What should Claude do instead?` and an empty composer. No `Stop`, `PostToolUse` or `SessionEnd` followed. |
+| `edit-write-approval` | prompt: use the Write tool to create `edit-specimen.txt` containing `hi` | `⏺ Write(edit-specimen.txt)` / `Create file` / path / a line-numbered preview (`1 hi`) / `Do you want to create edit-specimen.txt?` / `1. Yes`, `2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)`, `3. No`. Three options, not four. |
+| `edit-edit-approval` | prompt: use the Edit tool to change `hi` to `hello` | `⏺ Update(edit-specimen.txt)` / `Edit file` / a `-`/`+` diff / `Do you want to make this edit to edit-specimen.txt?` and the same three options. The tool is `Edit` in hooks, `Update` on screen. |
+| `edit-completed` | Enter at the Edit dialog | `⎿ Added 1 line, removed 1 line` with the diff, the reply, `✻ Brewed for 4s`. |
+| `failed-command` | `ls /nonexistent-specimen-dir`, approved | A command that fails: `Listed 1 directory`, the reply quoting `Exit code 1` and the `ls` error. (A read-only `ls` of a path **outside** the workspace still raised the dialog, with only Yes / Yes-and-auto / No.) |
 | `help.txt` | `claude --help` | Every flag in this version (`--session-id`, `--name`, `--resume`, `--continue`, `--permission-mode`, `--settings`, …). |
 
 Related menu screens (permission variants, AskUserQuestion, model picker,
@@ -47,13 +62,19 @@ session resume picker) are already specimens:
 - `--name <title>` is a display name: it appears on the composer rule, in
   `SessionStart.session_title` and `UserPromptSubmit.session_title`, and as
   `custom-title` / `agent-name` records at the top of the JSONL.
-- Resume is `claude --resume <id>` (or `--continue` for the latest). Not run
-  here, because it would cost a turn; Bram's launch lines are cited in Seams.
+- Resume is `claude --resume <id>` (or `--continue` for the latest); see
+  `resume-by-id`. It appends to the same JSONL, and `SessionStart` fires again
+  with `source: "resume"` (`hooks/SessionStart-resume.json`).
+- **Allocation and persistence differ.** With `--session-id`, the id exists
+  at launch (`SessionStart` carries it); the JSONL appears only at the first
+  message (see above). `exit-ctrl-c` printed a resume line for a session that
+  had a transcript; an idle launch-and-exit with no message was not tried, so
+  whether the printed id is then resumable is unknown.
 
 ## Hooks (`hooks/`)
 
 `settings.json` (the scratch repo's `.claude/settings.json`) registers
-`log-hook.sh <Event>` on each event; the script appends the stdin payload to a
+`log-hook.sh <Event>` on twelve events (the first pass had seven); the script appends the stdin payload to a
 per-event file and exits 0 (allow). Every payload shares `session_id`,
 `transcript_path`, `cwd`, `scratchpad_dir`, and (after the first prompt)
 `prompt_id`, `permission_mode`, `effort`.
@@ -66,11 +87,20 @@ per-event file and exits 0 (allow). Every payload shares `session_id`,
 | `PermissionRequest.json` | Fires when the dialog is shown (non-read-only command): `tool_input`, `permission_suggestions`. Bram's menu hook uses this event. |
 | `Notification.json` | The "Claude needs your permission" message, fired alongside the dialog. |
 | `PostToolUse.json` | After the tool ran, with its response. |
+| `PreToolUse-Write.json` / `PreToolUse-Edit.json` | The edit tools. Write: `tool_input {file_path, content}`. Edit: `tool_input {file_path, old_string, new_string, replace_all}`. Same envelope and `tool_use_id` as Bash. A guard matching `Bash` only would miss these. |
+| `PermissionRequest-Write.json` / `-Edit.json` | Same `tool_input`, plus `permission_suggestions: [{type: "setMode", mode: "acceptEdits", destination: "session"}]` (the dialog's option 2). |
+| `PostToolUse-Write.json` / `-Edit.json` | `tool_response` is an object here, not a string: Write `{type: "create", filePath, content, structuredPatch: [], originalFile: null, userModified}`; Edit `{filePath, oldString, newString, originalFile, structuredPatch: [{oldStart, ..., lines}], userModified, replaceAll}`. Plus `duration_ms`. |
+| `PostToolUseFailure.json` | A Bash command that exited non-zero: `error` (`"Exit code 1\nls: ..."`), `is_interrupt: false`, `duration_ms`. The analogue of Codex's sandbox-denied `PostToolUse`. |
+| `PreToolUse-interrupted.json` | The `PreToolUse` of the Esc-interrupted run. It is the last tool event: **no `PostToolUse`, `PostToolUseFailure` or `Stop` followed**. |
+| `SessionStart-resume.json` | `source: "resume"`, plus `seconds_since_last_response`, `context_tokens`, `prompt_cache_likely_expired`, `estimated_cache_write_usd`. `session_title` is kept from the first run. |
+| `SessionEnd.json` | Fired by the double Ctrl-C exit: `reason: "prompt_input_exit"`. Not fired when the driver killed the child. |
+| `SubagentStop.json` | Fires **at the end of an ordinary completed turn**, alongside `Stop`, with `agent_type: ""` and `last_assistant_message` equal to the suggested next prompt (`cat specimen.txt`), so it appears to be the prompt-suggestion helper, not a user-visible subagent. Not fired on declined or interrupted turns. A consumer keyed on `SubagentStop` would see phantom subagents. |
 | `Stop.json` | End of turn: `stop_hook_active`, `last_assistant_message`, `background_tasks`. |
 
 `SessionStart.json` comes from the idle run, `PostToolUse.json`, `Stop.json`,
 `PreToolUse.json` and `UserPromptSubmit.json` from the read-only turn, and
 `PermissionRequest.json` and `Notification.json` from the permission turn.
+In the 2026-10-28 runs `Notification` did **not** fire in the first five seconds of the dialog (the earlier pass held it longer), and no `PermissionDenied` fired after declining. No payload for either of those events is new.
 
 ## Transcript (`transcript-record.jsonl`)
 
@@ -84,35 +114,83 @@ session: `custom-title`, `agent-name`, `mode`, `permission-mode`,
 `file-history-snapshot`, `attachment` (environment, model, skill listing…),
 `assistant`, `last-prompt`, `tools-used`, `api-request*`.
 
+## Session metadata (`session-meta-record.jsonl`)
+
+The non-conversation records of one JSONL, in file order: `custom-title`
+(`customTitle`), `agent-name` (`agentName`), `mode`, `permission-mode`,
+`last-prompt` (`lastPrompt`, `leafUuid`), `tools-used`. The set is **written
+again at each resume** (three copies here: the first run, the `--resume`, and
+the closing exit), so the name on a session is the last `custom-title` /
+`agent-name` record, not the first. There is no summary record in these
+sessions (none appeared with `--name`).
+
 ## Not yet captured
 
-- Esc and Ctrl-C behaviour mid-turn, `/exit` and the "Resume this session with"
-  exit banner (Bram's tests quote one, `lib.rs:47009`). Nothing was sent after
-  the prompt, to avoid approving anything.
-- `--resume <id>` itself, and a pasted image (`[Image: …]` markers are handled
-  at `lib.rs:39229`; no capture here).
-- A `PreToolUse` deny and what the model sees of it.
+- A pasted image (`[Image: …]` markers are handled at `lib.rs:39229`; no
+  capture here).
+- A `PreToolUse` deny and what the model sees of it (out of scope for this
+  alignment, as for the other packs), and a `PermissionDenied` payload: it did
+  not fire when the dialog was declined with Esc; what triggers it (perhaps
+  only auto-mode denials) was not isolated.
+- A `Notification` payload from this pass (the first pass has one).
+- An idle launch-and-exit with no message (is the printed resume id usable?).
+- The `/exit` slash command and a single-Ctrl-C exit at a non-idle prompt.
 - A loopback `curl` from inside a turn.
-- Residue note: the turn sessions wrote a trust entry for the scratch repo into
-  the real `~/.claude.json` and their transcripts into `~/.claude/projects/`.
+- Subagent transcripts of a user-visible subagent (`SubagentStop` fired only
+  for the prompt-suggestion helper; its `agent_transcript_path` was not read).
+- Residue: the trust entry for the scratch repo in the real `~/.claude.json`
+  (from the first pass), and the sessions of both passes under
+  `~/.claude/projects/<munged-workspace>/`. The second pass added the
+  transcripts for `specimen-align-1`, `-2`, `-4`, `-5`, an unnamed
+  failing-command session, and subagent transcript directories. No credential
+  file was read or copied.
 
 ## Seams
 
 | Seam | Claude Code | Evidence |
 |---|---|---|
-| launch and resume by id | `claude --name '<title>' --session-id <uuid>` for a fresh named session; `claude --resume <id>`; `claude --continue` when no id | Bram code: `src-tauri/src/lib.rs:26805-26840`; `help.txt` |
+| launch and resume by id | `claude --name '<title>' --session-id <uuid>` for a fresh named session; `claude --resume <id>` (replays the conversation, `SessionStart` `source: "resume"`); `claude --continue` when no id | Bram code: `src-tauri/src/lib.rs:26805-26840`; `help.txt`, `resume-by-id.txt`, `hooks/SessionStart-resume.json` |
 | when the session id exists | Before the first message: `SessionStart` carries it, and with `--session-id` it is the id Bram chose | `hooks/SessionStart.json` |
 | session store | `~/.claude/projects/<munged-cwd>/<id>.jsonl`, created at the first message, appended on resume | `transcript-record.jsonl`; Bram code: `lib.rs:553`, `lib.rs:30822` |
-| naming | `--name` at launch (display title, also `custom-title` record); no rename needed | `idle-composer.txt`; `hooks/SessionStart.json` (`session_title`) |
+| naming | `--name` at launch (display title, also `custom-title` / `agent-name` records, rewritten on each resume; last wins); no rename needed | `idle-composer.txt`; `hooks/SessionStart.json` (`session_title`); `session-meta-record.jsonl` |
 | guard hook | `PreToolUse` in `.claude/settings.json`, command hook reading JSON on stdin; Bram registers `bram-guard guard claude-worklist` there, plus a menu hook on `PermissionRequest`, `PostToolUse`, `PermissionDenied`, `PreToolUse` (AskUserQuestion) | `hooks/PreToolUse.json`, `hooks/settings.json`; Bram code: `lib.rs:51533`, `lib.rs:51559` |
-| turn state | `UserPromptSubmit` (start) and `Stop` (end) hooks; on screen, the spinner line with `esc to interrupt` and `✻ Worked for Ns` | `hooks/UserPromptSubmit.json`, `hooks/Stop.json`, `turn-with-shell-readonly.txt` |
+| turn state | `UserPromptSubmit` (start) and `Stop` (end) hooks (`Stop` is absent when the turn is declined or interrupted, so a hook-only tracker never sees those turns end); on screen, the spinner line with `esc to interrupt` and `✻ Worked for Ns` | `hooks/UserPromptSubmit.json`, `hooks/Stop.json`, `turn-with-shell-readonly.txt` |
 | Agent→Bram channel | Loopback `curl` to the port in `resources/.bram-port` from the agent's Bash tool (per `conventions.md`), plus hooks calling out | Bram code: `app/__shell/conventions.md` (Transports); loopback-from-turn not captured |
 | Bram→agent delivery | Bracketed paste (`ESC[200~ … ESC[201~`) after a composer clear (`ESC ^U`), then a carriage return | Bram code: `lib.rs:22072`, `lib.rs:22089` |
 | pasted images | `[Image: source: /abs/path.png]` marker in the composer text; transcript records show `[Image: original WxH, …]` | not captured; Bram code: `lib.rs:39229` |
+| edit-tool hook payload | `PreToolUse` / `PermissionRequest` / `PostToolUse` with `tool_name` `Write` or `Edit` (screen label `Update`), `tool_input` `{file_path, content}` or `{file_path, old_string, new_string, replace_all}`, and an object `tool_response` | `hooks/PreToolUse-Write.json`, `PreToolUse-Edit.json`, `PostToolUse-Write.json`, `PostToolUse-Edit.json`, `PermissionRequest-Edit.json` |
+| blocked or failed tool | A failing command fires `PostToolUseFailure` (`error`, `is_interrupt`); declining the dialog or Esc fires nothing after `PermissionRequest`; `PermissionDenied` was not observed | `hooks/PostToolUseFailure.json`, `turn-with-shell-declined.txt` |
+| approval dialog shapes | Bash: 4 options (Yes / always allow / switch to auto mode / No); outside-workspace read: 3 options; Write/Edit: 3 options (Yes / switch to accept edits / No). Enter picks the preselected `1. Yes` | `turn-with-shell-approval.txt`, `failed-command` approval (`interrupt-approval.txt`), `edit-write-approval.txt` |
 | menus | AskUserQuestion, permission prompts, model picker, resume picker | [`docs/pty-menu-specimens/`](../../pty-menu-specimens/) `*claude*` files, and `turn-with-shell.txt` |
 | working status | `✢ Stewing… (running PreToolUse hooks… 0/2 · 2s)` then `(Ns · ↓N tokens)` with `esc to interrupt`; a verb that changes (Stewing, Decipher…) | `turn-with-shell-readonly.txt`; Bram code: `lib.rs:11955` matches the `Working (…esc to interrupt)` form used by Codex, so check it against this one |
-| interrupt and exit | Esc interrupts (footer `esc to interrupt`); Ctrl-C/`/exit` end the session and print a resume line | `turn-with-shell-readonly.txt` (footer); exit banner not captured (Bram test quote: `lib.rs:47009`) |
+| interrupt and exit | Esc mid-turn or at a dialog prints `⎿ Interrupted · What should Claude do instead?` and ends the turn **without a `Stop` hook**; Ctrl-C twice (second within about a second) exits, fires `SessionEnd` (`prompt_input_exit`) and prints `Resume this session with:` / `claude --resume <id>`; the first Ctrl-C only shows a hint | `interrupt-esc.txt`, `turn-with-shell-declined.txt`, `exit-ctrl-c.txt`, `hooks/SessionEnd.json`, `hooks/PreToolUse-interrupted.json`; Bram test quote of the banner: `lib.rs:47009` |
 | logged-out screen | None: the normal composer, footer `Not logged in · Run /login` | `logged-out.txt` |
 | instructions file | `CLAUDE.md` (project root and parents), `@`-imports | Bram code: `lib.rs:52390` |
 | screen shapes | Boxed trust prompt with numbered options; composer rule with the session name; numbered permission dialog with `Esc to cancel · Tab to amend` | `first-run-trust.txt`, `idle-composer.txt`, `turn-with-shell.txt` |
 | model and version | Header line `Claude Code v2.1.312`, `Opus 5.5 · Claude Max`; `SessionStart.model` is `claude-opus-5-5`; transcript records carry `version` | `idle-composer.txt`, `hooks/SessionStart.json`, `transcript-record.jsonl` |
+
+## Alignment — 2026-10-28
+
+Signed: Claude subagent (Sonnet), delegated by Jon's Claude main thread.
+Captured with `claude` 2.1.312 in the same scratch repo as the first pass,
+with hooks logging to a directory outside the repo. Added:
+
+- Screens: `turn-with-shell-working`, `-approval`, `-declined`, `-completed`;
+  `resume-by-id`; `exit-ctrl-c`; `interrupt-approval`, `-working`, `-esc`;
+  `edit-write-approval`, `edit-edit-approval`, `edit-completed`;
+  `failed-command`. (`turn-with-shell` and `turn-with-shell-readonly` are kept.)
+  Each has a `.txt` rendered through `capture/render.py`; the `.raw` files are
+  redacted streams, not byte-exact.
+- Hooks: `PreToolUse-Write/Edit`, `PermissionRequest-Write/Edit`,
+  `PostToolUse-Write/Edit`, `PostToolUseFailure`, `PreToolUse-interrupted`,
+  `SessionStart-resume`, `SessionEnd`, `SubagentStop`; `settings.json` now
+  registers twelve events and `log-hook.sh` honours `$HOOKLOG_DIR`.
+- `session-meta-record.jsonl`.
+- `capture/`: `drive.py`, `render.py`, `run.sh`, six schedules and a README.
+- Seams cells: interrupt and exit, turn state, launch and resume, naming; new
+  rows for the edit-tool payload, blocked or failed tools, and dialog shapes.
+- Findings worth a second look: `Stop` does not fire on a declined or
+  interrupted turn; `SubagentStop` fires on every completed turn; a bare
+  `sleep 20` is backgrounded rather than run, so interrupt tests need another
+  long command; the first Ctrl-C only shows a hint and expires within about a
+  second.

@@ -1,0 +1,22 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /plan to iterate on an implementation plan before code changes.
+
+
+  Run the shell command: sleep 20 && echo slept
+
+
+  Running that command now.
+
+  $ sleep 20 && echo slept Cancelled • 5.2s
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 4.7%
+  <workspace> · main

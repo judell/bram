@@ -1,0 +1,22 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /debug to instrument and debug complex problems.
+
+
+  Run the shell command: echo hello-specimen > specimen.txt
+
+
+  I'll run that command now.
+
+  $ echo hello-specimen > specimen.txt Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  echo hello-specimen > specimen.txt in .
+
+ Run this command?
+ Hook requested approval • Not in allowlist: echo
+  → Run (once) (y)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)

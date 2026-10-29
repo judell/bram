@@ -1,0 +1,23 @@
+{
+  "conversation_id": "0783a94b-beb5-4a44-97a2-8b1854b0186b",
+  "generation_id": "c7cd5aa4-028f-41fe-a5e6-3a9d1765f987",
+  "model": "default",
+  "tool_name": "Shell",
+  "tool_input": {
+    "command": "echo hello-declined > declined.txt",
+    "cwd": "",
+    "timeout": 30000
+  },
+  "tool_output": "{\"output\":\"\",\"exitCode\":0}",
+  "duration": 6748.126,
+  "tool_use_id": "5bb83e98-13d8-467f-8c69-5fe1d8c53e2c",
+  "cwd": "",
+  "session_id": "0783a94b-beb5-4a44-97a2-8b1854b0186b",
+  "hook_event_name": "postToolUse",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "~/.cursor/projects/<munged-workspace>/agent-transcripts/0783a94b-beb5-4a44-97a2-8b1854b0186b/0783a94b-beb5-4a44-97a2-8b1854b0186b.jsonl"
+}

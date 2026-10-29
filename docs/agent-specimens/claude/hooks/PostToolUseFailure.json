@@ -1,0 +1,21 @@
+{
+  "session_id": "02e6cb34-e652-4696-8710-ef8079e2fd5d",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/02e6cb34-e652-4696-8710-ef8079e2fd5d.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/02e6cb34-e652-4696-8710-ef8079e2fd5d/scratchpad",
+  "prompt_id": "ef6c3626-6866-4c00-a309-19c5095531f7",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls /nonexistent-specimen-dir",
+    "description": "List contents of a nonexistent directory"
+  },
+  "tool_use_id": "toolu_011JthSvhHiYk5DEVDK3m1Fz",
+  "error": "Exit code 1\nls: /nonexistent-specimen-dir: No such file or directory",
+  "is_interrupt": false,
+  "duration_ms": 162
+}

@@ -1,0 +1,9 @@
+{
+ "session_id": "01a185d7-6842-7e71-b7cf-e7bcd9781ce5",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T21-07-29-01a185d7-6842-7e71-b7cf-e7bcd9781ce5.jsonl",
+ "cwd": "<workspace>",
+ "hook_event_name": "SessionStart",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "source": "resume"
+}

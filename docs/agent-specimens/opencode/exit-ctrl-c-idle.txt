@@ -1,0 +1,1 @@
+[text drawn after the TUI leaves the alternate screen (ESC[?1049l); the final TUI frame is in turn-with-shell-completed.txt]

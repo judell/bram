@@ -1,0 +1,29 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use subagents to parallelize work and preserve context.
+
+
+  Run the shell command: echo DENYME-shell. If it is blocked, quote verbatim any reason you were given.
+
+
+  I'll run that echo command now.
+
+  $ echo DENYME-shell Rejected
+   Shell blocked by preToolUse hook
+
+   Agent note: Do not suggest workarounds to the blocked tool.
+
+  Blocked. Reason given:
+
+  │ Rejected: Shell blocked by preToolUse hook
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 4.7%
+  <workspace> · main

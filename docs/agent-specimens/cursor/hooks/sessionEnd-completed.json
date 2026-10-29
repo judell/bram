@@ -1,0 +1,17 @@
+{
+  "conversation_id": "f6c8044d-81ae-45ac-bd98-e4f1aa8436ca",
+  "generation_id": "f6c8044d-81ae-45ac-bd98-e4f1aa8436ca",
+  "model": "default",
+  "reason": "completed",
+  "duration_ms": 6333,
+  "is_background_agent": false,
+  "final_status": "completed",
+  "session_id": "f6c8044d-81ae-45ac-bd98-e4f1aa8436ca",
+  "hook_event_name": "sessionEnd",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": null
+}

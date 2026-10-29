@@ -1,0 +1,20 @@
+{
+  "conversation_id": "2d405cfa-c811-427f-860f-de9d0fb1f3c6",
+  "generation_id": "2d405cfa-c811-427f-860f-de9d0fb1f3c6",
+  "model": "default",
+  "file_path": "<workspace>/notes.txt",
+  "edits": [
+    {
+      "old_string": "edit-specimen",
+      "new_string": "edit-specimen-2"
+    }
+  ],
+  "session_id": "2d405cfa-c811-427f-860f-de9d0fb1f3c6",
+  "hook_event_name": "afterFileEdit",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "~/.cursor/projects/<munged-workspace>/agent-transcripts/2d405cfa-c811-427f-860f-de9d0fb1f3c6/2d405cfa-c811-427f-860f-de9d0fb1f3c6.jsonl"
+}

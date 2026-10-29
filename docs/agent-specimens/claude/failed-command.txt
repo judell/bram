@@ -1,0 +1,19 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   <workspace>
+
+
+❯ Run the shell command: ls /nonexistent-specimen-dir
+
+  Listed 1 directory (ctrl+o to expand)
+
+⏺ The command failed with exit code 1 because the directory doesn't exist:
+
+  ls: /nonexistent-specimen-dir: No such file or directory
+
+✻ Brewed for 5s · done 9:10 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts                                                                ◐ medium · /effort

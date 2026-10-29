@@ -1,0 +1,39 @@
+   Shell comm   Shell comm   Shell slee   Shell comm   Shell echo   Running ec   Shell comm ! Red or blue preference  +
+
+  ┃
+  ┃  Use the question tool to ask me whether I prefer red or blue, then wait for my answer.
+  ┃
+
+     + Thought · 959ms
+
+     → Asked 1 question
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  △ Permission required
+  ┃    ⚙ Call tool question
+  ┃
+  ┃  Tool: question
+  ┃
+  ┃
+  ┃   Allow once   Reject                                                ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃

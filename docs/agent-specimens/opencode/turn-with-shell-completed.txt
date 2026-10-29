@@ -1,0 +1,39 @@
+   Shell    Shell    Shell    Shell    Shell    Runnin   Shell    Red or   Red or   Greeti   Shell echo command       +
+
+  ┃
+  ┃  Run the shell command: echo hello-specimen
+  ┃
+
+     + Thought · 373ms
+
+  ┃
+  ┃  $ echo hello-specimen
+  ┃
+  ┃  hello-specimen
+  ┃
+
+     The command output was: hello-specimen.
+
+     Build · DeepSeek V4 Pro (New) · 9.0s · 14.8 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  <workspace>:main  8.0K (1%) · $0.00  ctrl+p commands

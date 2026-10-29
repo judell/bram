@@ -1,0 +1,14 @@
+{
+ "session_id": "01a185dd-483e-77a2-96e8-500da7e1f28d",
+ "turn_id": "01a185dd-7618-75c3-8392-d61ca7d896c7",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T21-13-54-01a185dd-483e-77a2-96e8-500da7e1f28d.jsonl",
+ "agent_transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T21-14-05-01a185dd-7608-7633-bf83-a90ee4131cb4.jsonl",
+ "cwd": "<workspace>",
+ "hook_event_name": "SubagentStop",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "stop_hook_active": false,
+ "agent_id": "01a185dd-7608-7633-bf83-a90ee4131cb4",
+ "agent_type": "default",
+ "last_assistant_message": "pong"
+}

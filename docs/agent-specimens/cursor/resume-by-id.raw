@@ -1,0 +1,44 @@
+[>1u]11;?[2K[G
+
+  Cursor Agent
+  [2mv2026.10.22-27dcf5f[22m
+  [2mTip: Type ? in the prompt bar to show in-app hints.[22m
+
+
+
+ [48;5;233m                                                                                                                      [49m
+ [48;5;233m [2m→ [22m[7mP[27m[2mlan, search, build anything[22m                                                                                       [49m
+ [48;5;233m                                                                                                                      [49m
+
+  [2mAuto[22m
+  [2m<workspace> · main[22m
+[?25l[?2004h]0;Cursor Agent[?2031h[?1004h[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G  [32m⠀⠞[39m [1mLoading conversation[22m
+
+
+
+ [48;5;233m                                                                                                                      [49m
+ [48;5;233m [2m→ [22m[7mP[27m[2mlan, search, build anything[22m                                                                                       [49m
+ [48;5;233m                                                                                                                      [49m
+
+  [2mAuto[22m
+  [2m<workspace> · main[22m
+]0;Cursor Agent[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G [48;5;235m                                                                                                                      [49m
+ [48;5;235m Run the shell command: echo hello-specimen > specimen.txt                                                            [49m
+ [48;5;235m                                                                                                                      [49m
+
+  I'll run that command now.
+
+  $ echo hello-specimen > specimen.txt [2m5.1s[22m
+
+  Done. [38;5;146mspecimen.txt[39m now contains [38;5;146mhello-specimen[39m.
+
+
+
+ [48;5;233m                                                                                                                      [49m
+ [48;5;233m [2m→ [22m[7mA[27m[2mdd a follow-up[22m                                                                                                    [49m
+ [48;5;233m                                                                                                                      [49m
+
+  [2mAuto[22m
+  [2m<workspace> · main[22m
+]0;Cursor Agent[2K[1A[2K[1A[2K[G  [2mAuto[22m [2m·[22m [2m4.7%[22m
+  [2m<workspace> · main[22m

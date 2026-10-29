@@ -67790,7 +67790,28 @@ fn needs_you_replier_phrase(author: &str, first_line: &str) -> Option<String> {
             return Some(format!("{} replied", speaker.trim()));
         }
     }
+    if let Some(speaker) = worklist_mirror_signature_speaker(line) {
+        return Some(format!("{} posted", speaker));
+    }
     Some(format!("{} replied", author))
+}
+
+// worklist-mirror-comments-signed: the mirror signs as "<owner>'s Bram (Bram
+// <version>, worklist mirror, host, …)". The guard's parser accepts only
+// agents, and should stay that way (an agent signing as Bram must not pass
+// the guard), so Alerts recognizes this one shape itself. Cross-machine
+// classification ignores it on purpose: another machine's mirror comments
+// are status notes, not moves that need you.
+fn worklist_mirror_signature_speaker(line: &str) -> Option<&str> {
+    let (speaker, rest) = line.split_once(" (")?;
+    let (owner, who) = speaker.split_once("'s ")?;
+    if owner.trim().is_empty() || who != "Bram" {
+        return None;
+    }
+    if !rest.starts_with("Bram ") || !rest.contains(", worklist mirror, host") {
+        return None;
+    }
+    Some(speaker.trim())
 }
 
 #[cfg(test)]
@@ -72000,27 +72021,123 @@ fn worklist_lifecycle_mirror_enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> b
     project_config_mirror_worklist_lifecycle_to_issue(config)
 }
 
-fn worklist_lifecycle_comment_body(
-    item_id: &str,
-    lifecycle: &str,
-    changelog: &str,
-    commit_sha: Option<&str>,
+// worklist-mirror-comments-signed: the mirror's comments are public words
+// posted through the owner's account, so they open with a signature like
+// every agent-authored forge artifact. Bram composes and posts them itself
+// (sometimes at Push time, with no agent turn), so Bram is the speaker.
+// Alerts recognizes the shape (worklist_mirror_signature_speaker) and names
+// "Jon's Bram" instead of taking an unsigned comment for the human's own.
+fn worklist_mirror_signature_line(
+    owner: &str,
+    version: &str,
+    os: &str,
+    machine: &str,
+    project: &str,
+    locator: &str,
 ) -> String {
-    let mut body = String::new();
-    body.push_str(&format!("bram-lifecycle: {}\n", lifecycle));
-    if let Some(sha) = commit_sha {
-        if !sha.trim().is_empty() {
-            body.push_str(&format!("bram-commit: {}\n", sha.trim()));
+    let mut slots = format!("Bram {}, worklist mirror, host, {}", version, os);
+    if !machine.is_empty() {
+        slots.push_str(&format!(", {}", machine));
+    }
+    format!(
+        "{}'s Bram ({}) speaking from the {} project ({}):",
+        owner, slots, project, locator
+    )
+}
+
+fn worklist_mirror_signature<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
+    let root = project_root(Some(app));
+    let owner = git_run(app, &["config", "user.name"])
+        .ok()
+        .and_then(|name| name.split_whitespace().next().map(str::to_string))
+        .unwrap_or_else(|| "The owner".to_string());
+    let version = first_nonempty_env(&["BRAM_FAKE_CURRENT", "XMLUI_DESKTOP_FAKE_CURRENT"])
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let (os, machine) = local_machine_identity();
+    let dir_name = root
+        .as_deref()
+        .and_then(|r| r.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "this".to_string());
+    let mut chars = dir_name.chars();
+    let project = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => dir_name.clone(),
+    };
+    let locator = root
+        .as_deref()
+        .and_then(guard_policy::expected_repo_locator)
+        .unwrap_or(dir_name);
+    worklist_mirror_signature_line(&owner, &version, os, machine, &project, &locator)
+}
+
+// worklist-mirror-comments-signed: an item id made readable for a public
+// comment ("issue-462-specimen-open-items" -> "specimen open items"). The
+// id itself rides in a hidden marker for anyone who needs it.
+fn worklist_item_display_name(item_id: &str) -> String {
+    let mut rest = item_id;
+    if let Some(after) = item_id.strip_prefix("issue-") {
+        let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && after[digits..].starts_with('-') {
+            rest = &after[digits + 1..];
         }
     }
+    let name = rest.replace('-', " ");
+    if name.trim().is_empty() {
+        item_id.to_string()
+    } else {
+        name
+    }
+}
+
+// The comment a lifecycle change posts: the signature, hidden markers (the
+// state, the item id and any commit, for tools; GitHub doesn't render HTML
+// comments), then one plain sentence. A proposal also carries the item's
+// plan, folded, since that's what an issue's readers want to see.
+fn worklist_lifecycle_comment_body(
+    signature: &str,
+    item_id: &str,
+    lifecycle: &str,
+    plan: Option<&str>,
+    commit_sha: Option<&str>,
+) -> String {
+    let name = worklist_item_display_name(item_id);
+    let sha = commit_sha.map(str::trim).filter(|s| !s.is_empty());
+    let mut body = String::new();
+    body.push_str(signature);
+    body.push_str("\n\n");
+    body.push_str(&format!("<!-- bram-lifecycle: {} -->\n", lifecycle));
+    body.push_str(&format!("<!-- bram-item: {} -->\n", item_id));
+    if let Some(sha) = sha {
+        body.push_str(&format!("<!-- bram-commit: {} -->\n", sha));
+    }
     body.push('\n');
-    body.push_str(&format!(
-        "Bram worklist item `{}` moved to `{}`.\n\n",
-        item_id, lifecycle
-    ));
-    body.push_str(changelog.trim());
+    let sentence = match (lifecycle, sha) {
+        ("proposed", _) => format!("Proposed a change for this issue: **{}**.", name),
+        ("applied", _) => format!("**{}** is done and waiting to be committed.", name),
+        ("committed", Some(sha)) => format!("**{}** was committed in {}.", name, sha),
+        ("committed", None) => format!("**{}** was committed.", name),
+        ("pushed", Some(sha)) => format!("**{}** was pushed: {}.", name, sha),
+        ("pushed", None) => format!("**{}** was pushed.", name),
+        ("dropped", _) => format!("**{}** was dropped; nothing changed.", name),
+        (other, _) => format!("**{}** is now {}.", name, other),
+    };
+    body.push_str(&sentence);
     body.push('\n');
+    if let Some(plan) = plan.map(str::trim).filter(|p| !p.is_empty()) {
+        body.push_str("\n<details>\n<summary>The plan</summary>\n\n");
+        body.push_str(plan);
+        body.push_str("\n\n</details>\n");
+    }
     body
+}
+
+// The plan a proposal shows: the "After" half of the item's draft.
+fn worklist_item_plan<R: tauri::Runtime>(app: &AppHandle<R>, item_id: &str) -> Option<String> {
+    let dir = worklist_drafts_dir(app)?;
+    let path = worklist_draft_path(&dir, item_id)?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    parse_worklist_draft(&raw).map(|(_, after)| after)
 }
 
 fn read_pending_worklist_push_mirrors(path: &Path) -> Vec<PendingWorklistPushMirror> {
@@ -72081,11 +72198,11 @@ fn enqueue_pending_worklist_push_mirror<R: tauri::Runtime>(
 }
 
 fn worklist_pushed_lifecycle_comment_body(
+    signature: &str,
     item_id: &str,
-    changelog: &str,
     commit_sha: &str,
 ) -> String {
-    worklist_lifecycle_comment_body(item_id, "pushed", changelog, Some(commit_sha))
+    worklist_lifecycle_comment_body(signature, item_id, "pushed", None, Some(commit_sha))
 }
 
 fn flush_pending_worklist_push_mirrors<R: tauri::Runtime>(app: &AppHandle<R>) {
@@ -72102,13 +72219,14 @@ fn flush_pending_worklist_push_mirrors<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(repo_slug) = repo_owner_name(app) else {
         return;
     };
+    let signature = worklist_mirror_signature(app);
     let mut remaining: Vec<PendingWorklistPushMirror> = Vec::new();
     for record in records {
         match gh_commit_visible(app, &repo_slug, &record.commit_sha) {
             Ok(true) => {
                 let body = worklist_pushed_lifecycle_comment_body(
+                    &signature,
                     &record.item_id,
-                    &record.changelog,
                     &record.commit_sha,
                 );
                 if let Err(e) = gh_issue_comment(app, record.issue, &body) {
@@ -73600,30 +73718,52 @@ fn worklist_feedback_ref_item_id(feedback_ref: &str) -> Option<String> {
     Some(item_id.to_string())
 }
 
-fn worklist_iteration_comment_body(item_id: &str, feedback_ref: &str, feedback: &str) -> String {
+// The comment an iterate posts: the user's own feedback, quoted, under
+// Bram's signature (Bram relays it). Screenshot paths are local cache files
+// a reader can't open, so the comment only counts them.
+fn worklist_iteration_comment_body(
+    signature: &str,
+    item_id: &str,
+    feedback_ref: &str,
+    feedback: &str,
+) -> String {
     let images = st_extract_image_paths(feedback);
     let clean_feedback = st_strip_image_paths(feedback);
-    let compact_feedback = clean_feedback
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     let mut body = String::new();
-    body.push_str("bram-lifecycle: iterated\n");
-    body.push_str(&format!("bram-feedback-ref: {}\n\n", feedback_ref));
-    if compact_feedback.is_empty() {
-        body.push_str(&format!("iterate: {}", item_id));
+    body.push_str(signature);
+    body.push_str("\n\n");
+    body.push_str("<!-- bram-lifecycle: iterated -->\n");
+    body.push_str(&format!("<!-- bram-item: {} -->\n", item_id));
+    body.push_str(&format!("<!-- bram-feedback-ref: {} -->\n\n", feedback_ref));
+    body.push_str(&format!(
+        "Feedback on **{}**:\n\n",
+        worklist_item_display_name(item_id)
+    ));
+    let quoted: Vec<String> = clean_feedback
+        .trim()
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {}", line.trim_end())
+            }
+        })
+        .collect();
+    if quoted.is_empty() {
+        body.push_str("> (no text)\n");
     } else {
-        body.push_str(&format!("iterate: {} — {}", item_id, compact_feedback));
-    }
-    if !images.is_empty() {
-        body.push_str("\n\nScreenshots:\n");
-        for image in images {
-            body.push_str(&format!("- `{}`\n", image));
-        }
-    } else {
+        body.push_str(&quoted.join("\n"));
         body.push('\n');
     }
-    body.push('\n');
+    match images.len() {
+        0 => {}
+        1 => body.push_str("\nIt came with a screenshot, which stays local.\n"),
+        n => body.push_str(&format!(
+            "\nIt came with {} screenshots, which stay local.\n",
+            n
+        )),
+    }
     body
 }
 
@@ -73646,7 +73786,8 @@ fn mirror_worklist_iteration_feedback_to_issues<R: tauri::Runtime>(
     if issues.is_empty() {
         return;
     }
-    let body = worklist_iteration_comment_body(&item_id, feedback_ref, feedback);
+    let signature = worklist_mirror_signature(app);
+    let body = worklist_iteration_comment_body(&signature, &item_id, feedback_ref, feedback);
     for issue in issues {
         if let Err(e) = gh_issue_comment(app, issue, &body) {
             eprintln!(
@@ -73678,6 +73819,7 @@ fn mirror_worklist_lifecycle_to_issues<R: tauri::Runtime>(
     } else {
         None
     };
+    let signature = worklist_mirror_signature(app);
     for change in changes {
         if !matches!(
             change.kind.as_str(),
@@ -73697,10 +73839,16 @@ fn mirror_worklist_lifecycle_to_issues<R: tauri::Runtime>(
         if issues.is_empty() {
             continue;
         }
+        let plan = if change.kind == "proposed" {
+            worklist_item_plan(app, &change.id)
+        } else {
+            None
+        };
         let body = worklist_lifecycle_comment_body(
+            &signature,
             &change.id,
             &change.kind,
-            changelog,
+            plan.as_deref(),
             if change.kind == "committed" {
                 commit_sha.as_deref()
             } else {
@@ -82459,8 +82607,9 @@ mod worklist_authorization_tests {
         validate_worklist_mutate_authorization, worklist_auth_feedback_for_ids,
         worklist_commit_add_args, worklist_commit_consumed_retry_message,
         worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
-        worklist_items, worklist_iteration_comment_body, worklist_lifecycle_comment_body,
-        worklist_lifecycle_item_issue_numbers, worklist_pushed_lifecycle_comment_body,
+        worklist_item_display_name, worklist_items, worklist_iteration_comment_body,
+        worklist_lifecycle_comment_body, worklist_lifecycle_item_issue_numbers,
+        worklist_mirror_signature_line, worklist_pushed_lifecycle_comment_body,
         worklist_raw_parseable, ParsedWorklistAuthorization, PendingWorklistPushMirror,
         WorklistAuthRetirement, WORKLIST_AUTH_TTL_MS,
     };
@@ -83416,31 +83565,83 @@ mod worklist_authorization_tests {
         assert!(worklist_lifecycle_item_issue_numbers(&none).is_empty());
     }
 
+    const SIG: &str = "Jon's Bram (Bram 0.8.0, worklist mirror, host, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+
     #[test]
-    fn lifecycle_comment_body_has_parseable_trailers() {
-        let body = worklist_lifecycle_comment_body(
-            "issue-209-mirror",
-            "committed",
-            "**Summary:** 1 committed",
-            Some("abcdef123456"),
+    fn mirror_signature_parses_as_a_signature() {
+        let line = worklist_mirror_signature_line(
+            "Jon",
+            "0.8.0",
+            "macOS",
+            "Tuck",
+            "Bram",
+            "github.com/judell/bram",
         );
-        assert!(body.starts_with("bram-lifecycle: committed\nbram-commit: abcdef123456\n"));
-        assert!(body.contains("Bram worklist item `issue-209-mirror` moved to `committed`."));
-        assert!(body.contains("**Summary:** 1 committed"));
+        assert_eq!(line, SIG);
+        assert_eq!(
+            crate::worklist_mirror_signature_speaker(&line),
+            Some("Jon's Bram")
+        );
+        assert_eq!(
+            crate::needs_you_replier_phrase("judell", &line).as_deref(),
+            Some("Jon's Bram posted")
+        );
+        // The guard's agent parser still refuses it: an agent can't sign as Bram.
+        assert!(crate::guard_policy::parse_agent_signature(&line).is_none());
+        // No hostname: the machine slot is left out, not left empty.
+        let bare = worklist_mirror_signature_line("Jon", "0.8.0", "Linux", "", "Bram", "bram");
+        assert!(bare.starts_with("Jon's Bram (Bram 0.8.0, worklist mirror, host, Linux) "));
     }
 
     #[test]
-    fn pushed_lifecycle_comment_body_has_parseable_trailers() {
+    fn item_display_name_drops_issue_prefix_and_dashes() {
+        assert_eq!(
+            worklist_item_display_name("issue-462-specimen-open-items"),
+            "specimen open items"
+        );
+        assert_eq!(
+            worklist_item_display_name("worklist-mirror-comments-signed"),
+            "worklist mirror comments signed"
+        );
+        assert_eq!(worklist_item_display_name("issue-412"), "issue 412");
+    }
+
+    #[test]
+    fn lifecycle_comment_body_is_signed_calm_and_keeps_hidden_markers() {
+        let body = worklist_lifecycle_comment_body(
+            SIG,
+            "issue-209-mirror",
+            "committed",
+            None,
+            Some("abcdef123456"),
+        );
+        assert!(body.starts_with(&format!("{}\n\n<!-- bram-lifecycle: committed -->\n", SIG)));
+        assert!(body.contains("<!-- bram-item: issue-209-mirror -->"));
+        assert!(body.contains("<!-- bram-commit: abcdef123456 -->"));
+        assert!(body.contains("**mirror** was committed in abcdef123456."));
+        assert!(!body.contains("Worklist change @"));
+        assert!(!body.contains('#'));
+
+        let proposed = worklist_lifecycle_comment_body(
+            SIG,
+            "issue-209-mirror",
+            "proposed",
+            Some("Mirror each state change."),
+            None,
+        );
+        assert!(proposed.contains("Proposed a change for this issue: **mirror**."));
+        assert!(proposed.contains("<summary>The plan</summary>\n\nMirror each state change."));
+    }
+
+    #[test]
+    fn pushed_lifecycle_comment_body_is_signed() {
         let body = worklist_pushed_lifecycle_comment_body(
+            SIG,
             "issue-215-pushed-lifecycle-event",
-            "**Summary:** pushed mirror",
             "abcdef123456",
         );
-
-        assert!(body.starts_with("bram-lifecycle: pushed\nbram-commit: abcdef123456\n"));
-        assert!(body
-            .contains("Bram worklist item `issue-215-pushed-lifecycle-event` moved to `pushed`."));
-        assert!(body.contains("**Summary:** pushed mirror"));
+        assert!(body.starts_with(&format!("{}\n\n<!-- bram-lifecycle: pushed -->\n", SIG)));
+        assert!(body.contains("**pushed lifecycle event** was pushed: abcdef123456."));
     }
 
     #[test]
@@ -83478,15 +83679,16 @@ mod worklist_authorization_tests {
         assert_eq!(worklist_feedback_ref_item_id("../issue-209"), None);
 
         let body = worklist_iteration_comment_body(
+            SIG,
             "issue-209-mirror",
             "1783133550173-issue-209-mirror",
             "Read this screenshot: @/tmp/shot.png\n[Image: source: /tmp/shot.png]\n\nPlease mirror iterations too.",
         );
-        assert!(body.starts_with(
-            "bram-lifecycle: iterated\nbram-feedback-ref: 1783133550173-issue-209-mirror\n"
-        ));
-        assert!(body.contains("iterate: issue-209-mirror — Please mirror iterations too."));
-        assert!(body.contains("Screenshots:\n- `/tmp/shot.png`"));
+        assert!(body.starts_with(&format!("{}\n\n<!-- bram-lifecycle: iterated -->\n", SIG)));
+        assert!(body.contains("<!-- bram-feedback-ref: 1783133550173-issue-209-mirror -->"));
+        assert!(body.contains("Feedback on **mirror**:\n\n> Please mirror iterations too."));
+        assert!(body.contains("It came with a screenshot, which stays local."));
+        assert!(!body.contains("/tmp/shot.png"));
         assert!(!body.contains("Read this screenshot"));
         assert!(!body.contains("[Image: source:"));
     }

@@ -802,6 +802,12 @@ machine-readable provenance: Alerts classifies a same-account
 comment by it — unsigned means the human typed it, this host's name
 means this machine's agent, any other means your agent elsewhere moved.
 
+Bram's own issue comments sign too. With the worklist mirror on, state
+changes and relayed feedback open with `<owner>'s Bram (Bram <version>,
+worklist mirror, host, <os>, <machine>)`. Read one as Bram speaking, not
+an agent or the human. The guards don't accept `Bram` as an agent, so
+never sign your own writes that way.
+
 Old and missing signatures:
 
 - **Old-form signatures are valid historical text, not valid new

@@ -79365,6 +79365,17 @@ mod precheck_content_hash_tests {
     }
 }
 
+// worklist-new-directory-entry-counts-zero: -uall so a wholly untracked
+// directory reports its files, not itself. Without it the directory's own `??`
+// line is an exact key for the declared entry, which the issue-374 expansion
+// never expands, and the item counted +0 with no Commit (cursor-specimen-pack,
+// 2026-10-28: 22 new files under one entry).
+fn worklist_status_args(all_paths: &[String]) -> Vec<&str> {
+    let mut args: Vec<&str> = vec!["status", "--porcelain", "--no-renames", "-uall", "--"];
+    args.extend(all_paths.iter().map(|f| f.as_str()));
+    args
+}
+
 fn worklist_change_index<R: tauri::Runtime>(
     app: &AppHandle<R>,
     all_paths: &[String],
@@ -79384,10 +79395,7 @@ fn worklist_change_index<R: tauri::Runtime>(
         return Some(idx);
     }
 
-    let mut status_args: Vec<&str> = vec!["status", "--porcelain", "--no-renames", "--"];
-    for f in all_paths {
-        status_args.push(f.as_str());
-    }
+    let status_args = worklist_status_args(all_paths);
     let porcelain = git_run(app, &status_args).unwrap_or_default();
     idx.spawns += 1;
     for line in porcelain.lines() {
@@ -88373,7 +88381,8 @@ mod session_reindex_gate_tests {
 #[cfg(test)]
 mod worklist_change_projection_tests {
     use super::{
-        worklist_change_activity_for, worklist_expand_declared_paths, WorklistChangeIndex,
+        worklist_change_activity_for, worklist_expand_declared_paths, worklist_status_args,
+        WorklistChangeIndex,
     };
     use std::collections::HashMap;
 
@@ -88584,6 +88593,38 @@ mod worklist_change_projection_tests {
         let (_, sum) = worklist_change_activity_for(&i, &paths).unwrap();
         assert_eq!(field(&sum, "removed"), 3);
         assert_eq!(field(&sum, "changed"), 2);
+    }
+
+    // worklist-new-directory-entry-counts-zero: the status call names a wholly
+    // untracked (nested) directory's files, so the declared directory has
+    // children to expand into rather than an exact `??` key of its own.
+    #[test]
+    fn a_new_directory_entry_reports_its_files() {
+        use std::process::Command;
+        let d = std::env::temp_dir().join(format!("bram-newdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("docs/specimens/cursor")).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&d)
+                .args(args)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        git(&["init", "-q", "."]);
+        std::fs::write(d.join("docs/specimens/cursor/a.txt"), "a\n").unwrap();
+        std::fs::write(d.join("docs/specimens/cursor/b.txt"), "b\n").unwrap();
+        let declared = vec!["docs/specimens/cursor/".to_string()];
+        let porcelain = git(&worklist_status_args(&declared));
+        let keys: Vec<&str> = porcelain.lines().map(|l| l[3..].trim()).collect();
+        assert_eq!(
+            keys,
+            vec!["docs/specimens/cursor/a.txt", "docs/specimens/cursor/b.txt"]
+        );
+        let i = idx(&[(keys[0], "new", 0, 0, 0), (keys[1], "new", 0, 0, 0)]);
+        assert_eq!(worklist_expand_declared_paths(&i, &declared).len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     // A mixed list keeps its non-directory entries in place.

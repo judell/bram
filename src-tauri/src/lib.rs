@@ -62526,6 +62526,10 @@ fn jsonl_completion_decision(
     }
 }
 
+fn is_subagent_transcript_path(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == "subagents")
+}
+
 // JSONL-driven turn-end detection (#91 follow-up, broadened by #153).
 // Durable session output is the primary independent completion signal:
 // Claude writes assistant `stop_reason:"end_turn"`; Codex writes
@@ -62660,6 +62664,27 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 decision.detected
             ),
         );
+    }
+
+    // Background subagents keep writing after the main turn ends. Their
+    // records are useful above (issue discovery and scan diagnostics), but
+    // cannot start/finish the main turn or clear/re-arm its Worklist claim.
+    // In the observed #462 specimen run a child re-armed the just-cleared
+    // claim in 9 ms, locking the row while the parent was idle. Keep this
+    // gate before BOTH the status updates and claim handling: working-status
+    // transitions can themselves call rearm_claim_for_live_authorization.
+    if is_subagent_transcript_path(path) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "jsonl-turn-end",
+                &format!(
+                    "op=skip provider={} reason=subagent-transcript decision={} path={}",
+                    provider_label, decision.reason, basename
+                ),
+            );
+        }
+        return;
     }
 
     // Provider-agnostic finished-cue emit on detection. Anchors the
@@ -66269,9 +66294,25 @@ mod turn_completion_tests {
         claude_jsonl_completion_decision, claude_jsonl_user_after_nonfinal_assistant,
         codex_jsonl_completion_decision, codex_killed_turn_suppresses_jsonl_working,
         codex_latest_user_message_ts_ms, codex_session_has_real_user_activity,
-        jsonl_completion_provider_for_path,
+        is_subagent_transcript_path, jsonl_completion_provider_for_path,
     };
     use std::path::Path;
+
+    #[test]
+    fn subagent_transcript_classification_uses_directory_not_filename() {
+        assert!(is_subagent_transcript_path(Path::new(
+            "/home/user/.claude/projects/project/session/subagents/agent-x.jsonl"
+        )));
+        assert!(!is_subagent_transcript_path(Path::new(
+            "/home/user/.claude/projects/project/session.jsonl"
+        )));
+        assert!(!is_subagent_transcript_path(Path::new(
+            "/home/user/.claude/projects/project/agent-main.jsonl"
+        )));
+        assert!(!is_subagent_transcript_path(Path::new(
+            "/home/user/.claude/projects/my-subagents-project/session.jsonl"
+        )));
+    }
 
     fn write_codex_activity_fixture(
         name: &str,
@@ -88029,7 +88070,7 @@ pub fn run() {
                     let is_subagent_event = event
                         .paths
                         .iter()
-                        .any(|p| p.components().any(|c| c.as_os_str() == "subagents"));
+                        .any(|p| is_subagent_transcript_path(p));
                     if is_subagent_event {
                         trace_dispatch("subagents", &[]);
                         // watcher-coalesce: defer to the trailing-edge fire.

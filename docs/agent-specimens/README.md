@@ -84,7 +84,15 @@ and are linked from the provider READMEs, not copied.
   Cursor subagents; a guard deny on Claude, Codex and OpenCode; a loopback
   `curl` from inside a Claude or OpenCode turn.
 
-## Review revisions
+## Authorship and review revisions
+
+Signed: Jon's Claude (Bram 0.8.0, main thread, Opus 5.5, macOS), 2026-10-28.
+Captured the Cursor pack (60ebeb0) and wrote this index. The Claude Code,
+Codex and OpenCode packs (9772971) and the alignment of all four to one set
+(aa4f0bc) were captured by Claude subagents (Sonnet), one per provider, which
+I briefed and checked. I rebuilt the Seams table from their packs, and
+re-redacted screen captures that still held scratch-path fragments split by
+terminal escapes.
 
 Signed: Codex (main thread), 2026-10-28. Corrected the Codex ID-allocation
 claim and the raw-stream provenance; recovered the Codex capture tools and

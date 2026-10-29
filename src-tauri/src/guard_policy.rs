@@ -2204,9 +2204,17 @@ fn full_shas(body: &str) -> Vec<String> {
     out
 }
 
-/// issue-277 B. Fails open on every unreadable shape; denies only on a positive
-/// local determination that a named 40-hex string is not a commit here.
+/// issue-277 B / #391. Check full SHAs locally and against remote-tracking
+/// refs. This is local evidence of a push, not a network/URL reachability
+/// check: any remote counts. Repos with no tracking refs skip the push check;
+/// unavailable git and failed remote-ref probes fail open.
 fn forge_sha_verdict(command: &str, cwd: &Path) -> (&'static str, String) {
+    forge_sha_verdict_with_git(command, cwd, Path::new("git"))
+}
+
+// An explicit executable lets tests exercise unavailable/failed git without
+// mutating the process-wide PATH while other guard tests run in parallel.
+fn forge_sha_verdict_with_git(command: &str, cwd: &Path, git: &Path) -> (&'static str, String) {
     if command.is_empty() {
         return ("skip", "no-command".into());
     }
@@ -2224,7 +2232,7 @@ fn forge_sha_verdict(command: &str, cwd: &Path) -> (&'static str, String) {
         return ("ok", "no-full-shas".into());
     }
     for sha in &shas {
-        let probe = std::process::Command::new("git")
+        let probe = std::process::Command::new(git)
             .arg("cat-file")
             .arg("-e")
             .arg(format!("{}^{{commit}}", sha))
@@ -2241,7 +2249,62 @@ fn forge_sha_verdict(command: &str, cwd: &Path) -> (&'static str, String) {
             }
         }
     }
+    let refs = std::process::Command::new(git)
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "--count=1",
+            "refs/remotes",
+        ])
+        .current_dir(cwd)
+        .stderr(std::process::Stdio::null())
+        .output();
+    let has_remote_refs = match refs {
+        Err(_) => return ("unparsed", "git-unavailable".into()),
+        Ok(output) if !output.status.success() => {
+            return ("unparsed", "git-remote-refs-error".into());
+        }
+        Ok(output) => !output.stdout.iter().all(u8::is_ascii_whitespace),
+    };
+    if has_remote_refs {
+        for sha in &shas {
+            let contains = std::process::Command::new(git)
+                .args([
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "--count=1",
+                    "--contains",
+                    sha,
+                    "refs/remotes",
+                ])
+                .current_dir(cwd)
+                .stderr(std::process::Stdio::null())
+                .output();
+            match contains {
+                Err(_) => return ("unparsed", "git-unavailable".into()),
+                Ok(output) if !output.status.success() => {
+                    return ("unparsed", "git-remote-contains-error".into());
+                }
+                Ok(output) if output.stdout.iter().all(u8::is_ascii_whitespace) => {
+                    return ("unpushed", sha.clone());
+                }
+                Ok(_) => {}
+            }
+        }
+    }
     ("ok", format!("verified:{}", shas.len()))
+}
+
+fn forge_sha_unpushed_message(sha: &str) -> String {
+    format!(
+        "The body contains a full commit SHA that is not contained in any remote-tracking ref:\n    {}\n\
+A local-only commit link can 404 for readers. Push the commit first, then confirm \
+`git branch -r --contains <sha>` lists a branch; or cite only the short SHA in \
+backticks, without a commit link. This check uses local tracking refs and accepts \
+any remote; it does not verify the link's destination. If you expect the commit \
+to be pushed already, run `git fetch` and retry to refresh those refs. See judell/bram#391.",
+        sha
+    )
 }
 
 // --- subagent gates ----------------------------------------------------------
@@ -3493,6 +3556,16 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
                 "The body contains a full commit SHA that does not resolve in this repository:\n    {}\nA fabricated or rebase-orphaned SHA renders as an ordinary link and 404s silently. Resolve the real hash with `git rev-parse <short-sha>` (or `git log --oneline`) and retry. See judell/bram#277.",
                 sha_detail
             ),
+        );
+    }
+    if sha_verdict == "unpushed" {
+        return deny_msg(
+            format!("forge-sha-unpushed:{}", sha_detail),
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &forge_sha_unpushed_message(&sha_detail),
         );
     }
     let (su_verdict, su_where) = session_url_verdict(&command, &cwd);
@@ -5153,6 +5226,9 @@ and retry. See judell/bram#277.",
             ),
             "-",
         );
+    }
+    if sha_verdict == "unpushed" {
+        return codex_deny(&forge_sha_unpushed_message(&sha_detail), "-");
     }
 
     let (su_verdict, su_where) = session_url_verdict(&command, cwd);
@@ -7688,6 +7764,142 @@ mod guard_policy_tests {
             body_of(&v),
             format!("The body contains a full commit SHA that does not resolve in this repository:\n    {sha}\nA fabricated or rebase-orphaned SHA renders as an ordinary link and 404s silently. Resolve the real hash with `git rev-parse <short-sha>` (or `git log --oneline`) and retry. See judell/bram#277.")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn forge_sha_test_git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Guard test",
+                "-c",
+                "user.email=guard@example.test",
+            ])
+            .args(args)
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn forge_sha_remote_tracking_refs_and_provider_denials() {
+        let root = managed_claude("forge-sha-remote");
+        forge_sha_test_git(&root, &["init", "--initial-branch=main"]);
+        let tree = forge_sha_test_git(&root, &["hash-object", "-w", "-t", "tree", "--stdin"]);
+        let pushed = forge_sha_test_git(&root, &["commit-tree", &tree, "-m", "base"]);
+        forge_sha_test_git(&root, &["update-ref", "refs/heads/main", &pushed]);
+        let command = "gh issue comment 5 --body-file comment.md";
+        let write_body = |text: &str| {
+            std::fs::write(
+                root.join("comment.md"),
+                format!("Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):\n\n{text}\n"),
+            ).unwrap();
+        };
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": root.to_string_lossy(),
+        });
+        let assert_allowed = || {
+            assert_eq!(forge_sha_verdict(command, &root).0, "ok");
+            for provider in ["claude-rs", "codex-rs"] {
+                let v = shadow_worklist_decision(provider, &payload).unwrap();
+                assert_eq!(v.decision, "allow", "{provider}: {}", v.message);
+            }
+        };
+
+        // A local commit in a repo with no tracking refs is still allowed,
+        // including a configured remote that has never been pushed/fetched.
+        write_body(&format!(
+            "See https://github.com/judell/bram/commit/{pushed}"
+        ));
+        assert_allowed();
+        forge_sha_test_git(&root, &["init", "--bare", "remote.git"]);
+        forge_sha_test_git(&root, &["remote", "add", "origin", "./remote.git"]);
+        assert_allowed();
+        forge_sha_test_git(
+            &root,
+            &["push", "origin", "refs/heads/main:refs/heads/main"],
+        );
+        assert_allowed();
+
+        // A descendant exists locally (including a local tag), but no remote
+        // contains it. Check a body with both SHAs, not only a lone citation.
+        let local =
+            forge_sha_test_git(&root, &["commit-tree", &tree, "-p", &pushed, "-m", "local"]);
+        forge_sha_test_git(&root, &["update-ref", "refs/heads/main", &local]);
+        forge_sha_test_git(&root, &["update-ref", "refs/tags/local-only", &local]);
+        write_body(&format!(
+            "Base {pushed}; see https://github.com/judell/bram/commit/{local}"
+        ));
+        assert_eq!(
+            forge_sha_verdict(command, &root),
+            ("unpushed", local.clone())
+        );
+        let claude = claude_decide(payload.clone());
+        assert_eq!(claude.decision, "deny");
+        assert_eq!(claude.reason, format!("forge-sha-unpushed:{local}"));
+        assert_eq!(body_of(&claude), forge_sha_unpushed_message(&local));
+        let codex = shadow_worklist_decision("codex-rs", &payload).unwrap();
+        assert_eq!(codex.decision, "deny");
+        assert!(codex.message.contains(&forge_sha_unpushed_message(&local)));
+        assert!(codex.message.contains("Push the commit first"));
+        assert!(codex.message.contains("short SHA in backticks"));
+
+        // The suggested non-link citation works without pushing.
+        write_body(&format!("Local commit `{}`", &local[..8]));
+        assert_allowed();
+
+        // Any remote counts (URL matching is deliberately outside #391).
+        forge_sha_test_git(&root, &["remote", "rename", "origin", "fork"]);
+        forge_sha_test_git(&root, &["push", "fork", "refs/heads/main:refs/heads/main"]);
+        write_body(&format!("Base {pushed}; now pushed {local}"));
+        assert_allowed();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forge_sha_missing_git_fails_open() {
+        let root = scratch("forge-sha-missing-git");
+        let command = "gh issue comment 5 --body '0123456789abcdef0123456789abcdef01234567'";
+        assert_eq!(
+            forge_sha_verdict_with_git(command, &root, &root.join("missing-git")),
+            ("unparsed", "git-unavailable".into())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forge_sha_failed_remote_probes_fail_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("forge-sha-failed-probes");
+        let git = root.join("fake-git");
+        let command = "gh issue comment 5 --body '0123456789abcdef0123456789abcdef01234567'";
+        for (script, detail) in [
+            (
+                "#!/bin/sh\nif [ \"$1\" = cat-file ]; then exit 0; fi\nexit 2\n",
+                "git-remote-refs-error",
+            ),
+            (
+                "#!/bin/sh\nif [ \"$1\" = cat-file ]; then exit 0; fi\ncase \"$*\" in *--contains*) exit 2;; esac\nprintf 'refs/remotes/origin/main\\n'\n",
+                "git-remote-contains-error",
+            ),
+        ] {
+            std::fs::write(&git, script).unwrap();
+            std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(
+                forge_sha_verdict_with_git(command, &root, &git),
+                ("unparsed", detail.into())
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

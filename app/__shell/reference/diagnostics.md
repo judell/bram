@@ -271,7 +271,15 @@ the references followable:
 - **Commits**: link the full-SHA forge URL
   (`https://<forge>/<owner>/<repo>/commit/<full-sha>`), displayed as the
   short SHA — bare short SHAs in backticks do **not** autolink on
-  GitHub. Resolve with `git rev-parse <short>`.
+  GitHub. Resolve with `git rev-parse <short>` and confirm it is pushed:
+  `git branch -r --contains <sha>` must list a branch before you link it.
+  If it is still local, push first or cite only the short SHA in backticks,
+  without a commit link. The forge-write guard checks full SHAs against
+  local remote-tracking refs; any remote counts, so check that the linked
+  repository actually contains the commit too. This is not a live remote
+  check: refs can be stale, so `git fetch` and retry if you expect the commit
+  to be pushed already. No remote-tracking refs, or a failed remote-ref
+  probe, skips the guard's push check (judell/bram#391).
 - **Issues**: bare `#N` autolinks; use it.
 - **Local-only sources** (session transcripts, worklist-history
   records) have no web URL. Name them by path or key, and where a

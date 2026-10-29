@@ -52,6 +52,13 @@ come from captures like these, never from guesses
 | `turn-with-edit-completed` | prompt asks for a file via the edit tool | `Edited notes.txt +1` / `▎+ edit-specimen`, footer `Auto · 4.7% · 1 file edited`. No permission prompt for the edit. |
 | `turn-with-edit-denied` | same, `preToolUse` returns deny | `Edited DENYME.txt Edit rejected`; the model quotes `Blocked by specimen hook (user_message).`. |
 | `turn-with-shell-denied` | shell call, `preToolUse` returns deny (`agent_message` only) | `Rejected` / `Shell blocked by preToolUse hook` / `Agent note: Do not suggest workarounds to the blocked tool.` |
+| `turn-with-image` | `What colour is this image? @<png>` (solid red 64x64) | The `@path` stays as typed text; the model's first action is a `Read <path>` tool line, then `Red — a solid, uniform fill of pure red (#FF0000 / RGB 255, 0, 0).` See *Pasted images*. A transient `Reconnecting to agent… (attempt 2, 3s)` line sits under the answer in this snapshot (a network retry, not part of the shape). |
+| `turn-with-subagent-running` | prompt asking for a subagent | `Explored available MCP tools cursor · Task`, `Running 1 agent…`, the child's description (`List workspace files`) and its current tool line (`Finding **/*` or `Running: ls -la …`), and the child's own `Run this command?` approval prompt **in the parent's pane**. See *Subagents*. |
+| `turn-with-subagent-completed` | same, `y` at the child's prompt | `1 agent completed` / `List workspace files` / `✓ Done`, then the parent's reply summarising what the subagent returned. |
+| `turn-with-subagent-background` | subagent spawned with `run_in_background` | `Running in background`, the parent's reply ends (`I'll share what it reports once it finishes.`), later a `Finished <description>` line and a second parent turn that reads the child's transcript file. |
+| `interrupt-esc-generating`, `interrupt-ctrl-c-generating` | Esc / Ctrl-C while the model streams a long reply (no tool) | The partial reply stays on screen; the composer returns holding the prior prompt text (`→ Write a 1500 word essay…`) rather than empty. Ctrl-C also shows `Press Ctrl+C again to exit`. |
+| `interrupt-ctrl-c-tool` | Ctrl-C while a Python `time.sleep(30)` runs | Tool line ends `Cancelled`, composer returns (same shape as `interrupt-ctrl-c`). |
+| `interrupt-esc-idle`, `interrupt-ctrl-c-idle` | Esc, then Ctrl-C, at an empty composer | Esc does nothing visible. One Ctrl-C prints `Press Ctrl+C again to exit`. No turn exists, so no `stop`. |
 | `help.txt` | `agent --help` | Every flag in this version, including some the docs page doesn't list (`--auto-review`, `--add-dir`, `-e/--endpoint`). Commands include `ls`, `resume`, `create-chat`, `generate-rule`. |
 | `create-chat*.txt` | `agent create-chat` | A new chat id printed before anything launches: under a PTY, with no TTY, and inside a repo. |
 
@@ -73,7 +80,7 @@ project hooks file was honored on first launch.
 | Payload | Notes |
 |---|---|
 | `sessionStart.json` | Fires at launch of a **new** session, **before any message**: `conversation_id` (= `session_id`), `model`, `cursor_version`, `workspace_roots`, `user_email`. `transcript_path` is `null`. **Does not fire on `--resume`** (neither interactive nor `-p`). |
-| `beforeSubmitPrompt.json` | The prompt text and `attachments: []`, where a pasted image would appear (untested). |
+| `beforeSubmitPrompt.json`, `beforeSubmitPrompt-image.json` | The prompt text and `attachments: []`. With `@<png>` in the text, `attachments` is **still `[]`** (`-image`): the path is just prompt text. |
 | `preToolUse.json` | `tool_name: "Shell"`, `tool_input: {command, cwd, timeout}`. This is the guard's enforcement point. |
 | `beforeShellExecution.json` | `command`, `sandbox: false`, and the first non-null `transcript_path`. |
 | `afterShellExecution.json` | `command`, `output`, `duration`, `sandbox`. |
@@ -83,7 +90,13 @@ project hooks file was honored on first launch.
 | `postToolUseFailure-interrupted.json` | Esc or Ctrl-C mid-command: `error_message: "Command was aborted"`, `failure_type: "error"`, `is_interrupt: true`. |
 | `postToolUseFailure-denied.json`, `-denied-read.json` | A `preToolUse` deny: `failure_type: "permission_denied"`, `is_interrupt: false`. `error_message` is the hook's `user_message` when given (`-denied-read`), else `Shell blocked by preToolUse hook` (`-denied`). |
 | `stop-completed.json` | `status: "completed"`, `loop_count`, token counts (`input_tokens`, `output_tokens`, `cache_*`), `transcript_path`. |
-| `stop-aborted.json`, `stop-error.json` | Esc or Ctrl-C mid-turn fires **two** `stop` payloads: `aborted`, then `error`. (Seen in every interrupt run, including Esc alone, so the second is not a Ctrl-C effect.) A reader treating `error` as failure will misread an interrupt. |
+| `stop-aborted.json`, `stop-error.json` | Esc or Ctrl-C mid-turn fires **two** `stop` payloads: `aborted`, then `error`. (Seen in every interrupt run, including Esc alone, so the second is not a Ctrl-C effect.) A reader treating `error` as failure will misread an interrupt. Isolated in *Double `stop`* below: always a pair, same `generation_id`, 0-13 ms apart, either order in the log. |
+| `stop-{aborted,error}-{esc,ctrlc}-{tool,gen}.json`, `timeline-interrupt-*.tsv` | The four isolation cases (Esc / Ctrl-C x running shell tool / streaming reply), each with both payloads, and the time-stamped log of every hook payload in the run (epoch seconds, event, full payload). |
+| `preToolUse-image-read.json`, `postToolUse-image-read.json` | The `@<png>` path becomes a `Read` tool call: `tool_input.file_path`; the `postToolUse` `tool_output` is `{"file_path":…,"content_length":0}`. |
+| `preToolUse-task.json`, `postToolUse-task.json`, `preToolUse-task-background.json` | The subagent tool is **`Task`**: `tool_input: {description, prompt, model: "inherit", subagent_type: "explore"}`; the background variant has `subagent_type: "generalPurpose"` and `run_in_background: true` (and `model: ""` in the envelope). |
+| `preToolUse-subagent-child-shell.json` | The child's tool calls fire the ordinary hooks, tagged only by a **different `conversation_id`** (and `generation_id` = that id, `transcript_path: null` until its first tool finishes). There is no parent field. |
+| `stop-subagent-background-first.json`, `-second.json` | A background subagent yields two `completed` stops for one user message: the first when the parent says it has started the child, the second after the child finishes and the host re-enters the parent (a new `generation_id`, no `beforeSubmitPrompt`). |
+| `timeline-subagent*.tsv` | Time-stamped logs of the two subagent runs. |
 | `afterAgentResponse.json` | `text` of the whole reply, plus token counts. |
 | `sessionEnd-completed.json`, `-completed-after-resume.json`, `sessionEnd-aborted.json` | `reason`, `final_status`, `duration_ms`. Two Ctrl-C at the composer: `completed`. The process killed by SIGTERM: `aborted`. |
 | `preToolUse-read-before-write.json` | The **edit** tool fires a `Read` `preToolUse` first, with the **same `tool_use_id`**, then the write. |
@@ -147,6 +160,88 @@ or `Write` with `path`/`contents`). **The last line of a finished turn is
 (`transcript-record-declined.jsonl`). See also `transcript-record-edit.jsonl`
 and `transcript-record-edit-denied.jsonl`.
 
+## Pasted images
+
+Bram delivers an image as `@<absolute png path>` in the typed text. Sent as
+`What colour is this image? @<png>` (a solid red 64x64 PNG made with
+`capture/make-red-png.py`), Cursor **did read the pixels**: the model's
+first move was a `Read` tool call on the path (`turn-with-image.txt`,
+`hooks/preToolUse-image-read.json`), and it answered "Red — … #FF0000 / RGB
+255, 0, 0". `beforeSubmitPrompt.attachments` stayed `[]`
+(`hooks/beforeSubmitPrompt-image.json`), so a hook cannot see that an image
+rode along; the `Read` hook is the only trace, and its `postToolUse` reports
+`content_length: 0` (not the image size). The transcript
+(`transcript-record-image.jsonl`) holds the user text with the literal
+`@path` in `<user_query>`, a `Read` `tool_use` with `path`, and the answer;
+no image data and no attachment record. `agent --help` has no image flag, so
+there was no flag form to compare. Not tried: the interactive paste or
+drag-in of an image (no clipboard in the driver).
+
+## Subagents
+
+Cursor's CLI has them. The model reached for a tool named **`Task`** (loaded
+first through `GetDynamicTools` / `CallDynamicTool`, namespace `cursor`) when
+asked to "use a subagent":
+
+- **Types and modes.** `subagent_type: "explore"` (read-only listing) and
+  `"generalPurpose"` both ran; `run_in_background: true` is accepted and the
+  screen says `Running in background`. There is no slash command or flag for
+  them in `help.txt`; they are model-initiated.
+- **Where recorded.** The child gets its **own conversation id** and its
+  transcript sits under the parent's folder:
+  `~/.cursor/projects/<munged-workspace>/agent-transcripts/<parent-id>/subagents/<child-id>.jsonl`
+  (`transcript-record-subagent*.jsonl` parent, `*-child.jsonl` child; the child's
+  record starts with the parent's `prompt` as its `user_query`). The parent
+  transcript shows only `GetDynamicTools` and `CallDynamicTool` records and the
+  reply, with no child result record. The child also gets a
+  `~/.cursor/chats/<md5>/<child-id>/store.db` (no `meta.json` or `prompt_history.json` seen).
+- **Hooks.** `subagentStart` and `subagentStop` exist in this version's hook
+  event list (found in the CLI bundle) and were registered in
+  `hooks/hooks.json`, but **neither fired** in three subagent runs (foreground
+  `explore`, foreground and background `generalPurpose`). What did fire:
+  the parent's `preToolUse`/`postToolUse` for `Task`, then the child's own
+  `preToolUse`/`beforeShellExecution`/`afterShellExecution`/`postToolUse`
+  (and `afterAgentThought`) under the child's `conversation_id`, with no field
+  linking it to the parent. Child tool calls need their own approvals, drawn in
+  the parent's pane. No `stop`, `beforeSubmitPrompt` or `sessionStart` fires for
+  the child.
+- **Background.** The parent's turn ends (`stop completed`) as soon as it has
+  launched the child; when the child finishes the host starts a second parent
+  turn with no `beforeSubmitPrompt` (its transcript user record is a synthetic
+  notice), ending in a second `stop completed`.
+
+A turn-state tracker keyed on `conversation_id` will see unknown ids appear
+mid-turn (children) and a `stop` with no preceding `beforeSubmitPrompt`
+(background re-entry).
+
+## Double `stop` on an interrupt
+
+Four cases plus idle, each in a fresh chat, hooks time-stamped
+(`hooks/timeline-interrupt-*.tsv`, payloads `hooks/stop-*-<case>.json`):
+
+| Case | `stop` payloads | Gap | Other |
+|---|---|---|---|
+| Esc, shell tool running (`esc-tool`) | `aborted`, `error` | 7 ms | `postToolUseFailure` (`is_interrupt: true`) 170 ms later |
+| Ctrl-C, shell tool running (`ctrlc-tool`) | `aborted`, `error` | 12 ms | `postToolUseFailure` 200 ms later |
+| Esc, model streaming, no tool (`esc-gen`) | `aborted`, `error` | 0 ms | `aborted` had `transcript_path: null` |
+| Ctrl-C, model streaming (`ctrlc-gen`) | `aborted`, `error` | 0 ms | `error` logged first; `aborted` had `transcript_path: null` |
+| Esc, then one Ctrl-C, empty composer (`idle`) | none | n/a | nothing fires; `sessionEnd` only when the driver killed the process |
+
+**Pattern.** The pair is unconditional for an interrupted turn: it does not
+depend on Esc vs Ctrl-C or on a running tool, and a turn that is not running
+fires neither. Both payloads share `generation_id` and `loop_count: 0`;
+they differ only in `status` (and sometimes `transcript_path`). They land
+within 0-13 ms and the log order is not stable (concurrent hook processes),
+so order by `status`, not arrival. The transcript has one `turn_ended`
+with `status: "aborted"`, `error: "User aborted/interrupted manually."`.
+`sessionEnd` does **not** explain the `error`: it fires only at process exit
+(`reason`/`final_status` `aborted` when killed), seconds later. There was
+one hooks source (the scratch `.cursor/hooks.json`; no `~/.cursor/hooks.json`
+exists), and the two payloads have different statuses, so the agent itself
+emits both. Why it does is not established. Practical rule for a provider:
+treat `aborted` as the interrupt and ignore a same-`generation_id`
+`error` that follows within a moment, or collapse both into one turn end.
+
 ## Instructions file
 
 Cursor honored all three of these in a scratch repo, using a distinctive
@@ -178,14 +273,12 @@ scratchpad only.
 
 ## Not yet captured
 
-- Whether `@<png>` attaches an image (`attachments` in `beforeSubmitPrompt`
-  stays untested).
-- Why `stop` fires twice (`aborted` then `error`) on an interrupt; not isolated
-  beyond "every Esc/Ctrl-C run".
+- An interactive image paste or drag (only `@path` was sent); an image flag does not exist in `--help`.
+- Why the agent emits both `aborted` and `error` (the pattern is isolated, the cause is not).
+- `subagentStart` / `subagentStop`: registered but never fired; maybe they need another subagent kind or a setting not found.
 - `sessionStart` with a source other than a new launch (there is no `source`
   field; resume fires nothing).
 - A `Notification`-style hook: none of the registered events looked like one.
-- Subagent transcripts: not checked for this version.
 - Which of `AGENTS.md`, `CLAUDE.md` and rules wins when they conflict; hook
   `agent_message` visibility with a model that is not asked to quote it.
 - Logged-out flow after the keypress (browser login).
@@ -199,10 +292,11 @@ scratchpad only.
 | session store | `~/.cursor/chats/<md5(workspace)>/<id>/{meta.json,store.db,prompt_history.json}` plus transcripts under `~/.cursor/projects/<munged-workspace>/agent-transcripts/<id>/<id>.jsonl` | `session-meta-record.json`, `session-store-meta-record.json`, `transcript-record.jsonl` |
 | naming | `/rename <name>` writes `meta.json` `title` and `store.db` `name`; default `New Agent`; shown by `/resume` | `rename.txt`, `session-list.txt`, `session-meta-record.json` |
 | guard hook | `preToolUse` (and `beforeShellExecution`) in project `.cursor/hooks.json`, no trust prompt; a deny returns `permission:"deny"`; the model saw `user_message`, not `agent_message` | `hooks/preToolUse.json`, `hooks/hooks.json`, `transcript-record-edit-denied.jsonl` |
-| turn state | `beforeSubmitPrompt` starts a turn, `stop` ends it with `status` `completed`/`aborted`/`error` (an interrupt fires `aborted` then `error`); transcript ends with `turn_ended` | `hooks/stop-completed.json`, `hooks/stop-aborted.json`, `transcript-turn-ended.jsonl` |
+| turn state | `beforeSubmitPrompt` starts a turn, `stop` ends it with `status` `completed`/`aborted`/`error`. An interrupted turn always fires `aborted` **and** `error` (same `generation_id`, 0-13 ms apart, either order in the log; Esc or Ctrl-C, tool or streaming, none when idle; `sessionEnd` is not involved); transcript ends with one `turn_ended` (`aborted`). A background subagent adds a second `stop` with no `beforeSubmitPrompt` | `hooks/stop-aborted-esc-tool.json`, `hooks/stop-error-esc-tool.json`, `hooks/timeline-interrupt-esc-tool.tsv`, `hooks/stop-subagent-background-second.json`, `transcript-turn-ended.jsonl` |
 | Agent→Bram channel | Loopback `curl` works, including under `--sandbox enabled` (no `--network` needed) | `hooks/afterShellExecution.json` (`sandbox:true` run), section Loopback `curl` |
 | Bram→agent delivery | Paste and Enter must be separate writes; a one-write paste is typed but not submitted | `README.md` delivery note |
-| pasted images | not captured | n/a |
+| pasted images | `@<png>` in the typed text works: the model `Read`s the file and sees the pixels (said red). `attachments` stays `[]`; the transcript keeps the literal `@path` and a `Read` `tool_use`, no image data | `turn-with-image.txt`, `hooks/beforeSubmitPrompt-image.json`, `hooks/preToolUse-image-read.json`, `transcript-record-image.jsonl` |
+| subagents | Model-initiated `Task` tool (`explore`, `generalPurpose`, optional background); child has its own conversation id and transcript at `agent-transcripts/<parent-id>/subagents/<child-id>.jsonl`; child tool hooks fire under the child id; `subagentStart`/`subagentStop` registered but did not fire | `turn-with-subagent-completed.txt`, `hooks/preToolUse-task.json`, `transcript-record-subagent-child.jsonl`, `hooks/timeline-subagent.tsv` |
 | menus | `/` popup, `/resume` list, approval prompt (`Run this command?`) | `slash-popup.txt`, `session-list.txt`, `turn-with-shell-approval.txt` |
 | working status | `⠠⠛ Running  N tokens` / `Thinking` / `Working`, composer `→ Add a follow-up … ctrl+c to stop`, footer `N task` | `turn-with-shell-working.txt` |
 | interrupt and exit | Esc or Ctrl-C stops a turn (`Cancelled`); at the composer Ctrl-C once shows `Press Ctrl+C again to exit`, twice exits and prints `agent --resume=<id>` (only for a chat with a conversation) | `interrupt-esc.txt`, `interrupt-ctrl-c.txt`, `exit-ctrl-c.txt` |
@@ -222,3 +316,31 @@ payloads; session metadata records; the instruction-file and loopback checks;
 and `capture/`. Pre-existing files were left as they were, except the hook
 logger and `hooks.json`, which gained events and the deny switches. Signed:
 Claude subagent (Sonnet), delegated by Jon's Claude main thread.
+
+## Open items — 2026-10-28
+
+Closed from [#462](https://github.com/judell/bram/issues/462)'s open-items
+list (`resources/worklist-drafts/issue-462-specimen-open-items.md`):
+
+- **Pasted images:** `@<png>` is read (as a `Read` tool call) and the model
+  describes it correctly; `attachments` stays `[]`. See *Pasted images*.
+- **Subagents:** they exist (the `Task` tool), with their own conversation id
+  and transcript under the parent's folder; `subagentStart`/`subagentStop`
+  did not fire. See *Subagents*.
+- **Double `stop`:** an interrupted turn always fires `aborted` and `error`
+  together, whatever the key or tool state; none when idle; `sessionEnd` does
+  not explain it. See *Double `stop`*.
+
+Method notes: the runs used a scratch repo outside Bram with a timestamping
+variant of `hooks/log-hook.sh` (now the checked-in one; it also writes
+`_timeline.tsv`) and `hooks.json` extended with `afterAgentThought`,
+`subagentStart` and `subagentStop`. The shell hook answered `allow`, yet the
+child's and the parent's commands still raised `Run this command?` (they are
+not in the allowlist), so the schedules send `y`. New schedules:
+`image-turn`, `subagent-foreground`, `subagent-background`, `esc-tool`,
+`ctrlc-tool`, `esc-generating`, `ctrlc-generating`, `idle-esc-ctrl-c`.
+Residue outside the scratchpad: about a dozen more chats (children included) under
+`~/.cursor/chats/` and transcripts under `~/.cursor/projects/` for the scratch
+workspace.
+
+Signed: Claude subagent (Sonnet), delegated by Jon's Claude main thread.

@@ -1,0 +1,31 @@
+{
+  "id": "evt_185ffc027001uYifh5CQ9F6TGk",
+  "created": 1793249493031,
+  "type": "session.created",
+  "durable": {
+    "aggregateID": "ses_e7a003fefffecYAWFUlmpZYLTI",
+    "seq": 0,
+    "version": 1
+  },
+  "location": {
+    "directory": "<workspace>/repo"
+  },
+  "data": {
+    "sessionID": "ses_e7a003fefffecYAWFUlmpZYLTI",
+    "projectID": "816bc67ecd798ef619843e4dc63cb211ce7b2342",
+    "location": {
+      "directory": "<workspace>/repo"
+    },
+    "subpath": "",
+    "parentID": "ses_e7a00513fffezZw6VcvyJFKMDy",
+    "slug": "happy-mountain",
+    "title": "List files in directory",
+    "agent": "explore",
+    "model": {
+      "id": "deepseek-v4-pro",
+      "providerID": "opencode-go",
+      "variant": "default"
+    },
+    "version": "2.1.4"
+  }
+}

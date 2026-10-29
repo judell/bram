@@ -1,0 +1,93 @@
+[
+  {
+    "seq": 4,
+    "type": "user",
+    "data": {
+      "time": {
+        "created": 1793249398392
+      },
+      "text": "What colour is this image? @<workspace>/red64.png ",
+      "files": [],
+      "agents": []
+    }
+  },
+  {
+    "seq": 7,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249398421,
+        "streamed": 1793249401668,
+        "completed": 1793249401695
+      },
+      "agent": "build",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The user wants to know the color of an image. Let me read the image file.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793249400847,
+            "completed": 1793249401662
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_hl21bdg6vma1afrstbwoc2al",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "<workspace>/red64.png"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Image read successfully"
+              },
+              {
+                "type": "file",
+                "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC",
+                "mime": "image/png",
+                "name": "<workspace>/red64.png"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793249401644,
+            "ran": 1793249401666,
+            "completed": 1793249401684
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "860598e537ab9149b16996f9b504e4cbb5f1a2a4",
+        "end": "860598e537ab9149b16996f9b504e4cbb5f1a2a4",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0.001548888,
+      "tokens": {
+        "input": 1809,
+        "output": 93,
+        "reasoning": 18,
+        "cache": {
+          "read": 6144,
+          "write": 0
+        }
+      }
+    }
+  }
+]

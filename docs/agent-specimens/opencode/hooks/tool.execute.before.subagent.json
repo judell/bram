@@ -1,0 +1,12 @@
+{
+  "tool": "subagent",
+  "sessionID": "ses_e7a00513fffezZw6VcvyJFKMDy",
+  "agent": "build",
+  "messageID": "msg_185ffaf0b001oJrpUUA2MSjXmq",
+  "id": "call_2tpm2o4ig40v1p99rsmfxgh2",
+  "input": {
+    "agent": "explore",
+    "description": "List files in directory",
+    "prompt": "List the files in the current working directory (<workspace>/repo). Report back the full listing of files and directories, including any top-level entries and their types."
+  }
+}

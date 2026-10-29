@@ -1,0 +1,14 @@
+{
+ "session_id": "01a185fd-d849-74d2-8ec8-eedde0cfa84d",
+ "turn_id": "01a185fe-078d-7411-a484-f2316b1dc109",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T21-49-28-01a185fd-d849-74d2-8ec8-eedde0cfa84d.jsonl",
+ "cwd": "<workspace>/repo",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "echo DENYME > denyme.txt"
+ },
+ "tool_use_id": "exec-cdd5054f-297b-4620-ad5c-d71d592e4d49"
+}

@@ -1,0 +1,15 @@
+{
+  "conversation_id": "805c74f8-f9ac-4c37-bc00-85a6f37006d4",
+  "generation_id": "f01d70c7-c6ad-442d-bdae-b097db117411",
+  "model": "default",
+  "status": "aborted",
+  "loop_count": 0,
+  "session_id": "805c74f8-f9ac-4c37-bc00-85a6f37006d4",
+  "hook_event_name": "stop",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": null
+}

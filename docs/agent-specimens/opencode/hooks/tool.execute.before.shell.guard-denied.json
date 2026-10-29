@@ -1,0 +1,10 @@
+{
+  "tool": "shell",
+  "sessionID": "ses_e7a031abbffe6iXRIhodJqvtjv",
+  "agent": "build",
+  "messageID": "msg_185fce59e001t0pODCNYu1vRoJ",
+  "id": "call_q6pop8e23dvlvinpiwl5kdn2",
+  "input": {
+    "command": "echo DENYME"
+  }
+}

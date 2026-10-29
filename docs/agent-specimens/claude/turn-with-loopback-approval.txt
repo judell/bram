@@ -1,0 +1,26 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   /…/<tmp-user>/-Users-<user>-bram/<session>/scratchpad/specimens-claude/ws
+
+
+❯ Run this exact shell command and nothing else: curl -sS http://127.0.0.1:54777/
+
+⏺ Bash(curl -sS http://127.0.0.1:54777/)
+  ⎿  Waiting…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+ Fetch local server root
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ curl -sS http://127.0.0.1:54777/
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: curl *
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

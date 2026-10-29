@@ -1,0 +1,39 @@
+   Shell command refusal request +
+
+  ┃
+  ┃  Run the shell command: echo DENYME. If the call is refused, quote verbatim every word of the refusal message you
+  ┃  received.
+  ┃
+
+  ┃
+  ┃  $ echo DENYME
+  ┃
+  ┃  MARKER-REASON-7731
+  ┃
+
+     + Thought · 641ms
+
+     The call was refused. The refusal message I received, verbatim, is:
+
+     MARKER-REASON-7731
+
+     Build · DeepSeek V4 Pro (New) · 4.7s · 20.8 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/-Use…/<session>/scratchpad/open-opencode/repo:main  8.1K (1%) · $0.00  ctrl+p commands

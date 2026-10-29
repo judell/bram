@@ -1,0 +1,429 @@
+[
+  {
+    "seq": 4,
+    "type": "user",
+    "data": {
+      "time": {
+        "created": 1793249493040
+      },
+      "text": "You are a subagent spawned by another session.\nList the files in the current working directory (<workspace>/repo). Report back the full listing of files and directories, including any top-level entries and their types."
+    }
+  },
+  {
+    "seq": 5,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249493050,
+        "streamed": 1793249495454,
+        "completed": 1793249495476
+      },
+      "agent": "explore",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_pnzwbq0xubqds6ofaig8ile3",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "<workspace>/repo"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read directory <workspace>/repo, entries 1-5\n.git/\n.opencode/\na.txt\nindex.html\nopencode.json"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793249495436,
+            "ran": 1793249495453,
+            "completed": 1793249495460
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "end": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0.0015833400000000001,
+      "tokens": {
+        "input": 2126,
+        "output": 91,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    }
+  },
+  {
+    "seq": 12,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249495494,
+        "streamed": 1793249498299,
+        "completed": 1793249498333
+      },
+      "agent": "explore",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_tpultuxwjs0732pc7k1qsj1k",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls -la <workspace>/repo"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "total 24\ndrwxr-xr-x   7 <user>  wheel  224 Oct 28 21:48 .\ndrwxr-xr-x  12 <user>  wheel  384 Oct 28 21:51 ..\ndrwxr-xr-x  12 <user>  wheel  384 Oct 28 21:48 .git\ndrwxr-xr-x   3 <user>  wheel   96 Oct 28 21:48 .opencode\n-rw-r--r--   1 <user>  wheel    3 Oct 28 21:48 a.txt\n-rw-r--r--   1 <user>  wheel   20 Oct 28 21:48 index.html\n-rw-r--r--   1 <user>  wheel   46 Oct 28 21:48 opencode.json\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793249498288,
+            "ran": 1793249498298,
+            "completed": 1793249498323
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "end": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0.000398156,
+      "tokens": {
+        "input": 253,
+        "output": 94,
+        "reasoning": 0,
+        "cache": {
+          "read": 2048,
+          "write": 0
+        }
+      }
+    }
+  },
+  {
+    "seq": 19,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249498346,
+        "streamed": 1793249503049,
+        "completed": 1793249503068
+      },
+      "agent": "explore",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Let me also list the contents of the subdirectories .git, .opencode, and read the files to provide a fuller picture.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793249499697,
+            "completed": 1793249503039
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_2zgvk89bdb5bdo2ligtblrgq",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "<workspace>/repo/.opencode"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read directory <workspace>/repo/.opencode, entries 1-1\nplugins/"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793249502920,
+            "ran": 1793249503041,
+            "completed": 1793249503053
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_3kp6un573572uuwqo4c85s4x",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "<workspace>/repo/a.txt"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file <workspace>/repo/a.txt, lines 1-1\n1: hi"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793249502966,
+            "ran": 1793249503043,
+            "completed": 1793249503054
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_3pqexcykyrppe0wd39viylim",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "<workspace>/repo/index.html"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file <workspace>/repo/index.html, lines 1-1\n1: hello-from-listener"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793249502973,
+            "ran": 1793249503044,
+            "completed": 1793249503055
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_s7ya2lrlm57cpx6oex52ssgr",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "<workspace>/repo/opencode.json"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file <workspace>/repo/opencode.json, lines 1-1\n1: {\"$schema\":\"https://opencode.ai/config.json\"}"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793249503015,
+            "ran": 1793249503047,
+            "completed": 1793249503057
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "end": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0.001113596,
+      "tokens": {
+        "input": 536,
+        "output": 333,
+        "reasoning": 28,
+        "cache": {
+          "read": 2048,
+          "write": 0
+        }
+      }
+    }
+  },
+  {
+    "seq": 40,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249503083,
+        "streamed": 1793249506304,
+        "completed": 1793249506328
+      },
+      "agent": "explore",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_5kzlrjugdv02ay06yvvul3a5",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "<workspace>/repo/.opencode/plugins"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read directory <workspace>/repo/.opencode/plugins, entries 1-1\nlogger.js"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793249506218,
+            "ran": 1793249506302,
+            "completed": 1793249506311
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_z9nri43x5uw2ofw4cz08qtes",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls -la <workspace>/repo/.opencode/plugins"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "total 8\ndrwxr-xr-x  3 <user>  wheel    96 Oct 28 21:48 .\ndrwxr-xr-x  3 <user>  wheel    96 Oct 28 21:48 ..\n-rw-r--r--  1 <user>  wheel  2142 Oct 28 21:51 logger.js\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793249506255,
+            "ran": 1793249506303,
+            "completed": 1793249506316
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "end": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0.001032768,
+      "tokens": {
+        "input": 945,
+        "output": 181,
+        "reasoning": 0,
+        "cache": {
+          "read": 2304,
+          "write": 0
+        }
+      }
+    }
+  },
+  {
+    "seq": 51,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249506341,
+        "streamed": 1793249514688,
+        "completed": 1793249514703
+      },
+      "agent": "explore",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Here is the full listing of the current working directory and its contents.\n\n## Top-level entries (working directory root)\n\n| Name | Type | Notes |\n|------|------|-------|\n| `.git/` | directory | Git repository metadata |\n| `.opencode/` | directory | opencode config directory |\n| `a.txt` | file | 3 bytes |\n| `index.html` | file | 20 bytes |\n| `opencode.json` | file | 46 bytes |\n\n## Directory contents\n\n### `.git/`\nStandard Git repository directory (12 entries, not enumerated here).\n\n### `.opencode/`\n- `plugins/` \u2014 directory\n\n### `.opencode/plugins/`\n- `logger.js` \u2014 file (2142 bytes)\n\n## File contents\n\n- **`a.txt`** (3 bytes): `hi`\n- **`index.html`** (20 bytes): `hello-from-listener`\n- **`opencode.json`** (46 bytes): `{\"$schema\":\"https://opencode.ai/config.json\"}`\n- **`.opencode/plugins/logger.js`** (2142 bytes): a JavaScript plugin file\n\n## Absolute paths\n\n- `<workspace>/repo/.git`\n- `<workspace>/repo/.opencode`\n- `<workspace>/repo/.opencode/plugins`\n- `<workspace>/repo/.opencode/plugins/logger.js`\n- `<workspace>/repo/a.txt`\n- `<workspace>/repo/index.html`\n- `<workspace>/repo/opencode.json`"
+        }
+      ],
+      "snapshot": {
+        "start": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "end": "8a2e6b67b9125d060417d8c51b37908b9052d2fe",
+        "files": []
+      },
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0.0023029160000000003,
+      "tokens": {
+        "input": 1543,
+        "output": 626,
+        "reasoning": 0,
+        "cache": {
+          "read": 2048,
+          "write": 0
+        }
+      }
+    }
+  },
+  {
+    "seq": 56,
+    "type": "idle",
+    "data": {
+      "time": {
+        "created": 1793249514706
+      },
+      "outcome": "succeeded"
+    }
+  }
+]

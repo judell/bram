@@ -1,0 +1,10 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   /…/<tmp-user>/-Users-<user>-bram/<session>/scratchpad/specimens-claude/ws
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────── specimen-image ─
+❯ What colour is this image?
+  @<scratchpad-root>/open-claude/red.png
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on

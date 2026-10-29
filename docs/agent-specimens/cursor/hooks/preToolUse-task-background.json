@@ -1,0 +1,21 @@
+{
+  "conversation_id": "9612b97a-7745-44a0-a5e7-67a06231a9c8",
+  "generation_id": "0a79983a-0da9-4631-ac56-f4a8a97519f5",
+  "model": "",
+  "tool_name": "Task",
+  "tool_input": {
+    "description": "Read README.md text",
+    "prompt": "Read the file README.md at the repository root (<workspace>/README.md) and report back its full text verbatim in your final response. If the file does not exist, say so clearly.",
+    "subagent_type": "generalPurpose",
+    "run_in_background": true
+  },
+  "tool_use_id": "call-9037d9b5-4a58-4d9e-ab74-956d52f3f3a7-1\nfc_0b0b531a-ba0d-97df-bc21-c0a7ae2df2f5_0",
+  "session_id": "9612b97a-7745-44a0-a5e7-67a06231a9c8",
+  "hook_event_name": "preToolUse",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "/Users/<user>/.cursor/projects/<munged-workspace>/agent-transcripts/9612b97a-7745-44a0-a5e7-67a06231a9c8/9612b97a-7745-44a0-a5e7-67a06231a9c8.jsonl"
+}

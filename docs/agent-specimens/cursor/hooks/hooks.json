@@ -1,13 +1,75 @@
-{"version": 1, "hooks": {
-  "sessionStart": [{"command": ".cursor/log-hook.sh sessionStart"}],
-  "beforeSubmitPrompt": [{"command": ".cursor/log-hook.sh beforeSubmitPrompt"}],
-  "preToolUse": [{"command": ".cursor/log-hook.sh preToolUse"}],
-  "postToolUse": [{"command": ".cursor/log-hook.sh postToolUse"}],
-  "postToolUseFailure": [{"command": ".cursor/log-hook.sh postToolUseFailure"}],
-  "beforeShellExecution": [{"command": ".cursor/log-hook.sh beforeShellExecution"}],
-  "afterShellExecution": [{"command": ".cursor/log-hook.sh afterShellExecution"}],
-  "afterFileEdit": [{"command": ".cursor/log-hook.sh afterFileEdit"}],
-  "afterAgentResponse": [{"command": ".cursor/log-hook.sh afterAgentResponse"}],
-  "stop": [{"command": ".cursor/log-hook.sh stop"}],
-  "sessionEnd": [{"command": ".cursor/log-hook.sh sessionEnd"}]
-}}
+{
+ "version": 1,
+ "hooks": {
+  "sessionStart": [
+   {
+    "command": ".cursor/log-hook.sh sessionStart"
+   }
+  ],
+  "beforeSubmitPrompt": [
+   {
+    "command": ".cursor/log-hook.sh beforeSubmitPrompt"
+   }
+  ],
+  "preToolUse": [
+   {
+    "command": ".cursor/log-hook.sh preToolUse"
+   }
+  ],
+  "postToolUse": [
+   {
+    "command": ".cursor/log-hook.sh postToolUse"
+   }
+  ],
+  "postToolUseFailure": [
+   {
+    "command": ".cursor/log-hook.sh postToolUseFailure"
+   }
+  ],
+  "beforeShellExecution": [
+   {
+    "command": ".cursor/log-hook.sh beforeShellExecution"
+   }
+  ],
+  "afterShellExecution": [
+   {
+    "command": ".cursor/log-hook.sh afterShellExecution"
+   }
+  ],
+  "afterFileEdit": [
+   {
+    "command": ".cursor/log-hook.sh afterFileEdit"
+   }
+  ],
+  "afterAgentResponse": [
+   {
+    "command": ".cursor/log-hook.sh afterAgentResponse"
+   }
+  ],
+  "afterAgentThought": [
+   {
+    "command": ".cursor/log-hook.sh afterAgentThought"
+   }
+  ],
+  "subagentStart": [
+   {
+    "command": ".cursor/log-hook.sh subagentStart"
+   }
+  ],
+  "subagentStop": [
+   {
+    "command": ".cursor/log-hook.sh subagentStop"
+   }
+  ],
+  "stop": [
+   {
+    "command": ".cursor/log-hook.sh stop"
+   }
+  ],
+  "sessionEnd": [
+   {
+    "command": ".cursor/log-hook.sh sessionEnd"
+   }
+  ]
+ }
+}

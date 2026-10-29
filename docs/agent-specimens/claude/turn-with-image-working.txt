@@ -1,0 +1,17 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   /…/<tmp-user>/-Users-<user>-bram/<session>/scratchpad/specimens-claude/ws
+
+
+❯ What colour is this image?
+  @<scratchpad-root>/open-claude/red.png
+  ⎿  Read ../../open-claude/red.png (168 bytes)
+
+⏺ The image is solid red, which looks like pure red (#FF0000).
+
+✻ Baked for 1s · done 9:51 PM
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────── specimen-image ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts

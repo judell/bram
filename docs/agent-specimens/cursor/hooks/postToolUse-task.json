@@ -1,0 +1,23 @@
+{
+  "conversation_id": "b3617c95-7e91-4c9d-90b4-cff826102714",
+  "generation_id": "1f85e3b1-0978-422e-a383-9fa70783bb26",
+  "model": "default",
+  "tool_name": "Task",
+  "tool_input": {
+    "description": "List workspace files",
+    "prompt": "List all files in the workspace at <workspace>. Do a quick listing of the top-level contents and any nested files you find. Return a clear file listing of what is present in this repository.",
+    "model": "inherit",
+    "subagent_type": "explore"
+  },
+  "tool_output": "{\"status\":\"success\",\"agentId\":\"c614031a-afaf-4894-bd90-0049140a5227\",\"durationMs\":16566,\"isBackground\":false}",
+  "duration": 16566,
+  "tool_use_id": "call-8ae2dd85-be77-414b-8ca2-af20a89b466c-1\nfc_5626ba5f-deba-99c2-ac7c-d84ab52cd4a4_0",
+  "session_id": "b3617c95-7e91-4c9d-90b4-cff826102714",
+  "hook_event_name": "postToolUse",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": "/Users/<user>/.cursor/projects/<munged-workspace>/agent-transcripts/b3617c95-7e91-4c9d-90b4-cff826102714/b3617c95-7e91-4c9d-90b4-cff826102714.jsonl"
+}

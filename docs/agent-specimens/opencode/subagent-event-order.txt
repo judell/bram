@@ -1,0 +1,104 @@
+# Event order, subagent turn (parent and child interleaved). tool.execute.* lines say which session they belong to; bus events carry data.sessionID. *.delta and *.updated omitted.
+session.created
+session.inbox.enqueued
+session.execution.started
+session.inbox.delivered
+session.renamed
+session.step.started
+session.reasoning.started
+session.tool.input.started
+session.reasoning.ended
+session.tool.input.ended
+session.tool.called
+session.step.streamed
+tool.execute.before tool=subagent agent=build session=parent
+session.created.child
+session.tool.progress
+session.inbox.enqueued
+session.execution.started
+session.inbox.delivered
+session.step.started
+session.tool.input.started
+session.tool.input.ended
+session.tool.called
+session.step.streamed
+tool.execute.before tool=read agent=explore session=child
+tool.execute.after tool=read agent=explore session=child
+session.tool.success
+session.step.ended
+session.step.started
+session.tool.input.started
+session.tool.input.ended
+session.tool.called
+session.step.streamed
+tool.execute.before tool=shell agent=explore session=child
+shell.created
+session.tool.progress
+shell.exited
+tool.execute.after tool=shell agent=explore session=child
+session.tool.success
+session.step.ended
+session.step.started
+session.reasoning.started
+session.tool.input.started
+session.tool.input.started
+session.tool.input.started
+session.tool.input.started
+session.reasoning.ended
+session.tool.input.ended
+session.tool.called
+session.tool.input.ended
+session.tool.called
+session.tool.input.ended
+session.tool.called
+tool.execute.before tool=read agent=explore session=child
+tool.execute.before tool=read agent=explore session=child
+tool.execute.before tool=read agent=explore session=child
+session.tool.input.ended
+session.tool.called
+session.step.streamed
+tool.execute.before tool=read agent=explore session=child
+tool.execute.after tool=read agent=explore session=child
+session.tool.success
+tool.execute.after tool=read agent=explore session=child
+session.tool.success
+tool.execute.after tool=read agent=explore session=child
+session.tool.success
+tool.execute.after tool=read agent=explore session=child
+session.tool.success
+session.step.ended
+session.step.started
+session.tool.input.started
+session.tool.input.started
+session.tool.input.ended
+session.tool.called
+session.tool.input.ended
+session.tool.called
+session.step.streamed
+tool.execute.before tool=read agent=explore session=child
+tool.execute.before tool=shell agent=explore session=child
+shell.created
+session.tool.progress
+tool.execute.after tool=read agent=explore session=child
+session.tool.success
+shell.exited
+tool.execute.after tool=shell agent=explore session=child
+session.tool.success
+session.step.ended
+session.step.started
+session.text.started
+session.text.ended
+session.step.streamed
+tool.execute.after tool=subagent agent=build session=parent
+session.step.ended
+session.execution.succeeded
+session.tool.success
+session.step.ended
+session.step.started
+session.text.started
+session.text.ended
+session.step.streamed
+session.step.ended
+session.execution.succeeded
+session.viewed
+location.shutdown

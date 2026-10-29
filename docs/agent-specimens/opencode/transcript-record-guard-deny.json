@@ -1,0 +1,132 @@
+[
+  {
+    "seq": 4,
+    "type": "user",
+    "data": {
+      "time": {
+        "created": 1793249306003
+      },
+      "text": "Run the shell command: echo DENYME. If the call is refused, quote verbatim every word of the refusal message you received.",
+      "files": [],
+      "agents": []
+    }
+  },
+  {
+    "seq": 7,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249306021,
+        "streamed": 1793249308093,
+        "completed": 1793249308105
+      },
+      "agent": "build",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_q6pop8e23dvlvinpiwl5kdn2",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "error",
+            "input": {
+              "command": "echo DENYME"
+            },
+            "error": {
+              "type": "unknown",
+              "message": "MARKER-REASON-7731"
+            }
+          },
+          "time": {
+            "created": 1793249308070,
+            "ran": 1793249308092,
+            "completed": 1793249308096
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "860598e537ab9149b16996f9b504e4cbb5f1a2a4",
+        "end": "860598e537ab9149b16996f9b504e4cbb5f1a2a4",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0.0027063520000000004,
+      "tokens": {
+        "input": 3826,
+        "output": 46,
+        "reasoning": 0,
+        "cache": {
+          "read": 4096,
+          "write": 0
+        }
+      }
+    }
+  },
+  {
+    "seq": 14,
+    "type": "assistant",
+    "data": {
+      "time": {
+        "created": 1793249308119,
+        "streamed": 1793249310656,
+        "completed": 1793249310692
+      },
+      "agent": "build",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "opencode-go",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The shell command was refused. The error message I received is: \"MARKER-REASON-7731\"",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793249309999,
+            "completed": 1793249310640
+          }
+        },
+        {
+          "type": "text",
+          "text": "The call was refused. The refusal message I received, verbatim, is:\n\n`MARKER-REASON-7731`"
+        }
+      ],
+      "snapshot": {
+        "start": "860598e537ab9149b16996f9b504e4cbb5f1a2a4",
+        "end": "860598e537ab9149b16996f9b504e4cbb5f1a2a4",
+        "files": []
+      },
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0.00048048,
+      "tokens": {
+        "input": 322,
+        "output": 27,
+        "reasoning": 23,
+        "cache": {
+          "read": 7680,
+          "write": 0
+        }
+      }
+    }
+  },
+  {
+    "seq": 21,
+    "type": "idle",
+    "data": {
+      "time": {
+        "created": 1793249310698
+      },
+      "outcome": "succeeded"
+    }
+  }
+]

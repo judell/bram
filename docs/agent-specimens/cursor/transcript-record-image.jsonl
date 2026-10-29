@@ -1,0 +1,4 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wednesday, Oct 28, 2026, 9:48 PM (UTC-7)</timestamp>\n<user_query>\nWhat colour is this image? @<scratch>/red.png\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"<scratch>/red.png"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"**Red** — a solid, uniform fill of pure red (`#FF0000` / RGB 255, 0, 0)."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"**Red** — solid pure red (`#FF0000` / RGB 255, 0, 0)."}]}}

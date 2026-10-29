@@ -54,3 +54,14 @@ tabs read "Shell", "Red or", etc.
 Every run creates sessions in the global `~/.local/share/opencode/opencode.db`
 (even `--standalone`). Delete them afterwards with `opencode session delete <id>`
 for the ids in the `session.created` events.
+
+## Added 2026-10-28 (open items)
+
+- `hooks/logger.js` can deny: with `SPECIMEN_DENY_MARKER=DENYME
+  SPECIMEN_DENY_MESSAGE=MARKER-REASON-7731` in the environment of `run.sh`,
+  a tool call whose input contains the marker throws that message. It also
+  saves a child session's `session.created` as `session.created.child.json`.
+- `make-red-png.py OUT.png` writes the 64x64 red PNG (stdlib only).
+- Schedules: `guard-deny.json`, `pasted-image.json` (the path in it is the
+  scratch path; edit it), `loopback-curl.json` (port 53775 was a scratch
+  `python3 -m http.server`; edit it), `subagent-task.json`.

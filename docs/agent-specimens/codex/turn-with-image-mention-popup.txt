@@ -1,0 +1,39 @@
+
+  >_ OpenAI Codex (v0.165.0)
+     <workspace>/repo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Mentions
+  Files, directories, plugins, skills and tasks
+
+   All Results   Filesystem Only   Plugins
+
+  <workspace>/red.png
+
+  no matches
+
+
+
+
+
+
+
+
+  enter/tab insert · esc close · ↑/↓ select · ←/→ filter
+
+› What colour is this image? @<workspace>/
+  <workspace>/red.png
+
+  GPT-6-Astra high · <workspace>

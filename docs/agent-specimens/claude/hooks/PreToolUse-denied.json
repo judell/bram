@@ -1,0 +1,18 @@
+{
+  "session_id": "fb8e461c-b4d4-46ac-9aa1-c2d2ab601b95",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/fb8e461c-b4d4-46ac-9aa1-c2d2ab601b95.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/fb8e461c-b4d4-46ac-9aa1-c2d2ab601b95/scratchpad",
+  "prompt_id": "5966c5b9-32d1-457d-b475-7dfa816735a6",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo DENYME",
+    "description": "Print DENYME"
+  },
+  "tool_use_id": "toolu_01J25DzBwcGmQDEgrsiJWW33"
+}

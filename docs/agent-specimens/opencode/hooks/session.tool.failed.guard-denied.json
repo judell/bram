@@ -1,0 +1,23 @@
+{
+  "id": "evt_185fcedc00013KPA16SjBjHz5h",
+  "created": 1793249308096,
+  "type": "session.tool.failed",
+  "durable": {
+    "aggregateID": "ses_e7a031abbffe6iXRIhodJqvtjv",
+    "seq": 12,
+    "version": 2
+  },
+  "location": {
+    "directory": "<workspace>/repo"
+  },
+  "data": {
+    "sessionID": "ses_e7a031abbffe6iXRIhodJqvtjv",
+    "assistantMessageID": "msg_185fce59e001t0pODCNYu1vRoJ",
+    "id": "call_q6pop8e23dvlvinpiwl5kdn2",
+    "error": {
+      "type": "unknown",
+      "message": "MARKER-REASON-7731"
+    },
+    "executed": false
+  }
+}

@@ -1,0 +1,25 @@
+# Event order, guard-deny turn. tool.execute.* are plugin hooks, the rest bus events; *.delta and *.updated omitted.
+session.created
+session.inbox.enqueued
+session.execution.started
+session.inbox.delivered
+session.renamed
+session.step.started
+session.tool.input.started
+session.tool.input.ended
+session.tool.called
+session.step.streamed
+tool.execute.before tool=shell agent=build session=parent
+DENY
+session.tool.failed
+session.step.ended
+session.step.started
+session.reasoning.started
+session.text.started
+session.reasoning.ended
+session.text.ended
+session.step.streamed
+session.step.ended
+session.execution.succeeded
+session.viewed
+location.shutdown

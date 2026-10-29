@@ -1,0 +1,14 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+
+
+
+  → Plan, search, build anything
+
+
+  Auto
+  <workspace> · main

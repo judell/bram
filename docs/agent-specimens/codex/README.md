@@ -53,6 +53,11 @@ from captures like these, never from guesses (`docs/developing-bram.md`
 | `resume-then-clear` | `codex resume <id>`, a message, then `/clear` and another message | Final screen after `/clear`: a fresh splash and one new turn (`ok2`). The resumed transcript is gone from the screen. `/clear` allocates a **new session id** (see `SessionStart-clear.json`). |
 | `resume-by-id` | `codex resume <id>` | The session replays its transcript (`› Run the shell command: ...`, `• Ran ...`, `Worked for 7s`) above a fresh composer. |
 | `exit-ctrl-c` | Ctrl-C at an idle, empty composer | **One Ctrl-C exits.** The shell gets `Session ID: <id>`; after a real turn it also prints `Token usage: ...` and `To continue this session, run: codex resume <id>`. |
+| `turn-with-deny` | prompt asks for `echo DENYME > denyme.txt` and to quote any reason; the logger denies | `• Blocked by hook` / `└ MARKER-REASON-7731: blocked by specimen guard`, then the model's reply quoting the same text. No approval prompt, no `Working` line left behind. |
+| `turn-with-image-mention-popup` | bracketed paste of `What colour is this image? @<abs png>` | A `Mentions` popup (`Files, directories, plugins, skills and tasks`; `All Results` / `Filesystem Only` / `Plugins`; `no matches`; `enter/tab insert · esc close`) opens over the composer because of the `@`. The Enter that followed still submitted the turn as typed (the popup did not swallow it). |
+| `turn-with-image` | same, submitted | The composer shows the text with the path **verbatim**; then `• Viewed image red.png` / `+ Show details`, `• The image is red.` No `[Image #1]` chip: `@path` is not an attachment. |
+| `turn-with-image-flag` | `codex "What colour is this image?" -i red.png` | `[Image #1]` chip above the prompt; `• Red.` The CLI-flag route attaches pixels. |
+| `turn-with-loopback` | prompt `Run this exact shell command ... curl -sS http://127.0.0.1:<port>/` | `• Exited (status 7) curl -sS ...` / `curl: (7) Failed to connect to 127.0.0.1 port <port> after 0 ms: Couldn't connect to server`. No approval prompt. |
 
 Delivery notes that aren't files: the working-line glyph is `◦`/`•` plus
 `Working (Ns • esc to interrupt)`; typed text and the Enter that submits it
@@ -88,6 +93,10 @@ command-line overrides, so no hook block was written to any config file.
 | `SubagentStart.json` / `SubagentStop.json` | `session_id` and `turn_id` are the **parent's**; `agent_id` is the subagent's thread id and `agent_type: "default"`. `SubagentStart.transcript_path` already names the **subagent's own rollout**; `SubagentStop` adds `agent_transcript_path`, `stop_hook_active` and `last_assistant_message` (`"pong"`). |
 | `notify-agent-turn-complete.json` | Not a hook: the `notify = [program, ...]` config key runs the program with one JSON argument per completed turn (`type: "agent-turn-complete"`, `thread-id`, `turn-id`, `cwd`, `client`, `input-messages`, `last-assistant-message`). Codex runs it **twice** per first turn: once for the hidden title-generation turn (whose `input-messages` is the title prompt and whose last message is `{"title": ...}`), once for the real turn. This file is the real turn. |
 | `Stop.json` | `stop_hook_active`, `last_assistant_message`. Did **not** fire when the turn was interrupted with Esc (declined run). |
+| `PreToolUse-denied.json` | The payload the deny hook answered (`tool_name: "Bash"`, `tool_input.command` contains `DENYME`). `hooks/deny-hook.sh` printed `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"MARKER-REASON-7731: blocked by specimen guard"}}` and exited 0, the shape Bram's guard returns to Codex (`guard_selftest_run_case`, `src-tauri/src/lib.rs`). No `PostToolUse` fired for the denied call; `Stop` fired normally. |
+| `UserPromptSubmit-image.json` | For the `@<png>` turn: `prompt` is the typed text with the path, and there is **no** `images`/`attachments` field. |
+| `UserPromptSubmit-image-flag.json` | For the `-i` turn: `prompt` is only `What colour is this image?`; the image is not mentioned in the payload at all. |
+| `PreToolUse-loopback.json`, `PostToolUse-loopback.json` | The `curl` call; `tool_response` is the plain string `"curl: (7) Failed to connect to 127.0.0.1 port <port> after 0 ms: Couldn't connect to server\n"`. A failed command still fires `PostToolUse`. |
 
 **Events 0.165.0 recognizes** (from the binary's config schema, not all
 captured): `PreModelRequest`, `PostModelRequest`, `PreToolUse`,
@@ -110,6 +119,50 @@ overlay; on the first Enter the schedule sends Down then Enter ("Trust all").
 
 Every payload includes `transcript_path` (the rollout file) from the first
 event on, which is why Bram can find the transcript before the turn ends.
+
+## Guard deny, pasted images, loopback (2026-10-28)
+
+Captured with `capture/schedules/s11`-`s14` (see [capture notes](capture/README.md)).
+
+**A deny and what the model sees.** The hook answered with
+`hookSpecificOutput.permissionDecision: "deny"` and a
+`permissionDecisionReason`, exit 0 (`hooks/deny-hook.sh`). Codex drew
+`Blocked by hook` with the reason, and **the reason reached the model**: the
+rollout shows the tool call returning
+`Script error:\nCommand blocked by PreToolUse hook: MARKER-REASON-7731: blocked by specimen guard. Command: echo DENYME > denyme.txt`,
+and the model, asked to quote any reason, quoted it
+(`transcript-record-deny.jsonl`). Unlike Cursor's `agent_message`, the
+`permissionDecisionReason` is delivered whole and nothing was needed beyond it.
+Codex's shell tool is a JS-wrapper `exec` `custom_tool_call`
+(`tools.exec_command({cmd})`), but the hook still saw `tool_name: "Bash"`.
+
+**Pasted images.** Bram's `@<abs png>` in the typed text does **not** attach
+the image. The `UserPromptSubmit` prompt and the rollout's user message are
+the literal text, with no `input_image` and no `images`/`local_images`
+(`transcript-record-image.jsonl`, record 11). The model nevertheless answered
+`The image is red.` because it chose to call its own `view_image` tool on the
+path (`exec` call, an `ImageView` item, then a `custom_tool_call_output`
+carrying an `input_image` data URL); the screen shows `Viewed image red.png`.
+So the answer depends on the model reading the file from disk, which needs the
+path to be readable inside the sandbox. The `-i/--image` flag route does attach:
+the user message is `<image name=[Image #1] path="...">`, an `input_image`
+data URL, `</image>`, then the text, and the item is a `local_image` content
+entry (`transcript-record-image-flag.jsonl`). A bracketed paste containing `@`
+opens the `Mentions` popup (`turn-with-image-mention-popup`); the following
+Enter submitted the text as typed. `view_image` is not covered by the logger's
+matcher (`^(Bash|apply_patch|Write|Edit|mcp__.*)$`), so no `PreToolUse` fired
+for it.
+
+**Loopback from inside a turn.** Under Bram's launch (plain `codex`, no
+flags; `lib.rs` passes none) the default sandbox here is `approval_policy:
+on-request`, `sandbox_policy: workspace-write`, `network_access: false`
+(`transcript-record-loopback.jsonl`). `curl -sS http://127.0.0.1:<port>/`
+against a `python3 -m http.server` the scratch dir started **was refused**
+(`curl: (7) Failed to connect ... Couldn't connect to server`); the listener's
+log shows only the check made from outside beforehand. There was no approval
+prompt and no escalation, so the filesystem intent/result channel is required.
+The model did not retry. The failure arrives as a normal `PostToolUse`.
+
 
 ## Session id, store, resume
 
@@ -182,9 +235,8 @@ under `~/.codex/sessions/2026/10/28/`. No credential file was read or copied.
 
 ## Not yet captured
 
-- Pasted images (`@<png>` / clipboard paste): not tried.
-- A `PreToolUse` deny and whether the model sees the denial reason: Bram's guard
-  does this, but the logger only allows.
+- Pasted images: terminal clipboard paste of image bytes (as opposed to an `@path`) was not tried.
+- Whether a loopback `curl` is allowed after the user approves an escalation: the default run raised no prompt to approve.
 - `SessionStart` with `source` `fork`/`compact`: `codex fork` and compaction were not driven. (`resume` and `clear` are captured.)
 - The reasoning-effort step after choosing a model in `/model` (Esc was used), and the picker's `⌃t transcript` / `⌃o` / `⌃a archive` views.
 - `PreModelRequest`/`PostModelRequest`/`PreCompact`/`PostCompact`/`Interrupt` payloads: events exist in 0.165.0 but were not registered.
@@ -205,13 +257,13 @@ under `~/.codex/sessions/2026/10/28/`. No credential file was read or copied.
 | when the session id exists | Allocated before any message: idle exit prints a `Session ID`; rollout/index persistence and `SessionStart` were observed after the first message | `exit-ctrl-c.txt`; `hooks/SessionStart.json` |
 | session store | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl` plus append-only `~/.codex/session_index.jsonl` | `session-meta-record.jsonl`; Bram: `src-tauri/src/lib.rs:25191`, `:31252` |
 | naming | Codex auto-names a thread into `session_index.jsonl` (`thread_name`, last wins; main threads only, none for subagents or resumes); Bram appends `{"by":"bram","reassert":true}` entries to restore its names | Bram code: `src-tauri/src/lib.rs:31199` (`codex_titles_to_reassert`); captured Codex lines: `session-index-record.jsonl` |
-| guard hook | `PreToolUse` (+ `PermissionRequest`, `PostToolUse`) in `~/.codex/config.toml` `[[hooks.*]]`, matcher `^(apply_patch\|Bash\|Write\|Edit\|mcp__.*)$`, user must trust each hook. The edit tool is `apply_patch`, input key `command` holds the patch text with absolute paths; `Write`/`Edit` names never appear | `hooks/PreToolUse.json`, `hooks/PreToolUse-apply_patch.json`, `hooks/PermissionRequest-apply_patch.json`, `hooks-trust.txt`; Bram code: `src-tauri/src/lib.rs:53379` |
+| guard hook | `PreToolUse` (+ `PermissionRequest`, `PostToolUse`) in `~/.codex/config.toml` `[[hooks.*]]`, matcher `^(apply_patch\|Bash\|Write\|Edit\|mcp__.*)$`, user must trust each hook. The edit tool is `apply_patch`, input key `command` holds the patch text with absolute paths; `Write`/`Edit` names never appear. A deny is `hookSpecificOutput.permissionDecision: "deny"` + `permissionDecisionReason` on stdout, exit 0; the reason reaches the model verbatim in the tool error (`Command blocked by PreToolUse hook: <reason>. Command: <cmd>`) and no `PostToolUse` fires | `hooks/PreToolUse.json`, `hooks/PreToolUse-apply_patch.json`, `hooks/PermissionRequest-apply_patch.json`, `hooks/PreToolUse-denied.json`, `hooks/deny-hook.sh`, `turn-with-deny.txt`, `transcript-record-deny.jsonl`, `hooks-trust.txt`; Bram code: `src-tauri/src/lib.rs:53379` |
 | subagents | Yes (`multi_agent`): own rollout per subagent, `SubagentStart`/`SubagentStop` with `agent_id` and `agent_transcript_path`, `session_meta.source.subagent`; not in the index; `Started`/`Completed` status lines | `hooks/SubagentStart.json`, `hooks/SubagentStop.json`, `subagent-session-meta-record.jsonl`, `turn-with-subagent.txt` |
 | notification | No `Notification` hook event. A `notify = [...]` config program receives `agent-turn-complete` JSON per turn (twice on a first turn) | `hooks/notify-agent-turn-complete.json` |
 | turn state | `UserPromptSubmit` starts a turn, `Stop` ends it (not on Esc interrupt); each carries `turn_id`. `SessionEnd` (`reason`) on exit | `hooks/UserPromptSubmit.json`, `hooks/Stop.json`, `turn-with-shell-declined.txt` |
-| Agent→Bram channel | Filesystem: write `resources/.worklist-intent.json`, read `resources/.worklist-result.json` by nonce (the workspace-write sandbox refuses loopback) | Bram code: `src-tauri/src/lib.rs:51292`, `:51308`; `.claude/bram-reference/worklist-mechanics.md` §Codex transport |
+| Agent→Bram channel | Loopback `curl` from a turn is **refused** under the default sandbox (`workspace-write`, `network_access: false`, `on-request`), with no approval prompt (`curl: (7) Failed to connect`), so the filesystem channel is needed. Filesystem: write `resources/.worklist-intent.json`, read `resources/.worklist-result.json` by nonce (the workspace-write sandbox refuses loopback) | Bram code: `src-tauri/src/lib.rs:51292`, `:51308`; `.claude/bram-reference/worklist-mechanics.md` §Codex transport; specimen: `turn-with-loopback.txt`, `hooks/PostToolUse-loopback.json`, `transcript-record-loopback.jsonl` |
 | Bram→agent delivery | Bracketed paste into the PTY, Enter as a separate write | Bram code: `src-tauri/src/lib.rs:22089` (`bracketed_paste_turn_payload`); not captured as a screen |
-| pasted images | not captured | n/a |
+| pasted images | `@<abs png>` typed or pasted is **not** an attachment: the prompt and rollout carry the literal text. The model answered `red` only by calling its own `view_image` on the path. The `-i/--image` flag attaches (`[Image #1]`, `input_image`, `local_image`). `@` opens a `Mentions` popup | `turn-with-image.txt`, `turn-with-image-mention-popup.txt`, `turn-with-image-flag.txt`, `transcript-record-image.jsonl`, `transcript-record-image-flag.jsonl`, `hooks/UserPromptSubmit-image*.json` |
 | menus | `/` popup, `/model` picker, `codex resume` picker, `codex agents` overview; action-required prompts for shell and for edits | `dialog-slash-popup.txt`, `dialog-model-picker.txt`, `dialog-resume-picker.txt`, `agents-overview.txt`, `turn-with-apply-patch-approval.txt`; older specimens: [`../../pty-menu-specimens/2026-09-09-codex-model-picker.md`](../../pty-menu-specimens/2026-09-09-codex-model-picker.md), [`../../pty-menu-specimens/2026-06-18-codex-action-required-sudo-chown.md`](../../pty-menu-specimens/2026-06-18-codex-action-required-sudo-chown.md) |
 | working status | `• Working (Ns • esc to interrupt)` | `turn-with-shell-working.txt` |
 | interrupt and exit | Esc interrupts (`■ Conversation interrupted`); one Ctrl-C at an idle composer exits and prints `codex resume <id>` | `turn-with-shell-declined.txt`, `exit-ctrl-c.txt` |
@@ -249,3 +301,35 @@ ran against the real `~/.codex` login with injected logger hooks.
   footer repaints split it with cursor-addressing escapes, so a few fragments of
   the scratch directory name remain in `.raw` (and `<scratch-root>` in the
   `.txt` footers). `agents-overview.txt` has no `.raw` because it listed other projects.
+
+## Open items — 2026-10-28
+
+Signed: Claude subagent (Sonnet), delegated by Jon's Claude main thread.
+Closed three holes listed in `resources/worklist-drafts/issue-462-specimen-open-items.md`
+for Codex (codex-cli 0.165.0), real `~/.codex` login, injected hooks, scratch
+repo outside the Bram repo.
+
+- **Guard deny:** `hooks/deny-hook.sh` (selected through `PRETOOL_SCRIPT` in
+  `hooks/run.sh`, schedule `s11`) denies a Bash call containing `DENYME` with
+  reason `MARKER-REASON-7731`. The reason **reached the model** and it quoted
+  it. Files: `turn-with-deny`, `hooks/PreToolUse-denied.json`,
+  `transcript-record-deny.jsonl`.
+- **Pasted images:** `@<abs png>` is **not** an attachment (no `images`/
+  `local_images`, no `[Image #1]`); the model said red only by calling its own
+  `view_image` on the path. `-i` does attach and the answer was red. Files:
+  `turn-with-image`, `turn-with-image-mention-popup`, `turn-with-image-flag`,
+  `hooks/UserPromptSubmit-image*.json`, `transcript-record-image*.jsonl`
+  (`s12`, `s13`). The 64x64 red PNG was made with Python `zlib`+`struct`.
+- **Loopback:** refused under the default sandbox, no prompt (`s14`). Files:
+  `turn-with-loopback`, `hooks/*-loopback.json`, `transcript-record-loopback.jsonl`.
+- **Surprises:** changing only the `PreToolUse` command re-raises `Hooks need
+  review` (the first image run, pasted before the schedule was fixed, typed
+  prose into that menu; the config restore undid any toggle). Codex's shell
+  tool is a JS `exec` wrapper but hooks still report `tool_name: "Bash"`. The
+  `.raw` files had the scratch path split by cursor addressing; fragments were
+  scrubbed at byte level.
+- **Residue:** `~/.codex/config.toml` backed up first and restored, confirmed
+  identical with `diff` (Codex had added a folder-trust entry and `hooks.state`
+  hashes). Four more scratch rollouts and their index lines remain under
+  `~/.codex/sessions/2026/10/28/`. The loopback listener was killed by PID.
+  No credential file was read or copied.

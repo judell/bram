@@ -1,0 +1,26 @@
+{
+  "session_id": "c2072093-fbec-4bba-bbc1-9e310508c608",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/c2072093-fbec-4bba-bbc1-9e310508c608.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/c2072093-fbec-4bba-bbc1-9e310508c608/scratchpad",
+  "prompt_id": "a5839475-95ad-4b97-9c18-a19af719c2a7",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "curl -sS http://127.0.0.1:54777/",
+    "description": "Fetch local server root"
+  },
+  "tool_response": {
+    "stdout": "loopback-ok-7731",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01AwqW6yXSnk23okHLwKujro",
+  "duration_ms": 162
+}

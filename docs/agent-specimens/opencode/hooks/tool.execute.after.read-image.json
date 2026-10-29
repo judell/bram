@@ -1,0 +1,36 @@
+{
+  "tool": "read",
+  "sessionID": "ses_e7a01b1e8ffeeq5EcKT5cMlBK5",
+  "agent": "build",
+  "messageID": "msg_185fe4e87001KM2wFDG0KLZXob",
+  "id": "call_hl21bdg6vma1afrstbwoc2al",
+  "input": {
+    "path": "<workspace>/red64.png"
+  },
+  "status": "completed",
+  "result": {
+    "output": {
+      "type": "file",
+      "uri": "file://<workspace>/red64.png",
+      "name": "red64.png",
+      "content": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC",
+      "encoding": "base64",
+      "mime": "image/png"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Image read successfully"
+      },
+      {
+        "type": "file",
+        "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC",
+        "mime": "image/png",
+        "name": "<workspace>/red64.png"
+      }
+    ],
+    "metadata": {
+      "truncated": false
+    }
+  }
+}

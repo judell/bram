@@ -49,6 +49,12 @@ return in one write is not submitted.
 | `shell-denied` | `agent --trust` | `turn-with-shell-denied` (run with `DENY_STYLE=agent-only`) |
 | `loopback-curl` | `agent --trust` | loopback `curl` under the default configuration (sandbox disabled) |
 | `loopback-curl-sandbox-allowed` | `agent --trust --sandbox enabled`, `SHELL_PERMISSION=allow` | loopback `curl` inside the sandbox |
+| `image-turn` | `agent --trust` | `turn-with-image` (`@<png>`; make the PNG with `make-red-png.py`) |
+| `subagent-foreground` | `agent --trust` | `turn-with-subagent-running`, `-completed` (needs `y` for the child's command) |
+| `subagent-background` | `agent --trust` | `turn-with-subagent-background` |
+| `esc-tool`, `ctrlc-tool` | `agent --trust` | `stop` pair during a running shell tool |
+| `esc-generating`, `ctrlc-generating` | `agent --trust` | `stop` pair while the reply streams; `interrupt-*-generating` |
+| `idle-esc-ctrl-c` | `agent --trust` | `interrupt-esc-idle`, `interrupt-ctrl-c-idle` |
 | `slash-popup` | `agent --trust` | `slash-popup` |
 | `rename-and-resume-list` | `agent --trust` | `rename`, `session-list` |
 

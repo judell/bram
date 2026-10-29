@@ -117,3 +117,21 @@ Notes learned:
   they are not screen-aware.
 - Redaction (`<workspace>` etc.) was applied afterwards by a throwaway script
   that is not retained; `.raw` redaction is by plain byte replacement.
+
+## Open-items additions — 2026-10-28
+
+Signed: Claude subagent (Sonnet), delegated by Jon's Claude main thread.
+`hooks/run.sh` gained an optional `PRETOOL_SCRIPT=<hook script>` environment
+variable that replaces the `PreToolUse` logger; `hooks/deny-hook.sh` is such a
+script. Schedules assume the scratch folder and hooks are already trusted (run
+once with `Down`, `Enter` at the `Hooks need review` overlay first; swapping
+the `PreToolUse` script re-raises it, and never paste prose while it is up).
+The image schedule contains the scratch path, redacted to `<workspace>`.
+
+| Schedule | Extra args / env | Produces |
+|---|---|---|
+| `s11-deny.json` | `PRETOOL_SCRIPT=.../hooks/deny-hook.sh` | `turn-with-deny`, `PreToolUse-denied` |
+| `s12-image.json` | none (prompt is a bracketed paste of `@<png>`) | `turn-with-image`, `turn-with-image-mention-popup` |
+| `s13-image-flag.json` | `"What colour is this image?" -i <png>` | `turn-with-image-flag` |
+| `s14-loopback.json` | a listener from `python3 -m http.server <port> --bind 127.0.0.1` (its port is in the schedule) | `turn-with-loopback` |
+

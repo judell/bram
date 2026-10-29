@@ -55,6 +55,10 @@ truncated tabs.
 | `permission-denied-by-config.txt` (**rendered**) | config denies `shell` on `echo *` | No prompt; `Permission denied: shell` under `$ echo hello-specimen`. |
 | `form-permission.txt`, `form-question.txt`, `form-answered.txt` (**rendered**) | prompt asking for the `question` tool | The `question` tool first asks permission (`Allow once   Reject`); then the form `Questions` / `1. Red  2. Blue  3. Type your own answer` / `↑↓ select  enter submit  esc dismiss`; after Enter the answer `Red` is shown. |
 | `exit-ctrl-c.txt`, `exit-ctrl-c-idle.txt` | Ctrl-C | A single Ctrl-C exits at once, from the composer, with no confirmation. After a turn it prints `Session   <title>` and `Continue  opencode -s ses_…` (the resume hint). With no session yet (idle composer) it prints nothing. |
+| `turn-with-shell-denied-by-guard.txt` (**rendered**) | scratch plugin throws `MARKER-REASON-7731` from `tool.execute.before` for a shell call containing `DENYME`; prompt asks the model to quote the refusal | `$ echo DENYME` with the thrown message as the tool output, in the tool box, and no command run; the model: `The refusal message I received, verbatim, is: MARKER-REASON-7731`. No permission prompt, no "blocked" decoration: the thrown message is the whole text. |
+| `pasted-image-typed.txt`, `pasted-image-answer.txt` (**rendered**) | `What colour is this image? @<abs path>/red64.png ` typed, then Enter | The composer holds the typed `@/…/red64.png` as plain text (no chip, no attachment indicator). The model (`DeepSeek V4 Pro`, `OpenCode Go`) said it cannot view images, so it decoded the PNG with Python and answered `The image is pure red`. |
+| `turn-with-loopback-curl.txt` (**rendered**) | `Run the shell command: curl -sS http://127.0.0.1:<port>/` against a scratch `python3 -m http.server` | Allowed with no prompt (default config): `$ curl -sS http://127.0.0.1:53775/` / `hello-from-listener`. The listener logged the request (`loopback-listener.log`). |
+| `subagent-working.txt`, `subagent-done.txt` (**rendered**) | `Use the task tool to start a subagent that lists the files in this directory…` | A row `⠋ Explore Subagent — List files in directory` (`✓` when done), footer `↓ 1 subagent · $0.00`. No extra tab opens; the child's tool calls are not drawn in the parent's transcript. |
 | `resume-by-id.txt` | `opencode --standalone --session ses_e7a5b72c3ffeMcdT467AVCgZDo` | Replays the prior conversation (`• Shell echo command`, `• Create …`) and lands on the composer. |
 | `session-list.txt` | `opencode session list` | `<ses_id>\t<title>\t<date>`, newest first, current project only. |
 
@@ -114,6 +118,10 @@ Bram's) that writes the first event of each type. Payloads:
 | `tool.execute.after.shell.denied.json` | A tool blocked by a configured rule: `status: "error"`, `error.error._tag: "Permission.BlockedError"`, the matching `rules`. `tool.execute.before` still fired and no `permission.asked` was emitted. |
 | `form.created.json` | `data.form`: `id` (`frm_…`), `sessionID`, `title: "Questions"`, `metadata.kind: "question"`, `fields[]` (`key`, `title`, `description`, `type`, `options[]`, `custom`). |
 | `form.replied.json`, `form.cancelled.json` | `form.replied`: `data: {id, sessionID, answer: {q0: "Red"}}`; `form.cancelled`: `data: {id, sessionID}` (here from Ctrl-C). |
+| `tool.execute.before.shell.guard-denied.json`, `session.tool.failed.guard-denied.json` | The call the scratch plugin threw on, and the failure that follows: `data.error` is `{type:"unknown", message:"MARKER-REASON-7731"}` (the thrown `Error` message, verbatim), `executed: false`. **No `tool.execute.after` fired** for the denied call, and no `permission.asked`. The stored tool state is `status: "error"`, `error.message` the same (`transcript-record-guard-deny.json`), and the model's next step is a normal one; the turn ends `succeeded`. Event order: `guard-deny-event-order.txt`. |
+| `tool.execute.after.read-image.json` | The `read` tool on a PNG returns `result.output` `{type:"file", uri:"file://…", mime:"image/png", encoding:"base64", content}` and `result.content` `[{type:"text","Image read successfully"},{type:"file", uri:"data:image/png;base64,…", mime, name}]`. |
+| `session.created.child.json` | A subagent's session: `data.parentID` is the parent `ses_…`, `agent: "explore"`, `title` from the task description, `slug`. Its own `session.execution.started` / `succeeded` fire (the child's `succeeded` first). |
+| `tool.execute.before.subagent.json` | The parent's call: `tool: "subagent"` (not `task`), `agent: "build"`, `input: {agent: "explore", description, prompt}`. Child tool calls (`read`, `shell`) pass the same plugin hooks with the child's `sessionID` and `agent: "explore"`. |
 | `tool.execute.before.shell.json` | The guard's enforcement point: `tool: "shell"`, `input.command`, `sessionID`, `agent`, `messageID`, `id`. |
 | `tool.execute.before.write.json` / `tool.execute.after.write.json` | `tool: "write"`, `input.path`, `input.content`; `after` adds `status` and `result.output` / `result.content`, which the edit advisory appends to. |
 | `tool.execute.after.shell.json` | The shell result. |
@@ -125,10 +133,12 @@ Bram's) that writes the first event of each type. Payloads:
   `session.tool.failed` plus a normal `succeeded`, and no bad-credential or
   network failure was provoked. Bram's code handles it (lib.rs ~10795).
 - `permission.replied` with `reply: "always"`.
-- Subagent sessions (`parentID`), not attempted.
+- Subagent sessions are captured (see Seams); not tried: a subagent whose tool call the guard denies, or one asking for a permission.
 - A permission-denied `write` (only `shell` denial was captured).
 - The stack-trace exit with empty XDG dirs (see `no-config-exit.txt`).
-- Pasted images, naming through the TUI.
+- Naming through the TUI. Pasted images: only the typed `@<path>` form was captured; the picker-selected `@` (which may fill the user row's `files` array) and an image-capable model were not tried, and the model in use cannot see images.
+- `opencode agent list`: there is no such subcommand in 2.1.4 (`opencode --help` lists none); the agent names (`build`, `explore`) were read from events.
+- Loopback under the `permission: {"*":"ask"}` config (only the default config was run).
 - Bram's transport is not captured, only cited: the plugin POSTs events to
   `http://127.0.0.1:<port>/__opencode/event` (`app/__shell/opencode/bram-plugin.js`
   `postEvent`; handler `src-tauri/src/lib.rs` ~86060), and `conventions.md`
@@ -142,11 +152,12 @@ Bram's) that writes the first event of each type. Payloads:
 | when the session id exists | Not until the first message is submitted: `session.created` carries `ses_…` | `hooks/session.created.json` |
 | session store | SQLite `~/.local/share/opencode/opencode.db`, `session_message` rows with JSON `data` | `transcript-record.json` |
 | naming | Auto title after the first turn; Bram renames by an SQL `UPDATE` on the DB; TUI rename is `ctrl+r` in the session list | Bram code: `src-tauri/src/lib.rs:32009`; `dialog-session-list.txt` |
-| guard hook | Plugin `api.tool.hook("execute.before")`; throw to deny | `hooks/tool.execute.before.shell.json`; Bram code: `app/__shell/opencode/bram-plugin.js` |
+| guard hook | Plugin `api.tool.hook("execute.before")`; throw to deny. The thrown `Error` message reaches the model verbatim as the tool's error (the model quoted `MARKER-REASON-7731`); `session.tool.failed` carries it as `error.message`, `type:"unknown"`; no `tool.execute.after`, no permission prompt | `turn-with-shell-denied-by-guard.txt`, `hooks/session.tool.failed.guard-denied.json`, `transcript-record-guard-deny.json`; Bram code: `app/__shell/opencode/bram-plugin.js` |
 | turn state | Bus events `session.execution.started/succeeded/failed/interrupted`, forwarded by the plugin | `hooks/session.execution.started.json`, `hooks/session.execution.succeeded.json` |
-| Agent→Bram channel | Plugin `fetch` POST to Bram loopback `/__opencode/event` | Bram code: `app/__shell/opencode/bram-plugin.js` (`postEvent`), `src-tauri/src/lib.rs:86060` |
+| Agent→Bram channel | Plugin `fetch` POST to Bram loopback `/__opencode/event`. A loopback `curl` from the agent's shell tool succeeds with no prompt in the default config (and the listener sees it) | `turn-with-loopback-curl.txt`, `loopback-listener.log`; Bram code: `app/__shell/opencode/bram-plugin.js` (`postEvent`), `src-tauri/src/lib.rs:86060` |
 | Bram→agent delivery | Typed into the PTY (no inbound API used) | not captured; Bram code: `src-tauri/src/lib.rs:44208` |
-| pasted images | not captured | not captured |
+| pasted images | `@<abs path>` typed into the composer stays literal text in the user row (`files: []`). The model then calls `read` on the path; the tool returns a `file` part (`data:image/png;base64,…`). Whether pixels reach the model depends on the model: DeepSeek V4 Pro said it could not view images and inspected the bytes instead | `pasted-image-answer.txt`, `transcript-record-pasted-image.json`, `hooks/tool.execute.after.read-image.json` |
+| subagents | The model calls a tool named `subagent` (`input: {agent, description, prompt}`); a child session is created in `session_v2` with `parent_id` set and `agent: "explore"`; the result text is `<subagent sessionID="ses_…" state="completed"…>`. The child's tool calls hit the plugin hooks; the TUI shows one row and a `↓ N subagent` footer, no tab | `subagent-working.txt`, `subagent-done.txt`, `session-meta-record-subagent.json`, `transcript-record-subagent-child.json`, `transcript-record-subagent-parent-tool.json`, `hooks/session.created.child.json`, `subagent-event-order.txt` |
 | menus | Ctrl+P palette; `Ctrl+X m/l/a` lists; `esc` closes | `dialog-command-palette.txt`, `dialog-session-list.txt`, `dialog-model-list.txt` |
 | working status | Spinner + `• Shell echo command` + `Build · <model> · <secs> · <tok/s>`; `⬝⬝⬝⬝⬝⬝⬝⬝ esc interrupt` while running; `session.execution.started` | `turn-with-shell.txt`, `turn-with-shell-working.txt` |
 | interrupt and exit | First Esc: `esc again to interrupt`; second within 5 s stops the turn: `session.execution.interrupted` `reason: "user"`, after `session.tool.failed`/`session.step.failed`. Ctrl-C exits at once and prints `Continue  opencode -s <id>` (after a turn only). | `interrupt-esc-once.txt`, `interrupt-esc-twice.txt`, `exit-ctrl-c.txt`, `exit-ctrl-c-idle.txt`, `hooks/session.execution.interrupted.user.json` |
@@ -188,3 +199,31 @@ title arrives later (`session.renamed`) and `idle_outcome` only at turn end.
 Older first-pass files (`resume-by-id`, `turn-with-shell`,
 `write-outside-project`) still contain a mangled scratch path; the new files
 are redacted.
+
+## Open items — 2026-10-28
+
+Signed: Claude subagent (Sonnet), delegated by Jon's Claude main thread.
+Closed four of the open items in `resources/worklist-drafts/issue-462-specimen-open-items.md`
+for OpenCode 2.1.4, model DeepSeek V4 Pro (`opencode-go`), `--standalone`, scratch repo, default permissions.
+
+- **Guard deny.** The scratch logger (`hooks/logger.js`, now with
+  `SPECIMEN_DENY_MARKER` / `SPECIMEN_DENY_MESSAGE`) throws from
+  `tool.execute.before`, as Bram's plugin does. The model got the message
+  verbatim and quoted it. Evidence: screen, `session.tool.failed`, stored
+  tool `error`, `guard-deny-event-order.txt`.
+- **Pasted image.** `@<path>` stays literal text; the model chose to `read`
+  it; the `read` result is a `file` part with a base64 data URI. The model
+  in use does not support images (it said so and decoded the PNG by hand), so
+  "answers red" shows the file arrived, not that vision worked. Two runs were
+  made; the first was cut off by the schedule before the answer.
+- **Loopback.** Allowed, no prompt, listener logged `GET /`. Run only under
+  the default config.
+- **Subagents.** Exist (tool `subagent`, agent `explore`). Child session has
+  `parent_id`; its `session.created` carries `parentID` (Bram's note in this
+  README was right). Child `session.execution.succeeded` fires before the
+  parent's. The child's tool calls fire the plugin hooks, so Bram's guard
+  would judge them too, with `agent: "explore"` and the child's `sessionID`;
+  the user row of the child starts `You are a subagent spawned by another
+  session.`
+- Not checked: how Bram's event forwarder treats a child session's
+  `session.execution.*` events (this pack's logger does not run Bram's code).

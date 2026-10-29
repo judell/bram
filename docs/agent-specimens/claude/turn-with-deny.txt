@@ -1,0 +1,29 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   /…/<tmp-user>/-Users-<user>-bram/<session>/scratchpad/specimens-claude/ws
+
+
+❯ Run this exact shell command and nothing else: echo DENYME
+
+⏺ Bash(echo DENYME)
+  ⎿  Error: PreToolUse:Bash hook error: MARKER-REASON-7731
+
+⏺ The command didn't run. A PreToolUse hook on Bash blocked it and returned the error MARKER-REASON-7731. I haven't
+  retried it or run anything else.
+
+✻ Baked for 6s · done 9:48 PM
+
+❯ Quote verbatim any reason or message you were given about that command being blocked.
+
+⏺ The exact error was:
+
+  PreToolUse:Bash hook error: MARKER-REASON-7731
+
+  The hook gave no other reason or message beyond that.
+
+✻ Cooked for 3s · done 9:48 PM
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────── specimen-deny ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts

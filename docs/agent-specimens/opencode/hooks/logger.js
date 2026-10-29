@@ -14,8 +14,17 @@ function dump(name, obj) {
 export default {
   id: "specimen.logger",
   setup(api) {
-    api.tool.hook("execute.before", async (evt) => { dump("tool.execute.before", evt); });
+    api.tool.hook("execute.before", async (evt) => {
+      dump("tool.execute.before", evt);
+      // Deny mode (as Bram's plugin denies: throw): set SPECIMEN_DENY_MARKER and SPECIMEN_DENY_MESSAGE.
+      const m = process.env.SPECIMEN_DENY_MARKER;
+      if (m && JSON.stringify(evt.input || {}).includes(m)) {
+        appendFileSync(OUT + "/all.log", "DENY " + evt.tool + " " + JSON.stringify(evt).slice(0, 300) + "\n");
+        writeFileSync(OUT + "/tool.execute.before.denied-call.json", JSON.stringify(evt, null, 2));
+        throw new Error(process.env.SPECIMEN_DENY_MESSAGE || "denied");
+      }
+    });
     api.tool.hook("execute.after", async (evt) => { dump("tool.execute.after", evt); });
-    (async () => { for await (const evt of api.event.subscribe()) { if (FORWARDED.has(evt.type)) dump(evt.type, evt); else appendFileSync(OUT + "/all.log", "other " + evt.type + "\n"); } })().catch(() => {});
+    (async () => { for await (const evt of api.event.subscribe()) { if (FORWARDED.has(evt.type)) dump(evt.type + (evt.type === "session.created" && evt.data && evt.data.parentID ? ".child" : ""), evt); else appendFileSync(OUT + "/all.log", "other " + evt.type + "\n"); } })().catch(() => {});
   },
 };

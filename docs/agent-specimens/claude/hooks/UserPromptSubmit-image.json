@@ -1,0 +1,11 @@
+{
+  "session_id": "87cff984-19c7-4afa-a181-d8d17afb2590",
+  "transcript_path": "~/.claude/projects/<munged-workspace>/87cff984-19c7-4afa-a181-d8d17afb2590.jsonl",
+  "cwd": "<workspace>",
+  "scratchpad_dir": "<scratchpad-root>/<munged-workspace>/87cff984-19c7-4afa-a181-d8d17afb2590/scratchpad",
+  "prompt_id": "f625dc8f-bdb9-4844-b8fa-5195d92c9e50",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "What colour is this image? @<scratchpad-root>/open-claude/red.png",
+  "session_title": "specimen-image"
+}

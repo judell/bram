@@ -1,0 +1,15 @@
+{
+  "conversation_id": "1c9c211c-efd2-4e62-a9f5-e46ecc7129b2",
+  "generation_id": "bbbb4413-fc38-4388-9961-4ee211a9afc1",
+  "model": "default",
+  "prompt": "What colour is this image? @<scratch>/red.png",
+  "attachments": [],
+  "session_id": "1c9c211c-efd2-4e62-a9f5-e46ecc7129b2",
+  "hook_event_name": "beforeSubmitPrompt",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": null
+}

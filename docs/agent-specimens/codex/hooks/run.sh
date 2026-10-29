@@ -25,6 +25,9 @@ hook_override() {
   printf 'hooks.%s=[{%shooks=[{type="command",command=%s}]}]' \
     "$event" "$match_field" "$(toml_string "$LOGGER $event")"
 }
+# Optional: PRETOOL_SCRIPT=<path to a hook script> replaces the PreToolUse logger
+# (hooks/deny-hook.sh denies calls containing DENYME).
+PRE_LOGGER=$(python3 -I -c 'import shlex,sys; print("bash " + shlex.quote(sys.argv[1]))' "${PRETOOL_SCRIPT:-$L}")
 M='^(Bash|apply_patch|Write|Edit|mcp__.*)$'
 mkdir -p -- "$OUT/hooklog"
 cd -- "$R"
@@ -32,7 +35,7 @@ env -u OPENAI_API_KEY HOOKLOG_DIR="$OUT/hooklog" python3 -I "$HOOK_DIR/../captur
  -c "projects.$(toml_string "$R").trust_level=\"trusted\"" \
  -c "$(hook_override SessionStart)" \
  -c "$(hook_override UserPromptSubmit)" \
- -c "$(hook_override PreToolUse "$M")" \
+ -c "$(LOGGER="$PRE_LOGGER" hook_override PreToolUse "$M")" \
  -c "$(hook_override PermissionRequest "$M")" \
  -c "$(hook_override PostToolUse "$M")" \
  -c "$(hook_override Stop)" "$@"

@@ -8,6 +8,8 @@ ev="$1"
 dir="${HOOKLOG_DIR:-$(dirname "$0")/../../hooklog}"
 payload=$(cat)
 printf '%s\n' "$payload" >> "$dir/$ev.jsonl"
+# One timestamped line per payload (epoch seconds, event, payload), for ordering questions.
+printf '%s\t%s\t%s\n' "$(python3 -c 'import time;print("%.3f"%time.time())')" "$ev" "$(printf '%s' "$payload" | tr -d '\n')" >> "$dir/_timeline.tsv"
 case "$ev" in
   preToolUse)
     if printf '%s' "$payload" | grep -q DENYME; then

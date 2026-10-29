@@ -1,0 +1,10 @@
+{
+ "session_id": "01a18600-1175-7e41-8cc6-9d19f6851fcb",
+ "turn_id": "01a18600-44a4-71d1-8358-c5feb55b203a",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T21-51-53-01a18600-1175-7e41-8cc6-9d19f6851fcb.jsonl",
+ "cwd": "<workspace>/repo",
+ "hook_event_name": "UserPromptSubmit",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "prompt": "What colour is this image? @<workspace>/red.png"
+}

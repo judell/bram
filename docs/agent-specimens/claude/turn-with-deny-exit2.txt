@@ -1,0 +1,20 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   /…/<tmp-user>/-Users-<user>-bram/<session>/scratchpad/specimens-claude/ws
+
+
+❯ Run this exact shell command and nothing else: echo DENYME
+
+⏺ Bash(echo DENYME)
+  ⎿  Error: PreToolUse:Bash hook error: [$CLAUDE_PROJECT_DIR/.claude/log-hook.sh PreToolUse]: MARKER-REASON-7731 (exit2
+     stderr)
+
+⏺ The command echo DENYME didn't run. A PreToolUse hook (.claude/log-hook.sh) blocked it and returned MARKER-REASON-7731
+  (it exited with status 2 and wrote that reason to stderr). I haven't retried it or tried another way to run it.
+
+✻ Churned for 3s · done 9:49 PM
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────── specimen-deny2 ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts

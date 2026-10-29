@@ -1,0 +1,18 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.312
+           Opus 5.5 · Claude Max
+ ▘▘   ▝▝   /…/<tmp-user>/-Users-<user>-bram/<session>/scratchpad/specimens-claude/ws
+
+
+❯ Run this exact shell command and nothing else: curl -sS http://127.0.0.1:54777/
+
+⏺ Bash(curl -sS http://127.0.0.1:54777/)
+  ⎿  loopback-ok-7731
+
+⏺ I ran the command. The local server at 127.0.0.1:54777 replied with loopback-ok-7731.
+
+✻ Brewed for 9s · done 9:52 PM
+
+──────────────────────────────────────────────────────────────────────────────────────────────────── specimen-loopback ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts                                                                ◐ medium · /effort

@@ -1,0 +1,21 @@
+{
+  "conversation_id": "c614031a-afaf-4894-bd90-0049140a5227",
+  "generation_id": "c614031a-afaf-4894-bd90-0049140a5227",
+  "model": "default",
+  "tool_name": "Shell",
+  "tool_input": {
+    "command": "ls -la && echo \"---\" && find . -print | head -500",
+    "cwd": "<workspace>",
+    "timeout": 30000
+  },
+  "tool_use_id": "dd1786c8-a4a2-4eb6-b593-fe4e6218b4c5",
+  "cwd": "<workspace>",
+  "session_id": "c614031a-afaf-4894-bd90-0049140a5227",
+  "hook_event_name": "preToolUse",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": null
+}

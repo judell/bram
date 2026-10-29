@@ -1,0 +1,39 @@
+[2K[G
+  [33m╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  [1m[33m⚠ [39mWorkspace Trust Required[22m                                                                                      [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  Cursor Agent can execute code and access files in this directory.                                               [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  Do you trust the contents of this directory?                                                                    [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m    [1m[36m<workspace>[39m[22m  [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  [32m▶ [39m[1m[a] Trust this workspace[22m                                                                                      [33m│[39m
+  [33m│[39m  [2m  [q] Quit[22m                                                                                                      [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  [2mUse arrow keys to navigate, Enter to select, or press the key shown[22m                                             [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[39m
+[?25l[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G  [33m│[39m  [2m  [a] Trust this workspace[22m                                                                                      [33m│[39m
+  [33m│[39m  [2m  [q] Quit[22m                                                                                                      [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  [34m⏳ Trusting workspace...[39m                                                                                        [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[39m
+[?25h[>1u]11;?[2K[G
+
+  Cursor Agent
+  [2mv2026.10.22-27dcf5f[22m
+  [2mTip: Use subagents to parallelize work and preserve context.[22m
+
+
+
+ [48;5;233m                                                                                                                      [49m
+ [48;5;233m [2m→ [22m[7mP[27m[2mlan, search, build anything[22m                                                                                       [49m
+ [48;5;233m                                                                                                                      [49m
+
+  [2mAuto[22m
+  [2m<workspace> · main[22m
+[?25l[?2004h]0;Cursor Agent[?2031h[?1004h

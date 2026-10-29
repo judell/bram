@@ -1,0 +1,19 @@
+[2K[G
+  [33m╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  [1m[33m⚠ [39mWorkspace Trust Required[22m                                                                                      [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  Cursor Agent can execute code and access files in this directory.                                               [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  Do you trust the contents of this directory?                                                                    [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m    [1m[36m<workspace>[39m[22m  [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  [32m▶ [39m[1m[a] Trust this workspace[22m                                                                                      [33m│[39m
+  [33m│[39m  [2m  [q] Quit[22m                                                                                                      [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m│[39m  [2mUse arrow keys to navigate, Enter to select, or press the key shown[22m                                             [33m│[39m
+  [33m│[39m                                                                                                                  [33m│[39m
+  [33m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[39m
+[?25l

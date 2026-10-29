@@ -1,0 +1,15 @@
+{
+  "conversation_id": "ffd2e29c-7237-4054-a7cd-967de5a6ac4b",
+  "generation_id": "460c56fe-2ed7-4595-9d9e-4eb254fa627a",
+  "model": "default",
+  "prompt": "Run the shell command: echo hello-specimen",
+  "attachments": [],
+  "session_id": "ffd2e29c-7237-4054-a7cd-967de5a6ac4b",
+  "hook_event_name": "beforeSubmitPrompt",
+  "cursor_version": "2026.10.22-27dcf5f",
+  "workspace_roots": [
+    "<workspace>"
+  ],
+  "user_email": "<user-email>",
+  "transcript_path": null
+}

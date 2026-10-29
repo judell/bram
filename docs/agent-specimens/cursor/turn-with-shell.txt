@@ -1,0 +1,251 @@
+
+
+  Cursor Agent
+  v2026.10.22-27dcf5f
+  Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+
+
+                                                                                                                       
+  → Plan, search, build anything                                                                                       
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+                                                                                                                       
+  Run the shell command: echo hello-specimen                                                                           
+                                                                                                                       
+
+ ⠀⠞ Working
+
+                                                                                                                       
+  → Plan, search, build anything                                                                                       
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠠⠜ Working
+
+                                                                                                                       
+  → Plan, search, build anything                                                                                       
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠰⠰ Working
+
+                                                                                                                       
+  → Plan, search, build anything                                                                                       
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠘⠤ Working
+
+                                                                                                                       
+  → Plan, search, build anything                                                                                       
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠘⠆ Working
+
+                                                                                                                       
+  → Plan, search, build anything                                                                                       
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠘⠣ Working
+
+                                                                                                                       
+  → Plan, search, build anything                                                                                       
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠰⠳ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠠⠛ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠀⠞ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠠⠜ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠰⠰ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠘⠤ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠘⠆ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠘⠣ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠰⠳ Working
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠰⠳ Working  1 token
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+  $ echo hello-specimen 0ms
+
+ ⠰⠳ Working  1 token
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto
+  <workspace> · main
+ ⠰⠳ Running  1 token
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto · 4.6%
+  <workspace> · main
+ ⠰⠳ Running  31 tokens
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto · 4.6%
+  <workspace> · main
+ ⠠⠛ Running  31 tokens
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  Auto · 4.6%
+  <workspace> · main
+  1 task
+  Auto · 4.6%
+  <workspace> · main
+ ⠀⠞ Running  31 tokens
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  1 task
+  Auto · 4.6%
+  <workspace> · main
+ ⠠⠜ Running  31 tokens
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  1 task
+  Auto · 4.6%
+  <workspace> · main
+ ⠰⠰ Running  31 tokens
+    Tip: Use /mcp to connect Cursor to your tools and data sources.
+
+                                                                                                                       
+  → Add a follow-up                                                                                     ctrl+c to stop 
+                                                                                                                       
+
+  1 task
+  Auto · 4.6%
+  <workspace> · main
+  $ echo hello-specimen Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  echo hello-specimen in .
+
+ Run this command?
+ Hook requested approval • Not in allowlist: echo
+  → Run (once) (y)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+

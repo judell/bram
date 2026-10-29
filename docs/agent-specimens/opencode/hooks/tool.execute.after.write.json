@@ -1,0 +1,26 @@
+{
+  "tool": "write",
+  "sessionID": "ses_e7a5c0497ffe2WYM5gk1G3N72d",
+  "agent": "build",
+  "messageID": "msg_185a3fc2b001OrPn0qSBchQYm3",
+  "id": "call_ktam5pk6xb53xchtvxzo6iub",
+  "input": {
+    "path": "<workspace>/outside/x.txt",
+    "content": "specimen"
+  },
+  "status": "completed",
+  "result": {
+    "output": {
+      "operation": "write",
+      "target": "<workspace>/outside/x.txt",
+      "resource": "<workspace>/outside/x.txt",
+      "existed": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Created file successfully: <workspace>/outside/x.txt"
+      }
+    ]
+  }
+}

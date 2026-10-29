@@ -1,0 +1,17 @@
+{
+  "id": "evt_185a3fc1a0017b1tuy7RzJ1EKF",
+  "created": 1793243479066,
+  "type": "session.inbox.delivered",
+  "durable": {
+    "aggregateID": "ses_e7a5c0497ffe2WYM5gk1G3N72d",
+    "seq": 4,
+    "version": 1
+  },
+  "location": {
+    "directory": "<workspace>/repo"
+  },
+  "data": {
+    "sessionID": "ses_e7a5c0497ffe2WYM5gk1G3N72d",
+    "inboxID": "msg_185a3fb6d001q5kuunCj0OTwfa"
+  }
+}

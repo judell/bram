@@ -1,0 +1,31 @@
+{
+  "id": "evt_185a40887001GfbsM4gbpLNmyE",
+  "created": 1793243482247,
+  "type": "session.step.ended",
+  "durable": {
+    "aggregateID": "ses_e7a5c0497ffe2WYM5gk1G3N72d",
+    "seq": 15,
+    "version": 1
+  },
+  "location": {
+    "directory": "<workspace>/repo"
+  },
+  "data": {
+    "sessionID": "ses_e7a5c0497ffe2WYM5gk1G3N72d",
+    "assistantMessageID": "msg_185a3fc2b001OrPn0qSBchQYm3",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.0016195080000000002,
+    "tokens": {
+      "input": 1820,
+      "output": 112,
+      "reasoning": 31,
+      "cache": {
+        "read": 6144,
+        "write": 0
+      }
+    },
+    "snapshot": "ac8b3ea6587f1cac3848626a22d25afeca874600",
+    "files": []
+  }
+}

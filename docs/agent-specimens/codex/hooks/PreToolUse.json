@@ -1,0 +1,14 @@
+{
+ "session_id": "01a185a7-7452-7773-ae72-3530b038e248",
+ "turn_id": "01a185a7-9cc2-7b52-9002-d107968678c4",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T20-15-06-01a185a7-7452-7773-ae72-3530b038e248.jsonl",
+ "cwd": "<workspace>",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "echo hello-specimen > specimen.txt"
+ },
+ "tool_use_id": "exec-e67af62f-53ff-4854-8a25-a19d8cb7f285"
+}

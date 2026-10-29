@@ -1,0 +1,37 @@
+WelcometoClaudeCodev2.1.312
+..........................................................
+
+*█████▓▓░
+*███▓░░░
+░░░░░░███▓░
+░░░░░░░░░░░░░███▓░
+░░░░░░░░░░░░░░░░░░░*██▓░░▓
+░▓▓███▓▓░
+ *░░░░
+ ░░░░░░░░
+ ░░░░░░░░░░░░░░░░
+*
+▗ ▗     ▖ ▖*
+         *
+.......    ..........................................
+
+Let'sgetstarted.
+
+Choosethetextstylethatlooksbestwithyourterminal
+Tochangethislater,run/theme
+
+Auto(matchterminal)
+❯✔Darkmode
+Lightmode
+Darkmode(colorblind-friendly)
+Lightmode(colorblind-friendly)
+Darkmode(ANSIcolorsonly)
+Lightmode(ANSIcolorsonly)
+
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ 1 function greet(){
+ 2 -  console.log("Hello, World!");                                                                               
+ 2 +  console.log("Hello, Claude!");                                                                              
+ 3 }
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Syntaxtheme:MonokaiExtended(ctrl+ttodisable)

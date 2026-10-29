@@ -1,0 +1,40 @@
+
+  >_ OpenAI Codex (v0.165.0)
+     <workspace>
+
+
+› Run the shell command: echo hello-specimen > specimen.txt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+• Working (1s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  GPT-6-Astra high · <workspace>…
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view

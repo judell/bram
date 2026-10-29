@@ -1,0 +1,14 @@
+▗ ▗   ▖ ▖ClaudeCodev2.1.312
+       Opus5.5·APIUsageBilling
+▘▘▝▝<workspace>2
+
+▎AutomodeisnowClaudeCode'sdefaultpermissionmode.
+▎AutomodeletsClaudehandlepermissionpromptsautomatically.Claudecheckseachtoolcallforriskyactionsand
+▎promptinjectionbeforeexecuting,runstheonesitassessesaslower-risk,andblockstherest.
+▎https://code.claude.com/docs/en/permission-modes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯  
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⏵⏵automodeon (shift+tabtocycle)·←foragentsNotloggedin·Run/login
+◐medium·/effort

@@ -1,0 +1,15 @@
+{
+ "session_id": "01a185a4-5d64-7d82-8941-9d109ebc2125",
+ "turn_id": "01a185a4-8c2f-7643-a132-855b78161bf9",
+ "transcript_path": "~/.codex/sessions/2026/10/28/rollout-2026-10-28T20-11-43-01a185a4-5d64-7d82-8941-9d109ebc2125.jsonl",
+ "cwd": "<workspace>",
+ "hook_event_name": "PostToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "default",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "echo hello-specimen"
+ },
+ "tool_response": "hello-specimen\n",
+ "tool_use_id": "exec-2c55a3f4-579d-4dfd-8571-dbaa8a30e7a8"
+}

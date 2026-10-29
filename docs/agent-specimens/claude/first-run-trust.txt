@@ -1,0 +1,17 @@
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Accessingworkspace:
+
+<workspace>
+
+Quicksafetycheck:Isthisaprojectyoucreatedoroneyoutrust?(Likeyourowncode,awell-knownopensource
+project,orworkfromyourteam).Ifnot,takeamomenttoreviewwhat'sinthisfolderfirst.
+
+ClaudeCode'llbeabletoread,edit,andexecutefileshere.
+
+Securityguide
+
+❯No,exit
+Yes,Itrustthisfolder
+
+Entertoconfirm·Esctocancel

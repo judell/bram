@@ -1,0 +1,28 @@
+{
+  "id": "evt_185a3fbaa001JDDN4KyZWFyVRI",
+  "created": 1793243478954,
+  "type": "session.created",
+  "durable": {
+    "aggregateID": "ses_e7a5c0497ffe2WYM5gk1G3N72d",
+    "seq": 0,
+    "version": 1
+  },
+  "location": {
+    "directory": "<workspace>/repo"
+  },
+  "data": {
+    "sessionID": "ses_e7a5c0497ffe2WYM5gk1G3N72d",
+    "projectID": "dcfd4f81bdaaa1da969db8a101f6ef3db57cbcaa",
+    "location": {
+      "directory": "<workspace>/repo"
+    },
+    "subpath": "",
+    "slug": "quick-squid",
+    "agent": "build",
+    "model": {
+      "id": "deepseek-v4-pro",
+      "providerID": "opencode-go"
+    },
+    "version": "2.1.4"
+  }
+}

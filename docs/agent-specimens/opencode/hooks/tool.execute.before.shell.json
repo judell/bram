@@ -1,0 +1,10 @@
+{
+  "tool": "shell",
+  "sessionID": "ses_e7a5b72c3ffeMcdT467AVCgZDo",
+  "agent": "build",
+  "messageID": "msg_185a48e0c001o1hjnMjqqGF3L7",
+  "id": "call_vw8n6m9imy2p10du1iu1wqxc",
+  "input": {
+    "command": "echo hello-specimen"
+  }
+}

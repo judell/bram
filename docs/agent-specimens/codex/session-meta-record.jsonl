@@ -1,0 +1,1 @@
+{"type": "session_meta", "payload": {"id": "01a185a4-5d64-7d82-8941-9d109ebc2125", "timestamp": "2026-10-29T03:11:43.994Z", "cwd": "<workspace>", "originator": "codex-tui", "cli_version": "0.165.0", "source": "cli", "model_provider": "openai"}}

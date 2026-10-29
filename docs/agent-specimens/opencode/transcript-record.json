@@ -1,0 +1,16 @@
+{
+  "id": "msg_185a48d44001FnvY0zveUeVVx2",
+  "session_id": "ses_e7a5b72c3ffeMcdT467AVCgZDo",
+  "type": "user",
+  "seq": 4,
+  "time_created": 1793243516405,
+  "time_updated": 1793243516407,
+  "data": {
+    "time": {
+      "created": 1793243516405
+    },
+    "text": "Run the shell command: echo hello-specimen",
+    "files": [],
+    "agents": []
+  }
+}

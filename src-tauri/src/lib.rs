@@ -68500,7 +68500,9 @@ fn needs_you_replier_phrase(author: &str, first_line: &str) -> Option<String> {
 }
 
 // worklist-mirror-comments-signed: the mirror signs as "<owner>'s Bram (Bram
-// <version>, worklist mirror, host, …)". The guard's parser accepts only
+// <version>, posted automatically, …)". Comments posted before that wording
+// say "worklist mirror, host" instead (Bram-internal jargon a reader can't
+// decode), and are still recognized. The guard's parser accepts only
 // agents, and should stay that way (an agent signing as Bram must not pass
 // the guard), so Alerts recognizes this one shape itself. Cross-machine
 // classification ignores it on purpose: another machine's mirror comments
@@ -68511,7 +68513,9 @@ fn worklist_mirror_signature_speaker(line: &str) -> Option<&str> {
     if owner.trim().is_empty() || who != "Bram" {
         return None;
     }
-    if !rest.starts_with("Bram ") || !rest.contains(", worklist mirror, host") {
+    let marked =
+        rest.contains(", posted automatically") || rest.contains(", worklist mirror, host");
+    if !rest.starts_with("Bram ") || !marked {
         return None;
     }
     Some(speaker.trim())
@@ -72812,7 +72816,7 @@ fn worklist_mirror_signature_line(
     project: &str,
     locator: &str,
 ) -> String {
-    let mut slots = format!("Bram {}, worklist mirror, host, {}", version, os);
+    let mut slots = format!("Bram {}, posted automatically, {}", version, os);
     if !machine.is_empty() {
         slots.push_str(&format!(", {}", machine));
     }
@@ -84534,7 +84538,7 @@ mod worklist_authorization_tests {
         assert!(worklist_lifecycle_item_issue_numbers(&none).is_empty());
     }
 
-    const SIG: &str = "Jon's Bram (Bram 0.8.0, worklist mirror, host, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+    const SIG: &str = "Jon's Bram (Bram 0.8.0, posted automatically, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
 
     #[test]
     fn mirror_signature_parses_as_a_signature() {
@@ -84559,7 +84563,13 @@ mod worklist_authorization_tests {
         assert!(crate::guard_policy::parse_agent_signature(&line).is_none());
         // No hostname: the machine slot is left out, not left empty.
         let bare = worklist_mirror_signature_line("Jon", "0.8.0", "Linux", "", "Bram", "bram");
-        assert!(bare.starts_with("Jon's Bram (Bram 0.8.0, worklist mirror, host, Linux) "));
+        assert!(bare.starts_with("Jon's Bram (Bram 0.8.0, posted automatically, Linux) "));
+        // Comments posted in the earlier wording still read as Bram's.
+        let legacy = "Jon's Bram (Bram 0.8.0, worklist mirror, host, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+        assert_eq!(
+            crate::worklist_mirror_signature_speaker(legacy),
+            Some("Jon's Bram")
+        );
     }
 
     #[test]

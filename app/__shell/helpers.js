@@ -2582,7 +2582,6 @@ window.__bramComposerTargetsSelection = function () {
 window.__bramComposerPlaceholder = function (pathname, sel, toChat, provider) {
   var hint = window.__bramComposerPlaceholderHint(pathname, sel, toChat);
   var ticked = sel || window.__bramW2Selection || [];
-  if (window.__bramComposerShowAddresseeLine(ticked)) return hint;
   var to = String(window.__bramComposerAddressee(ticked, toChat, provider)).replace(/^To: /, "To ");
   return to + ": " + hint;
 };
@@ -2613,8 +2612,8 @@ window.__bramComposerPlaceholderHint = function (pathname, sel, toChat) {
   return "Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
 };
 // composer-addressee-in-placeholder: the line above the box shows only with
-// items ticked: it carries the chat/feedback toggle, and in feedback mode it
-// keeps Enter's target in view after the placeholder vanishes on typing.
+// items ticked, and carries only the chat/feedback toggle. The addressee
+// itself is always in the placeholder (composer-addressee-always-in-box).
 window.__bramComposerShowAddresseeLine = function (sel) {
   return Array.isArray(sel) && sel.length > 0;
 };

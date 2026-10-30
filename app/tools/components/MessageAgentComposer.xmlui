@@ -63,24 +63,23 @@
          children they sat gap-Form ($space-4) apart and the line read as
          unrelated to the box (https://www.xmlui.org/docs/reference/components/Form). -->
     <VStack width="100%" gap="0">
-    <!-- composer-addressee-in-placeholder: in plain chat the placeholder names
-         the addressee and this line is hidden, saving a footer line. With
-         items ticked it shows: the chat/feedback toggle lives here, and it
-         keeps Enter's target visible while typing feedback. -->
+    <!-- composer-addressee-in-placeholder: the placeholder always names the
+         addressee (composer-addressee-always-in-box, Jon: the "To: Claude"
+         line "lives inside the message box"). This line shows only with
+         items ticked, and holds only the chat/feedback toggle. -->
     <HStack when="{window.__bramComposerShowAddresseeLine(w2Sel.value || [])}"
       width="100%" gap="$space-2" verticalAlignment="center" paddingLeft="3rem">
-      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-        value="{window.__bramComposerAddressee(w2Sel.value || [], toChat, $props.activeProvider)}"
-        tooltip="{window.__bramComposerAddresseeTooltip(w2Sel.value || [], toChat)}" />
       <Button
         when="{(w2Sel.value || []).length > 0 &amp;&amp; !toChat}"
         label="Send as chat instead"
+        tooltip="{window.__bramComposerAddresseeTooltip(w2Sel.value || [], toChat)}"
         variant="ghost"
         size="xs"
         onClick="toChat = true" />
       <Button
         when="{(w2Sel.value || []).length > 0 &amp;&amp; toChat}"
         label="Back to feedback"
+        tooltip="{window.__bramComposerAddresseeTooltip(w2Sel.value || [], toChat)}"
         variant="ghost"
         size="xs"
         onClick="toChat = false" />

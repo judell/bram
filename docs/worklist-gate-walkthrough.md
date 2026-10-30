@@ -107,12 +107,13 @@ really is on disk; restart the demo.
 - No explainer line.
 - Expanding the row shows "No changes yet" and no Diff.
 
-**Then, the composer:** the line above the message box reads "To: <item>
-(feedback)" with **Send as chat instead**, and the placeholder is just the
-hint. Click it: the line reads "To: Claude (chat)" with the item still
-ticked. Change the selection and it switches back to feedback.
-Clear the selection: the line goes away and the placeholder opens "To
-Claude (chat):" (composer-addressee-in-placeholder).
+**Then, the composer:** the placeholder opens "To <item> (feedback):", and
+the line above the box holds only **Send as chat instead**. Click it: the
+placeholder opens "To Claude (chat):" and the line reads **Back to
+feedback**, with the item still ticked. Change the selection and it
+switches back to feedback. Clear the selection: the line goes away and the
+placeholder still opens "To Claude (chat):"
+(composer-addressee-always-in-box).
 
 ## Phase 2: start one; Start goes away once it can commit
 

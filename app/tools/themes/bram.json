@@ -9,6 +9,8 @@
     "paddingHorizontal-Button-sm": "$space-1",
     "width-navPanel-App": "$space-32",
     "maxWidth-content-App": "100%",
+    "paddingHorizontal-content-App": "0",
+    "paddingVertical-content-App": "0",
     "maxWidth-App": "100%",
     "maxWidth-content-Footer": "100%",
     "maxWidth-ModalDialog": "85vw",

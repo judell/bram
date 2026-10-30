@@ -130,7 +130,7 @@
   </Theme>
   <VStack
     height="100%"
-    padding="$space-4"
+    paddingTop="$space-4"
     gap="$space-2"
     <!-- issue-275-a1 step 1: canonical lifecycle names. `onInit` / `onCleanup`
          are documented as legacy compatibility ALIASES for `onMount` /
@@ -198,7 +198,8 @@
          size observer races at load). Needs an explicit backgroundColor
          or scrolled content shows through (per the sticky-header
          how-to). -->
-    <StickySection stickTo="top" top="$height-AppHeader" backgroundColor="$backgroundColor">
+    <StickySection stickTo="top" top="$height-AppHeader" backgroundColor="$backgroundColor"
+      paddingHorizontal="$space-4">
       <HStack verticalAlignment="center" gap="$space-2" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
@@ -216,6 +217,7 @@
     </StickySection>
     <Text
       when="{currentSession}"
+      paddingHorizontal="$space-4"
       fontSize="$fontSize-sm"
       maxLines="1"
       value="{window.__bramSessionMetaLine(currentSession)}" />
@@ -223,6 +225,7 @@
          it is still running. The footer's Main chip swaps back. -->
     <Text
       when="{$props.agentId}"
+      paddingHorizontal="$space-4"
       fontSize="$fontSize-sm"
       fontWeight="bold"
       color="$color-primary-600"
@@ -239,7 +242,8 @@
     <DataSource id="orientStatus" url="/__enhance/status" />
     <HStack
       when="{!$props.agentId &amp;&amp; !orientSent &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.startupGreetingVisible}"
-      width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2">
+      width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2"
+      paddingHorizontal="$space-4">
       <!-- width="*": the text takes the row's remainder and wraps, so the
            button can't be pushed off the edge
            (https://www.xmlui.org/docs/howto/keep-a-star-sized-element-from-collapsing). -->
@@ -253,10 +257,6 @@
         tooltip="Hide this; nothing is sent"
         onClick="orientSent = true; window.__bramMarkOrientSent()" />
     </HStack>
-    <Text
-      when="{events.length === 0}"
-      color="$textColor-secondary"
-      value="No transcript yet." />
     <!-- #427: the Worklist on demand in a pane below the transcript, with a
          draggable divider (https://www.xmlui.org/docs/howto/create-a-resizable-split-view).
          With the pane's `when` false the splitter shows no bar and the List
@@ -308,8 +308,21 @@
       idKey="{findPlan ? '__findKey' : 'id'}"
       onScroll="(ev) => atBottom = window.__bramFollowClassify(atBottom, ev.atEnd, $props.agentId)"
       onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range, transcriptList, $props.agentId)">
-      <property name="emptyListTemplate"><Fragment/></property>
-      <VStack gap="$space-1" paddingVertical="$space-1">
+      <!-- transcript-worklist-bar-full-width: "No transcript yet" lives in
+           the List's own empty state
+           (https://www.xmlui.org/docs/reference/components/List). Above the
+           split it was 35 px that vanished when the transcript loaded, which
+           shifted the split up until the next re-measure ~0.8 s later: the
+           bar's jump up and back on every load. The `when` keeps a find
+           with no matches from claiming there is no transcript. -->
+      <property name="emptyListTemplate">
+        <Text
+          when="{events.length === 0}"
+          paddingHorizontal="$space-4"
+          color="$textColor-secondary"
+          value="No transcript yet." />
+      </property>
+      <VStack gap="$space-1" paddingVertical="$space-1" paddingHorizontal="$space-4">
         <!-- user message -->
         <VStack
           when="{$item.kind === 'user'}"

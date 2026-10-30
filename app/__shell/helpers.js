@@ -11427,12 +11427,6 @@ var __BRAM_DESCRIBE_CONCURRENCY = 3;
 // added upstream in xmlui feat/list-visible-range). The [data-index] DOM
 // scrape remains as fallback for the window before the first event lands.
 window.__bramSetVisibleRange = function (range, listRef, agentId) {
-  // A pending Worklist-pane close re-lands BEFORE the new range is stored,
-  // so the reading row recorded at the toggle isn't overwritten by the
-  // remounted List's top-of-list report.
-  if (window.__bramSplitToggleLand && listRef) {
-    try { __bramSplitToggleLanding(listRef, agentId); } catch (e0) {}
-  }
   window.__bramVisibleRange = range || null;
   try { __bramPumpDescribeQueue(); } catch (e) {}
   // #427: the List's first render is the moment its splitter exists to
@@ -11587,29 +11581,34 @@ window.__bramTranscriptWorklistBarLabel = function (open, board) {
     (ready ? " · " + ready + " ready to commit" : "");
 };
 
-// #427: the Transcript's Worklist pane, open or closed. FOCUS (what the user
-// is looking at now), so sessionStorage: it survives a tab switch or pane
-// reload, which remount the Transcript, but not a relaunch.
-window.__bramRestoreTranscriptWorklistOpen = function () {
+// worklist-bar-on-every-page: the Worklist pane under every tab, open or
+// closed. One app-wide value (Main.xmlui's worklistOpen). FOCUS (what the
+// user is looking at now), so sessionStorage: it survives a tab switch or
+// pane reload but not a relaunch. The key is the one #427's Transcript-only
+// pane used, so an open pane stays open across this change.
+window.__bramRestoreWorklistPaneOpen = function () {
   return __bramReadSS("bram.transcriptWorklistOpen", "") === "1";
 };
-window.__bramToggleTranscriptWorklistOpen = function (open) {
-  var next = !open;
-  __bramWriteSS("bram.transcriptWorklistOpen", next ? "1" : "");
-  // XMLUI's Splitter renders one child and two children in different trees,
-  // so toggling the pane REMOUNTS the transcript List, which starts at the
-  // top. Record what the reader was looking at; the remounted List's first
-  // visible-range report re-lands it (__bramSplitToggleLanding). Opening
-  // keeps its deliberate jump to the newest turn, so only a close is
-  // recorded. (transcript-split-toggle-keeps-reading-position)
-  var following = window.__bramFollowAtBottom !== false;
-  var vr = window.__bramVisibleRange;
-  var row = (vr && typeof vr.startIndex === "number") ? vr.startIndex : -1;
-  window.__bramSplitToggleLand = next ? null : { following: following, row: row };
+window.__bramSetWorklistPaneOpen = function (next, cause) {
+  var open = !!next;
+  __bramWriteSS("bram.transcriptWorklistOpen", open ? "1" : "");
   window.__bramIframeTrace("transcript-worklist", {
-    op: next ? "open" : "close", follow: following, row: row,
+    op: open ? "open" : "close", cause: cause || "bar",
   });
-  return next;
+  return open;
+};
+// The Worklist routes show the full page, so no bar there.
+window.__bramIsWorklistRoute = function (pathname) {
+  return pathname === "/worklist2" || pathname === "/worklist" || pathname === "/";
+};
+// Arriving on the Worklist page closes the pane, so any other tab comes
+// back with the bar alone (Jon: "switching to any other tab switches back
+// to that tab with the work list bar only").
+window.__bramWorklistPaneOnRoute = function (pathname, open) {
+  if (open && window.__bramIsWorklistRoute(pathname)) {
+    return window.__bramSetWorklistPaneOpen(false, "worklist-route");
+  }
+  return open;
 };
 // The Worklist pane's own scroll position (transcript-split-toggle-keeps-
 // reading-position). FOCUS, so sessionStorage. Saved continuously while the
@@ -11621,7 +11620,7 @@ var __bramWorklistPaneState = null;
 window.__bramWorklistPaneMounted = function () {
   var KEY = "bram.transcriptWorklistPaneScroll";
   var el = null;
-  try { el = document.querySelector('[data-testid="transcript-worklist-pane"]'); } catch (e) { el = null; }
+  try { el = document.querySelector('[data-testid="worklist-pane"]'); } catch (e) { el = null; }
   if (!el) return;
   if (__bramWorklistPaneState) window.__bramWorklistPaneUnmounted();
   var saved = Number(__bramReadSS(KEY, "0")) || 0;
@@ -11669,36 +11668,6 @@ window.__bramWorklistPaneUnmounted = function () {
   st.listeners.forEach(function (l) {
     try { st.el.removeEventListener(l[0], l[1]); } catch (e) {}
   });
-};
-
-// Re-land the transcript after a close remounted it: the bottom if the
-// reader was following (the jump yields if they scroll first), else the row
-// they were reading. Called with the List's first visible-range report after
-// the toggle; one-shot.
-function __bramSplitToggleLanding(listRef, agentId) {
-  var p = window.__bramSplitToggleLand;
-  window.__bramSplitToggleLand = null;
-  if (!p || !listRef) return;
-  if (p.following) {
-    window.__bramBottomJumpRetry(listRef, "worklist-close", agentId, null);
-    return;
-  }
-  if (p.row > 0) {
-    try { listRef.scrollToIndex(p.row); } catch (e) { /* ignore */ }
-  }
-  window.__bramIframeTrace("follow-state", {
-    op: "restore", cause: "worklist-close", row: p.row, agentId: agentId || "main",
-  });
-}
-// #427: the split's resize event. Saves the divider as a percentage (a
-// DECISION, via __bramSaveSplitterSize -> localStorage) only while the
-// Worklist pane is open -- closed, the transcript fills the splitter and
-// that is not a divider position. Then re-lands the transcript on its
-// newest turn (the jump yields if the user has scrolled up).
-window.__bramTranscriptSplitResized = function (primaryPx, totalPx, open, listRef, agentId) {
-  var p = Number(primaryPx), t = Number(totalPx);
-  if (open && p > 0 && t > p) window.__bramSaveSplitterSize("transcript-worklist", [p, t - p]);
-  window.__bramBottomJumpRetry(listRef, "worklist-resize", agentId, null);
 };
 
 // Markup helper: the measured px, or a viewport-relative stand-in until the

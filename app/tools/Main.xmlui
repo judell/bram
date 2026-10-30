@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -1030,7 +1030,7 @@
       <Page url="/"><Worklist /></Page>
       <Page url="/worklist"><Worklist /></Page>
       <Page url="/worklist2"><Worklist /></Page>
-      <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" /></Page>
+      <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" worklistOpen="{worklistOpen}" onOpenWorklist="worklistOpen = window.__bramSetWorklistPaneOpen(true, 'orient')" /></Page>
       <Page url="/search"><Search /></Page>
       <Page url="/queue"><AgentMessageQueue /></Page>
       <Page url="/status"><Status /></Page>
@@ -1044,11 +1044,74 @@
       <Page url="/files"><Files /></Page>
     </Pages>
   </Theme>
-  <!-- testId: #427 measures the Transcript Worklist split down to this
-       footer's top (helpers.js bramSubscribeTranscriptSplitHeight). -->
+  <!-- worklist-bar-on-every-page (Jon): the Worklist bar under every tab,
+       not only the Transcript. The board the bar summarizes, refreshed the
+       way Worklist.xmlui refreshes its own (push, no poll). -->
+  <DataSource id="twlBoard" url="/__worklist" />
+  <PushSource id="twlWorklistEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener
+    listenTo="{twlWorklistEvt.value &amp;&amp; twlWorklistEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(twlWorklistEvt.value, twlBoard)" />
+  <PushSource id="twlGitEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener
+    listenTo="{twlGitEvt.value &amp;&amp; twlGitEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(twlGitEvt.value, twlBoard)" />
+  <!-- Arriving on the Worklist page closes the pane, so every other tab
+       comes back with the bar alone. -->
+  <ChangeListener
+    listenTo="{$pathname}"
+    onDidChange="worklistOpen = window.__bramWorklistPaneOnRoute($pathname, worklistOpen)" />
+  <!-- testId: #427 measures the Transcript's List down to this footer's top
+       (helpers.js bramSubscribeTranscriptSplitHeight); the Worklist pane
+       below is part of that height. -->
   <Footer testId="app-footer">
     <Theme fontSize-TextArea="$fontSize-lg" fontSize-placeholder-TextArea="$fontSize-lg">
-    <VStack width="100%" gap="$space-1">
+    <VStack width="100%" gap="0">
+      <!-- worklist-bar-on-every-page: the bar, and the pane it opens, on the
+           Footer's top edge, flush on the message box under every tab but
+           the Worklist page itself (that page IS the Worklist). The Footer
+           is the surface vertical-sticky pins, so the pane needs no measured
+           split; it has a fixed height and scrolls itself. A resizable
+           VSplitter around <Pages> was rejected: XMLUI's Splitter renders one
+           child and two children in different trees, so every open or close
+           would remount the current tab
+           (https://www.xmlui.org/docs/reference/components/Splitter). The
+           Footer's own padding is zero on the sides (themes/bram.json) so the
+           bar runs edge to edge; the composer group below pads itself. -->
+      <VStack when="{!window.__bramIsWorklistRoute($pathname)}" width="100%" gap="0"
+        backgroundColor="$color-secondary-50">
+        <HStack verticalAlignment="center" gap="0">
+          <Button variant="ghost" size="sm" width="*" contentPosition="start"
+            label="{window.__bramTranscriptWorklistBarLabel(worklistOpen, twlBoard.value)}"
+            tooltip="{worklistOpen ? 'Hide the Worklist' : 'Show the Worklist'}"
+            onClick="worklistOpen = window.__bramSetWorklistPaneOpen(!worklistOpen, 'bar')" />
+          <!-- Pop out: the full Worklist page. Arriving there closes the pane
+               (the $pathname listener above). -->
+          <!-- A labeled, outlined button with room from the edge: the bare
+               ghost ↗ sat in the corner against the pane's scrollbar and was
+               easy to miss (Jon). -->
+          <Button when="{worklistOpen}" variant="outlined" size="xs" label="Open as page ↗"
+            marginRight="$space-4"
+            tooltip="Open the Worklist as a full page"
+            onClick="navigate('/worklist2')" />
+        </HStack>
+        <!-- transcript-worklist-pane-tint: a faint tint marks "the Worklist,
+             shown inside another tab". The inner VStack is the scroller and
+             carries testId + lifecycle, so the pane remembers its own scroll
+             position (helpers.js __bramWorklistPaneMounted) across Hide/Show
+             and tab switches. Lifecycle events:
+             https://www.xmlui.org/docs/howto/clean-up-when-a-panel-closes -->
+        <VStack when="{worklistOpen}" height="40vh" overflowY="auto" paddingTop="$space-2"
+          testId="worklist-pane"
+          onMount="window.__bramWorklistPaneMounted()"
+          onUnmount="window.__bramWorklistPaneUnmounted()">
+          <Worklist />
+          <WorklistGateBar />
+        </VStack>
+      </VStack>
+    <VStack width="100%" gap="$space-1" paddingHorizontal="$space-4" paddingTop="$space-2">
       <!-- issue-278: the Worklist gate, docked. The gate row could not be
            pinned where it lived (sticky cannot escape its containing block;
            `dock` needs a bounded parent height and scrollWholePage="false").
@@ -1666,6 +1729,7 @@
           tooltip="{window.__bramTipDismissTooltip ? window.__bramTipDismissTooltip() : 'Dismiss this tip'}"
           onClick="footerTipTick = window.__bramDismissTip((window.__bramPickTip(footerTipSettings.value, footerSessions.value, footerTipTick) || {}).id, footerTipTick)" />
       </HStack>
+    </VStack>
     </VStack>
     </Theme>
   </Footer>

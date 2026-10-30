@@ -1,9 +1,8 @@
 <Component name="Transcript"
   var.orientSent="{window.__bramOrientSent()}"
-  var.fullscreenImage="{null}"
-  var.worklistOpen="{window.__bramRestoreTranscriptWorklistOpen()}">
+  var.fullscreenImage="{null}">
   <!-- (#427: the List now sits at height="100%" inside the measured
-       VSplitter below, which bounds it; the history that follows still
+       Stack below, which bounds it; the history that follows still
        explains why a bounded List is required.)
        Bounded List as the sole scroller. The List gets height="*" inside a
        height="100%" parent, so it fills the remaining viewport and scrolls
@@ -257,56 +256,31 @@
       <Text fontSize="$fontSize-sm" width="*"
         value="New here? Get an overview and architecture diagrams of this repo, every claim cited to the code. It starts as a Worklist item, so nothing is written until you click Start. If Claude is new to this repo, open the terminal first and answer its trust prompt." />
       <Button label="Orient me" size="sm"
-        onClick="toTurn('Orient in this repo: read and follow .claude/bram-reference/orientation.md'); orientSent = true; window.__bramMarkOrientSent(); worklistOpen = worklistOpen || window.__bramToggleTranscriptWorklistOpen(false)" />
+        onClick="toTurn('Orient in this repo: read and follow .claude/bram-reference/orientation.md'); orientSent = true; window.__bramMarkOrientSent(); emitEvent('openWorklist')" />
       <!-- orient-me-dismiss-x: hide without orienting; remembered per project
            like the click above. -->
       <Button label="✕" variant="ghost" size="sm"
         tooltip="Hide this; nothing is sent"
         onClick="orientSent = true; window.__bramMarkOrientSent()" />
     </HStack>
-    <!-- #427: the Worklist on demand in a pane below the transcript, with a
-         draggable divider (https://www.xmlui.org/docs/howto/create-a-resizable-split-view).
-         With the pane's `when` false the splitter shows no bar and the List
-         fills it (https://www.xmlui.org/docs/reference/components/Splitter).
-         This tab's page scrolls (load-bearing; app-wide
-         scrollWholePage=false was rejected on evidence in 410d069), so
-         nothing above bounds a "*" height (it collapsed the HSplitter
-         attempt to 0). The height is MEASURED -- splitter top to footer top,
+    <!-- #427: the List's bounded height. This tab's page scrolls
+         (load-bearing; app-wide scrollWholePage=false was rejected on
+         evidence in 410d069), so nothing above bounds a "*" height. The
+         height is MEASURED -- this Stack's top to the footer's top,
          re-measured on resize events (helpers.js
          bramSubscribeTranscriptSplitHeight) -- because a guessed
          calc(100vh - 300px) overflowed the page by 134px and hid the last
          lines under the message box. The List scrolls itself inside it.
-         Tried and dropped first: an HSplitter (the collapse above), a
-         right-hand Drawer (covered the transcript; a width slider to
-         uncover it was clumsy) and a ModalDialog (cannot be moved or
-         resized). -->
+         (The #427 Worklist split that lived here moved to the Footer:
+         worklist-bar-on-every-page.) -->
     <PushSource id="splitHeight" initial="{0}"
       subscribe="{window.bramSubscribeTranscriptSplitHeight()}" />
-    <!-- transcript-worklist-expander-bar: the board the bar summarizes,
-         refreshed the way Worklist.xmlui refreshes its own (push, no poll). -->
-    <DataSource id="twlBoard" url="/__worklist" />
-    <PushSource id="twlWorklistEvt" initial="{null}"
-      subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
-    <ChangeListener
-      listenTo="{twlWorklistEvt.value &amp;&amp; twlWorklistEvt.value.tick}"
-      onDidChange="window.__bramRefetchOnLiveEvent(twlWorklistEvt.value, twlBoard)" />
-    <PushSource id="twlGitEvt" initial="{null}"
-      subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
-    <ChangeListener
-      listenTo="{twlGitEvt.value &amp;&amp; twlGitEvt.value.tick}"
-      onDidChange="window.__bramRefetchOnLiveEvent(twlGitEvt.value, twlBoard)" />
-    <!-- transcript-worklist-expander-bar: a DockPanel. The bounded height the
-         split already had moves to this Stack; the VSplitter fills what is
-         left (dock="stretch") and, while the pane is closed, the bar docks
-         to the bottom. The bar's room comes out of the stretch region, so
-         nothing is measured or subtracted.
-         https://www.xmlui.org/docs/howto/dock-elements-to-panel-edges -->
-    <Stack height="{window.__bramTranscriptSplitHeightCss(splitHeight.value)}" gap="0">
-    <VSplitter testId="transcript-split" dock="stretch"
-      height="100%"
-      initialPrimarySize="{window.__bramRestoreSplitterSize('transcript-worklist', '55%')}"
-      minPrimarySize="15%" maxPrimarySize="-120px"
-      onResize="(px) => window.__bramTranscriptSplitResized(px, splitHeight.value, worklistOpen, transcriptList, $props.agentId)">
+    <!-- worklist-bar-on-every-page: the Worklist bar and pane moved to the
+         App Footer, under every tab, so this tab no longer splits. The
+         List keeps its measured, bounded height (the Footer's height, pane
+         included, is one of the measured terms), and it no longer remounts
+         when the pane opens or closes: only its height changes. -->
+    <Stack testId="transcript-split" height="{window.__bramTranscriptSplitHeightCss(splitHeight.value)}" gap="0">
     <List
       id="transcriptList"
       testId="transcript-list"
@@ -514,70 +488,23 @@
         </VStack>
       </VStack>
     </List>
-      <!-- The real Worklist plus its gate buttons, which Main.xmlui mounts in
-           the Footer only on the Worklist routes. Both are self-contained;
-           the Worklist page is unmounted on this tab, so this is the one live
-           instance, and ticks ride the shared window.__bramW2Selection
-           (Worklist.xmlui) to and from the Worklist tab. -->
-      <!-- The `when` VStack stays plain: with onMount/onUnmount on it, a
-           false `when` still counted as the Splitter's second child, so Hide
-           left the two-pane layout up (2026-10-07). The inner VStack is the
-           scroller and carries testId + lifecycle, so the pane remembers its
-           own scroll position (helpers.js __bramWorklistPaneMounted) across
-           Hide/Show and tab switches. Lifecycle events:
-           https://www.xmlui.org/docs/howto/clean-up-when-a-panel-closes -->
-      <VStack when="{worklistOpen}" height="100%" gap="0">
-        <!-- transcript-worklist-expander-bar: open, the bar heads the pane
-             (dock="top") and the scroller fills the rest. -->
-        <HStack dock="top" backgroundColor="$color-secondary-50">
-          <Button variant="ghost" size="sm" width="100%" contentPosition="start"
-            label="{window.__bramTranscriptWorklistBarLabel(true, twlBoard.value)}"
-            tooltip="Hide the Worklist"
-            onClick="worklistOpen = window.__bramToggleTranscriptWorklistOpen(worklistOpen)" />
-        </HStack>
-        <!-- transcript-worklist-pane-tint: a faint tint marks "the Worklist,
-             shown inside the Transcript". The secondary scale because rows
-             use primary for highlights and the Transcript uses surface;
-             $color-* (not $const-color-*) follows dark mode.
-             https://www.xmlui.org/docs/styles-and-themes/theme-variables -->
-        <VStack dock="stretch" overflowY="auto" paddingTop="$space-2"
-          backgroundColor="$color-secondary-50"
-          testId="transcript-worklist-pane"
-          onMount="window.__bramWorklistPaneMounted()"
-          onUnmount="window.__bramWorklistPaneUnmounted()">
-          <Worklist />
-          <WorklistGateBar />
-        </VStack>
-      </VStack>
-    </VSplitter>
-    <!-- transcript-worklist-expander-bar: closed, the bar docks under the
-         transcript. Same tint as the pane, so it reads as part of the
-         transcript rather than of the message box below. -->
-    <HStack dock="bottom" when="{!worklistOpen}" backgroundColor="$color-secondary-50">
-      <Button variant="ghost" size="sm" width="100%" contentPosition="start"
-        label="{window.__bramTranscriptWorklistBarLabel(false, twlBoard.value)}"
-        tooltip="Show the Worklist below the transcript"
-        onClick="worklistOpen = window.__bramToggleTranscriptWorklistOpen(worklistOpen)" />
-    </HStack>
     </Stack>
-    <!-- Closing the pane REMOUNTS the List (XMLUI's Splitter renders one
-         child and two children in different trees), which starts at the
-         top. The toggle records follow/row and the remounted List's first
-         onVisibleRangeDidChange re-lands it (helpers.js
-         __bramSplitToggleLanding); hence the List passes itself there.
-         Opening the pane shrinks the transcript; land it on the newest
+    <!-- Opening the Worklist pane (now in the App Footer, passed in as
+         $props.worklistOpen) shrinks the transcript; land it on the newest
          turn, the message most likely to name the rows to act on. Same
-         follow-then-retry jump as the agent-chip switch below. Jumping
-         here alone landed ~285px short (demo trace, 2026-10-07): the pane
-         appears after the jump and shrinks the List. The VSplitter's
-         onResize re-runs the jump when that shrink lands (and on divider
-         drags); the helper yields if the user has scrolled up. Event
-         driven, no timed wait. onResize passes total=null: `events` read 0
-         in that handler's scope, so the helper falls back to its own
-         window.__bramLastTranscriptEvents. -->
+         follow-then-retry jump as the agent-chip switch below.
+         worklist-bar-on-every-page: the pane no longer remounts the List
+         (no Splitter here), so a close needs no re-landing, and the
+         splitter's onResize re-jump becomes a jump on the measured height
+         changing, which is when the shrink or growth actually lands. The
+         helper yields if the user has scrolled up. Event driven, no timed
+         wait. -->
     <ChangeListener
-      listenTo="{worklistOpen}"
-      onDidChange="() => { if (worklistOpen) { atBottom = window.__bramFollowTransition(true, 'worklist-open', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'worklist-open', $props.agentId, events.length); } }" />
+      listenTo="{$props.worklistOpen}"
+      onDidChange="() => { if ($props.worklistOpen) { atBottom = window.__bramFollowTransition(true, 'worklist-open', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'worklist-open', $props.agentId, events.length); } }" />
+    <ChangeListener
+      listenTo="{splitHeight.value}"
+      onDidChange="window.__bramBottomJumpRetry(transcriptList, 'worklist-resize', $props.agentId, null)" />
     <!-- Explicit follow-bottom (replaces scrollAnchor="bottom" and its
          content-wrapper re-stick ResizeObserver, xmlui #3599). onScroll keeps
          atBottom in sync (fires only on user scrolls; programmatic scrolls are

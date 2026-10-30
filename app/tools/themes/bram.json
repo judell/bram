@@ -13,6 +13,7 @@
     "paddingVertical-content-App": "0",
     "maxWidth-App": "100%",
     "maxWidth-content-Footer": "100%",
+    "padding-Footer": "0 0 $space-2 0",
     "maxWidth-ModalDialog": "85vw",
     "lineHeight-H2": "1.2",
     "lineHeight-H3": "1.2",

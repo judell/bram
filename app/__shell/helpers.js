@@ -2574,7 +2574,19 @@ window.__bramComposerTargetsSelection = function () {
 // that turns into a status message conflates teaching with reporting — the
 // combined footer context line (__bramFooterContextLine) carries in-flight
 // status now, and the placeholder always tells you what Enter will do.
-window.__bramComposerPlaceholder = function (pathname, sel, toChat) {
+// composer-addressee-in-placeholder: the addressee shows in exactly one place.
+// In plain chat the line above the box is hidden, so the placeholder opens
+// with it ("To Claude (chat): …", same wording as __bramComposerAddressee).
+// With items ticked the line shows it, and the placeholder is the hint alone
+// (Jon: "we don't need the addressee in both places").
+window.__bramComposerPlaceholder = function (pathname, sel, toChat, provider) {
+  var hint = window.__bramComposerPlaceholderHint(pathname, sel, toChat);
+  var ticked = sel || window.__bramW2Selection || [];
+  if (window.__bramComposerShowAddresseeLine(ticked)) return hint;
+  var to = String(window.__bramComposerAddressee(ticked, toChat, provider)).replace(/^To: /, "To ");
+  return to + ": " + hint;
+};
+window.__bramComposerPlaceholderHint = function (pathname, sel, toChat) {
   // composer-addressee-line: switched to chat, the box is a chat box.
   var selection = toChat ? [] : (sel || window.__bramW2Selection || []);
   var route = String(
@@ -2594,11 +2606,17 @@ window.__bramComposerPlaceholder = function (pathname, sel, toChat) {
     // verb now, and the gate buttons are pure lifecycle — each sends this
     // message along WITH its action. The wording teaches that split.
     if (onWorklist) {
-      return "Feedback about selection: Enter sends it; the buttons above send it with their action. Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+      return "Enter sends it; the buttons above send it with their action. Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
     }
-    return "Feedback about selection: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+    return "Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
   }
-  return "Chat with agent: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+  return "Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+};
+// composer-addressee-in-placeholder: the line above the box shows only with
+// items ticked: it carries the chat/feedback toggle, and in feedback mode it
+// keeps Enter's target in view after the placeholder vanishes on typing.
+window.__bramComposerShowAddresseeLine = function (sel) {
+  return Array.isArray(sel) && sel.length > 0;
 };
 
 // switch-to-transcript-on-action: Feedback as a first-class verb. The

@@ -287,9 +287,9 @@ status; the user's Commit button judges committability independently.
 Worklist items selected, a message the user sends (Enter in the message
 box) is **feedback addressed to those items**, and arrives as an
 `iterate:` turn. With nothing selected, it is **general chat** with you.
-An addressee line above the message box always shows where Enter will
-send ("To: <item> (feedback)" or "To: Claude (chat)"). With items
-selected, its **Send as chat instead** control sends that one message as
+The box's placeholder, or with items selected a line above it, shows
+where Enter will send ("To <item> (feedback)", "To Claude (chat)"). That
+line's **Send as chat instead** control sends that one message as
 general chat without clearing the selection; changing the selection
 switches it back to feedback. After **Start** the started items stay
 selected, so follow-ups arrive as `iterate:`; other gate verbs clear it.

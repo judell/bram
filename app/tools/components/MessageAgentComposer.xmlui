@@ -63,7 +63,12 @@
          children they sat gap-Form ($space-4) apart and the line read as
          unrelated to the box (https://www.xmlui.org/docs/reference/components/Form). -->
     <VStack width="100%" gap="0">
-    <HStack width="100%" gap="$space-2" verticalAlignment="center" paddingLeft="3rem">
+    <!-- composer-addressee-in-placeholder: in plain chat the placeholder names
+         the addressee and this line is hidden, saving a footer line. With
+         items ticked it shows: the chat/feedback toggle lives here, and it
+         keeps Enter's target visible while typing feedback. -->
+    <HStack when="{window.__bramComposerShowAddresseeLine(w2Sel.value || [])}"
+      width="100%" gap="$space-2" verticalAlignment="center" paddingLeft="3rem">
       <Text fontSize="$fontSize-sm" color="$textColor-secondary"
         value="{window.__bramComposerAddressee(w2Sel.value || [], toChat, $props.activeProvider)}"
         tooltip="{window.__bramComposerAddresseeTooltip(w2Sel.value || [], toChat)}" />
@@ -144,7 +149,7 @@
         <TextArea
           id="composerBox"
           initialValue="{window.__bramRestoreWorklistDraft()}"
-          placeholder="{window.__bramComposerPlaceholder($props.route, w2Sel.value || [], toChat)}"
+          placeholder="{window.__bramComposerPlaceholder($props.route, w2Sel.value || [], toChat, $props.activeProvider)}"
           enterSubmits="true"
           autoSize="true"
           minRows="3"

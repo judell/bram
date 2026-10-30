@@ -1291,7 +1291,7 @@ window.__bramSwitchAgent = function (provider) {
     window.fetch("/__sessions/pair?" + from + "=" + encodeURIComponent(value.fromSessionId || "") +
       "&" + to + "=" + encodeURIComponent(value.toSessionId || "") +
       "&from=" + encodeURIComponent(from), { cache: "no-store" }).then(function (r) {
-      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (!r.ok) return window.__bramHttpError(r);
     }).catch(function (e) {
       if (toastApi && typeof toastApi.error === "function") {
         toastApi.error("Could not pair: " + String((e && e.message) || e));
@@ -1392,6 +1392,15 @@ window.__bramSearchTypeLabel = function (h) {
   return h.type;
 };
 
+// issue-461-refuse-placeholder-pair: throw the host's refusal text, so the
+// toast says why instead of "HTTP 409". Falls back to the status when the
+// body is empty.
+window.__bramHttpError = function (r) {
+  return r.text().then(function (t) {
+    throw new Error((t || "").trim() || "HTTP " + r.status);
+  });
+};
+
 // session-groups: the Sessions row's Add to '<group>'. The group's member
 // anchors the join, so this session joins its group and takes its name. No
 // `from`: nothing is resumed, so no catch-up is offered.
@@ -1404,7 +1413,7 @@ window.__bramSessionAddToGroup = function (entry, toastApi) {
     encodeURIComponent(entry.anchorId) + "&" + encodeURIComponent(entry.provider) + "=" +
     encodeURIComponent(entry.id);
   window.fetch(url, { cache: "no-store" }).then(function (r) {
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) return window.__bramHttpError(r);
     if (typeof toastApi === "function") toastApi("Added to '" + entry.name + "'");
   }).catch(function (e) {
     if (toastApi && typeof toastApi.error === "function") {

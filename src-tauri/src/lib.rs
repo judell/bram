@@ -24025,15 +24025,30 @@ fn pair_offers_enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
         .unwrap_or(true)
 }
 
-// provider-session-pair-offer: Keep these together, from the pair offer.
-fn pair_sessions_route<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    query: &str,
-) -> Result<Vec<u8>, String> {
+// issue-461-refuse-placeholder-pair: the Sessions row's bridge id for a
+// session that hasn't started yet. `pending_session_entry` builds it from
+// this prefix and the pair route refuses it, so the two can't drift.
+const PENDING_SESSION_ID_PREFIX: &str = "pending-";
+
+fn session_id_is_placeholder(id: &str) -> bool {
+    id.starts_with(PENDING_SESSION_ID_PREFIX)
+}
+
+const PAIR_PLACEHOLDER_REFUSAL: &str =
+    "That session hasn't started yet, so it can't be kept together with another. Try again once it has.";
+
+type PairSide = (SessionProvider, String);
+
+// issue-461-refuse-placeholder-pair: the route's query parsing and refusal,
+// pure so tests can run it without an app. Returns (anchor, arrived). A
+// placeholder on either side is refused here, before anything is recorded.
+// A preallocated real id is accepted with no transcript: this never touches
+// disk.
+fn parse_pair_sessions_query(query: &str) -> Result<(PairSide, PairSide), String> {
     // opencode-partner-handoff: the two sides arrive as `<provider>=<id>`,
     // any two of claude / codex / opencode (the pane always sent claude and
     // codex before).
-    let mut sides: Vec<(SessionProvider, String)> = Vec::new();
+    let mut sides: Vec<PairSide> = Vec::new();
     // provider-session-digest-for-codex: the side the offer was about (the
     // session you switched away from), whose digest the other side reads.
     let mut from: Option<SessionProvider> = None;
@@ -24053,9 +24068,46 @@ fn pair_sessions_route<R: tauri::Runtime>(
     let [a, b] = sides.as_slice() else {
         return Err("two sessions of different providers required".to_string());
     };
+    if session_id_is_placeholder(&a.1) || session_id_is_placeholder(&b.1) {
+        return Err(PAIR_PLACEHOLDER_REFUSAL.to_string());
+    }
     // session-groups: the session you switched away from anchors the join, so
     // the one you arrived at moves into its group (or both start one).
-    let (anchor, arrived) = if from == Some(b.0) { (b, a) } else { (a, b) };
+    Ok(if from == Some(b.0) {
+        (b.clone(), a.clone())
+    } else {
+        (a.clone(), b.clone())
+    })
+}
+
+// provider-session-pair-offer: Keep these together, from the pair offer.
+fn pair_sessions_route<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    query: &str,
+) -> Result<Vec<u8>, String> {
+    let from = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "from")
+            .then(|| SessionProvider::from_str(&percent_decode(value)))
+            .flatten()
+    });
+    let (anchor, arrived) = match parse_pair_sessions_query(query) {
+        Ok(sides) => sides,
+        Err(e) => {
+            if e == PAIR_PLACEHOLDER_REFUSAL && bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "state-mirror",
+                    &format!(
+                        "op=pair-refused source=offer-keep detail=placeholder-session query-len={}",
+                        query.len()
+                    ),
+                );
+            }
+            return Err(e);
+        }
+    };
+    let (anchor, arrived) = (&anchor, &arrived);
     record_pair_for(app, anchor, arrived, "offer-keep");
     emit_pair_offer(app, None, None);
     if from.is_some() {
@@ -37418,9 +37470,9 @@ fn pending_session_entry<R: tauri::Runtime>(
 ) -> Option<SessionEntry> {
     let rec = read_pending_session_title(app, provider)?;
     Some(SessionEntry {
-        id: rec
-            .session_id
-            .unwrap_or_else(|| format!("pending-{}", rec.created_at_ms.max(0))),
+        id: rec.session_id.unwrap_or_else(|| {
+            format!("{}{}", PENDING_SESSION_ID_PREFIX, rec.created_at_ms.max(0))
+        }),
         mtime: rec.created_at_ms.max(0) as u64 / 1_000,
         size: 0,
         title: Some(rec.title),
@@ -76828,7 +76880,7 @@ fn route_request<R: tauri::Runtime>(
                 let status = match e.as_str() {
                     "session not found" => 404,
                     "empty title" | "invalid session id" => 400,
-                    SESSION_DELETE_LIVE_REFUSAL => 409,
+                    SESSION_DELETE_LIVE_REFUSAL | PAIR_PLACEHOLDER_REFUSAL => 409,
                     _ => 500,
                 };
                 (status, "text/plain; charset=utf-8", e.into_bytes())
@@ -91449,5 +91501,80 @@ mod push_withheld_tests {
     fn default_and_origin_head_are_not_another_branch() {
         let c = vec![v(&["main", "origin/main", "origin/HEAD", "origin"])];
         assert!(push_withheld_branches("main", "main", &c).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pair_sessions_query_tests {
+    use super::{
+        parse_pair_sessions_query, session_id_is_placeholder, SessionProvider,
+        PAIR_PLACEHOLDER_REFUSAL,
+    };
+
+    const CLAUDE: &str = "6f1c2b9e-0000-4000-8000-123456789abc";
+    const CODEX: &str = "01999999-aaaa-7bbb-8ccc-0123456789ab";
+    const OPENCODE: &str = "ses_abc123XYZ";
+    const PENDING: &str = "pending-1793380088801";
+
+    #[test]
+    fn placeholder_check_matches_pending_prefix() {
+        assert!(session_id_is_placeholder(PENDING));
+        assert!(!session_id_is_placeholder(CLAUDE));
+        assert!(!session_id_is_placeholder(CODEX));
+        assert!(!session_id_is_placeholder(OPENCODE));
+    }
+
+    #[test]
+    fn placeholder_on_either_side_is_refused_for_either_from() {
+        for from in ["claude", "opencode", ""] {
+            for q in [
+                format!("claude={PENDING}&opencode={OPENCODE}&from={from}"),
+                format!("claude={CLAUDE}&opencode={PENDING}&from={from}"),
+                format!("opencode={PENDING}&claude={CLAUDE}&from={from}"),
+                format!("claude={PENDING}&codex={PENDING}&from={from}"),
+            ] {
+                assert_eq!(
+                    parse_pair_sessions_query(&q),
+                    Err(PAIR_PLACEHOLDER_REFUSAL.to_string()),
+                    "{q}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_ids_are_accepted_and_from_picks_the_anchor() {
+        let q = format!("claude={CLAUDE}&codex={CODEX}&from=claude");
+        let (anchor, arrived) = parse_pair_sessions_query(&q).unwrap();
+        assert_eq!(anchor, (SessionProvider::Claude, CLAUDE.to_string()));
+        assert_eq!(arrived, (SessionProvider::Codex, CODEX.to_string()));
+
+        let q = format!("claude={CLAUDE}&codex={CODEX}&from=codex");
+        let (anchor, arrived) = parse_pair_sessions_query(&q).unwrap();
+        assert_eq!(anchor, (SessionProvider::Codex, CODEX.to_string()));
+        assert_eq!(arrived, (SessionProvider::Claude, CLAUDE.to_string()));
+
+        // No `from`: the first side anchors.
+        let q = format!("opencode={OPENCODE}&claude={CLAUDE}");
+        let (anchor, arrived) = parse_pair_sessions_query(&q).unwrap();
+        assert_eq!(anchor, (SessionProvider::Opencode, OPENCODE.to_string()));
+        assert_eq!(arrived, (SessionProvider::Claude, CLAUDE.to_string()));
+    }
+
+    #[test]
+    fn preallocated_id_with_no_transcript_is_accepted() {
+        // Exists nowhere on disk; the pure function must not look.
+        let q = "claude=00000000-0000-4000-8000-00000000dead&opencode=ses_nowhere&from=opencode";
+        let (anchor, arrived) = parse_pair_sessions_query(q).unwrap();
+        assert_eq!(anchor.0, SessionProvider::Opencode);
+        assert_eq!(arrived.0, SessionProvider::Claude);
+    }
+
+    #[test]
+    fn existing_two_sessions_error_is_kept() {
+        assert_eq!(
+            parse_pair_sessions_query(&format!("claude={CLAUDE}")),
+            Err("two sessions of different providers required".to_string())
+        );
     }
 }

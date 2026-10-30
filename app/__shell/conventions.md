@@ -75,12 +75,12 @@ Skip the worklist only in these contexts, never because the change is
 - **`skip-worklist:` structured prefix on this turn.** The turn begins
   literally with `skip-worklist: ` followed by the request. Same family
   as `approved:` / `drop:` / `iterate:`, but it authorizes a direct
-  edit rather than a lifecycle transition. The user types it (the
-  button that prepended it is retired). Unlike the other prefixes, the host forwards the **entire
-  turn text including the prefix** so you can see it. On seeing it,
-  skip propose-first, act on the rest of the message as a direct edit,
-  and do not write a new worklist item; the PreToolUse hook allows the
-  edits.
+  edit rather than a lifecycle transition. The user types it, or sends
+  with ⌘Enter / Ctrl+Enter, adding a closing "Just do it and commit."
+  Unlike the other prefixes, the host forwards the **entire turn text
+  including the prefix**. On seeing it, skip propose-first, make the
+  change directly, write no worklist item, and commit only if the turn
+  asks; the PreToolUse hook allows the edits.
 - **Correcting code you just wrote in the current iteration.** Fixing a
   typo or off-by-one from your last turn is iteration on in-progress
   work, not a fresh change request.

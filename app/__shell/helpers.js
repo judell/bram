@@ -2594,6 +2594,8 @@ window.__bramComposerPlaceholderHint = function (pathname, sel, toChat) {
   // The root route renders the Worklist (and its gate bar) too — Main.xmlui's
   // gate-bar `when` includes '/', so the buttons-above sentence is true there.
   var onWorklist = route.indexOf("/worklist") >= 0 || route === "/" || route === "#/";
+  // composer-cmd-enter-just-do-it (Jon's wording).
+  var direct = " (" + window.__bramDirectEnterKeyLabel() + "Enter to \u201cjust do it and commit\u201d)";
   // Feedback elevated to a first-class concept (Jon's spec, 2026-09-07;
   // the Feedback button retired same day — with a selection, Enter and the
   // gate buttons all send feedback, so the placeholder carries the
@@ -2605,11 +2607,11 @@ window.__bramComposerPlaceholderHint = function (pathname, sel, toChat) {
     // verb now, and the gate buttons are pure lifecycle — each sends this
     // message along WITH its action. The wording teaches that split.
     if (onWorklist) {
-      return "Enter sends it; the buttons above send it with their action. Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+      return "Enter sends it" + direct + "; the buttons above send it with their action. Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
     }
-    return "Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+    return "Enter sends" + direct + ", Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
   }
-  return "Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+  return "Enter sends" + direct + ", Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
 };
 // composer-addressee-in-placeholder: the line above the box shows only with
 // items ticked, and carries only the chat/feedback toggle. The addressee
@@ -2657,6 +2659,12 @@ window.__bramSubmitFeedbackForSelection = function (box) {
 // sent with an item ticked, the sender unsure where it went — are why the
 // destination is shown before sending instead of inferred silently.
 window.__bramComposerEnterSubmit = function (box, toChat) {
+  // composer-cmd-enter-just-do-it: ⌘Enter / Ctrl+Enter (noted by the keydown
+  // listener below) sends a direct request, whatever is ticked.
+  if (window.__bramComposerTakeDirectEnter()) {
+    window.__bramIframeTrace("composer-send", { to: "just-do-it", selected: (window.__bramW2Selection || []).length });
+    return window.__bramSubmitMessageAgentComposer(box, "just-do-it");
+  }
   var sel = window.__bramW2Selection || [];
   var feedback = sel.length > 0 && !toChat;
   try {
@@ -2669,6 +2677,35 @@ window.__bramComposerEnterSubmit = function (box, toChat) {
     return window.__bramSubmitFeedbackForSelection(box);
   }
   return window.__bramSubmitMessageAgentComposer(box, "");
+};
+// composer-cmd-enter-just-do-it: the OS's modifier for "just do it and
+// commit" -- ⌘ on macOS, Ctrl elsewhere.
+window.__bramDirectEnterKeyIsMac = function () {
+  try { return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || ""); } catch (e) { return false; }
+};
+window.__bramDirectEnterKeyLabel = function () {
+  return window.__bramDirectEnterKeyIsMac() ? "\u2318" : "Ctrl+";
+};
+// XMLUI's TextArea (enterSubmits) submits the Form on any Enter without
+// Shift, modifier or not, and exposes no modifier to onSubmit; there's no
+// XMLUI prop or how-to for it. So a capture-phase keydown notes a ⌘ / Ctrl
+// Enter in the footer composer just before React's handler submits, and
+// __bramComposerEnterSubmit takes the note (one-shot, 1 s).
+window.__bramComposerDirectEnterAt = 0;
+window.__bramComposerTakeDirectEnter = function () {
+  var at = window.__bramComposerDirectEnterAt || 0;
+  window.__bramComposerDirectEnterAt = 0;
+  return at > 0 && (Date.now() - at) < 1000;
+};
+window.__bramComposerDirectEnterKeydown = function (e) {
+  try {
+    if (!e || e.key !== "Enter" || e.shiftKey) return;
+    var mod = window.__bramDirectEnterKeyIsMac() ? e.metaKey : e.ctrlKey;
+    if (!mod) return;
+    var t = e.target;
+    if (!t || t.tagName !== "TEXTAREA" || !t.closest || !t.closest('[data-testid="app-footer"]')) return;
+    window.__bramComposerDirectEnterAt = Date.now();
+  } catch (x) {}
 };
 // The addressee line's text. `provider` is the active agent ("claude" |
 // "codex" | "opencode"); `toChat` the per-message override.
@@ -7922,7 +7959,10 @@ window.__bramRecordWorklistFeedbackConversation = function (text) {
 window.__bramPrepareWorklistMessageSubmission = function (opts) {
   opts = opts || {};
   var rawText = opts.text || "";
-  var skipWorklist = opts.mode === "skip-worklist";
+  // composer-cmd-enter-just-do-it: "just-do-it" is skip-worklist plus the
+  // closing opt-out phrase and the instruction to commit.
+  var justDoIt = opts.mode === "just-do-it";
+  var skipWorklist = opts.mode === "skip-worklist" || justDoIt;
   window.__bramWorklistMessageSubmissionSeq = (window.__bramWorklistMessageSubmissionSeq || 0) + 1;
   var seq = window.__bramWorklistMessageSubmissionSeq;
   // Every submit attempt traces BEFORE any gating/empty checks, so a send that silently goes nowhere is visible in bram-trace (2026-07-03: "message 2 resent got eaten" left zero traces).
@@ -7936,6 +7976,7 @@ window.__bramPrepareWorklistMessageSubmission = function (opts) {
   } catch (e) {}
   if (skipWorklist && !rawText.trim()) return { submitted: false, seq: seq };
   var text = skipWorklist ? ("skip-worklist: " + rawText.trim()) : rawText;
+  if (justDoIt) text += "\n\nJust do it and commit.";
   if (!text.trim()) return { submitted: false, seq: seq };
 
   if (window.__bramFlushWorklistDraft) window.__bramFlushWorklistDraft();
@@ -18143,3 +18184,8 @@ window.__bramInstallCodeBlockTools();
     return lastSearchOut;
   };
 })();
+
+// composer-cmd-enter-just-do-it: registered after its definition (top-level
+// calls must follow what they call). Capture phase, so it runs before the
+// TextArea's own keydown submits the Form.
+try { document.addEventListener("keydown", window.__bramComposerDirectEnterKeydown, true); } catch (e) {}

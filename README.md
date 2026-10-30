@@ -2,7 +2,7 @@
 
 ## What is it?
 
-Agentic software development on human terms: legible, orderly, transparent, accountable, and collaborative. 
+Agentic software development on human terms: legible, orderly, transparent, accountable, and collaborative.
 
 ## Why the name?
 

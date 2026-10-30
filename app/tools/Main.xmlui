@@ -1339,125 +1339,13 @@
       <!-- Subagent chips strip (surface-subagent-activity-in-pane):
            shown only when the active session has subagents. Clicking a
            chip swaps the Transcript viewport to that agent's stream;
-           Main swaps back. Placement per approval feedback: footer,
-           below the message box, above the session-info line. Capped at
+           Main swaps back. Placement: on the session-info line below,
+           between the session text and the index status
+           (subagent-chips-on-session-line; it had its own row). Capped at
            the 3 most recently started agents; older ones collapse into
            the rightmost "+N more" dropdown so a subagent-heavy session
            can't crowd the footer. Tooltips carry type, description, and
            the model the subagent ran on. -->
-      <HStack
-        when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
-        width="100%"
-        horizontalAlignment="center"
-        gap="$space-1"
-        paddingHorizontal="$space-1"
-        verticalAlignment="center">
-        <!-- Bold the chip whose stream the Transcript is currently showing
-             (App-scope transcriptAgentId): fontWeight-Button theme var per
-             https://www.xmlui.org/docs/reference/components/Button#styling.
-             bold-chip-static-theme-values: the first attempt bound a DYNAMIC
-             expression as the Theme var's value (mixing a raw 'bold' with a
-             '$token' string) and was never observed working — theme vars are
-             not reliably reactive and expression-produced token strings are
-             not reliably resolved. So: two when=-branched wrappers with
-             STATIC literal values; reactivity rides when= remounting, the
-             guaranteed path. Weight only, orthogonal to the running-state
-             variant/themeColor bindings below. -->
-        <Theme when="{transcriptAgentId === ''}" fontWeight-Button="$fontWeight-bold">
-          <Button
-            label="Main"
-            size="xs"
-            variant="outlined"
-            tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
-            onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
-        </Theme>
-        <Button
-          when="{transcriptAgentId !== ''}"
-          label="Main"
-          size="xs"
-          variant="outlined"
-          tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
-          onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
-        <!-- One continuous reverse-chron read: newest chip leftmost (after
-             Main), then the dropdown continues newest→oldest top-down. Each
-             chip pairs its label with a ghost ✕ that appends the agentId to
-             dismissedAgentIds (dismissible-subagent-chips); dismissing a
-             visible chip promotes the next agent up from the dropdown. The
-             Main chip is intentionally never dismissible. -->
-        <Items data="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).slice(-3).reverse()}">
-          <HStack gap="0" verticalAlignment="center">
-            <!-- surface-delegated-work-in-flight: the ● glyph
-                 (__bramAgentChipLabel) was the only truthful signal that a
-                 subagent is still running, and it read as the quietest
-                 pixel on the page. A running chip now goes solid+primary
-                 (filled, accent) instead of the quiet outlined+secondary a
-                 finished chip keeps — Button's own themeColor/variant
-                 props, no new component. -->
-            <!-- Same static-value bolding as the Main chip above, keyed to
-                 this chip's own agentId (see bold-chip-static-theme-values
-                 comment there for why the dynamic form failed). -->
-            <Theme when="{transcriptAgentId === $item.agentId}" fontWeight-Button="$fontWeight-bold">
-              <Button
-                label="{window.__bramAgentChipLabel($item)}"
-                size="xs"
-                variant="{($item.state || ($item.finished ? 'finished' : 'running')) === 'running' ? 'solid' : 'outlined'}"
-                themeColor="{($item.state || ($item.finished ? 'finished' : 'running')) === 'finished' ? 'secondary' : 'primary'}"
-                tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-                onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
-            </Theme>
-            <Button
-              when="{transcriptAgentId !== $item.agentId}"
-              label="{window.__bramAgentChipLabel($item)}"
-              size="xs"
-              variant="{($item.state || ($item.finished ? 'finished' : 'running')) === 'running' ? 'solid' : 'outlined'}"
-              themeColor="{($item.state || ($item.finished ? 'finished' : 'running')) === 'finished' ? 'secondary' : 'primary'}"
-              tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-              onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
-            <Button
-              label="✕"
-              size="xs"
-              variant="ghost"
-              tooltip="Dismiss this subagent — restore it later from the hidden menu"
-              onClick="dismissedAgentIds = window.__bramDismissAgent(dismissedAgentIds, $item.agentId)" />
-          </HStack>
-        </Items>
-        <!-- Overflow MenuItems deliberately do NOT get the fontWeight-Button
-             bolding above — a collapsed agent's selection state still lives
-             in its session-info line, the same "selection lives in the
-             session line" rationale that predates this bolding change. -->
-        <DropdownMenu
-          when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 3}"
-          label="{'+' + (window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length - 3) + ' more'}"
-          alignment="end"
-          triggerButtonVariant="outlined">
-          <Items data="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).slice(0, -3).reverse()}">
-            <MenuItem
-              label="{window.__bramAgentChipLabel($item)}"
-              tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-              onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
-          </Items>
-        </DropdownMenu>
-        <!-- Recover dismissed subagents (subagent-dismiss-recoverable): shown
-             only while the live roster still contains dismissed agents. Each
-             entry restores that pane; Restore all clears the set. Reachable
-             even when every subagent is hidden, because the strip's when also
-             opens for hidden-in-roster agents. -->
-        <DropdownMenu
-          when="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
-          label="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) + ' hidden'}"
-          alignment="end"
-          triggerButtonVariant="ghost">
-          <Items data="{window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).slice().reverse() : []}">
-            <MenuItem
-              label="{'↩ ' + window.__bramAgentChipLabel($item)}"
-              tooltip="{'Restore ' + (window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-              onClick="dismissedAgentIds = window.__bramRestoreAgent(dismissedAgentIds, $item.agentId)" />
-          </Items>
-          <MenuItem
-            label="Restore all"
-            onClick="dismissedAgentIds = window.__bramRestoreAllAgents()" />
-        </DropdownMenu>
-      </HStack>
       <!-- Session info with the transcript viewport (Main / subagent)
            reported after the provider token — selection lives here, not
            in chip styling, so dropdown-overflow agents indicate the same
@@ -1485,14 +1373,138 @@
              __bramFooterStatusMarkdown; parts from __bramFooterSessionLineParts.
              Sizing and spacing via Markdown's theme vars
              (https://www.xmlui.org/docs/reference/components/Markdown#styling). -->
-        <Theme fontSize-Text-markdown="$fontSize-sm" textColor-Text="$textColor-secondary"
-               marginTop-Text-markdown="0" marginBottom-Text-markdown="0" width="*">
-          <Markdown
-            width="*"
-            interpolateBindings="false"
-            allowHtml="false"
-            content="{window.__bramFooterStatusMarkdown(window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value), footerIndexStatus.value)}" />
-        </Theme>
+        <!-- subagent-chips-on-session-line (Jon): the subagent chips, which
+             had their own centered row above, sit on this line between the
+             session text and the index status. The index status stays last
+             because "Indexing…" is transient. Buttons can't live inside
+             Markdown, so the line is three items in a wrapping row: the
+             session Markdown (no index), " · " + chips, " · " + index.
+             https://www.xmlui.org/docs/howto/wrap-items-across-multiple-rows -->
+        <HStack width="*" wrapContent="true" gap="$space-1" verticalAlignment="center">
+          <Theme fontSize-Text-markdown="$fontSize-sm" textColor-Text="$textColor-secondary"
+                 marginTop-Text-markdown="0" marginBottom-Text-markdown="0">
+            <Markdown
+              interpolateBindings="false"
+              allowHtml="false"
+              content="{window.__bramFooterStatusMarkdown(window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value), null)}" />
+          </Theme>
+          <HStack
+            when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
+            gap="$space-1"
+            verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="·" />
+            <!-- Bold the chip whose stream the Transcript is currently showing
+                 (App-scope transcriptAgentId): fontWeight-Button theme var per
+                 https://www.xmlui.org/docs/reference/components/Button#styling.
+                 bold-chip-static-theme-values: the first attempt bound a DYNAMIC
+                 expression as the Theme var's value (mixing a raw 'bold' with a
+                 '$token' string) and was never observed working — theme vars are
+                 not reliably reactive and expression-produced token strings are
+                 not reliably resolved. So: two when=-branched wrappers with
+                 STATIC literal values; reactivity rides when= remounting, the
+                 guaranteed path. Weight only, orthogonal to the running-state
+                 variant/themeColor bindings below. -->
+            <Theme when="{transcriptAgentId === ''}" fontWeight-Button="$fontWeight-bold">
+              <Button
+                label="Main"
+                size="xs"
+                variant="outlined"
+                tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
+                onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+            </Theme>
+            <Button
+              when="{transcriptAgentId !== ''}"
+              label="Main"
+              size="xs"
+              variant="outlined"
+              tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
+              onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+            <!-- One continuous reverse-chron read: newest chip leftmost (after
+                 Main), then the dropdown continues newest→oldest top-down. Each
+                 chip pairs its label with a ghost ✕ that appends the agentId to
+                 dismissedAgentIds (dismissible-subagent-chips); dismissing a
+                 visible chip promotes the next agent up from the dropdown. The
+                 Main chip is intentionally never dismissible. -->
+            <Items data="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).slice(-3).reverse()}">
+              <HStack gap="0" verticalAlignment="center">
+                <!-- surface-delegated-work-in-flight: the ● glyph
+                     (__bramAgentChipLabel) was the only truthful signal that a
+                     subagent is still running, and it read as the quietest
+                     pixel on the page. A running chip now goes solid+primary
+                     (filled, accent) instead of the quiet outlined+secondary a
+                     finished chip keeps — Button's own themeColor/variant
+                     props, no new component. -->
+                <!-- Same static-value bolding as the Main chip above, keyed to
+                     this chip's own agentId (see bold-chip-static-theme-values
+                     comment there for why the dynamic form failed). -->
+                <Theme when="{transcriptAgentId === $item.agentId}" fontWeight-Button="$fontWeight-bold">
+                  <Button
+                    label="{window.__bramAgentChipLabel($item)}"
+                    size="xs"
+                    variant="{($item.state || ($item.finished ? 'finished' : 'running')) === 'running' ? 'solid' : 'outlined'}"
+                    themeColor="{($item.state || ($item.finished ? 'finished' : 'running')) === 'finished' ? 'secondary' : 'primary'}"
+                    tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+                    onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+                </Theme>
+                <Button
+                  when="{transcriptAgentId !== $item.agentId}"
+                  label="{window.__bramAgentChipLabel($item)}"
+                  size="xs"
+                  variant="{($item.state || ($item.finished ? 'finished' : 'running')) === 'running' ? 'solid' : 'outlined'}"
+                  themeColor="{($item.state || ($item.finished ? 'finished' : 'running')) === 'finished' ? 'secondary' : 'primary'}"
+                  tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+                  onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+                <Button
+                  label="✕"
+                  size="xs"
+                  variant="ghost"
+                  tooltip="Dismiss this subagent — restore it later from the hidden menu"
+                  onClick="dismissedAgentIds = window.__bramDismissAgent(dismissedAgentIds, $item.agentId)" />
+              </HStack>
+            </Items>
+            <!-- Overflow MenuItems deliberately do NOT get the fontWeight-Button
+                 bolding above — a collapsed agent's selection state still lives
+                 in its session-info line, the same "selection lives in the
+                 session line" rationale that predates this bolding change. -->
+            <DropdownMenu
+              when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 3}"
+              label="{'+' + (window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length - 3) + ' more'}"
+              alignment="end"
+              triggerButtonVariant="outlined">
+              <Items data="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).slice(0, -3).reverse()}">
+                <MenuItem
+                  label="{window.__bramAgentChipLabel($item)}"
+                  tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+                  onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+              </Items>
+            </DropdownMenu>
+            <!-- Recover dismissed subagents (subagent-dismiss-recoverable): shown
+                 only while the live roster still contains dismissed agents. Each
+                 entry restores that pane; Restore all clears the set. Reachable
+                 even when every subagent is hidden, because the strip's when also
+                 opens for hidden-in-roster agents. -->
+            <DropdownMenu
+              when="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
+              label="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) + ' hidden'}"
+              alignment="end"
+              triggerButtonVariant="ghost">
+              <Items data="{window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).slice().reverse() : []}">
+                <MenuItem
+                  label="{'↩ ' + window.__bramAgentChipLabel($item)}"
+                  tooltip="{'Restore ' + (window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+                  onClick="dismissedAgentIds = window.__bramRestoreAgent(dismissedAgentIds, $item.agentId)" />
+              </Items>
+              <MenuItem
+                label="Restore all"
+                onClick="dismissedAgentIds = window.__bramRestoreAllAgents()" />
+            </DropdownMenu>
+          </HStack>
+          <Text
+            when="{window.__bramFooterIndexLabel(footerIndexStatus.value)}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{'· ' + window.__bramFooterIndexLabel(footerIndexStatus.value)}" />
+        </HStack>
         <!-- composer-addressee-hugs-box (Jon): the chip slot moved from the
              line's start to its end, so the status sits flush left and does
              not shift when the chip appears. -->

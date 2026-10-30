@@ -200,7 +200,14 @@
          how-to). -->
     <StickySection stickTo="top" top="$height-AppHeader" backgroundColor="$backgroundColor"
       paddingHorizontal="$space-4">
-      <HStack verticalAlignment="center" gap="$space-2" paddingVertical="$space-2">
+      <!-- header-wraps-instead-of-overflowing: with the terminal open the
+           pane is ~406px, and heading + count + the 16rem find box don't fit
+           on one line. An HStack "keeps all children in a single row and may
+           overflow"; that overflow made the page's two scrollbars take turns
+           (transcript-split-height flip loop, its `wide` field named the
+           find box). Wrapping drops the find box to its own line instead.
+           https://www.xmlui.org/docs/howto/wrap-items-across-multiple-rows -->
+      <HStack verticalAlignment="center" gap="$space-2" paddingVertical="$space-2" wrapContent="true">
         <Heading level="h2">Transcript</Heading>
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
         <FindBar id="transcriptFindBar" placeholder="Find in transcript…"

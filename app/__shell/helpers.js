@@ -11451,6 +11451,31 @@ window.__bramSetVisibleRange = function (range, listRef, agentId) {
 // (Transcript.xmlui's VSplitter, Main.xmlui's Footer). Emits px, or 0 before the first measurement
 // (the markup's fallback). Splitter top is taken in page coordinates (adds
 // the page scroller's scrollTop) so an already-scrolled page measures right.
+// The deepest elements under `page` whose right edge passes page's visible
+// right edge, as "tag.class testid WxP right=R" strings (up to 5). Diagnostic
+// for horizontal overflow; called only on a split-height flip.
+function __bramWidestOverflow(page) {
+  var limit = page.getBoundingClientRect().left + page.clientWidth + 1;
+  var hits = [];
+  var all = page.querySelectorAll("*");
+  for (var i = 0; i < all.length && hits.length < 200; i++) {
+    var r = all[i].getBoundingClientRect();
+    if (r.width > 0 && r.right > limit) hits.push(all[i]);
+  }
+  var deepest = hits.filter(function (el) {
+    return !hits.some(function (o) { return o !== el && el.contains(o); });
+  });
+  return deepest.slice(0, 5).map(function (el) {
+    var r = el.getBoundingClientRect();
+    var cls = (typeof el.className === "string" ? el.className : "").split(" ")[0];
+    var tid = el.getAttribute("data-testid");
+    var txt = (el.textContent || "").trim().slice(0, 40);
+    return el.tagName.toLowerCase() + (cls ? "." + cls : "") + (tid ? " [" + tid + "]" : "") +
+      " " + Math.round(r.width) + "w right=" + Math.round(r.right) + " limit=" + Math.round(limit) +
+      (txt ? " \"" + txt + "\"" : "");
+  });
+}
+
 window.bramSubscribeTranscriptSplitHeight = (function () {
   var factory;
   var subscribers = new Set();
@@ -11502,11 +11527,22 @@ window.bramSubscribeTranscriptSplitHeight = (function () {
       // leave it to be spotted in a run of lines.
       var now = Date.now();
       var flip = next === prevValue && (now - lastEmitAt) < 1000;
-      window.__bramIframeTrace("transcript-split-height", {
+      var fields = {
         px: next, prev: value, scrolled: Math.round(scrolled),
         viewH: Math.round(viewH), spOffset: Math.round(spOffset), footH: Math.round(footH),
         flip: flip,
-      });
+      };
+      // header-wraps-instead-of-overflowing: a flip with the terminal open
+      // was the page's two scrollbars taking turns (width 421<->406, viewH
+      // 1001<->1016), i.e. something wider than the page. On a flip, name it:
+      // the page's scrollWidth vs clientWidth, and the deepest elements whose
+      // right edge passes the page's.
+      if (flip && page) {
+        fields.scrollW = page.scrollWidth;
+        fields.clientW = page.clientWidth;
+        if (page.scrollWidth > page.clientWidth) fields.wide = __bramWidestOverflow(page);
+      }
+      window.__bramIframeTrace("transcript-split-height", fields);
       prevValue = value;
       lastEmitAt = now;
       value = next;

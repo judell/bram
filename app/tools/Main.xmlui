@@ -17,6 +17,22 @@
     id="transcriptUnseen"
     initial="{window.__bramUnseenValue ? window.__bramUnseenValue() : 0}"
     subscribe="{window.bramSubscribeTranscriptUnseen ? window.bramSubscribeTranscriptUnseen() : null}" />
+  <!-- alerts-pulse-and-startup-check: the Alerts nav link's pulse needs the
+       Needs-you lanes on every tab, not only when the Alerts page is open.
+       Same seam and same push events as Inbox.xmlui (no poll). -->
+  <DataSource id="alertsNav" url="/__needs-you" />
+  <PushSource id="alertsNavEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('needs-you-changed')}" />
+  <ChangeListener listenTo="{alertsNavEvt.value &amp;&amp; alertsNavEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavEvt.value, alertsNav)" />
+  <PushSource id="alertsNavIssuesEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('issues-changed')}" />
+  <ChangeListener listenTo="{alertsNavIssuesEvt.value &amp;&amp; alertsNavIssuesEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavIssuesEvt.value, alertsNav)" />
+  <PushSource id="alertsNavWorklistEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener listenTo="{alertsNavWorklistEvt.value &amp;&amp; alertsNavWorklistEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavWorklistEvt.value, alertsNav)" />
   <!-- PTY-throughput subscription now lives inside ActivitySparkline so its
        per-chunk churn is isolated from the footer composer. -->
 
@@ -679,7 +695,28 @@
     <NavLink label="Commits" to="/commits" tooltip="Recent commits, and pushing them" />
     <NavLink label="Queue" to="/queue" tooltip="Notes you&apos;re holding to send the agent when it&apos;s free" />
     <NavLink label="Search" to="/search" tooltip="Search the project&apos;s history: sessions, commits, issues, worklist" />
-    <NavLink label="Alerts" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
+    <!-- alerts-pulse-and-startup-check: a dot beside the label pulses, like
+         the transcript's new chip, while Needs-you-now holds something unseen
+         this session. The first cut pulsed the whole link, and `fadein`
+         (reverse, loop) runs opacity down to 0 with no range option
+         (https://www.xmlui.org/docs/behaviors#animation), so the label
+         vanished into the panel ("goes to black in dark mode", Jon). A
+         fading dot reads as a pulse and leaves the label steady. The
+         negative margin pulls it in across NavLink's own right padding
+         (a gap can't be negative). NavLink
+         itself documents no animation prop
+         (https://www.xmlui.org/docs/reference/components/NavLink). -->
+    <HStack verticalAlignment="center" gap="0">
+      <NavLink label="Alerts" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
+      <Text
+        when="{window.__bramAlertsShouldPulse(alertsNav.value, $pathname)}"
+        color="$color-primary-500"
+        fontSize="$fontSize-sm"
+        marginLeft="-0.75rem"
+        animation="fadein"
+        animationOptions="{{ duration: 1200, reverse: true, loop: true }}"
+        tooltip="Something new is waiting in Alerts">●</Text>
+    </HStack>
     <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
     <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
     <NavLink label="Settings" to="/settings" tooltip="Project and personal settings for Bram" />

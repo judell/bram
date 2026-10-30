@@ -3720,6 +3720,56 @@ window.__bramChipShouldPulse = function (status) {
   return !(status && status.state === "working");
 };
 
+// alerts-pulse-and-startup-check: the Alerts nav link pulses, like the new
+// chip, while "Needs you now" holds an item not yet seen this session. An
+// item is its id plus its activity marker, so a fresh reply on the same
+// thread counts as new. Being on the Alerts page marks everything showing as
+// seen. Seen-ness is focus state (what you've looked at), so sessionStorage,
+// scoped by project; after a relaunch a still-waiting item pulses once more,
+// which is right, since it is still waiting on you.
+window.__bramAlertsKey = function (item) {
+  if (!item) return "";
+  return (item.id || "") + "|" + (item.activityMarker || item.activityAt || "");
+};
+window.__bramAlertsShouldPulse = function (needsYou, pathname) {
+  var items =
+    needsYou && needsYou.lanes && Array.isArray(needsYou.lanes.needsYouNow)
+      ? needsYou.lanes.needsYouNow
+      : [];
+  var storeKey = window.__bramProjectScopedKey
+    ? window.__bramProjectScopedKey("bram.alertsSeen")
+    : null;
+  var seen = {};
+  if (storeKey) {
+    try {
+      seen = JSON.parse(sessionStorage.getItem(storeKey) || "{}") || {};
+    } catch (e) {
+      seen = {};
+    }
+  }
+  if (pathname === "/needs-you") {
+    if (!storeKey) return false;
+    var changed = false;
+    for (var i = 0; i < items.length; i++) {
+      var k = window.__bramAlertsKey(items[i]);
+      if (k && !seen[k]) {
+        seen[k] = 1;
+        changed = true;
+      }
+    }
+    if (changed) {
+      try {
+        sessionStorage.setItem(storeKey, JSON.stringify(seen));
+      } catch (e) {}
+    }
+    return false;
+  }
+  for (var j = 0; j < items.length; j++) {
+    if (!seen[window.__bramAlertsKey(items[j])]) return true;
+  }
+  return false;
+};
+
 // Round 2 (Jon, from the field): COMPOSE the facts, don't choose one —
 // "Selected in Worklist: a, b · Proposing a new item…" when both hold.
 window.__bramFooterContextLine = function (claim, proposing, sel, agentStatus) {

@@ -36623,6 +36623,11 @@ fn run_index_buckets<R: tauri::Runtime>(
                 if n > 0 {
                     added.push((bucket.status_name().to_string(), n));
                 }
+                // alerts-pulse-and-startup-check: the first pass is done, so
+                // Alerts can stop saying "checking" (and tell the pane).
+                if !ISSUES_FIRST_PASS_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    emit_replayable_signal(app, "needs-you-changed");
+                }
                 // issue-329: the periodic sweep. A forge-side merge moves no
                 // local ref and pushes nothing, so neither live trigger
                 // (button, refs-watch) can fire and a queued close waited
@@ -68361,6 +68366,10 @@ fn spawn_forge_awaiting_refresher(app: AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(3));
         let mut last_sig = String::new();
+        // alerts-pulse-and-startup-check: the first fetch always signals,
+        // even when it finds nothing (empty == the initial empty signature),
+        // so the pane drops its "checking" state promptly.
+        let mut first = true;
         loop {
             // needs-you-dismissals-survive-forge-outage: a failed fetch used
             // to return an empty list, indistinguishable from "nothing
@@ -68403,10 +68412,11 @@ fn spawn_forge_awaiting_refresher(app: AppHandle) {
             let changed = sig != last_sig;
             let n = fresh.len();
             *FORGE_AWAITING_CACHE.lock().unwrap() = Some((std::time::Instant::now(), fresh));
-            if changed {
+            if changed || first {
                 last_sig = sig;
                 emit_replayable_signal(&app, "needs-you-changed");
             }
+            first = false;
             append_bram_trace_line(
                 &app,
                 "needs-you",
@@ -69781,6 +69791,55 @@ fn needs_you_reminder_row(
     ))
 }
 
+// alerts-pulse-and-startup-check: set when this process's first issue pass
+// finishes, whatever its outcome, so the Alerts page knows the local sweep
+// has something to sweep.
+static ISSUES_FIRST_PASS_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+const NEEDS_YOU_CHECKING_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn needs_you_first_serve() -> &'static std::time::Instant {
+    static FIRST: OnceLock<std::time::Instant> = OnceLock::new();
+    FIRST.get_or_init(std::time::Instant::now)
+}
+
+// Pure, for tests: still checking while either source is warming, never
+// past the cap.
+fn needs_you_still_checking(
+    forge_warming: bool,
+    issues_warming: bool,
+    since_first_serve: std::time::Duration,
+) -> bool {
+    (forge_warming || issues_warming) && since_first_serve < NEEDS_YOU_CHECKING_CAP
+}
+
+#[cfg(test)]
+mod needs_you_checking_tests {
+    use super::{needs_you_still_checking, NEEDS_YOU_CHECKING_CAP};
+    use std::time::Duration;
+
+    #[test]
+    fn checking_until_both_sources_answer_or_the_cap() {
+        let early = Duration::from_secs(5);
+        assert!(needs_you_still_checking(true, true, early));
+        assert!(
+            needs_you_still_checking(false, true, early),
+            "issues still warming"
+        );
+        assert!(
+            needs_you_still_checking(true, false, early),
+            "notifications still warming"
+        );
+        assert!(!needs_you_still_checking(false, false, early));
+        assert!(!needs_you_still_checking(
+            true,
+            true,
+            NEEDS_YOU_CHECKING_CAP
+        ));
+    }
+}
+
 fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70012,15 +70071,39 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
         }
     }
 
+    // alerts-pulse-and-startup-check: an answer is only "nothing waiting" once
+    // both launch-time sources have answered: the notifications snapshot and
+    // this process's first issue pass (the local sweep's source). Until then
+    // the pane shows a spinner. After the 2026-10-30 relaunch the page said
+    // "nothing waiting" for 40 s while #463 was. Capped so a held indexer or
+    // a failing gh can't leave the spinner up for good.
+    let checking = needs_you_still_checking(
+        forge_warming,
+        !ISSUES_FIRST_PASS_DONE.load(std::sync::atomic::Ordering::SeqCst),
+        needs_you_first_serve().elapsed(),
+    );
+    // If a source never answers, the cap ends "checking"; one timer makes
+    // sure the pane hears about it.
+    static CAP_TIMER_ARMED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if checking && !CAP_TIMER_ARMED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let app = app.clone();
+        let remaining = NEEDS_YOU_CHECKING_CAP.saturating_sub(needs_you_first_serve().elapsed());
+        std::thread::spawn(move || {
+            std::thread::sleep(remaining + std::time::Duration::from_secs(1));
+            emit_replayable_signal(&app, "needs-you-changed");
+        });
+    }
     append_bram_trace_line(
         app,
         "needs-you",
         &format!(
-            "op=serve now={} decision={} others={} loose={}",
+            "op=serve now={} decision={} others={} loose={} checking={}",
             needs_now.len(),
             your_decision.len(),
             others_hands.len(),
-            loose_ends.len()
+            loose_ends.len(),
+            checking as u8
         ),
     );
 
@@ -70035,6 +70118,7 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
     }
     let body = serde_json::json!({
         "verifiedAtMs": now_ms,
+        "checking": checking,
         "lanes": {
             "needsYouNow": needs_now,
             "yourDecision": your_decision,

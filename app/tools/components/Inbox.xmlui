@@ -2,6 +2,7 @@
   name="Inbox"
   var.lanesReady="{!!(inbox.value &amp;&amp; inbox.value.lanes)}"
   var.emptyAll="{lanesReady &amp;&amp;
+    !inbox.value.checking &amp;&amp;
     inbox.value.lanes.needsYouNow.length === 0 &amp;&amp;
     inbox.value.lanes.yourDecision.length === 0 &amp;&amp;
     inbox.value.lanes.othersHands.length === 0 &amp;&amp;
@@ -87,6 +88,16 @@
     <Text when="{!lanesReady}" color="$textColor-secondary">
       Checking what's waiting on you…
     </Text>
+
+    <!-- alerts-pulse-and-startup-check: right after launch the host has
+         answered before it has heard from GitHub (notifications) or run its
+         first issue pass. `checking` says so; until it clears, never say
+         "nothing waiting". Items already known still render below.
+         https://www.xmlui.org/docs/reference/components/Spinner -->
+    <HStack when="{lanesReady &amp;&amp; inbox.value.checking}" verticalAlignment="center" gap="$space-2">
+      <Spinner />
+      <Text color="$textColor-secondary">Checking GitHub for new activity…</Text>
+    </HStack>
 
     <Text when="{emptyAll}" color="$textColor-secondary">
       Nothing is waiting on you right now.

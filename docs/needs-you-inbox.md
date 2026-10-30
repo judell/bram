@@ -97,7 +97,7 @@ the unverified fallback renders.**
 
 | lane input | source | freshness |
 |---|---|---|
-| Issues | the ~45s issues indexer + `/__issues?fresh=1` on open | near-real-time, live on demand |
+| Issues | the 30s incremental issues poll + `/__issues?fresh=1` on open | near-real-time, live on demand |
 | Commits | git branch state — **including commits that arrived from elsewhere** (another machine or session, a push to the branch), reconciled against `@{u}..HEAD` and the default branch | live; reconciled, not assumed local |
 | PRs *(new)* | forge adapter — reviews-requested, checks, merge state | **new work**; GitHub first per `docs/forge-adapter.md` |
 | Bram-local | worklist items awaiting the user, queued closes | already local, already live |
@@ -193,7 +193,7 @@ Per #323's lesson: verification is **per-item live checks**, so cost is real
 and must be placed deliberately. The plan says, per input, what runs:
 
 - **on open** (the user is looking; a fresh re-fetch is warranted),
-- **on a timer / on an event** (ride the ~45s issues indexer and the existing
+- **on a timer / on an event** (ride the 30s issues poll and the existing
   Tauri events; do not add a new poll — the #329 close-sweep is the precedent
   for a consumer on work already being done),
 - **lazily** (the exact-artifact link resolves only when the item is expanded).

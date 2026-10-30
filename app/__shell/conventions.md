@@ -769,7 +769,7 @@ curl -4 -sS "http://127.0.0.1:61455/__search?q=<urlencoded>&limit=20&types=commi
 **Caveats.** FTS5 is keyword, not semantic: a miss means "nothing
 matched those terms", not proof of absence. A **503** (`{"error":"search index not ready","reason":"holding|initial-scan",…}`)
 means no index yet — never read it as absence of
-history. Scope is the current project; new issues take ~45s to appear.
+history. Scope is the current project; new issues take ~30s to appear.
 Commit diffs are indexed but bounded (long lines elided, 256 KB cap);
 `git log -S` / `git grep` remain the precision tools.
 

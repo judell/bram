@@ -17256,6 +17256,330 @@ fn issues_list_stale(conn: &rusqlite::Connection) -> bool {
     )
 }
 
+// issues-incremental-since-poll: the incremental poll's memory, kept beside
+// the stale marker. `since_s` is the high-water mark sent as `since` (GitHub's
+// own updatedAt, so local clock skew doesn't enter); `etag` is the last answer
+// to that exact query; `reconciled_at_ms` is the last full probe, which is
+// what catches deleted and transferred issues (they never appear as updated).
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct IssuePollState {
+    since_s: i64,
+    etag: Option<String>,
+    reconciled_at_ms: i64,
+}
+
+// A full reconcile at least this often, and at every launch's first pass.
+const ISSUE_RECONCILE_MS: i64 = 60 * 60 * 1000;
+
+fn read_issue_poll_state(conn: &rusqlite::Connection) -> IssuePollState {
+    search_index::get_extra(conn, "issues:poll")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_issue_poll_state(conn: &rusqlite::Connection, state: &IssuePollState) {
+    let row = search_index::IndexRow {
+        kind: "issue-poll-state".to_string(),
+        source: String::new(),
+        date: String::new(),
+        link: String::new(),
+        content: String::new(),
+        intent: String::new(),
+        file: "issues:poll".to_string(),
+        tool_ids: None,
+        extra: serde_json::to_string(state).unwrap_or_default(),
+    };
+    let _ = search_index::index_doc(conn, &row, 0, 0);
+}
+
+// Whether this pass may take the incremental path. Pure, for tests.
+fn issue_poll_can_go_incremental(
+    state: &IssuePollState,
+    now_ms: i64,
+    list_stale: bool,
+    reconciled_this_process: bool,
+) -> bool {
+    reconciled_this_process
+        && !list_stale
+        && state.since_s > 0
+        && state.reconciled_at_ms > 0
+        && now_ms - state.reconciled_at_ms < ISSUE_RECONCILE_MS
+}
+
+// The next `since` after a set of changes: the newest updatedAt seen, less a
+// second, so an issue updated in the same second as the newest isn't skipped.
+// The overlap re-returns that issue; its unchanged token makes it a no-op.
+fn issue_poll_next_since(current_since_s: i64, changed: &[(u64, i64)]) -> i64 {
+    changed
+        .iter()
+        .map(|(_, t)| *t - 1)
+        .max()
+        .map_or(current_since_s, |t| t.max(current_since_s))
+}
+
+static ISSUES_RECONCILED_THIS_PROCESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// One issue's search row, from `issue_view`-shaped detail. `extra` empty means
+// the enriched payload is built when the issue is first opened (gh_issue_view
+// treats an empty blob as a cache miss), not before Alerts can see it.
+fn issue_index_row(
+    number: u64,
+    token: i64,
+    issue: &serde_json::Value,
+    extra: String,
+) -> search_index::IndexRow {
+    let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let author = issue
+        .get("author")
+        .and_then(|v| v.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mut content = format!("{}\n{}\n{}", title, body, author);
+    if let Some(comments) = issue.get("comments").and_then(|v| v.as_array()) {
+        for c in comments {
+            if let Some(cb) = c.get("body").and_then(|v| v.as_str()) {
+                content.push('\n');
+                content.push_str(cb);
+            }
+        }
+    }
+    search_index::IndexRow {
+        kind: "issue".to_string(),
+        source: format!("#{} {}", number, title),
+        date: token.to_string(),
+        link: issue
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        content,
+        intent: String::new(),
+        file: format!("issue:{}", number),
+        tool_ids: None,
+        extra,
+    }
+}
+
+// issues-incremental-since-poll: splice changed issues into the cached
+// issues:list instead of re-fetching it. The full list with comments took
+// 19.75 s on judell/bram (2026-10-30), and it ran after every change; this is
+// the same splice issue-index-immediate-refresh (#254) already uses for one
+// issue. False when there is no usable cache, so the caller rebuilds.
+fn splice_issue_list_rows<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    issues: &[serde_json::Value],
+) -> bool {
+    let Some(mut list) = search_index::get_extra(conn, "issues:list").ok().flatten() else {
+        return false;
+    };
+    let repo_slug = repo_owner_name(app);
+    for issue in issues {
+        let mut row = issue.clone();
+        enrich_issue_activity(app, &mut row, repo_slug.as_deref());
+        match issues_list_upsert_row(&list, &row) {
+            Some(updated) => list = updated,
+            None => return false,
+        }
+    }
+    cache_issues_list_row(conn, &list) != "empty-contradiction"
+}
+
+// True when every issue in the cached list is still in the probe: nothing was
+// deleted or transferred away, so splicing the changed rows is a complete
+// update. Pure, for tests.
+fn cached_issue_list_covered_by(list_json: &str, probe_numbers: &HashSet<u64>) -> bool {
+    match serde_json::from_str::<serde_json::Value>(list_json) {
+        Ok(serde_json::Value::Array(items)) => items.iter().all(|i| {
+            i.get("number")
+                .and_then(|n| n.as_u64())
+                .map_or(false, |n| probe_numbers.contains(&n))
+        }),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod issues_since_tests {
+    use super::{
+        cached_issue_list_covered_by, issue_poll_can_go_incremental, issue_poll_next_since,
+        parse_issues_since_response, IssuePollState, ISSUE_RECONCILE_MS,
+    };
+    use std::collections::HashSet;
+
+    #[test]
+    fn a_200_lists_issues_drops_pull_requests_and_keeps_the_etag() {
+        let raw = "HTTP/2.0 200 OK\r\nEtag: W/\"abc\"\r\nX-Ratelimit-Remaining: 4085\r\n\r\n\
+            [{\"number\":463,\"updated_at\":\"2026-10-29T18:12:53Z\"},\
+             {\"number\":464,\"updated_at\":\"2026-10-29T19:00:00Z\",\"pull_request\":{}}]";
+        let r = parse_issues_since_response(raw).expect("parses");
+        assert!(!r.not_modified);
+        assert_eq!(r.etag.as_deref(), Some("W/\"abc\""));
+        assert_eq!(r.changed.len(), 1);
+        assert_eq!(r.changed[0].0, 463);
+        assert!(r.changed[0].1 > 0);
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn a_304_changes_nothing_and_a_next_page_is_truncation() {
+        let r = parse_issues_since_response("HTTP/2.0 304 Not Modified\r\nEtag: W/\"abc\"\r\n\r\n")
+            .expect("parses");
+        assert!(r.not_modified);
+        assert!(r.changed.is_empty());
+        let paged = "HTTP/2.0 200 OK\nLink: <https://api.github.com/x?page=2>; rel=\"next\"\n\n[]";
+        assert!(
+            parse_issues_since_response(paged)
+                .expect("parses")
+                .truncated
+        );
+        assert!(parse_issues_since_response("HTTP/2.0 401 Unauthorized\r\n\r\n{}").is_err());
+        assert!(parse_issues_since_response("").is_err());
+    }
+
+    #[test]
+    fn incremental_only_after_a_fresh_reconcile_in_this_process() {
+        let now = 10 * ISSUE_RECONCILE_MS;
+        let fresh = IssuePollState {
+            since_s: 100,
+            etag: None,
+            reconciled_at_ms: now - 1000,
+        };
+        assert!(issue_poll_can_go_incremental(&fresh, now, false, true));
+        assert!(
+            !issue_poll_can_go_incremental(&fresh, now, false, false),
+            "launch reconciles"
+        );
+        assert!(
+            !issue_poll_can_go_incremental(&fresh, now, true, true),
+            "stale list"
+        );
+        assert!(!issue_poll_can_go_incremental(
+            &IssuePollState::default(),
+            now,
+            false,
+            true
+        ));
+        let old = IssuePollState {
+            reconciled_at_ms: now - ISSUE_RECONCILE_MS,
+            ..fresh.clone()
+        };
+        assert!(
+            !issue_poll_can_go_incremental(&old, now, false, true),
+            "hourly"
+        );
+    }
+
+    #[test]
+    fn since_moves_to_the_newest_change_less_a_second_and_never_back() {
+        assert_eq!(issue_poll_next_since(100, &[(1, 150), (2, 120)]), 149);
+        assert_eq!(issue_poll_next_since(100, &[]), 100);
+        assert_eq!(issue_poll_next_since(200, &[(1, 150)]), 200);
+    }
+
+    #[test]
+    fn a_deleted_issue_in_the_cache_forces_the_full_rebuild() {
+        let probe: HashSet<u64> = [461, 462, 463].into_iter().collect();
+        assert!(cached_issue_list_covered_by(
+            r#"[{"number":462},{"number":461}]"#,
+            &probe
+        ));
+        assert!(!cached_issue_list_covered_by(
+            r#"[{"number":460},{"number":461}]"#,
+            &probe
+        ));
+        assert!(!cached_issue_list_covered_by("not json", &probe));
+    }
+}
+
+// The incremental pass: index the issues GitHub says changed since the last
+// mark, splice them into the cached list, and move the mark. No full probe, no
+// list rebuild, no enrichment.
+fn run_issue_since_pass<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    root: &Path,
+    adapter: &dyn ForgeAdapter,
+    mut state: IssuePollState,
+    answer: IssuesSince,
+    call_ms: u128,
+) -> Result<IndexPassOutcome, String> {
+    let (mut indexed, mut skipped, mut redacted) = (0usize, 0usize, 0usize);
+    let mut fetched: Vec<serde_json::Value> = Vec::new();
+    let mut failure: Option<String> = None;
+    for (number, token) in &answer.changed {
+        let key = format!("issue:{}", number);
+        if !search_index::needs_index(conn, &key, *token, 0).unwrap_or(true) {
+            skipped += 1;
+            continue;
+        }
+        let issue = match adapter.issue_view(root, *number) {
+            Ok(v) => v,
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        };
+        let row = issue_index_row(*number, *token, &issue, String::new());
+        redacted += search_index::index_doc(conn, &row, *token, 0).map_err(|e| e.to_string())?;
+        indexed += 1;
+        fetched.push(issue);
+    }
+    // Whatever was indexed must reach the list, or a later pass (its token now
+    // current) would never splice it. If the splice can't happen, hand the
+    // list to the next pass's full rebuild.
+    if !fetched.is_empty() && !splice_issue_list_rows(app, conn, &fetched) {
+        set_issues_list_stale(conn, true);
+    }
+    if let Some(e) = failure {
+        set_issues_list_stale(conn, true);
+        if indexed > 0 {
+            emit_replayable_signal(app, "issues-changed");
+        }
+        return Err(e);
+    }
+    if !answer.not_modified {
+        let next = issue_poll_next_since(state.since_s, &answer.changed);
+        // The ETag answers this exact URL; a new `since` is a new URL.
+        state.etag = if next == state.since_s {
+            answer.etag.clone()
+        } else {
+            None
+        };
+        state.since_s = next;
+    }
+    write_issue_poll_state(conn, &state);
+    if indexed > 0 {
+        emit_replayable_signal(app, "issues-changed");
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "search-index",
+            &format!(
+                "op=issues-since not_modified={} changed={} indexed={} skipped={} since={} call_ms={}",
+                answer.not_modified as u8,
+                answer.changed.len(),
+                indexed,
+                skipped,
+                format_iso_utc(state.since_s * 1000),
+                call_ms
+            ),
+        );
+    }
+    Ok(IndexPassOutcome {
+        seen: answer.changed.len(),
+        indexed,
+        skipped,
+        rows: search_index::row_count(conn).unwrap_or(0),
+        redacted,
+    })
+}
+
 // Cache-first: serve the full issues list from the search index's stored
 // `extra` blob (written by the background indexer, see run_issue_index_pass),
 // truncated to `limit`. Falls back to a live build on a cache miss or parse
@@ -17778,6 +18102,76 @@ fn glab_issue_view_bytes(root: &Path, number: u64) -> Result<Vec<u8>, String> {
 // (activity enrichment, search indexing, close-authority policy) is
 // forge-neutral and stays above this trait.
 
+// issues-incremental-since-poll: one `issues?since=` answer. `changed` holds
+// (number, updatedAt epoch seconds) for issues only (pull requests, which the
+// issues endpoint also returns, are dropped). `truncated` means a next page
+// exists, so the caller reconciles in full rather than paging.
+#[derive(Debug, Default, PartialEq)]
+struct IssuesSince {
+    not_modified: bool,
+    changed: Vec<(u64, i64)>,
+    etag: Option<String>,
+    truncated: bool,
+}
+
+// Parse `gh api -i` output for the issues endpoint: a status line, headers,
+// a blank line, then the JSON body. A 304 has no body. Pure, so the shape is
+// tested without a network.
+fn parse_issues_since_response(raw: &str) -> Result<IssuesSince, String> {
+    let (head, body) = match raw.split_once("\r\n\r\n") {
+        Some(parts) => parts,
+        None => raw.split_once("\n\n").unwrap_or((raw, "")),
+    };
+    let mut lines = head.lines();
+    let status = lines.next().unwrap_or("").trim();
+    let code = status.split_whitespace().nth(1).unwrap_or("");
+    let mut etag = None;
+    let mut truncated = false;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if name == "etag" && !value.is_empty() {
+            etag = Some(value.to_string());
+        } else if name == "link" && value.contains("rel=\"next\"") {
+            truncated = true;
+        }
+    }
+    match code {
+        "304" => Ok(IssuesSince {
+            not_modified: true,
+            etag,
+            ..Default::default()
+        }),
+        "200" => {
+            let rows: Vec<serde_json::Value> = serde_json::from_str(body.trim())
+                .map_err(|e| format!("[gh api issues since] parse: {}", e))?;
+            let changed = rows
+                .iter()
+                .filter(|v| v.get("pull_request").is_none())
+                .filter_map(|v| {
+                    let number = v.get("number").and_then(|n| n.as_u64())?;
+                    let updated = v
+                        .get("updated_at")
+                        .and_then(|u| u.as_str())
+                        .and_then(parse_iso_to_epoch)
+                        .unwrap_or(0);
+                    Some((number, updated))
+                })
+                .collect();
+            Ok(IssuesSince {
+                not_modified: false,
+                changed,
+                etag,
+                truncated,
+            })
+        }
+        _ => Err(format!("[gh api issues since] status: {}", status)),
+    }
+}
+
 trait ForgeAdapter: Sync {
     fn label(&self) -> &'static str;
     // The forge's CLI binary name, for user-facing hints ("glab is not
@@ -17789,6 +18183,18 @@ trait ForgeAdapter: Sync {
     /// changed" pass is cheap. `None` = this forge has no local issue-index
     /// path (GitLab), so the indexer skips it (issue-230-incremental-issue-fetch).
     fn issues_change_probe(&self, root: &Path) -> Result<Option<Vec<(u64, i64)>>, String>;
+    /// issues-incremental-since-poll: only the issues updated since `since`
+    /// (ISO 8601), as a conditional request against the previous `etag`.
+    /// `None` = this forge has no such path, so the indexer uses the full
+    /// probe every pass.
+    fn issues_since(
+        &self,
+        _root: &Path,
+        _since: &str,
+        _etag: Option<&str>,
+    ) -> Result<Option<IssuesSince>, String> {
+        Ok(None)
+    }
     fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String>;
     /// Cold-path batched detail fetch (index-rebuild-reports-its-progress):
     /// full issue detail (title/body/state/author/comments/etc, the SAME
@@ -18034,6 +18440,42 @@ impl ForgeAdapter for GitHubForge {
             })
             .collect();
         Ok(Some(probe))
+    }
+
+    // issues-incremental-since-poll: `gh api -i` so the status line and ETag
+    // come back with the body. gh exits non-zero on a 304, so the output is
+    // parsed whatever the exit status; only a spawn failure or an
+    // unparseable answer is an error. `{owner}/{repo}` is filled in by gh from
+    // the checkout's remote. Measured 2026-10-30 on judell/bram: 0.75 s for a
+    // 200, against 3.2 s for the full number,updatedAt probe; a 304 does not
+    // count against the rate limit.
+    fn issues_since(
+        &self,
+        root: &Path,
+        since: &str,
+        etag: Option<&str>,
+    ) -> Result<Option<IssuesSince>, String> {
+        let path = format!(
+            "repos/{{owner}}/{{repo}}/issues?since={}&state=all&sort=updated&direction=desc&per_page=100",
+            since
+        );
+        let mut cmd = std::process::Command::new("gh");
+        cmd.current_dir(root).args(["api", "-i"]);
+        if let Some(tag) = etag {
+            cmd.args(["-H", &format!("If-None-Match: {}", tag)]);
+        }
+        let out = cmd
+            .arg(&path)
+            .output()
+            .map_err(|e| format!("[gh api issues since] failed to spawn gh: {}", e))?;
+        let raw = String::from_utf8_lossy(&out.stdout);
+        parse_issues_since_response(&raw).map(Some).map_err(|e| {
+            format!(
+                "{} stderr: {}",
+                e,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        })
     }
 
     fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String> {
@@ -35099,6 +35541,54 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
     let root = project_root(Some(app)).ok_or("no project root")?;
     let adapter = forge_adapter(app);
+    // issues-incremental-since-poll: between full reconciles, ask only for
+    // what changed since the last mark. Any doubt (no mark yet, first pass of
+    // this process, a stale list, a truncated or failed answer, a forge with
+    // no such path) falls through to the full probe below, which reconciles.
+    let now_ms = unix_now_ms();
+    let poll_state = read_issue_poll_state(&conn);
+    let reconciled_here = ISSUES_RECONCILED_THIS_PROCESS.load(std::sync::atomic::Ordering::SeqCst);
+    if issue_poll_can_go_incremental(
+        &poll_state,
+        now_ms,
+        issues_list_stale(&conn),
+        reconciled_here,
+    ) {
+        let started = std::time::Instant::now();
+        match adapter.issues_since(
+            &root,
+            &format_iso_utc(poll_state.since_s * 1000),
+            poll_state.etag.as_deref(),
+        ) {
+            Ok(Some(answer)) if !answer.truncated => {
+                let call_ms = started.elapsed().as_millis();
+                return run_issue_since_pass(
+                    app, &conn, &root, adapter, poll_state, answer, call_ms,
+                );
+            }
+            Ok(Some(answer)) => {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=issues-since-truncated changed={} → reconcile",
+                        answer.changed.len()
+                    ),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=issues-since-error detail={} → reconcile",
+                        e.replace('\n', " ")
+                    ),
+                );
+            }
+        }
+    }
     let Some(probe) = adapter.issues_change_probe(&root)? else {
         // GitLab: not indexed yet (probe returned None).
         return Ok(IndexPassOutcome {
@@ -35116,6 +35606,10 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     // reached it.
     let probe_newest = probe.iter().map(|(n, _)| *n).max().unwrap_or(0);
     let probe_len = probe.len();
+    // issues-incremental-since-poll: the reconcile's mark for the
+    // incremental passes that follow, and its view of which issues exist.
+    let probe_max_token = probe.iter().map(|(_, t)| *t).max().unwrap_or(0);
+    let probe_numbers: HashSet<u64> = probe.iter().map(|(n, _)| *n).collect();
     // Gate first (local SQLite, cheap) so the fetch step knows its total and
     // can report affirmative progress during a cold backfill (issue #250) —
     // each per-issue fetch is a network call, and a schema reset makes
@@ -35185,6 +35679,10 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     // batched fetch above already resolved every pending issue's detail in
     // one shot, so there is no per-item network tick left to report against.
     let mut done = 0usize;
+    // issues-incremental-since-poll: a few changed issues are spliced into the
+    // cached list below instead of re-fetching all of it (19.75 s measured).
+    let collect_for_splice = !issue_pass_should_batch_fetch(total_pending);
+    let mut splice_candidates: Vec<serde_json::Value> = Vec::new();
     for (number, token) in pending {
         let key = format!("issue:{}", number);
         // Full detail for this issue: from the batch when the cold path
@@ -35273,6 +35771,9 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
         redacted += search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
         done += 1;
+        if collect_for_splice {
+            splice_candidates.push(issue);
+        }
         if report_progress {
             search_index_set_progress(app, Some(("issue", done, total_pending)));
             if bram_trace_enabled() {
@@ -35306,7 +35807,27 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     // list row, then emit) already had this order.
     let list_stale = issues_list_stale(&conn);
     let mut signal_issues_changed = indexed > 0;
-    if indexed > 0 || list_stale {
+    // issues-incremental-since-poll: splice when it's a complete update: a
+    // few changes, a healthy cache, and every cached issue still in the probe
+    // (a deletion or transfer needs the full rebuild to drop its row).
+    let spliced = !list_stale
+        && indexed > 0
+        && splice_candidates.len() == indexed
+        && search_index::get_extra(&conn, "issues:list")
+            .ok()
+            .flatten()
+            .map_or(false, |list| {
+                cached_issue_list_covered_by(&list, &probe_numbers)
+            })
+        && splice_issue_list_rows(app, &conn, &splice_candidates);
+    if spliced && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "search-index",
+            &format!("op=issues-list-splice n={}", indexed),
+        );
+    }
+    if !spliced && (indexed > 0 || list_stale) {
         // Rebuild + cache the full issues list so /__issues can also serve
         // cache-first, byte-identical to a live build_issues_list. Runs on
         // doc changes AND while the staleness marker is set, so one failed
@@ -35374,6 +35895,30 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     // and subscribers should refetch what they can.
     if signal_issues_changed {
         emit_replayable_signal(app, "issues-changed");
+    }
+    // issues-incremental-since-poll: a completed reconcile sets the mark the
+    // incremental passes ask from (GitHub's newest updatedAt, less a second).
+    if probe_max_token > 0 {
+        write_issue_poll_state(
+            &conn,
+            &IssuePollState {
+                since_s: probe_max_token - 1,
+                etag: None,
+                reconciled_at_ms: now_ms,
+            },
+        );
+        ISSUES_RECONCILED_THIS_PROCESS.store(true, std::sync::atomic::Ordering::SeqCst);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=issues-reconcile since={} spliced={}",
+                    format_iso_utc((probe_max_token - 1) * 1000),
+                    spliced as u8
+                ),
+            );
+        }
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok(IndexPassOutcome {
@@ -36627,9 +37172,17 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                 rebuild_commits_list_cache(&app, &conn);
             }
         }
-        let issues_poll = std::time::Duration::from_secs(60);
+        // issues-incremental-since-poll: the issue poll keeps its own due time.
+        // It used to be the recv_timeout itself, which every watcher request
+        // restarted, so while anyone worked (session writes are constant) the
+        // poll waited for a quiet minute: passes landed ~2¼ min apart or
+        // worse. An incremental pass is one conditional request, usually a
+        // free 304, so 30 s is cheap.
+        let issues_poll = std::time::Duration::from_secs(30);
+        let mut issues_due = std::time::Instant::now() + issues_poll;
         loop {
-            let first = match rx.recv_timeout(issues_poll) {
+            let wait = issues_due.saturating_duration_since(std::time::Instant::now());
+            let first = match rx.recv_timeout(wait) {
                 Ok(bucket) => Some(bucket),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -36640,19 +37193,25 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                 IndexRunDisplay::QuietUnlessAdded
             };
             let mut wanted: Vec<IndexBucket> = Vec::new();
-            match first {
-                // A watcher request: coalesce the whole burst into one pass per
-                // bucket (a session write fires 2-3 events; a commit several).
-                Some(bucket) => {
-                    wanted.push(bucket);
-                    while let Ok(more) = rx.try_recv() {
-                        if !wanted.contains(&more) {
-                            wanted.push(more);
-                        }
+            // A watcher request: coalesce the whole burst into one pass per
+            // bucket (a session write fires 2-3 events; a commit several).
+            if let Some(bucket) = first {
+                wanted.push(bucket);
+                while let Ok(more) = rx.try_recv() {
+                    if !wanted.contains(&more) {
+                        wanted.push(more);
                     }
                 }
-                // Idle timeout: the residual remote poll.
-                None => wanted.push(IndexBucket::Issues),
+            }
+            // The remote poll, when due, whatever else is running.
+            if std::time::Instant::now() >= issues_due || wanted.contains(&IndexBucket::Issues) {
+                if !wanted.contains(&IndexBucket::Issues) {
+                    wanted.push(IndexBucket::Issues);
+                }
+                issues_due = std::time::Instant::now() + issues_poll;
+            }
+            if wanted.is_empty() {
+                continue;
             }
             run_index_buckets(&app, &wanted, display);
         }

@@ -21994,7 +21994,10 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
             SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
             // No session discovery for Antigravity yet
             // (antigravity-sessions-browser).
-            SessionProvider::Antigravity => None,
+            SessionProvider::Antigravity => antigravity_summary_rows_for_id(app, &sid)
+                .map(|(_, title, _)| title)
+                .filter(|title| !title.trim().is_empty())
+                .or_else(|| claude_session_title(&path).ok().flatten()),
         };
         let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
         if let Some(obj) = item.as_object_mut() {
@@ -24185,7 +24188,10 @@ fn session_title_by_id<R: tauri::Runtime>(
             .or_else(|| claude_session_title(&path).ok().flatten()),
         // session_path_for_id answers None for Antigravity, so this is
         // unreachable until antigravity-sessions-browser; None keeps it honest.
-        SessionProvider::Antigravity => None,
+        SessionProvider::Antigravity => antigravity_summary_rows_for_id(app, id)
+            .map(|(_, title, _)| title)
+            .filter(|title| !title.trim().is_empty())
+            .or_else(|| claude_session_title(&path).ok().flatten()),
     }
 }
 
@@ -25699,7 +25705,11 @@ fn fallback_latest_session_id<R: tauri::Runtime>(
             .flatten()
             .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p)),
         // Nothing to fall back to until antigravity-sessions-browser.
-        SessionProvider::Antigravity => None,
+        SessionProvider::Antigravity => discover_antigravity_sessions(app, Some(1))
+            .ok()?
+            .into_iter()
+            .next()
+            .map(|s| s.id),
     }
 }
 
@@ -25819,7 +25829,7 @@ fn session_path_for_id<R: tauri::Runtime>(
         SessionProvider::Codex => codex_session_path_for_id(app, id),
         SessionProvider::Opencode => opencode_session_path_for_id(app, id),
         // No file-discovery for Antigravity yet (antigravity-sessions-browser).
-        SessionProvider::Antigravity => None,
+        SessionProvider::Antigravity => antigravity_export_path(app, id),
     }
 }
 
@@ -31525,7 +31535,10 @@ fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String>
             .and_then(|stem| stem.to_str())
             .map(str::to_string),
         // No transcript paths for Antigravity until antigravity-sessions-browser.
-        SessionProvider::Antigravity => None,
+        SessionProvider::Antigravity => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string),
     }
 }
 
@@ -33224,6 +33237,431 @@ fn opencode_session_path_for_id<R: tauri::Runtime>(
         .map(|s| s.path)
 }
 
+// Antigravity stores the project association in conversation_summaries.db;
+// the per-conversation brain directory contains the transcript, not a cwd.
+// Both inputs are opened read-only. The provider's records are unlike Claude's
+// JSONL, so a disposable Claude-shaped projection in Bram's cache lets every
+// existing transcript consumer keep using the same parser.
+fn antigravity_data_dir() -> Option<PathBuf> {
+    Some(home_dir()?.join(".gemini").join("antigravity-cli"))
+}
+
+fn antigravity_workspace_matches(value: &str, canonical: &str) -> bool {
+    let decoded = percent_decode(value);
+    let path = decoded
+        .strip_prefix("file://")
+        .unwrap_or(&decoded)
+        .trim_end_matches('/');
+    let canonical = canonical.trim_end_matches('/');
+    path == canonical || path.strip_prefix("file://") == Some(canonical)
+}
+
+fn antigravity_summary_rows(canonical_root: &str) -> Vec<(String, String, i64)> {
+    let Some(path) = antigravity_data_dir().map(|p| p.join("conversation_summaries.db")) else {
+        return Vec::new();
+    };
+    antigravity_summary_rows_from_db(&path, canonical_root)
+}
+
+fn antigravity_summary_rows_from_db(
+    path: &Path,
+    canonical_root: &str,
+) -> Vec<(String, String, i64)> {
+    let read_only =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = match rusqlite::Connection::open_with_flags(path, read_only) {
+        Ok(conn) => conn,
+        Err(_) => {
+            // Antigravity removes its WAL sidecars on exit. Immutable mode
+            // reads the checkpointed database without requiring those files.
+            let uri = format!("file:{}?immutable=1", path.to_string_lossy());
+            let flags = read_only | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+            let Ok(conn) = rusqlite::Connection::open_with_flags(uri, flags) else {
+                return Vec::new();
+            };
+            conn
+        }
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT conversation_id, title, workspace_uris, last_modified_time
+         FROM conversation_summaries ORDER BY last_modified_time DESC",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok)
+        .filter_map(|(id, title, workspaces, modified)| {
+            if !session_id_is_safe(&id) {
+                return None;
+            }
+            let value: serde_json::Value = serde_json::from_str(&workspaces).ok()?;
+            let matches = value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|s| antigravity_workspace_matches(s, canonical_root))
+                })
+                .unwrap_or_else(|| {
+                    value
+                        .as_str()
+                        .is_some_and(|s| antigravity_workspace_matches(s, canonical_root))
+                });
+            if !matches {
+                return None;
+            }
+            // ISO-8601 timestamps sort lexically in the database query. Keep
+            // an order-preserving numeric token for SessionRecord consumers.
+            let millis = antigravity_timestamp_ms(&modified);
+            Some((id, title, millis))
+        })
+        .collect()
+}
+
+fn antigravity_timestamp_ms(value: &str) -> i64 {
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    let normalized = if value.as_bytes().get(10) == Some(&b' ') {
+        let mut value = value.to_string();
+        value.replace_range(10..11, "T");
+        value
+    } else {
+        value.to_string()
+    };
+    OffsetDateTime::parse(&normalized, &Rfc3339)
+        .map(|timestamp| (timestamp.unix_timestamp_nanos() / 1_000_000) as i64)
+        .unwrap_or(0)
+}
+
+fn antigravity_summary_rows_for_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Option<(String, String, i64)> {
+    let root = project_root(Some(app))?.canonicalize().ok()?;
+    antigravity_summary_rows(&root.to_string_lossy())
+        .into_iter()
+        .find(|row| row.0 == id)
+}
+
+fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, usize), String> {
+    let mut output = String::new();
+    let mut unknown = 0usize;
+    let mut pending_tool_results = Vec::new();
+    let mut emit = |record: serde_json::Value| -> Result<(), String> {
+        output.push_str(&serde_json::to_string(&record).map_err(|e| e.to_string())?);
+        output.push('\n');
+        Ok(())
+    };
+    for line in source.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = record
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let stamp = record
+            .get("created_at")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match kind {
+            "USER_INPUT" => {
+                emit(
+                    serde_json::json!({"type":"user","message":{"role":"user","content":record.get("content").and_then(|v|v.as_str()).unwrap_or("")},"timestamp":stamp}),
+                )?;
+            }
+            "PLANNER_RESPONSE" => {
+                let mut content = Vec::new();
+                if let Some(text) = record
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    content.push(serde_json::json!({"type":"text","text":text}));
+                }
+                if let Some(thinking) = record
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    content.push(serde_json::json!({"type":"thinking","thinking":thinking}));
+                }
+                if let Some(calls) = record.get("tool_calls").and_then(|v| v.as_array()) {
+                    for (i, call) in calls.iter().enumerate() {
+                        let name = call
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown_tool");
+                        let args = call
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let tool_id = format!(
+                            "agy-{}-{}",
+                            id,
+                            record
+                                .get("step_index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                * 100
+                                + i as u64
+                        );
+                        content.push(serde_json::json!({"type":"tool_use","id":tool_id,"name":name,"input":args}));
+                        pending_tool_results.push(tool_id);
+                    }
+                }
+                if content.is_empty() {
+                    content.push(serde_json::json!({"type":"text","text":"(Antigravity produced an empty planner response)"}));
+                }
+                emit(
+                    serde_json::json!({"type":"assistant","message":{"role":"assistant","content":content,"stop_reason":"end_turn"},"timestamp":stamp}),
+                )?;
+            }
+            "GENERIC" => {
+                let mut results = Vec::new();
+                for tool_id in pending_tool_results.drain(..) {
+                    let text = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    results.push(serde_json::json!({"type":"tool_result","tool_use_id":tool_id,"content":text,"is_error":record.get("status").and_then(|v|v.as_str()) == Some("ERROR")}));
+                }
+                if !results.is_empty() {
+                    emit(
+                        serde_json::json!({"type":"user","message":{"role":"user","content":results},"timestamp":stamp}),
+                    )?;
+                } else if let Some(text) = record
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    emit(
+                        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":text}]},"timestamp":stamp}),
+                    )?;
+                }
+            }
+            other => {
+                unknown += 1;
+                let label = format!(
+                    "[Antigravity {other} record] {}",
+                    record.get("content").and_then(|v| v.as_str()).unwrap_or("")
+                );
+                emit(
+                    serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":label}]},"timestamp":stamp}),
+                )?;
+            }
+        }
+    }
+    Ok((output, unknown))
+}
+
+fn antigravity_export_path<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Option<PathBuf> {
+    if !session_id_is_safe(id) {
+        return None;
+    }
+    let root = project_root(Some(app))?.canonicalize().ok()?;
+    antigravity_summary_rows(&root.to_string_lossy())
+        .iter()
+        .any(|row| row.0 == id)
+        .then_some(())?;
+    antigravity_export_path_for_project(app, id, &root)
+}
+
+fn antigravity_export_path_for_project<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    root: &Path,
+) -> Option<PathBuf> {
+    let source_dir = antigravity_data_dir()?
+        .join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs");
+    let regular = source_dir.join("transcript.jsonl");
+    let full = source_dir.join("transcript_full.jsonl");
+    let source = match (regular.metadata().ok(), full.metadata().ok()) {
+        (None, None) => return None,
+        (Some(_), None) => regular,
+        (None, Some(_)) => full,
+        (Some(a), Some(b)) if b.len() > a.len() => full,
+        (Some(_), Some(_)) => regular,
+    };
+    let export = app
+        .path()
+        .app_cache_dir()
+        .ok()?
+        .join("antigravity-sessions")
+        .join(encode_path_for_filename(&strip_unc_prefix(
+            root.to_path_buf(),
+        )))
+        .join(format!("{id}.jsonl"));
+    let source_meta = std::fs::metadata(&source).ok()?;
+    let fresh = std::fs::metadata(&export).ok().is_some_and(|m| {
+        m.len() == source_meta.len() && m.modified().ok() >= source_meta.modified().ok()
+    });
+    if !fresh {
+        let input = std::fs::read_to_string(&source).ok()?;
+        let (text, unknown) = antigravity_transcript_jsonl(id, &input).ok()?;
+        std::fs::create_dir_all(export.parent()?).ok()?;
+        atomic_write_text(&export, &text).ok()?;
+        if unknown > 0 && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "antigravity-sessions",
+                &format!("op=unknown-records session={} count={}", id, unknown),
+            );
+        }
+    }
+    Some(export)
+}
+
+fn discover_antigravity_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionRecord>, String> {
+    let root = project_root(Some(app))
+        .ok_or("could not resolve project root")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let mut rows = antigravity_summary_rows(&root.to_string_lossy());
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
+    let mut sessions = Vec::new();
+    for (id, title, updated) in rows {
+        let Some(path) = antigravity_export_path_for_project(app, &id, &root) else {
+            continue;
+        };
+        let meta = std::fs::metadata(&path).ok();
+        sessions.push(SessionRecord {
+            provider: SessionProvider::Antigravity,
+            id,
+            path,
+            mtime: (updated.max(0) / 1000) as u64,
+            size: meta.map(|m| m.len()).unwrap_or(0),
+            title: Some(title).filter(|t| !t.trim().is_empty()),
+        });
+    }
+    Ok(sessions)
+}
+
+#[cfg(test)]
+mod antigravity_transcript_tests {
+    use super::{
+        antigravity_transcript_jsonl, antigravity_workspace_matches, st_parse_lines_to_turns,
+    };
+
+    #[test]
+    fn pinned_antigravity_records_project_user_assistant_and_tools() {
+        let source =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
+        let (jsonl, _) = antigravity_transcript_jsonl("fixture-id", source).unwrap();
+        let turns = st_parse_lines_to_turns(&jsonl);
+        assert!(turns.iter().any(|turn| turn["role"] == "user"));
+        assert!(turns.iter().any(|turn| turn["role"] == "assistant"));
+        assert!(turns
+            .iter()
+            .flat_map(|turn| turn["entries"].as_array().into_iter().flatten())
+            .any(|entry| entry["kind"] == "tool"));
+    }
+
+    #[test]
+    fn unknown_antigravity_record_gets_visible_stub() {
+        let (jsonl, unknown) = antigravity_transcript_jsonl(
+            "fixture-id",
+            r#"{"type":"FUTURE_EVENT","content":"future detail"}"#,
+        )
+        .unwrap();
+        assert_eq!(unknown, 1);
+        let turns = st_parse_lines_to_turns(&jsonl);
+        assert!(turns.iter().any(|turn| turn["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Antigravity FUTURE_EVENT record")));
+    }
+
+    #[test]
+    fn workspace_uris_match_canonical_project_paths() {
+        assert!(antigravity_workspace_matches(
+            "file:///work/project%20one",
+            "/work/project one"
+        ));
+        assert!(!antigravity_workspace_matches(
+            "file:///work/project-two",
+            "/work/project"
+        ));
+    }
+
+    #[test]
+    fn denied_tool_result_is_preserved_as_an_error() {
+        let source =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-denied.jsonl");
+        let (jsonl, _) = antigravity_transcript_jsonl("fixture-id", source).unwrap();
+        let turns = st_parse_lines_to_turns(&jsonl);
+        assert!(turns
+            .iter()
+            .flat_map(|turn| turn["entries"].as_array().into_iter().flatten())
+            .any(|entry| entry["kind"] == "tool" && entry["isError"] == true));
+    }
+
+    #[test]
+    fn summary_reader_handles_checkpointed_wal_database_without_sidecars() {
+        use super::antigravity_summary_rows_from_db;
+        use std::path::PathBuf;
+
+        let path = std::env::temp_dir().join(format!(
+            "bram-antigravity-summary-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id TEXT, title TEXT NOT NULL DEFAULT '',
+                    workspace_uris TEXT NOT NULL, last_modified_time TEXT NOT NULL
+                 );
+                 INSERT INTO conversation_summaries
+                 VALUES ('fixture-session', 'Fixture title', '[\"file:///fixture/project\"]',
+                         '2026-10-31 21:17:11.439086+00:00');",
+            )
+            .unwrap();
+        }
+        assert!(!PathBuf::from(format!("{}-wal", path.display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", path.display())).exists());
+        let rows = antigravity_summary_rows_from_db(&path, "/fixture/project");
+        assert_eq!(
+            rows,
+            vec![(
+                "fixture-session".into(),
+                "Fixture title".into(),
+                1_793_481_431_439
+            )]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn summary_timestamps_parse_space_and_rfc3339_forms() {
+        use super::antigravity_timestamp_ms;
+
+        assert_eq!(
+            antigravity_timestamp_ms("2026-10-31 21:17:11.439086+00:00"),
+            1_793_481_431_439
+        );
+        assert_eq!(
+            antigravity_timestamp_ms("2026-10-31T21:17:11.439086Z"),
+            1_793_481_431_439
+        );
+        assert_eq!(antigravity_timestamp_ms("not a timestamp"), 0);
+    }
+}
+
 #[cfg(test)]
 mod opencode_rename_tests {
     use super::opencode_set_session_title_in;
@@ -33545,7 +33983,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
             SessionProvider::Claude => discover_claude_sessions(app, limit)?,
             SessionProvider::Codex => discover_codex_sessions(app, limit)?,
             SessionProvider::Opencode => discover_opencode_sessions(app, limit)?,
-            SessionProvider::Antigravity => Vec::new(),
+            SessionProvider::Antigravity => discover_antigravity_sessions(app, limit)?,
         };
         return Ok((provider, sessions));
     }
@@ -33556,7 +33994,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
         SessionProvider::Claude => claude,
         SessionProvider::Codex => codex,
         SessionProvider::Opencode => Vec::new(),
-        SessionProvider::Antigravity => Vec::new(),
+        SessionProvider::Antigravity => discover_antigravity_sessions(app, None)?,
     };
     Ok((provider, sessions))
 }
@@ -33623,7 +34061,7 @@ fn session_meta<R: tauri::Runtime>(
         SessionProvider::Claude => count_claude_sessions(app)?,
         SessionProvider::Codex => count_codex_sessions(app)?,
         SessionProvider::Opencode => discover_opencode_sessions(app, None)?.len(),
-        SessionProvider::Antigravity => 0,
+        SessionProvider::Antigravity => discover_antigravity_sessions(app, None)?.len(),
     };
     let discovery_notes = if provider == SessionProvider::Claude && count == 0 {
         claude_sessions_dir_lookup(app)
@@ -35287,6 +35725,15 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
                 (s.path, token, s.size, s.id, SessionProvider::Opencode)
             }),
     );
+    files_vec.extend(
+        discover_antigravity_sessions(app, None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| {
+                let token = opencode_export_change_token(&s.path).unwrap_or(s.mtime * 1000);
+                (s.path, token, s.size, s.id, SessionProvider::Antigravity)
+            }),
+    );
     stats.discover_ms = discover_started.elapsed().as_millis();
     stats.files = files_vec.len();
     let intent_started = std::time::Instant::now();
@@ -35330,7 +35777,13 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         // a turn ends or the session is renamed (it is rewritten whole, never
         // appended), so withholding its small final change would leave it
         // stale with no later change to bring the pass back.
-        if needs_index && !forced && provider != SessionProvider::Opencode {
+        if needs_index
+            && !forced
+            && !matches!(
+                provider,
+                SessionProvider::Opencode | SessionProvider::Antigravity
+            )
+        {
             if let Ok(Some((prev_size, indexed_at))) = search_index::indexed_meta(&conn, &path_str)
             {
                 let age = (unix_now_ms() / 1000) - indexed_at;
@@ -35378,7 +35831,10 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         // search-index-opencode-sessions: an export is rewritten whole, so
         // earlier records can change while the file grows; the incremental
         // (append-only) extractor would keep stale text. Parse it cold.
-        let extracted = if provider == SessionProvider::Opencode {
+        let extracted = if matches!(
+            provider,
+            SessionProvider::Opencode | SessionProvider::Antigravity
+        ) {
             opencode_session_search_data(&path)
         } else {
             claude_session_search_data(&path)
@@ -37891,7 +38347,10 @@ fn live_session_id<R: tauri::Runtime>(
             }),
         // No live-session cache and no discovery for Antigravity yet
         // (antigravity-sessions-browser).
-        SessionProvider::Antigravity => None,
+        SessionProvider::Antigravity => latest_session_path_for_provider(app, provider)
+            .ok()
+            .flatten()
+            .and_then(|p| session_id_for_path(provider, &p)),
     }
 }
 
@@ -37937,6 +38396,9 @@ fn delete_session<R: tauri::Runtime>(
         .into_iter()
         .find(|session| session.id == id)
         .ok_or("session not found")?;
+    if provider == SessionProvider::Antigravity {
+        return Err("Antigravity sessions can't be deleted yet".to_string());
+    }
     // delete-live-session-leaves-stub (2026-10-27 20:49Z): deleting the
     // session its CLI was running let the CLI rewrite the file at exit, a
     // 1 KB stub that its partner then resumed into "No conversation found".
@@ -38397,7 +38859,7 @@ fn latest_session_path<R: tauri::Runtime>(
         SessionProvider::Codex => latest_codex_session_path(app)?,
         SessionProvider::Opencode => current_opencode_session_path(app)?,
         // No session files to compare against the agent hint yet.
-        SessionProvider::Antigravity => None,
+        SessionProvider::Antigravity => latest_session_path_for_provider(app, provider)?,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -38423,7 +38885,10 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
         SessionProvider::Opencode => current_opencode_session_path(app),
-        SessionProvider::Antigravity => Ok(None),
+        SessionProvider::Antigravity => Ok(discover_antigravity_sessions(app, Some(1))?
+            .into_iter()
+            .next()
+            .map(|s| s.path)),
     }
 }
 

@@ -11515,8 +11515,23 @@ function __bramWidestOverflow(page) {
     var txt = (el.textContent || "").trim().slice(0, 40);
     return el.tagName.toLowerCase() + (cls ? "." + cls : "") + (tid ? " [" + tid + "]" : "") +
       " " + Math.round(r.width) + "w right=" + Math.round(r.right) + " limit=" + Math.round(limit) +
-      (txt ? " \"" + txt + "\"" : "");
+      (txt ? " \"" + txt + "\"" : "") + __bramOverflowCause(el);
   });
+}
+
+// What pushed an overflowing element right: for it and three ancestors, its
+// left edge and each earlier sibling that takes up width, as
+// " <left=L sib=Wx'text'...". Part of the same flip diagnostic.
+function __bramOverflowCause(el) {
+  var out = "";
+  for (var n = el, depth = 0; n && depth < 4; n = n.parentElement, depth++) {
+    out += " <left=" + Math.round(n.getBoundingClientRect().left);
+    for (var s = n.previousElementSibling; s; s = s.previousElementSibling) {
+      var w = Math.round(s.getBoundingClientRect().width);
+      if (w > 0) out += " sib=" + w + "w'" + (s.textContent || "").trim().slice(0, 24) + "'";
+    }
+  }
+  return out;
 }
 
 window.bramSubscribeTranscriptSplitHeight = (function () {
@@ -14954,6 +14969,42 @@ window.__bramVisibleFooterAgents = function (roster, dismissed) {
   });
 };
 
+// subagent-chips-show-selection: the footer chips, newest first, capped at 3.
+// A selected agent is always among them, taking the last slot if it would
+// otherwise be in "+N more": selection is the chip's fill, so a selection
+// needs a chip.
+window.__bramFooterChipAgents = function (roster, dismissed, selectedId) {
+  var visible = window.__bramVisibleFooterAgents(roster, dismissed);
+  var chips = visible.slice(-3).reverse();
+  var selected = visible.slice(0, -3).filter(function (a) { return a.agentId === selectedId; });
+  return selected.length ? chips.slice(0, 2).concat(selected) : chips;
+};
+
+// The rest of the visible agents for the "+N more" menu, newest first.
+window.__bramFooterOverflowAgents = function (roster, dismissed, selectedId) {
+  var chips = window.__bramFooterChipAgents(roster, dismissed, selectedId);
+  return window.__bramVisibleFooterAgents(roster, dismissed).filter(function (a) {
+    return chips.indexOf(a) === -1;
+  }).reverse();
+};
+
+// The transcript selection that still has a chip: the agent id, or "" (Main)
+// once the agent is dismissed or leaves the roster. One chip is always
+// selected, and the Transcript doesn't stay on a stream with none. A roster
+// that hasn't loaded keeps the selection.
+window.__bramLiveTranscriptAgent = function (agentId, roster, dismissed) {
+  if (!agentId || !roster) return agentId;
+  var live = window.__bramVisibleFooterAgents(roster, dismissed).some(function (a) {
+    return a.agentId === agentId;
+  });
+  return live ? agentId : "";
+};
+
+// Main's chip takes the same running glyph as a subagent's.
+window.__bramMainChipLabel = function (status) {
+  return status && status.state === "working" ? "Main ●" : "Main";
+};
+
 // The dismissed agents still present in the current roster — drives the
 // "N hidden" recovery control (count + restore menu). Empty when nothing
 // hidden is in the live roster, so the control is absent unless there is
@@ -14981,69 +15032,32 @@ window.__bramRunningSubagentCount = function (roster) {
   return n;
 };
 
-// Footer session-info line with the transcript viewport spliced in after
-// the provider token: "CLAUDE · Main · july5 · id …" or
-// "CLAUDE · subagent: <description> · july5 · id …". The viewport lives
-// HERE rather than in chip styling so dropdown-overflow agents get the
-// same selection indicator as chip agents.
-//
-// Returned as {pre, bold, post} segments so the viewport NAME — "Main" or
-// the subagent's description — renders bold while everything around it
-// (provider, "subagent:" label, model, session meta) stays regular. The
-// name is the tie between the chip strip and the stream being viewed; the
-// chrome around it is not. The "subagent: " label and " (Model)" suffix
-// deliberately sit outside the bold segment. Main.xmlui renders the three
-// segments as adjacent Texts; __bramFooterSessionLine joins them, so the
-// string and segmented forms can never disagree.
-window.__bramFooterSessionLineParts = function (session, agentId, roster) {
+// Footer session-info line: "CLAUDE (Opus 5.5) · Session: july5 · id …". It
+// describes the session only, and doesn't change with the transcript viewed:
+// the chips carry selection (subagent-chips-show-selection). "Session:" types
+// the title, which is otherwise a freeform phrase beside the freeform chips.
+window.__bramFooterSessionLine = function (session, roster) {
   var meta = window.__bramSessionMetaLine(session) || "";
-  var agents = (roster && roster.agents) || [];
-  var mainModel = roster && roster.mainModel;
-  // Zero-subagent sessions still get the plain meta line unless we have
-  // the main model to report; a bare "Main" is footer noise.
-  if (!agentId && agents.length === 0 && !mainModel) return { pre: meta, bold: "", post: "" };
-  var viewPre = "";
-  var viewBold = "Main";
-  var viewPost = "";
-  if (agentId) {
-    var match = null;
-    for (var i = 0; i < agents.length; i++) {
-      if (agents[i].agentId === agentId) { match = agents[i]; break; }
-    }
-    viewPre = "subagent: ";
-    viewBold = (match && (match.description || match.agentType)) || agentId;
-    if (match && match.model) viewPost = " (" + window.__bramPrettyModel(match.model) + ")";
-  } else if (mainModel) {
-    viewPost = " (" + window.__bramPrettyModel(mainModel) + ")";
-  }
-  if (!meta) return { pre: viewPre, bold: viewBold, post: viewPost };
+  var model = roster && roster.mainModel ? " (" + window.__bramPrettyModel(roster.mainModel) + ")" : "";
+  if (!meta) return model.trim();
+  if (!session.provider) return "Session: " + meta;
   var sp = meta.indexOf(" ");
-  if (sp < 0) return { pre: meta + " · " + viewPre, bold: viewBold, post: viewPost };
-  return {
-    pre: meta.slice(0, sp) + " · " + viewPre,
-    bold: viewBold,
-    post: viewPost + " ·" + meta.slice(sp),
-  };
+  return meta.slice(0, sp) + model + " · Session:" + meta.slice(sp);
 };
 // composer-addressee-hugs-box (Jon): the footer status as ONE Markdown
 // paragraph, so a narrow pane wraps it at word boundaries like a sentence.
 // As separate Text items under HStack wrapContent it broke per item
 // ("CLAUDE ·Main" alone, then the rest, then "· Indexed" on its own line).
-// Only the viewport name is bold; every join is the same " · ". Session and
-// agent names are data, so Markdown punctuation is escaped.
-window.__bramFooterStatusMarkdown = function (parts, indexStatus) {
+// Every join is the same " · ". Session names are data, so Markdown
+// punctuation is escaped.
+window.__bramFooterStatusMarkdown = function (line, indexStatus) {
   var indexLabel = indexStatus ? window.__bramFooterIndexLabel(indexStatus) : "";
   var esc = function (t) {
     return String(t || "").replace(/([\\`*_{}\[\]()#+\-.!|<>~])/g, "\\$1");
   };
-  var p = parts || {};
-  var line = esc(p.pre) + (p.bold ? "**" + esc(p.bold) + "**" : "") + esc(p.post);
-  if (indexLabel) line += (line ? " · " : "") + esc(indexLabel);
-  return line;
-};
-window.__bramFooterSessionLine = function (session, agentId, roster) {
-  var p = window.__bramFooterSessionLineParts(session, agentId, roster);
-  return p.pre + p.bold + p.post;
+  var out = esc(line);
+  if (indexLabel) out += (out ? " · " : "") + esc(indexLabel);
+  return out;
 };
 
 // One-line header for a subagent view (Transcript header + inline peek),

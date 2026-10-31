@@ -63483,8 +63483,9 @@ mod codex_subagent_tests {
 
     fn rollout(dir: &Path, name: &str, specimen: &str) -> PathBuf {
         let path = dir.join(name);
-        let cwd = canonical_path_string(dir);
-        std::fs::write(&path, specimen.replace("<workspace>", &cwd)).unwrap();
+        // JSON-encoded: a Windows path's backslashes would make invalid JSON.
+        let cwd = serde_json::to_string(&canonical_path_string(dir)).unwrap();
+        std::fs::write(&path, specimen.replace("\"<workspace>\"", &cwd)).unwrap();
         path
     }
 

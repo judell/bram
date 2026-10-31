@@ -597,8 +597,8 @@ the running agent.
 
 ## Layout
 
-- `Main.xmlui`, `components/`, `resources/`, `Globals.xs`,
-  `config.json`, `index.html` — the XMLUI app at the repo root.
+- `orientation/` — this repo's target app, an overview and architecture
+  site. The root `index.html` redirects to it.
 - `app/` — parent shell (Tauri webview entry, terminal wiring, vendor
   scripts, and `__shell/helpers.js` that the target app includes).
 - `src-tauri/` — Rust backend (PTY for the terminal, custom `tauri://`

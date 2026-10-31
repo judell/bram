@@ -1,0 +1,67 @@
+flowchart TD
+  host["Bram host"]
+  wl["Worklist files"]
+  auth["Authorization record"]
+  claim["Execution claim"]
+  refs["Claim refs"]
+  hist["Worklist history"]
+  ledger["Audit ledger"]
+  mirror["State mirror"]
+  search["Search index"]
+  trace["Trace log"]
+  tx["Provider transcripts"]
+  guard["bram-guard"]
+  pane["Agent pane"]
+  store["Pane browser storage"]
+  remote["Git remote"]
+
+  wl -->|"snapshot on change"| hist
+  host -->|"records approval"| auth
+  host -->|"writes claim"| claim
+  host -->|"captures boundary trees"| refs
+  host -->|"appends decisions"| ledger
+  host -->|"mirrors writes"| mirror
+  host -->|"appends trace lines"| trace
+  tx -->|"indexed into FTS5"| search
+  tx -->|"read by host"| host
+  auth -->|"read by guard"| guard
+  pane -->|"saves decisions and focus"| store
+  refs -.->|"shared only by explicit refspec"| remote
+
+  %% Invisible links stack the nodes into short rows, top to bottom.
+  claim ~~~ refs
+  claim ~~~ ledger
+  refs ~~~ mirror
+  ledger ~~~ trace
+  mirror ~~~ guard
+  trace ~~~ remote
+  guard ~~~ wl
+  remote ~~~ pane
+
+%% tip: Bram host :: The Rust process. Most files below are written only by it; the agent writes worklist.json and drafts.
+%% tip: Worklist files :: resources/worklist.json (metadata) and resources/worklist-drafts/<id>.md (before/after prose). Gitignored in this repo.
+%% tip: Authorization record :: resources/.worklist-authorization.json. One slot, 30 minute TTL, gitignored.
+%% tip: Execution claim :: resources/.inflight-claim.json. Single slot; cleared at turn end and on startup if stale.
+%% tip: Claim refs :: refs/bram/claims/* point at trees; ordered ledger in resources/.claim-intervals.json.
+%% tip: Worklist history :: resources/worklist-history/<unix_ms>.json and .md snapshots. Host-written.
+%% tip: Audit ledger :: resources/audit-ledger.jsonl. Metadata only, best-effort, not tamper-evident.
+%% tip: State mirror :: SQLite shadow of the authorization and claim files. Files stay the truth in phase A.
+%% tip: Search index :: SQLite FTS5 outside the repo, one database per project, behind GET /__search.
+%% tip: Trace log :: resources/bram-traces/bram-trace.log, archived each run. On by default.
+%% tip: Provider transcripts :: Claude JSONL and Codex rollouts live under the user's home, not the repo.
+%% tip: bram-guard :: Reads resources/.worklist-authorization.json directly and uses its existence as the project-root marker.
+%% tip: Agent pane :: The XMLUI app. Page-local state is lost on tab switch; session state is held above the pages.
+%% tip: Pane browser storage :: localStorage for decisions, sessionStorage for focus; project-scoped keys carry a project suffix.
+%% tip: Git remote :: A normal push transfers branches, not refs/bram/*.
+%% tip: snapshot on change :: A filesystem watcher calls maybe_snapshot_worklist.
+%% tip: records approval :: Written through the record_worklist_action_authorization Tauri command.
+%% tip: writes claim :: write_inflight_claim_sentinel, called in the same command as the approval.
+%% tip: captures boundary trees :: capture_claim_tree uses a temporary index so the real index is untouched.
+%% tip: appends decisions :: Authorization decisions and gated commits, ungated by the trace toggle.
+%% tip: mirrors writes :: mirror_* calls run after each successful file write; errors are trace-only.
+%% tip: appends trace lines :: append_bram_trace_line, one line per waypoint.
+%% tip: indexed into FTS5 :: A background indexer covers sessions, commits, issues and worklist history.
+%% tip: read by host :: The host watches and projects transcripts for turn state and the Transcript tab.
+%% tip: read by guard :: Per-call, from a separate process.
+%% tip: saves decisions and focus :: Decisions persist; focus dies with the session.
+%% tip: shared only by explicit refspec :: Dashed: claim refs are machine-local unless someone pushes them on purpose.

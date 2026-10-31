@@ -1,0 +1,39 @@
+flowchart TD
+  act["Pane action"]
+  drafts["Draft files"]
+  queue["Intent queue"]
+  pty["PTY"]
+  cli["Agent CLI"]
+  log["Provider transcript"]
+  spine["Turn-state spine"]
+  pane["Agent pane"]
+
+  act -->|"toTurn via Tauri command"| queue
+  act -->|"writes feedback draft"| drafts
+  queue -->|"drain and bracketed paste"| pty
+  pty -->|"terminal input"| cli
+  cli -->|"appends session log"| log
+  cli -->|"terminal output"| spine
+  log -->|"JSONL turn-end scan"| spine
+  spine -->|"turn-state-changed event"| pane
+  log -->|"projected turns"| pane
+  cli -.->|"reads draft by reference"| drafts
+
+%% tip: Pane action :: A click on Start, Commit or Drop, or a message typed in the message box.
+%% tip: Draft files :: resources/feedback-drafts and resources/outbound-turns hold full-fidelity text so the PTY carries only a short frame.
+%% tip: Intent queue :: resources/.pty-intent.jsonl, drained by the host under a lock.
+%% tip: PTY :: The pseudo-terminal the agent CLI runs in.
+%% tip: Agent CLI :: claude, codex or opencode, reading the PTY like a person at a keyboard.
+%% tip: Provider transcript :: Claude and Codex write JSONL session files; OpenCode keeps sessions in SQLite.
+%% tip: Turn-state spine :: The host's single record of what the turn is doing: phase, provider, pending menu, completion cursor.
+%% tip: Agent pane :: Footer status, Transcript and Worklist render from the spine and the projection.
+%% tip: toTurn via Tauri command :: window.toTurn invokes queue_pty_intent; nothing reaches the PTY from the pane directly.
+%% tip: writes feedback draft :: Per-item feedback is written to disk and only a small reference travels in the turn.
+%% tip: drain and bracketed paste :: The host drains the queue, holds sends during menus or boot, then pastes with bracketed-paste markers and a separate Enter.
+%% tip: terminal input :: Bytes written to the PTY master.
+%% tip: appends session log :: The agent records the turn in its own transcript, outside Bram.
+%% tip: terminal output :: PTY activity is the fastest signal but noisy and prone to stale redraws.
+%% tip: JSONL turn-end scan :: Structured, authoritative for completion, but delayed.
+%% tip: turn-state-changed event :: Emitted only when phase, provider, turn stamp or menu changes.
+%% tip: projected turns :: The /__turns route normalizes transcripts and outbound envelopes into one list.
+%% tip: reads draft by reference :: Dashed: only works if the agent opens the referenced file.

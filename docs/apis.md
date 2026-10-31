@@ -732,7 +732,7 @@ The Inbox tab's data: what is waiting on the user, in four lanes.
 
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
-| `/__needs-you` | HTTP GET | — | `{ verifiedAtMs, checking, lanes: { needsYouNow, yourDecision, othersHands, looseEnds }, notes }` | agent pane iframe (Inbox tab) |
+| `/__needs-you` | HTTP GET | — | `{ verifiedAtMs, checking, lanes: { needsYouNow, yourDecision, othersHands, looseEnds }, notes }`. Forge rows carry `excerpt`: the first line of real content in the thread's latest comment (a Bram forge signature line, blank lines and leading `#`/`>` marks skipped; whitespace collapsed; capped at 160 chars with an ellipsis; empty when the comment is only a signature). It comes from the existing latest-comment fetch, with no extra `gh` call. Untrusted text: render as plain text, never Markdown. | agent pane iframe (Inbox tab) |
 | `/__needs-you/dismiss` | HTTP POST | `{ id, activityMarker }` (both required; 400 otherwise) | `{ ok: true }` — hides a forge item until new activity changes its marker; emits `needs-you-changed`. | agent pane iframe |
 
 ## Drift policy

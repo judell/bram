@@ -3778,7 +3778,88 @@ window.__bramAlertsKey = function (item) {
   if (!item) return "";
   return (item.id || "") + "|" + (item.activityMarker || item.activityAt || "");
 };
+// alerts-show-whats-new-and-what-was-said: arriving at Alerts snapshots which
+// rows (ALL lanes) are unseen BEFORE marking them seen, and keeps the snapshot
+// until you leave the page, so the rows can wear a New badge. Both the nav
+// pulse binding (Main.xmlui) and the Inbox page call __bramAlertsSnapshot, in
+// whatever order the engine evaluates them: on the page it unions newly
+// unseen keys into the snapshot, then marks them seen, so whichever runs
+// first captures and the other sees them already seen but still in the
+// snapshot. Off the page it clears the snapshot. The pulse itself stays on
+// Needs you now only.
+window.__bramAlertsSeenRead = function (storeKey) {
+  try {
+    return JSON.parse(sessionStorage.getItem(storeKey) || "{}") || {};
+  } catch (e) {
+    return {};
+  }
+};
+window.__bramAlertsAllItems = function (needsYou) {
+  var lanes = (needsYou && needsYou.lanes) || {};
+  var out = [];
+  var names = ["needsYouNow", "yourDecision", "othersHands", "looseEnds"];
+  for (var n = 0; n < names.length; n++) {
+    var arr = lanes[names[n]];
+    if (Array.isArray(arr)) out = out.concat(arr);
+  }
+  return out;
+};
+window.__bramAlertsSnapshotMap = {};
+window.__bramAlertsSnapshot = function (needsYou, pathname) {
+  if (pathname !== "/needs-you") {
+    window.__bramAlertsSnapshotMap = {};
+    return window.__bramAlertsSnapshotMap;
+  }
+  var storeKey = window.__bramProjectScopedKey
+    ? window.__bramProjectScopedKey("bram.alertsSeen")
+    : null;
+  if (!storeKey) return window.__bramAlertsSnapshotMap;
+  var items = window.__bramAlertsAllItems(needsYou);
+  var seen = window.__bramAlertsSeenRead(storeKey);
+  var snap = window.__bramAlertsSnapshotMap;
+  var added = 0;
+  var changed = false;
+  for (var i = 0; i < items.length; i++) {
+    var k = window.__bramAlertsKey(items[i]);
+    if (k && !seen[k]) {
+      seen[k] = 1;
+      changed = true;
+      if (!snap[k]) {
+        snap[k] = 1;
+        added++;
+      }
+    }
+  }
+  if (changed) {
+    try {
+      sessionStorage.setItem(storeKey, JSON.stringify(seen));
+    } catch (e) {}
+  }
+  if (added) {
+    window.__bramIframeTrace("alerts-new-snapshot", { added: added, total: Object.keys(snap).length });
+  }
+  return snap;
+};
+window.__bramAlertsIsNew = function (snap, item) {
+  return !!(snap && snap[window.__bramAlertsKey(item)]);
+};
+window.__bramAlertsAccent = function (snap, item) {
+  return window.__bramAlertsIsNew(snap, item)
+    ? "3px solid var(--xmlui-color-primary-500)"
+    : "";
+};
+// The row's detail line. With an excerpt the comment's own words replace the
+// "GitHub notification (reason)." tail, keeping the replier's name ("Asish's
+// Claude replied"); without one the host's detail stands.
+window.__bramAlertsDetail = function (item) {
+  var d = (item && item.detail) || "";
+  if (!item || !item.excerpt) return d;
+  var cut = d.indexOf(" \u00b7 GitHub notification");
+  return cut > 0 ? d.slice(0, cut) : d;
+};
 window.__bramAlertsShouldPulse = function (needsYou, pathname) {
+  var snap = window.__bramAlertsSnapshot(needsYou, pathname);
+  if (pathname === "/needs-you") return false;
   var items =
     needsYou && needsYou.lanes && Array.isArray(needsYou.lanes.needsYouNow)
       ? needsYou.lanes.needsYouNow
@@ -3786,31 +3867,7 @@ window.__bramAlertsShouldPulse = function (needsYou, pathname) {
   var storeKey = window.__bramProjectScopedKey
     ? window.__bramProjectScopedKey("bram.alertsSeen")
     : null;
-  var seen = {};
-  if (storeKey) {
-    try {
-      seen = JSON.parse(sessionStorage.getItem(storeKey) || "{}") || {};
-    } catch (e) {
-      seen = {};
-    }
-  }
-  if (pathname === "/needs-you") {
-    if (!storeKey) return false;
-    var changed = false;
-    for (var i = 0; i < items.length; i++) {
-      var k = window.__bramAlertsKey(items[i]);
-      if (k && !seen[k]) {
-        seen[k] = 1;
-        changed = true;
-      }
-    }
-    if (changed) {
-      try {
-        sessionStorage.setItem(storeKey, JSON.stringify(seen));
-      } catch (e) {}
-    }
-    return false;
-  }
+  var seen = storeKey ? window.__bramAlertsSeenRead(storeKey) : {};
   for (var j = 0; j < items.length; j++) {
     if (!seen[window.__bramAlertsKey(items[j])]) return true;
   }

@@ -69090,6 +69090,117 @@ fn needs_you_replier_phrase(author: &str, first_line: &str) -> Option<String> {
     Some(format!("{} replied", author))
 }
 
+// alerts-show-whats-new-and-what-was-said: the comment's own words, for the
+// row to show under its title. The first line of real content: a Bram forge
+// signature line (agent or worklist-mirror form), blank lines, and bare
+// Markdown marks are skipped; leading heading/quote/emphasis marks are
+// stripped from the line kept. Whitespace is collapsed and the length capped
+// (in chars, with an ellipsis). Untrusted text: the pane renders it as plain
+// Text, never Markdown. Empty when the comment holds nothing but a signature.
+const NEEDS_YOU_EXCERPT_MAX_CHARS: usize = 160;
+
+fn needs_you_excerpt(body: &str) -> String {
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let bare =
+            line.trim_start_matches(|ch: char| matches!(ch, '_' | '*' | '>' | '#' | '-' | ' '));
+        if guard_policy::parse_agent_signature(bare).is_some()
+            || worklist_mirror_signature_speaker(bare).is_some()
+        {
+            continue;
+        }
+        let text = line
+            .trim_start_matches(|ch: char| matches!(ch, '#' | '>' | ' '))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.is_empty()
+            || text
+                .chars()
+                .all(|ch| matches!(ch, '-' | '*' | '_' | '=' | '`'))
+        {
+            continue;
+        }
+        let text = strip_markdown_escapes(&text);
+        if text.chars().count() > NEEDS_YOU_EXCERPT_MAX_CHARS {
+            let cut: String = text.chars().take(NEEDS_YOU_EXCERPT_MAX_CHARS).collect();
+            return format!("{}\u{2026}", cut.trim_end());
+        }
+        return text;
+    }
+    String::new()
+}
+
+// The excerpt renders as plain text, so a Markdown escape ("10\. Cool") would
+// show its backslash.
+fn strip_markdown_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|next| next.is_ascii_punctuation()) {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod needs_you_excerpt_tests {
+    use super::{needs_you_excerpt, NEEDS_YOU_EXCERPT_MAX_CHARS};
+
+    const SIG: &str = "Jon's Claude (Bram 0.6.6, main thread, Fable 5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+
+    #[test]
+    fn markdown_escapes_do_not_show() {
+        assert_eq!(needs_you_excerpt(r"10\. Cool, thanks"), "10. Cool, thanks");
+        assert_eq!(needs_you_excerpt(r"a \\ b"), r"a \ b");
+        assert_eq!(needs_you_excerpt(r"C:\temp"), r"C:\temp");
+    }
+
+    #[test]
+    fn plain_comment_is_its_first_line() {
+        assert_eq!(
+            needs_you_excerpt("The gate toggle settles it.\nSecond line."),
+            "The gate toggle settles it."
+        );
+    }
+
+    #[test]
+    fn signature_only_comment_is_empty() {
+        assert_eq!(needs_you_excerpt(SIG), "");
+        assert_eq!(needs_you_excerpt(&format!("{}\n\n", SIG)), "");
+    }
+
+    #[test]
+    fn signature_then_heading_yields_the_heading_text() {
+        let body = format!("{}\n\n## Findings on the gate\nmore", SIG);
+        assert_eq!(needs_you_excerpt(&body), "Findings on the gate");
+    }
+
+    #[test]
+    fn emphasized_signature_is_still_skipped() {
+        let body = format!("_{}_\nReal content", SIG);
+        assert_eq!(needs_you_excerpt(&body), "Real content");
+    }
+
+    #[test]
+    fn long_line_is_capped_with_ellipsis() {
+        let out = needs_you_excerpt(&"word ".repeat(100));
+        assert!(out.chars().count() <= NEEDS_YOU_EXCERPT_MAX_CHARS);
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn empty_body_is_empty() {
+        assert_eq!(needs_you_excerpt(""), "");
+        assert_eq!(needs_you_excerpt("\n  \n---\n"), "");
+    }
+}
+
 // worklist-mirror-comments-signed: the mirror signs as "<owner>'s Bram (Bram
 // <version>, posted automatically, …)". Comments posted before that wording
 // say "worklist mirror, host" instead (Bram-internal jargon a reader can't
@@ -69802,6 +69913,7 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
         // pre-change detail was reason-only — "I need to know who replied
         // in order to judge what to do"). One call, one extra jq field.
         let mut replier: Option<String> = None;
+        let mut excerpt = String::new();
         let comments_url = format!(
             "{}/comments?per_page=100",
             subj_url.replace("/pulls/", "/issues/")
@@ -69813,21 +69925,27 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                     "api",
                     comments_url.as_str(),
                     "--jq",
-                    ".[-1] | ((.user.login // \"\") + \"\\n\" + ((.body // \"\") | split(\"\\n\")[0]))",
+                    ".[-1] | ((.user.login // \"\") + \"\\n\" + ((.body // \"\")[0:4000]))",
                 ],
                 "gh last comment author",
             ) {
                 let raw = String::from_utf8_lossy(&cout).to_string();
-                let (author, first_line) = match raw.split_once('\n') {
-                    Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
+                // alerts-show-whats-new-and-what-was-said: the same call now
+                // returns the body's head (not just its first line); the
+                // first line still names the replier, and the excerpt skips
+                // a signature to reach the content.
+                let (author, comment_body) = match raw.split_once('\n') {
+                    Some((a, b)) => (a.trim().to_string(), b.to_string()),
                     None => (raw.trim().to_string(), String::new()),
                 };
+                let first_line = comment_body.lines().next().unwrap_or("").trim().to_string();
                 if !author.is_empty() {
                     if author.eq_ignore_ascii_case(login.as_str()) {
                         continue;
                     }
                     verified = true;
                     replier = needs_you_replier_phrase(&author, &first_line);
+                    excerpt = needs_you_excerpt(&comment_body);
                 }
             }
         }
@@ -69896,6 +70014,7 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                     Some(who) => format!("{} · GitHub notification ({}).", who, reason),
                     None => format!("GitHub notification (reason: {}).", reason),
                 },
+                "excerpt": excerpt,
                 "link": "/issues",
                 // The thread's web page: replying is the act that clears the
                 // item, and GitHub is where replying happens — so Open goes

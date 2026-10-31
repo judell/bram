@@ -124,7 +124,7 @@
            on the Transcript, which unmounts this modal. -->
       <property name="titleTemplate">
         <HStack gap="$space-2" verticalAlignment="center">
-          <Text value="{selectedHit ? selectedHit.source : ''}" fontSize="inherit" fontWeight="inherit" />
+          <Text value="{selectedHit ? selectedHit.source : ''}" fontSize="inherit" fontWeight="inherit" width="*" overflowMode="flow" />
           <Button when="{selectedHit &amp;&amp; selectedHit.type === 'session'}"
             icon="swap" variant="ghost" size="xs"
             tooltip="Switch to this session (restarts the agent on it)"

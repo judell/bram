@@ -1,8 +1,8 @@
 # Subagent transcripts
 
-How Bram shows a subagent's transcript, and what Codex and OpenCode need to
-get the same treatment. Today only Claude's subagents appear. The choice of
-how to find Codex and OpenCode children is recorded in
+How Bram shows a subagent's transcript, and what OpenCode needs to get the
+same treatment. Claude's and Codex's subagents appear today. The choice of how
+to find Codex and OpenCode children is recorded in
 [`decisions/2026-10-30-subagent-transcript-provider-discovery.md`](decisions/2026-10-30-subagent-transcript-provider-discovery.md);
 this doc covers everything around it.
 
@@ -18,45 +18,48 @@ child's activity is never the main session's activity.
 
 ## The provider seam
 
-| | Claude (shipped) | Codex (gap) | OpenCode (gap) |
+| | Claude (shipped) | Codex (shipped) | OpenCode (gap) |
 |---|---|---|---|
 | Where the child is | `<sid>/subagents/agent-<id>.jsonl`, or under `workflows/wf_*/` | its own rollout in `~/.codex/sessions/<y>/<m>/<d>/` | a row in `session_v2` |
 | Link to parent | the directory | `parent_thread_id` in `session_meta` | `parent_id` |
 | Child's id | `agent-<id>` | `id` (its `session_id` is the **parent's**) | the row's `id` |
 | Label | `.meta.json`: `agentType`, `description`, `toolUseId` | `agent_path`, `agent_nickname` | `agent`, `title` |
 | Link to the dispatching call | `toolUseId` | the parent's `spawn_agent` call (join not worked out) | the `subagent` tool's `metadata.sessionID` |
-| Explicit completion | `<task-notification>` in the parent | `SubagentStop` hook; Bram doesn't register it | child's `idle_outcome`, and the parent's `<subagent … state="completed">` result |
+| Completion | `<task-notification>` in the parent | none: `task_complete` ends a turn, so idle stands in for finished | child's `idle_outcome`, and the parent's `<subagent … state="completed">` result |
 | Evidence | `st_subagent_files` | [`codex` specimens](agent-specimens/codex/README.md), rollouts `01a18d7d…` and `01a18ddf…` | [`opencode` specimens](agent-specimens/opencode/README.md) |
 
 A specimen is not proof of behaviour on a real project: this machine's
 OpenCode database had no child rows on 2026-10-30, so the OpenCode column rests
 on one captured run (2.1.4). Cursor and Antigravity are out of scope here.
 
-## Where the code assumes Claude
+## Where the code is provider-specific
 
-Everything goes through one helper, and two more checks share its assumption.
+`read_subagent_roster` and `read_subagent_turns` branch on the provider: Codex
+goes through `codex_child_rollouts`, everything else through the Claude path
+below. OpenCode still needs its own branch. The Claude path's assumptions:
 
 - **`st_subagent_files`** finds children by walking the directory from
   `st_session_subagents_dir`, which is the sidecar layout. For a Codex or
   OpenCode session that directory doesn't exist, so the answer is an empty
-  list, not an error. Its callers:
-  - `read_subagent_roster`, behind `/__agents`, which drives the chips
-  - `read_subagent_turns`, behind `/__turns?agent=`
+  list, not an error. Two callers are still Claude-only for Codex too:
   - `st_tag_agent_tool_entries`, which gives tool rows their peek
   - `sweep_subagents_for_pending_call` and the pending-call lookups, which
     find a subagent's permission prompt
 - **`is_subagent_transcript_path`** tests for a path component named
-  `subagents`. A Codex child rollout has none, so this guard can't see one.
+  `subagents`. A Codex child has none, so the turn-end gate in
+  `check_jsonl_for_turn_end` also asks `codex_session_is_subagent`.
 - **`is_own_subagent_transcript_path`** decides when the watcher emits
   `subagents-changed`, and it's anchored to the Claude sessions directory.
+
+**A Codex child's rollout replays its parent's history first.**
+`codex_child_own_records` cuts to the child's own work. Its task can't be shown,
+because Codex stores that message encrypted.
 
 Both routes resolve the parent through `active_session_path`, and that is
 provider-aware already. The coupling is below it.
 
-To extend this, put the discovery behind one provider-aware function that
-returns what `SubagentFile` holds today, and keep the routes' response shape.
-The chips, the Transcript view and `SubagentPeek` then need no changes.
-OpenCode exports are Claude-shaped, so its children should fit the same
+Keep the routes' response shape, so the chips, the Transcript view and
+`SubagentPeek` need no changes. OpenCode exports are Claude-shaped, so its children should fit the same
 projection pass. Whether a child gets exported at all is still open.
 
 ## Completion
@@ -73,12 +76,12 @@ Only explicit evidence sets `finished`. A failed read yields `waiting`, never a
 false completion. Keep that rule for the new providers:
 
 - **OpenCode** has explicit evidence on the child row (`idle_outcome`).
-- **Codex** is the open case. `SubagentStop` is explicit, but relying on it
-  means registering a hook, which re-raises Codex's "Hooks need review"
-  overlay, and it can't speak for past sessions. The better candidate is the
-  rollout's own `task_complete` event, which ends child `01a18ddf…`. That's one
-  specimen, and it marks the end of a turn. Whether a child can take another
-  turn afterwards hasn't been checked.
+- **Codex has no such evidence, so it uses idle.** `task_complete` ends a turn,
+  not the child: a `followup_task` from the parent opens another, and 0.166.0 has
+  no close tool. `codex_child_is_idle` reads the last turn record, and an idle
+  child shows `✓`. A follow-up takes it back to `●`. This one rule departs from
+  "only explicit evidence": the turn's end is explicit, the child's isn't. See
+  [`subagent-second-turn-child-records.jsonl`](agent-specimens/codex/subagent-second-turn-child-records.jsonl).
 - **Claude** has a trap: its `SubagentStop` also fires on ordinary turns with
   an empty `agent_type` (see the
   [specimen index](agent-specimens/README.md)), so don't read it as "a
@@ -107,7 +110,8 @@ children. Expect the same bug there until it does.
 
 **Menu answers miss, and menus come back.** Observed for Codex:
 `answer-miss reason=no-key-match` with repeated menu reappearances, alongside
-the parent/child switching. The cause isn't established. The Claude history is
+the parent/child switching. The cause isn't established, and a later run with
+that switching fixed showed none, but it also showed no permission menus. The Claude history is
 the place to start: `40855ce4` made hook menu claims a queue, because parallel
 subagent prompts defeat a single slot, and `d0c2e80e` bound an answer to the
 displayed prompt's own id instead of the oldest pending call.
@@ -121,15 +125,22 @@ Don't count it as understood.
 
 Follow [Push over polling](developing-bram.md#push-over-polling). Children
 should arrive through `subagents-changed`, so the pane needs no new
-subscription. For Codex, the watcher needs to recognise a child rollout. For
-OpenCode, the data is in SQLite, so the signal has to come from the plugin or
+subscription.
+
+For Codex, the host polls. On macOS the directory watcher reports a rollout only
+at its create and its writer's close, not on appends (reproduced with `notify`
+8.2.0 outside Bram), so it goes quiet while a child works. The parent has always
+updated through `start_codex_session_poll_fallback`, not the watcher. That poll
+now also compares `codex_children_signature` while Codex is the running agent,
+and emits `subagents-changed` only on a change. Linux and Windows weren't checked.
+
+For OpenCode, the data is in SQLite, so the signal has to come from the plugin or
 the host. The plugin's `forwardTurns` drops child sessions from the turn
 stream, and that must stay true for turn state: a child's signal needs a
 separate path.
 
 ## Open
 
-- Whether `task_complete` means a Codex child has finished, or only a turn.
 - How to join a Codex child to its `spawn_agent` call, for the inline peek.
 - How OpenCode child transcripts get exported, and how the host learns they
   changed.

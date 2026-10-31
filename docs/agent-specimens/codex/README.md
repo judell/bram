@@ -201,6 +201,19 @@ The model did not retry. The failure arrives as a normal `PostToolUse`.
   `codex agents` (`agents-overview`) is the screen for them across projects.
   The subagent has no `session_index.jsonl` line; Bram's session scanner
   should key on `source.subagent` / `thread_source` to skip them.
+- **A subagent's turns** (0.166.0, `codex exec`, one run):
+  `task_complete` ends a turn, not the child. After it, the parent's
+  `followup_task` opened a second turn in the same rollout. The rollouts' records,
+  without content, are in `subagent-second-turn-child-records.jsonl` and
+  `subagent-second-turn-parent-records.jsonl`. The parent logs a `SubAgentActivity`
+  with `kind` `started`, `completed` (once per child turn) or `interacted`. There is
+  no close tool: the subagent tools are `spawn_agent`, `followup_task`,
+  `send_message`, `interrupt_agent`, `list_agents` and `wait_agent`, and nothing in
+  a rollout marks a child done. `interrupt_agent` on a completed child left only a
+  parent `SubAgentActivity` with `kind:"interrupted"`.
+- **The fork:** a child's rollout has a second `session_meta` (the parent's) and
+  replays the parent's history, up to a developer message starting `You are now a
+  newly spawned child agent`.
 - `session-meta-record.jsonl`: the rollout's first line, trimmed to
   identifying fields. The real one also carries the account/user ids and the
   full base instructions text, left out here.

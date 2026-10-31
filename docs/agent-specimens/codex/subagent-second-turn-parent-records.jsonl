@@ -1,0 +1,8 @@
+{"line": 15, "function_call": "spawn_agent"}
+{"line": 17, "item": "SubAgentActivity", "kind": "started", "agent_path": "/root/pong", "id": "call_7727f27df92f4a37b5cd0290f1c34b2f"}
+{"line": 21, "function_call": "wait_agent"}
+{"line": 23, "item": "SubAgentActivity", "kind": "completed", "agent_path": "/root/pong", "id": "subagent-completed-01a1900a-a4a4-79f3-9abb-768b28b45694"}
+{"line": 29, "function_call": "followup_task"}
+{"line": 31, "item": "SubAgentActivity", "kind": "interacted", "agent_path": "/root/pong", "id": "call_531254aaac1b4ba8ab920b4f23dacc53"}
+{"line": 34, "function_call": "wait_agent"}
+{"line": 36, "item": "SubAgentActivity", "kind": "completed", "agent_path": "/root/pong", "id": "subagent-completed-01a1900a-b9d9-7e20-a700-a175b8d086a0"}

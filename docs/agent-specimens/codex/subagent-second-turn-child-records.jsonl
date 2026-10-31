@@ -1,0 +1,21 @@
+{"line": 18, "type": "event_msg", "payload_type": "task_started", "turn_id": "01a1900a-a4a4-79f3-9abb-768b28b45694", "turn_attribution": {"turn_trigger": "exec", "initiating_agent_path": "/root"}}
+{"line": 19, "type": "response_item", "payload_type": "message"}
+{"line": 20, "type": "response_item", "payload_type": "message"}
+{"line": 21, "type": "world_state", "payload_type": null}
+{"line": 22, "type": "turn_context", "payload_type": null, "turn_id": "01a1900a-a4a4-79f3-9abb-768b28b45694"}
+{"line": 23, "type": "inter_agent_communication_metadata", "payload_type": null}
+{"line": 24, "type": "response_item", "payload_type": "agent_message"}
+{"line": 25, "type": "event_msg", "payload_type": "item_completed", "turn_id": "01a1900a-a4a4-79f3-9abb-768b28b45694"}
+{"line": 26, "type": "response_item", "payload_type": "message"}
+{"line": 27, "type": "token_usage_record", "payload_type": null, "turn_id": "01a1900a-a4a4-79f3-9abb-768b28b45694"}
+{"line": 28, "type": "event_msg", "payload_type": "token_count"}
+{"line": 29, "type": "event_msg", "payload_type": "task_complete", "turn_id": "01a1900a-a4a4-79f3-9abb-768b28b45694", "last_agent_message": "pong"}
+{"line": 30, "type": "event_msg", "payload_type": "task_started", "turn_id": "01a1900a-b9d9-7e20-a700-a175b8d086a0", "turn_attribution": {"turn_trigger": "exec", "initiating_agent_path": "/root"}}
+{"line": 31, "type": "turn_context", "payload_type": null, "turn_id": "01a1900a-b9d9-7e20-a700-a175b8d086a0"}
+{"line": 32, "type": "inter_agent_communication_metadata", "payload_type": null}
+{"line": 33, "type": "response_item", "payload_type": "agent_message"}
+{"line": 34, "type": "event_msg", "payload_type": "item_completed", "turn_id": "01a1900a-b9d9-7e20-a700-a175b8d086a0"}
+{"line": 35, "type": "response_item", "payload_type": "message"}
+{"line": 36, "type": "token_usage_record", "payload_type": null, "turn_id": "01a1900a-b9d9-7e20-a700-a175b8d086a0"}
+{"line": 37, "type": "event_msg", "payload_type": "token_count"}
+{"line": 38, "type": "event_msg", "payload_type": "task_complete", "turn_id": "01a1900a-b9d9-7e20-a700-a175b8d086a0", "last_agent_message": "ping"}

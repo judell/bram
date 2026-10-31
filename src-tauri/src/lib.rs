@@ -32069,6 +32069,48 @@ fn codex_child_rollouts(session_path: &Path) -> Vec<(String, PathBuf, CodexChild
     codex_child_rollouts_in(&home.join(".codex").join("sessions"), &parent_id)
 }
 
+// Whether a child's latest turn has ended. Codex writes no record that a child
+// is done, and none exists to close one: `task_complete` ends a turn, and a
+// `followup_task` from the parent opens another. So idle is the closest thing
+// to finished, and a follow-up takes it back to running. With neither record
+// in the tail, it isn't idle, and recency decides.
+fn codex_child_is_idle(tail: &str) -> bool {
+    for line in tail.lines().rev() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
+            continue;
+        }
+        match record.pointer("/payload/type").and_then(|v| v.as_str()) {
+            Some("task_started") => return false,
+            Some("task_complete") | Some("turn_aborted") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn codex_child_state(path: &Path, updated_at_ms: i64, now_ms: i64) -> &'static str {
+    let idle = st_read_tail(path, 64 * 1024).is_some_and(|tail| codex_child_is_idle(&tail));
+    st_subagent_state_str(idle, updated_at_ms, now_ms)
+}
+
+// What the poll compares between ticks: each child and its change token. A
+// long-lived writer's appends raise no file events on macOS, only its create
+// and close, so the watcher can't keep a child's chip current.
+fn codex_children_signature(session_path: &Path) -> Vec<(PathBuf, Option<(u128, u64)>)> {
+    let mut signature: Vec<_> = codex_child_rollouts(session_path)
+        .into_iter()
+        .map(|(_, path, _)| {
+            let token = codex_file_change_token(&path);
+            (path, token)
+        })
+        .collect();
+    signature.sort();
+    signature
+}
+
 // A child's rollout opens with a replay of its parent's history, and its own
 // work starts after the developer message that tells it it was spawned. Take
 // the last one: a grandchild replays its parent's. With no marker (a CLI that
@@ -38227,6 +38269,7 @@ fn system_time_ms(t: std::time::SystemTime) -> Option<i64> {
 fn start_codex_session_poll_fallback<R: tauri::Runtime>(app_handle: AppHandle<R>) {
     std::thread::spawn(move || {
         let mut last_seen: Option<(PathBuf, std::time::SystemTime)> = None;
+        let mut last_children = Vec::new();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let path = match latest_session_path(&app_handle, Some(SessionProvider::Codex)) {
@@ -38237,6 +38280,20 @@ fn start_codex_session_poll_fallback<R: tauri::Runtime>(app_handle: AppHandle<R>
                 }
                 Err(_) => continue,
             };
+            // codex-subagent-refresh-and-completion: chips follow a child from
+            // here, while Codex is the running agent. Fires only on a change.
+            if matches!(current_provider(&app_handle), Some(SessionProvider::Codex)) {
+                let children = codex_children_signature(&path);
+                if children != last_children {
+                    append_bram_trace_line(
+                        &app_handle,
+                        "subagents",
+                        &format!("op=codex-poll children={}", children.len()),
+                    );
+                    last_children = children;
+                    emit_replayable_signal(&app_handle, "subagents-changed");
+                }
+            }
             let mtime = match std::fs::metadata(&path).and_then(|md| md.modified()) {
                 Ok(mtime) => mtime,
                 Err(_) => continue,
@@ -44264,6 +44321,7 @@ fn read_subagent_turns<R: tauri::Runtime>(
             return empty();
         };
         let mut turns = st_parse_lines_to_turns(codex_child_own_records(&text));
+        let finished = codex_child_is_idle(&text);
         project_user_turns(app, &mut turns);
         apply_describe_overlay(&mut turns, &describe_overlay_snapshot(app));
         apply_menu_answer_overlay(&mut turns, &menu_answer_overlay_snapshot());
@@ -44275,7 +44333,7 @@ fn read_subagent_turns<R: tauri::Runtime>(
             "toolUseId": "",
             "model": st_last_session_model(&path),
             "turns": turns,
-            "finished": false,
+            "finished": finished,
         });
         return serde_json::to_vec(&body).map_err(|e| e.to_string());
     }
@@ -44392,9 +44450,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
                 continue;
             };
             let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
-            // No parent-side completion yet, so a child reads running, then
-            // waiting (codex-subagent-refresh-and-completion).
-            let state = st_subagent_state_str(false, updated_at_ms, now_ms);
+            let state = codex_child_state(&path, updated_at_ms, now_ms);
             agents.push(serde_json::json!({
                 "agentId": id,
                 "agentType": child.nickname,
@@ -44403,7 +44459,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
                 "workflowId": "",
                 "model": st_last_session_model(&path),
                 "state": state,
-                "finished": false,
+                "finished": state == "finished",
                 "startedAtMs": md.created().map(to_ms).unwrap_or(updated_at_ms),
                 "updatedAtMs": updated_at_ms,
             }));
@@ -63415,8 +63471,9 @@ fn is_own_subagent_transcript_path(path: &Path, sessions_dir: Option<&Path>) -> 
 #[cfg(test)]
 mod codex_subagent_tests {
     use super::{
-        canonical_path_string, codex_child_label, codex_child_meta, codex_child_own_records,
-        codex_child_rollouts_in, codex_main_session_id, codex_session_is_subagent,
+        canonical_path_string, codex_child_is_idle, codex_child_label, codex_child_meta,
+        codex_child_own_records, codex_child_rollouts_in, codex_main_session_id,
+        codex_session_is_subagent,
     };
     use std::path::{Path, PathBuf};
 
@@ -63500,6 +63557,25 @@ mod codex_subagent_tests {
         let text = format!("{quoted}\n{{\"own\":1}}\n");
         assert_eq!(codex_child_own_records(&text), text);
         assert_eq!(codex_child_own_records("{\"a\":1}\n"), "{\"a\":1}\n");
+    }
+
+    fn event(kind: &str) -> String {
+        format!(r#"{{"type":"event_msg","payload":{{"type":"{kind}"}}}}"#)
+    }
+
+    #[test]
+    fn a_child_is_idle_between_turns_and_running_within_one() {
+        let other = r#"{"type":"response_item","payload":{"type":"message"}}"#;
+        let (start, end) = (event("task_started"), event("task_complete"));
+        assert!(!codex_child_is_idle(&format!("{start}\n{other}\n")));
+        assert!(codex_child_is_idle(&format!("{start}\n{end}\n{other}\n")));
+        // A follow-up from the parent reopens it.
+        assert!(!codex_child_is_idle(&format!("{start}\n{end}\n{start}\n")));
+        assert!(codex_child_is_idle(&format!(
+            "{start}\n{}\n",
+            event("turn_aborted")
+        )));
+        assert!(!codex_child_is_idle(other));
     }
 
     #[test]

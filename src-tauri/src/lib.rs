@@ -70554,6 +70554,23 @@ mod needs_you_checking_tests {
     }
 }
 
+// Does a begun item have anything on disk to commit? One `git status` over its
+// declared files. An item with no files, or a git failure, counts as having
+// changes: when unsure, the row stays where the user will see it.
+fn begun_item_has_changes<R: tauri::Runtime>(app: &AppHandle<R>, item: &serde_json::Value) -> bool {
+    let files = worklist_item_files(item);
+    if files.is_empty() {
+        return true;
+    }
+    let mut args = vec!["status", "--porcelain", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git_status_reports_changes(git_run(app, &args).ok().as_deref())
+}
+
+fn git_status_reports_changes(porcelain: Option<&str>) -> bool {
+    porcelain.map(|out| !out.trim().is_empty()).unwrap_or(true)
+}
+
 fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70604,6 +70621,29 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
         let begun = item.get("begunAtMs").is_some();
         let waiting = status == "applied" || (status == "proposed" && begun);
         if !waiting || claimed.contains(&id) {
+            continue;
+        }
+        // alerts-begun-item-not-ready-to-commit: a begun item with nothing on
+        // disk isn't ready to commit. Its work may be running elsewhere, such
+        // as with a subagent, so it's a quiet row, not a blocking one.
+        if status == "proposed" && !begun_item_has_changes(app, &item) {
+            classified.push((
+                owner_state_lane(false, false, false),
+                serde_json::json!({
+                    "source": "bram-local",
+                    "id": id,
+                    "title": format!("Worklist item \u{201c}{}\u{201d} has no changes yet", id),
+                    "detail": "Started, with nothing on disk. If no agent is working on it, Resume or Drop it.",
+                    "activityAt": item
+                        .get("begunAtMs")
+                        .and_then(|v| v.as_i64())
+                        .map(format_iso_utc_ms),
+                    "link": format!("/worklist2?expand={}", id),
+                    "court": "agent",
+                    "blocking": false,
+                    "verified": true,
+                }),
+            ));
             continue;
         }
         let closes: Vec<String> = item
@@ -71005,6 +71045,16 @@ mod needs_you_tests {
             true,
             false
         ));
+    }
+
+    #[test]
+    fn begun_item_with_no_changes_is_not_ready_to_commit() {
+        assert!(!super::git_status_reports_changes(Some("")));
+        assert!(!super::git_status_reports_changes(Some("\n")));
+        assert!(super::git_status_reports_changes(Some(" M src/a.rs\n")));
+        assert!(super::git_status_reports_changes(Some("?? new.txt\n")));
+        // A git failure keeps the row visible, not silently gone.
+        assert!(super::git_status_reports_changes(None));
     }
 
     #[test]

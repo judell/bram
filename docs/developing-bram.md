@@ -714,6 +714,19 @@ is what makes them assertable:
 | what Setup seeded | the file tree (`.claude/`, `AGENTS.md`, `CLAUDE.md`, `resources/.worklist-authorization.json`) |
 | what startup did | `resources/bram-traces/bram-trace.log` |
 
+The status says *which* check failed, not only that one did (#465):
+
+| field | meaning |
+|---|---|
+| `claudeDocsCurrent`, `menuHookRegistered` | the two halves of `claudeNeedsSetup` that were once invisible (`hookRegistered` and `coreInstalled` are the others) |
+| `setupReasons` | stable codes, computed beside the verdict for the providers `providerNeedsSetup` consults: `not-installed`, `claude-hook-missing`, `claude-menu-hook-missing`, `claude-instructions-stale`, `codex-hook-missing`, `codex-developer-instructions-missing`, `codex-instructions-stale`, `opencode-plugin-missing`, `opencode-instructions-missing`. The banner and an agent read this one list |
+| `runningVersion`, `checkoutVersion`, `processOlderThanCheckout` | the process's `CARGO_PKG_VERSION` against `src-tauri/Cargo.toml` beside the on-disk `app/` root; `checkoutVersion` is null when serving the embedded tree. Compared numerically |
+| `providerSetupKind` | `repo-setup`, `codex-hook-refresh`, or `restart-older-process` (the banner offers no Run Setup button there) |
+
+A process older than its checkout can't be produced by the harness's
+pristine scenarios; raise the worktree's `src-tauri/Cargo.toml` version
+under a running `./bram` launch and read the status.
+
 `/__enhance/status` fields answer *different questions* and can
 legitimately disagree — a fact that was itself a bug for a while.
 `claudeNeedsSetup` / `codexNeedsSetup` are about installation currency

@@ -6961,6 +6961,114 @@ window.__bramProjectFolderIsOk = function (status) {
   return window.__bramProjectFolderKind(status) === "ok";
 };
 
+// issue-465: the Setup banner's heading, text, button label, tooltip and
+// whether Run Setup is offered, all from one place so the markup stays a
+// single call per attribute. `status` is /__enhance/status; `field` is one of
+// heading | text | button | tooltip | runnable. Three variants: first install,
+// already set up (names what was found; never says "install"), and a process
+// older than its checkout (Setup is not the remedy, so no button).
+window.__bramSetupReasonText = function (code) {
+  var m = {
+    "claude-instructions-stale": "This project's Bram instructions are out of date",
+    "claude-hook-missing": "The worklist guard hook isn't registered",
+    "claude-menu-hook-missing": "The permission hook isn't registered",
+    "codex-hook-missing": "Codex's Bram hooks are missing or out of date",
+    "codex-developer-instructions-missing": "Codex's Bram developer instructions are missing or out of date",
+    "codex-instructions-stale": "This project's AGENTS.md instructions for Codex are out of date",
+    "opencode-plugin-missing": "The OpenCode guard plugin is missing or out of date",
+    "opencode-instructions-missing": "OpenCode isn't configured to load the Bram instructions",
+  };
+  return m[code] || code;
+};
+// What skipping Setup costs until it runs, so the banner answers "do I have to
+// press this?" The guard hook is the only one that changes what agents can do.
+window.__bramSetupReasonCost = function (code) {
+  var m = {
+    "claude-instructions-stale": "Until then the agent works from older instructions.",
+    "claude-hook-missing": "Until then the Worklist isn't enforced: the agent can edit files no item covers.",
+    "claude-menu-hook-missing": "Until then permission prompts appear only in the terminal.",
+    "codex-hook-missing": "Until then the Worklist may not be enforced for Codex.",
+    "codex-developer-instructions-missing": "Until then Codex works from older instructions.",
+    "codex-instructions-stale": "Until then Codex works from older instructions.",
+    "opencode-plugin-missing": "Until then the Worklist isn't enforced for OpenCode.",
+    "opencode-instructions-missing": "Until then OpenCode works without Bram's instructions.",
+  };
+  return m[code] || "";
+};
+// issue-465: the banner's ⓘ dialog. Markdown, because Text prints backticks
+// literally. It lists every situation the banner can report, so keep it in
+// step with __bramSetupReasonText and __bramSetupReasonCost.
+window.__bramSetupInfoMarkdown = function () {
+  return [
+    "Bram sets up this repo so AI agents share the Worklist: agents propose changes, and you approve them. Setup installs a small set of files, and running it again is safe.",
+    "",
+    "**Why this banner appears**",
+    "",
+    "- **New project:** nothing is installed yet. Bram normally does this itself before the agent starts, so you'll see it only if that didn't happen.",
+    "- **Instructions out of date:** Bram's instructions for an agent are older than this Bram. An upgrade usually causes this. The agent works from the older instructions until it's fixed.",
+    "- **Worklist guard missing:** the hook or plugin that enforces the Worklist isn't in place. **This is the serious one:** an agent can edit files no item covers.",
+    "- **Permission hook missing (Claude):** permission prompts appear only in the terminal, not here. If the terminal is hidden, a prompt can go unseen.",
+    "- **Bram older than its checkout:** the code on disk is newer than the running Bram. Setup isn't the fix, so the banner offers no button. Restart Bram, after rebuilding if you haven't. Running Setup from an older Bram would stamp new instructions with the old version.",
+    "",
+    "**If you don't press the button**",
+    "",
+    "Nothing stops working right away, and Bram runs Setup itself at its next launch. Until then, the costs above apply.",
+    "",
+    "**What Setup writes**",
+    "",
+    "- `resources/.worklist-authorization.json`, the approval record every agent's guard reads.",
+    "- The conventions file, `.claude/bram-conventions.md`, and its reference files.",
+    "- **Claude:** an import in `CLAUDE.md`, and the worklist-guard and permission hooks.",
+    "- **Codex:** a block in `AGENTS.md`, plus `developer_instructions` and hooks in `~/.codex/config.toml`.",
+    "- **OpenCode, where installed:** the guard plugin in `.opencode/plugins/`, and the conventions entry in `.opencode/opencode.json`.",
+    "",
+    "**After Setup runs**",
+    "",
+    "Restart the agent, because it reads hooks and instructions when it starts. The banner won't return until something Setup wrote goes missing or falls out of date.",
+  ].join("\n");
+};
+window.__bramSetupBanner = function (status, field) {
+  var s = status || {};
+  var reasons = s.setupReasons || [];
+  var kind = s.providerSetupKind;
+  var refresh = kind === "codex-hook-refresh";
+  var older = kind === "restart-older-process";
+  var firstInstall = reasons.indexOf("not-installed") >= 0 || !reasons.length;
+  var found = reasons
+    .filter(function (c) { return c !== "not-installed"; })
+    .map(function (c) {
+      return (window.__bramSetupReasonText(c) + ". " + window.__bramSetupReasonCost(c)).trim();
+    });
+  if (older) {
+    if (field === "heading") return "Restart Bram";
+    if (field === "text")
+      return "This Bram is " + s.runningVersion + " and its checkout is " + s.checkoutVersion + ". Restart it, after rebuilding if you haven't.";
+    if (field === "button") return "";
+    if (field === "tooltip") return "About restarting Bram";
+    return false;
+  }
+  if (field === "runnable") return true;
+  if (refresh) {
+    if (field === "heading") return "Refresh Agent Coordination";
+    if (field === "text")
+      return "Bram was upgraded. Refresh the coordination files so Claude and Codex use the current conventions and hooks.";
+    if (field === "button") return "Refresh Coordination";
+    return "About agent coordination refresh";
+  }
+  if (firstInstall) {
+    if (field === "heading") return "Set Up Agent Coordination";
+    if (field === "text")
+      return "Install Bram's worklist coordination files and agent adapters for this repo.";
+    if (field === "button") return "Run Setup";
+    return "About agent coordination setup";
+  }
+  if (field === "heading") return "Agent Coordination Needs Attention";
+  if (field === "text")
+    return found.join(" ") + " Run Setup to fix this now, or Bram will at its next launch; it is safe to run again. Restart the agent afterwards.";
+  if (field === "button") return "Run Setup";
+  return "About agent coordination setup";
+};
+
 // Badge takes a dynamic background only through colorMap (value -> color),
 // so the chip's one-entry map is built here rather than as an inline
 // object literal in the markup.

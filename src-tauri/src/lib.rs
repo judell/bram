@@ -54811,6 +54811,120 @@ fn trace_codex_hooks_untrusted<R: tauri::Runtime>(app: &AppHandle<R>, events: &[
     }
 }
 
+// issue-465: why the Setup banner is up, as stable codes computed beside the
+// verdict so the banner and an agent read the same answer. One entry per
+// check that feeds a provider's needs-setup flag, scoped to the providers
+// provider_needs_setup_for consults (the active one, or all when none is).
+#[derive(Clone, Copy, Default)]
+struct SetupReasonInputs {
+    core_installed: bool,
+    claude_hook_registered: bool,
+    claude_menu_hook_registered: bool,
+    claude_docs_current: bool,
+    codex_hook_block_current: bool,
+    codex_instr_current: bool,
+    codex_docs_current: bool,
+    opencode_wanted: bool,
+    opencode_plugin_ok: bool,
+    opencode_instructions_current: bool,
+    is_source_repo: bool,
+}
+
+fn setup_reasons(active: Option<SessionProvider>, i: SetupReasonInputs) -> Vec<&'static str> {
+    let claude = matches!(active, None | Some(SessionProvider::Claude));
+    let codex = matches!(active, None | Some(SessionProvider::Codex));
+    let opencode = matches!(active, None | Some(SessionProvider::Opencode));
+    let mut out = Vec::new();
+    // core_installed gates every provider's verdict (OpenCode only where wanted).
+    if !i.core_installed && (claude || codex || (opencode && i.opencode_wanted)) {
+        out.push("not-installed");
+    }
+    if claude {
+        if !i.claude_hook_registered {
+            out.push("claude-hook-missing");
+        }
+        if !i.claude_menu_hook_registered {
+            out.push("claude-menu-hook-missing");
+        }
+        if !i.is_source_repo && !i.claude_docs_current {
+            out.push("claude-instructions-stale");
+        }
+    }
+    if codex {
+        if !i.codex_hook_block_current {
+            out.push("codex-hook-missing");
+        }
+        if !i.codex_instr_current {
+            out.push("codex-developer-instructions-missing");
+        }
+        if !i.is_source_repo && !i.codex_docs_current {
+            out.push("codex-instructions-stale");
+        }
+    }
+    if opencode && i.opencode_wanted {
+        if !i.opencode_plugin_ok {
+            out.push("opencode-plugin-missing");
+        }
+        if !i.opencode_instructions_current {
+            out.push("opencode-instructions-missing");
+        }
+    }
+    out
+}
+
+// Numeric dotted-version compare ("0.10.0" > "0.9.9"); a pre-release or
+// build suffix on a component is ignored. None when either side is unparsable.
+fn parse_version_parts(v: &str) -> Option<Vec<u64>> {
+    let core = v.trim().trim_start_matches('v');
+    let core = core.split(['-', '+']).next()?;
+    let parts: Option<Vec<u64>> = core.split('.').map(|p| p.parse::<u64>().ok()).collect();
+    parts.filter(|p| !p.is_empty())
+}
+
+fn version_is_older(running: &str, other: &str) -> bool {
+    let (Some(mut a), Some(mut b)) = (parse_version_parts(running), parse_version_parts(other))
+    else {
+        return false;
+    };
+    let n = a.len().max(b.len());
+    a.resize(n, 0);
+    b.resize(n, 0);
+    a < b
+}
+
+// The `version` of the [package] table in a Cargo.toml's text.
+fn parse_cargo_package_version(text: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_package = t == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = t.strip_prefix("version") {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let v = rest.trim().trim_matches('"');
+                    if !v.is_empty() && !rest.contains("workspace") {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// The checkout's version: src-tauri/Cargo.toml beside the on-disk app/ root
+// serve_app_file resolves. None when serving the embedded tree (an installed
+// bundle), which cannot disagree with its own version.
+fn checkout_version<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let root = resolve_app_root(Some(app))?;
+    let text = std::fs::read_to_string(root.parent()?.join("src-tauri/Cargo.toml")).ok()?;
+    parse_cargo_package_version(&text)
+}
+
 fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     use serde_json::json;
     let proj = project_root(Some(app)).ok_or("no project root")?;
@@ -54921,6 +55035,31 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         codex_needs_setup,
         opencode_needs_setup,
     );
+    let setup_reasons_list = setup_reasons(
+        active_provider,
+        SetupReasonInputs {
+            core_installed,
+            claude_hook_registered: hook_registered,
+            claude_menu_hook_registered: menu_hook_registered,
+            claude_docs_current,
+            codex_hook_block_current,
+            codex_instr_current,
+            codex_docs_current,
+            opencode_wanted: opencode_plugin_wanted(app, &proj),
+            opencode_plugin_ok: opencode_plugin_current || opencode_plugin_custom,
+            opencode_instructions_current,
+            is_source_repo,
+        },
+    );
+    // issue-465: a process older than the checkout it reads cannot match the
+    // checkout's seeded text; Setup there would stamp the old version on the
+    // new text, so the remedy is a restart, not Setup.
+    let running_version = env!("CARGO_PKG_VERSION");
+    let checkout_version_str = checkout_version(app);
+    let process_older_than_checkout = checkout_version_str
+        .as_deref()
+        .map(|c| version_is_older(running_version, c))
+        .unwrap_or(false);
     let active_provider_json = match active_provider {
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
@@ -55023,11 +55162,6 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "opencodeInstructionsCurrent": opencode_instructions_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
-        "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
-            "codex-hook-refresh"
-        } else {
-            "repo-setup"
-        },
         "claudeMd": claude_md_has_marker,
         "codexAgents": codex_agents_has_marker,
         "sidecar": sidecar_exists,
@@ -55043,6 +55177,22 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "settingsPath": settings.display().to_string(),
         "worklistAuthPath": worklist_auth.display().to_string(),
     });
+    // issue-465: inserted after the literal -- the json! macro above is at
+    // its recursion limit.
+    let mut body = body;
+    body["claudeDocsCurrent"] = json!(claude_docs_current);
+    body["menuHookRegistered"] = json!(menu_hook_registered);
+    body["setupReasons"] = json!(setup_reasons_list);
+    body["runningVersion"] = json!(running_version);
+    body["checkoutVersion"] = json!(checkout_version_str);
+    body["processOlderThanCheckout"] = json!(process_older_than_checkout);
+    body["providerSetupKind"] = if process_older_than_checkout && provider_needs_setup {
+        json!("restart-older-process")
+    } else if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
+        json!("codex-hook-refresh")
+    } else {
+        json!("repo-setup")
+    };
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
@@ -91967,5 +92117,123 @@ mod pair_sessions_query_tests {
             parse_pair_sessions_query(&format!("claude={CLAUDE}")),
             Err("two sessions of different providers required".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod setup_reason_tests {
+    use super::{
+        parse_cargo_package_version, setup_reasons, version_is_older, SessionProvider,
+        SetupReasonInputs,
+    };
+
+    fn healthy() -> SetupReasonInputs {
+        SetupReasonInputs {
+            core_installed: true,
+            claude_hook_registered: true,
+            claude_menu_hook_registered: true,
+            claude_docs_current: true,
+            codex_hook_block_current: true,
+            codex_instr_current: true,
+            codex_docs_current: true,
+            opencode_wanted: true,
+            opencode_plugin_ok: true,
+            opencode_instructions_current: true,
+            is_source_repo: false,
+        }
+    }
+
+    #[test]
+    fn healthy_project_has_no_reasons() {
+        assert!(setup_reasons(None, healthy()).is_empty());
+    }
+
+    #[test]
+    fn stale_claude_instructions_alone_is_named() {
+        // #465: claudeNeedsSetup true with every hook present.
+        let i = SetupReasonInputs {
+            claude_docs_current: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Claude), i),
+            vec!["claude-instructions-stale"]
+        );
+    }
+
+    #[test]
+    fn missing_menu_hook_is_distinguished_from_stale_docs() {
+        let i = SetupReasonInputs {
+            claude_menu_hook_registered: false,
+            ..healthy()
+        };
+        assert_eq!(setup_reasons(None, i), vec!["claude-menu-hook-missing"]);
+    }
+
+    #[test]
+    fn source_repo_exempts_doc_currency_only() {
+        let i = SetupReasonInputs {
+            is_source_repo: true,
+            claude_docs_current: false,
+            claude_hook_registered: false,
+            ..healthy()
+        };
+        assert_eq!(setup_reasons(None, i), vec!["claude-hook-missing"]);
+    }
+
+    #[test]
+    fn reasons_follow_the_active_provider() {
+        let i = SetupReasonInputs {
+            codex_hook_block_current: false,
+            ..healthy()
+        };
+        assert!(setup_reasons(Some(SessionProvider::Claude), i).is_empty());
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Codex), i),
+            vec!["codex-hook-missing"]
+        );
+    }
+
+    #[test]
+    fn opencode_reasons_only_where_wanted() {
+        let i = SetupReasonInputs {
+            opencode_plugin_ok: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Opencode), i),
+            vec!["opencode-plugin-missing"]
+        );
+        let i = SetupReasonInputs {
+            opencode_wanted: false,
+            ..i
+        };
+        assert!(setup_reasons(None, i).is_empty());
+    }
+
+    #[test]
+    fn not_installed_is_named_once() {
+        let i = SetupReasonInputs {
+            core_installed: false,
+            ..healthy()
+        };
+        assert_eq!(setup_reasons(None, i), vec!["not-installed"]);
+    }
+
+    #[test]
+    fn versions_compare_numerically_not_as_strings() {
+        assert!(version_is_older("0.7.8", "0.8.1"));
+        assert!(version_is_older("0.9.9", "0.10.0"));
+        assert!(!version_is_older("0.10.0", "0.9.9"));
+        assert!(!version_is_older("0.8.1", "0.8.1"));
+        assert!(version_is_older("0.8", "0.8.1"));
+        assert!(!version_is_older("0.8.1", "garbage"));
+    }
+
+    #[test]
+    fn cargo_version_comes_from_the_package_table() {
+        let t = "[dependencies]\nversion = \"9.9.9\"\n[package]\nname = \"bram\"\nversion = \"0.8.2\"\n";
+        assert_eq!(parse_cargo_package_version(t).as_deref(), Some("0.8.2"));
+        assert_eq!(parse_cargo_package_version("[package]\nname=\"x\"\n"), None);
     }
 }

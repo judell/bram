@@ -95,9 +95,9 @@ recorded as a tripwire (`worklist-strip op=anomaly`, `e5f745d`).
 Per row, on expand: **files expected to change**, **changes**, **shared with**.
 It renders for plan rows too — only the activity numbers are begun-gated —
 because the path list and the overlap are what a reader needs in order to
-decide what to do next. The `shared with` column renders each claimant as the
-same coloured badge that claimant's own row carries (`__bramItemColor`), so the
-join is recognition rather than label comparison.
+decide what to do next. The `shared with` column is one line of counts, such as
+`2 with lines · 1 listed`: items that own lines in the file, and items that only
+list it. The ⓘ dialog names each one.
 
 Below the action bar, a board-wide **Shared files** table
 (`__bramWorklistOverlapRows`) lists one row per path that more than one begun

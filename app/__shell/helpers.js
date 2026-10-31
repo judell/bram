@@ -5870,6 +5870,17 @@ window.__bramBasename = function (path) {
 // "issue-269-drop-not-blocked-by-unrelated-claim issue-278-semantic-colour"
 // reads as one malformed token. A middot cannot be confused with anything
 // inside an id, which is hyphen-and-alphanumeric only.
+// shared-with-one-line: the files table's cell. Items with lines here entangle
+// a commit; items that only list the file don't. Names are in the ⓘ dialog.
+window.__bramSharedWithSummary = function (file, items, claim) {
+  var withLines = window.__bramSharedWithBegun(file, items, claim).length;
+  var listed = window.__bramSharedWithPlanned(file, items, claim).length;
+  var parts = [];
+  if (withLines) parts.push(withLines + " with lines");
+  if (listed) parts.push(listed + " listed");
+  return parts.join(" \u00b7 ");
+};
+
 window.__bramJoinIds = function (ids) {
   return (ids || []).join(" \u00b7 ");
 };

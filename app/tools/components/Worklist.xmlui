@@ -753,18 +753,16 @@
                      here:`, from membership. The tense words described
                      progress, while the column is about lines in this file:
                      an item whose lines were all rewritten by another read
-                     `planned:`, as if it had never started. -->
+                     `planned:`, as if it had never started.
+                     shared-with-one-line (Jon, 2026-10-30): counts on one line.
+                     Lists of long ids wrapped to three lines. The ⓘ names them.
+                     https://www.xmlui.org/docs/reference/components/Text#overflowmode -->
                 <HStack when="{!$item.ignored}" gap="$space-1" verticalAlignment="center">
-                <VStack gap="$space-0" width="*">
                   <Text
-                    when="{window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
-                    overflowMode="flow"
-                    value="{'has lines here: ' + window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
-                  <Text
-                    when="{window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
-                    overflowMode="flow"
-                    value="{'declares it, no lines here: ' + window.__bramJoinIds(window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
-                </VStack>
+                    width="*"
+                    maxLines="1"
+                    overflowMode="ellipsis"
+                    value="{window.__bramSharedWithSummary($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}" />
                 <Button label="ⓘ" variant="ghost" size="xs"
                   tooltip="Explain who else lists this file"
                   onClick="fileCellInfoDialog.open(window.__bramFileSharedExplain($item, rowItem, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))" />

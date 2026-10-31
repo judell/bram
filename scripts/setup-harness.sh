@@ -239,6 +239,30 @@ assert_setup_landed() {
     ok "no .opencode/ without OpenCode"
   fi
 
+  # antigravity-worklist-guard: Bram's guard group is seeded into
+  # .agents/hooks.json where agy is installed (antigravity_hooks_wanted keys
+  # on its CLI) and nowhere else. assert_idempotent's fingerprint covers the
+  # file, so a second Setup must leave it byte-identical.
+  assert_field antigravityNeedsSetup false
+  if command -v agy > /dev/null 2>&1; then
+    assert_file "$dir" ".agents/hooks.json"
+    # The command wraps the guard so that no decision (an older guard that
+    # doesn't know the hook) becomes a deny; agy lets empty output through.
+    if jq -e '.["bram-worklist-guard"].PreToolUse[0]
+              | (.matcher == "^(write_file|edit_file|run_command)$")
+                and (.hooks[0].command | contains("guard antigravity-worklist"))
+                and (.hooks[0].command | contains("\"decision\":\"deny\""))' \
+         "$dir/.agents/hooks.json" > /dev/null 2>&1; then
+      ok "Antigravity hooks register the guard"
+    else
+      bad "Antigravity hooks register the guard" "$(head -12 "$dir/.agents/hooks.json" 2>/dev/null)"
+    fi
+  elif [ -e "$dir/.agents/hooks.json" ]; then
+    bad "no .agents/hooks.json without agy" "Setup created it with no agy on PATH"
+  else
+    ok "no .agents/hooks.json without agy"
+  fi
+
   # Tonight's bug: firstRun keys on .bram.json (lib.rs:33551 / 21336), which
   # Setup does not write, so the "first time in this repo" banner survives a
   # successful Setup. Same shape as #211.

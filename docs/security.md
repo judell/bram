@@ -301,6 +301,35 @@ the slowest 0.03 ms), and 2.5–9 ms for the first call after a project loads.
 Code mode's `execute` itself couldn't write a file through Node's `fs` when
 tested, so the guard sees every write as a tool call.
 
+Antigravity's registration (antigravity-worklist-guard) is a named group,
+`bram-worklist-guard`, that Setup merges into the project's
+`.agents/hooks.json` wherever `agy` is on PATH, keeping the user's own groups.
+It runs the `antigravity-worklist` hook on agy's `write_file`, `edit_file` and
+`run_command`, which the guard translates to Claude's `Write`, `Edit` and
+`Bash` before the shared policy decides. A spike on agy 1.4.12 (2026-10-31)
+settled the failure modes: a hook that crashes, exits nonzero, hangs past its
+`timeout` or prints invalid JSON blocks the call, and only exit 0 with empty
+output lets it through. So the guard always prints a decision, and the
+self-test fails a guard that doesn't. That isn't enough on its own: a guard
+that predates this change answers `antigravity-worklist` with exit 0 and no
+output (measured on 0.8.1), and `~/.bram/bram-guard` follows whichever
+running Bram re-pointed it last. So the registered command wraps the guard in
+a shell test that turns empty output into a deny naming the cause, the same
+role OpenCode's plugin plays by denying any non-decision. Windows registers
+the bare command until a capture shows which shell agy uses there. The
+self-test runs the link directly, so with an older Bram running it can read
+red for the Antigravity cases (and for the signed forge cases, whose version
+the older guard rejects); that red is accurate about the link at that moment.
+An explicit `allow` doesn't skip agy's
+own permission check, and the guard never answers `auto_approve`, which would.
+Five cases run agy-shaped payloads, for 22 in all; a signed forge case waits
+for Antigravity's signature (antigravity-signature-and-conventions). Known
+limits: agy has no untracked local hooks file, so in a project that tracks
+`.agents/hooks.json`, Setup's group changes a tracked file. A file that isn't
+JSON is left alone and fails the self-test without raising the Setup banner,
+since no Setup run could fix it. MCP tools and subagents' tool calls aren't
+covered yet, because how they reach the hook hasn't been captured.
+
 ## Ranked action plan
 
 Severity is impact-weighted against the threat model. Effort: **S** = < half a

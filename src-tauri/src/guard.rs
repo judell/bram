@@ -8,7 +8,7 @@
 // claims/clears and stay deliberately fail-open, exit 0 always — a menu hook
 // must never gate or delay a tool call. Every invocation appends one
 // breadcrumb to resources/bram-traces/hook-events.log, tagged `claude-rs` /
-// `codex-rs` / `opencode-rs`, written only when <root>/resources already exists — outside
+// `codex-rs` / `opencode-rs` / `antigravity-rs`, written only when <root>/resources already exists — outside
 // that, guard mode creates nothing (`guard_mode_is_inert_without_
 // resources_dir` holds the line).
 
@@ -72,6 +72,15 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
         // opencode-edit-advisory: called by the plugin's `execute.after` once
         // an OpenCode edit has landed.
         "opencode-after" => opencode_after_hook(&opencode_policy_payload(&payload), started),
+        // antigravity-worklist-guard: registered by Setup in the project's
+        // .agents/hooks.json as agy's PreToolUse hook.
+        "antigravity-worklist" => authority_guarded_dispatch(
+            "antigravity-rs",
+            &antigravity_policy_payload(&payload),
+            stdin_error,
+            started,
+            authority_worklist_hook,
+        ),
         other => {
             // Misregistration surfaces in stderr, never in the exit code: a
             // nonzero exit from a PreToolUse-shaped hook could block a tool
@@ -151,6 +160,8 @@ fn route_to_project_guard(
         "codex-rs"
     } else if hook.starts_with("opencode-") {
         "opencode-rs"
+    } else if hook.starts_with("antigravity-") {
+        "antigravity-rs"
     } else {
         "claude-rs"
     };
@@ -359,6 +370,90 @@ fn opencode_policy_payload(payload: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+// antigravity-worklist-guard: agy's PreToolUse payload in the vocabulary the
+// policy already judges, as OpenCode's is. The three tools that change files
+// take Claude's shapes; any other name passes through, which the policy
+// allows (agy 1.4.12's other tools read, search, ask, schedule or manage
+// subagents). Field names are from docs/agent-specimens/antigravity/hooks/
+// payloads/PreToolUse.jsonl.
+//
+// The payload has no `cwd`, and the hook runner's working directory isn't the
+// workspace (the specimen pack's relative logger path failed there), so the
+// root is `workspacePaths[0]`. No `transcript_path` either: agy's transcript
+// isn't Claude-shaped, so the typed opt-out reaches this guard through the
+// host's direct-edit record, as it does for Codex and OpenCode.
+fn antigravity_policy_payload(payload: &serde_json::Value) -> serde_json::Value {
+    let cwd = antigravity_workspace(payload).unwrap_or_default();
+    let call = payload
+        .get("toolCall")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let name = str_field(&call, "name");
+    let args = call
+        .get("args")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let field = |k: &str| args.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    // agy sends absolute paths; a relative one is resolved against the
+    // workspace, as for OpenCode.
+    let path = args.get("Path").and_then(|v| v.as_str()).map(|p| {
+        if Path::new(p).is_absolute() || cwd.is_empty() {
+            p.to_string()
+        } else {
+            Path::new(&cwd).join(p).to_string_lossy().into_owned()
+        }
+    });
+    let (tool_name, tool_input) = match name.as_str() {
+        "write_file" => (
+            "Write".to_string(),
+            serde_json::json!({ "file_path": path, "content": field("Content") }),
+        ),
+        "edit_file" => (
+            "Edit".to_string(),
+            serde_json::json!({
+                "file_path": path,
+                "old_string": field("Target"),
+                "new_string": field("Replacement"),
+            }),
+        ),
+        "run_command" => (
+            "Bash".to_string(),
+            serde_json::json!({ "command": field("CommandLine") }),
+        ),
+        other => (other.to_string(), args.clone()),
+    };
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "cwd": cwd,
+    })
+}
+
+fn antigravity_workspace(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("workspacePaths")?
+        .as_array()?
+        .first()?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+// agy reads one JSON object from stdout. An explicit `allow` doesn't skip
+// agy's own permission check (the spike's `run_command` was still held for
+// agy's "command" permission), so the guard never answers `auto_approve`,
+// which would. Empty output also allows, so every path prints a decision.
+fn antigravity_answer(decision: &str, reason: &str) -> i32 {
+    let out = if reason.is_empty() {
+        serde_json::json!({ "decision": decision })
+    } else {
+        serde_json::json!({ "decision": decision, "reason": reason })
+    };
+    println!("{}", out);
+    0
+}
+
 // opencode-edit-advisory: the addressed-turn advisory Claude and Codex get as
 // PostToolUse additionalContext. OpenCode has no such field; its plugin appends
 // the note to the tool's result, which is what OpenCode's model reads. One JSON
@@ -405,14 +500,14 @@ fn authority_worklist_hook(
     let root = resolve_project_root(provider, payload);
     let policy_provider = match provider {
         "opencode-rs" if tool == "apply_patch" => "codex-rs",
-        "opencode-rs" => "claude-rs",
+        "opencode-rs" | "antigravity-rs" => "claude-rs",
         other => other,
     };
     let Some(v) = crate::guard_policy::shadow_worklist_decision(policy_provider, payload) else {
-        return if provider == "opencode-rs" {
-            opencode_answer("allow", "")
-        } else {
-            0
+        return match provider {
+            "opencode-rs" => opencode_answer("allow", ""),
+            "antigravity-rs" => antigravity_answer("allow", ""),
+            _ => 0,
         };
     };
     post_hook_trace(&root, &tool, &v.target, &v.decision, &v.reason);
@@ -464,6 +559,9 @@ fn authority_worklist_hook(
         if provider == "opencode-rs" {
             return opencode_answer("allow", "");
         }
+        if provider == "antigravity-rs" {
+            return antigravity_answer("allow", "");
+        }
         return 0;
     }
     // Deny. Codex answers by stdout JSON (permissionDecision deny, exit 0);
@@ -487,6 +585,16 @@ fn authority_worklist_hook(
     }
     if provider == "opencode-rs" {
         return opencode_answer(
+            "deny",
+            if message.is_empty() {
+                "blocked"
+            } else {
+                &message
+            },
+        );
+    }
+    if provider == "antigravity-rs" {
+        return antigravity_answer(
             "deny",
             if message.is_empty() {
                 "blocked"
@@ -622,6 +730,13 @@ fn authority_fail_closed(
         eprintln!("{}", message);
         return opencode_answer("deny", &message);
     }
+    // agy would block a crashed guard anyway (the spike: any nonzero exit,
+    // a kill at the timeout, or invalid JSON blocks the call), but an
+    // explicit deny carries the reason to the model.
+    if provider == "antigravity-rs" {
+        eprintln!("{}", message);
+        return antigravity_answer("deny", &message);
+    }
     eprintln!("{}", message);
     2
 }
@@ -688,6 +803,14 @@ fn resolve_project_root(provider: &str, payload: &serde_json::Value) -> PathBuf 
     }
     if !cwd.is_empty() {
         return PathBuf::from(cwd);
+    }
+    // antigravity-worklist-guard: per-project routing reads agy's raw
+    // payload, which names the workspace but has no `cwd`, and agy doesn't
+    // run hooks from the workspace.
+    if provider == "antigravity-rs" {
+        if let Some(ws) = antigravity_workspace(payload) {
+            return PathBuf::from(ws);
+        }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -1545,6 +1668,152 @@ mod guard_mode_tests {
         assert!(log.contains("opencode-rs PreToolUse Write"), "log: {log}");
         assert!(log.contains("decided=error target=- ms="), "log: {log}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // antigravity-worklist-guard: agy 1.4.12's PreToolUse payloads as the
+    // specimen pack captured them (docs/agent-specimens/antigravity/hooks/
+    // payloads/PreToolUse.jsonl), trimmed to the fields the guard reads.
+    #[test]
+    fn antigravity_payloads_translate_to_the_policy_vocabulary() {
+        let t = |name: &str, args: serde_json::Value| {
+            antigravity_policy_payload(&serde_json::json!({
+                "conversationId": "c", "stepIdx": 2, "workspacePaths": ["/p"],
+                "toolCall": { "name": name, "args": args }
+            }))
+        };
+        let write = t(
+            "write_file",
+            serde_json::json!({ "Content": "FIRST-VALUE", "Overwrite": true, "Path": "/p/a.txt" }),
+        );
+        assert_eq!(write["hook_event_name"], "PreToolUse");
+        assert_eq!(write["tool_name"], "Write");
+        assert_eq!(write["tool_input"]["file_path"], "/p/a.txt");
+        assert_eq!(write["tool_input"]["content"], "FIRST-VALUE");
+        assert_eq!(write["cwd"], "/p");
+        let edit = t(
+            "edit_file",
+            serde_json::json!({ "Path": "/p/a.txt", "Target": "FIRST-VALUE", "Replacement": "SECOND-VALUE" }),
+        );
+        assert_eq!(edit["tool_name"], "Edit");
+        assert_eq!(edit["tool_input"]["file_path"], "/p/a.txt");
+        assert_eq!(edit["tool_input"]["old_string"], "FIRST-VALUE");
+        assert_eq!(edit["tool_input"]["new_string"], "SECOND-VALUE");
+        let relative = t(
+            "write_file",
+            serde_json::json!({ "Content": "x", "Path": "b.txt" }),
+        );
+        assert_eq!(
+            relative["tool_input"]["file_path"],
+            Path::new("/p").join("b.txt").to_string_lossy().as_ref()
+        );
+        let shell = t(
+            "run_command",
+            serde_json::json!({ "CommandLine": "echo RUN-COMMAND-7731", "WaitMsBeforeAsync": 5000, "toolSummary": "Echo" }),
+        );
+        assert_eq!(shell["tool_name"], "Bash");
+        assert_eq!(shell["tool_input"]["command"], "echo RUN-COMMAND-7731");
+        let read = t("read_file", serde_json::json!({ "Path": "/p/a.txt" }));
+        assert_eq!(read["tool_name"], "read_file");
+        assert_eq!(read["tool_input"]["Path"], "/p/a.txt");
+        // No workspace: an empty cwd, never a guess.
+        let bare = antigravity_policy_payload(&serde_json::json!({
+            "toolCall": { "name": "write_file", "args": { "Path": "/p/a.txt", "Content": "x" } }
+        }));
+        assert_eq!(bare["cwd"], "");
+        assert_eq!(bare["tool_input"]["file_path"], "/p/a.txt");
+    }
+
+    #[test]
+    fn antigravity_decisions_follow_worklist_coverage() {
+        let root = scratch("antigravity-coverage");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("resources/worklist.json"),
+            r#"{"version":1,"items":[{"id":"x","status":"proposed","files":["covered.txt"]}]}"#,
+        )
+        .unwrap();
+        let at = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let payload = |name: &str, args: serde_json::Value| {
+            antigravity_policy_payload(&serde_json::json!({
+                "workspacePaths": [root.to_string_lossy()],
+                "toolCall": { "name": name, "args": args }
+            }))
+        };
+        let decide = |name: &str, args: serde_json::Value| {
+            crate::guard_policy::shadow_worklist_decision("claude-rs", &payload(name, args))
+                .unwrap()
+                .decision
+        };
+        assert_eq!(
+            decide(
+                "write_file",
+                serde_json::json!({ "Path": at("covered.txt"), "Content": "ok" })
+            ),
+            "allow"
+        );
+        assert_eq!(
+            decide(
+                "write_file",
+                serde_json::json!({ "Path": at("other.txt"), "Content": "no" })
+            ),
+            "deny"
+        );
+        assert_eq!(
+            decide(
+                "edit_file",
+                serde_json::json!({ "Path": at("other.txt"), "Target": "a", "Replacement": "b" })
+            ),
+            "deny"
+        );
+        // Through the deciding hook itself: agy's answer is a stdout JSON
+        // line with exit 0 either way, and the breadcrumb names the provider.
+        let code = authority_worklist_hook(
+            "antigravity-rs",
+            &payload(
+                "write_file",
+                serde_json::json!({ "Path": at("other.txt"), "Content": "no" }),
+            ),
+            std::time::Instant::now(),
+        );
+        assert_eq!(code, 0, "agy reads the deny from stdout, exit 0");
+        let log = read_crumbs(&root);
+        assert!(
+            log.contains("antigravity-rs PreToolUse Write decided=deny"),
+            "log: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn antigravity_authority_fails_closed_on_unparseable_stdin() {
+        let root = scratch("fault-antigravity-stdin");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let code = authority_fail_closed(
+            &root,
+            "antigravity-rs",
+            "",
+            GuardFault::UnparseableStdin("EOF while parsing".into()),
+            std::time::Instant::now(),
+        );
+        assert_eq!(code, 0, "agy denies via its stdout JSON line, exit 0");
+        let log = read_crumbs(&root);
+        assert!(log.contains("antigravity-rs PreToolUse ?"), "log: {log}");
+        assert!(log.contains("decided=error target=- ms="), "log: {log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Per-project routing reads agy's raw payload, before translation.
+    #[test]
+    fn antigravity_root_comes_from_the_workspace() {
+        let raw = serde_json::json!({
+            "workspacePaths": ["/work/space"],
+            "toolCall": { "name": "write_file", "args": {} }
+        });
+        assert_eq!(
+            resolve_project_root("antigravity-rs", &raw),
+            PathBuf::from("/work/space")
+        );
     }
 
     #[test]

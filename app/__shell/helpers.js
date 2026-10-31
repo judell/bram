@@ -16463,6 +16463,15 @@ window.__bramGuardRegistrationLine = function (r) {
     parts.push("OpenCode: " + (o.custom ? "your own plugin, so Bram's checks are off"
       : o.ok ? "plugin current" : "plugin missing or stale (run Setup)"));
   }
+  // antigravity-worklist-guard: Bram's group in .agents/hooks.json, only
+  // where agy is wanted; an older host sends no antigravity entry. Setup
+  // leaves a file that isn't JSON alone, so that case asks for a hand fix.
+  var a = reg.antigravity;
+  if (a && a.wanted) {
+    parts.push("Antigravity: " + (a.ok ? "hook current"
+      : a.state === "unparseable" ? ".agents/hooks.json isn't valid JSON, so agy runs without the guard (fix it by hand)"
+      : "hook missing or stale (run Setup)"));
+  }
   return parts.join(" · ");
 };
 

@@ -31181,14 +31181,18 @@ fn provider_needs_setup_for(
     claude_needs: bool,
     codex_needs: bool,
     opencode_needs: bool,
+    antigravity_needs: bool,
 ) -> bool {
     match active {
         Some(SessionProvider::Claude) => claude_needs,
         Some(SessionProvider::Codex) => codex_needs,
         Some(SessionProvider::Opencode) => opencode_needs,
         // opencode_needs is already false wherever OpenCode isn't installed
-        // (opencode_plugin_wanted), so it raises no banner for non-users.
-        None => claude_needs || codex_needs || opencode_needs,
+        // (opencode_plugin_wanted), so it raises no banner for non-users;
+        // antigravity_needs likewise (antigravity_hooks_wanted). Antigravity
+        // gets its own arm with its SessionProvider variant
+        // (antigravity-provider-switch).
+        None => claude_needs || codex_needs || opencode_needs || antigravity_needs,
     }
 }
 
@@ -37225,7 +37229,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     let claude_needs = status["claudeNeedsSetup"].as_bool().unwrap_or(false);
     let codex_needs = status["codexNeedsSetup"].as_bool().unwrap_or(false);
     let opencode_needs = status["opencodeNeedsSetup"].as_bool().unwrap_or(false);
-    if !claude_needs && !codex_needs && !opencode_needs {
+    let antigravity_needs = status["antigravityNeedsSetup"].as_bool().unwrap_or(false);
+    if !claude_needs && !codex_needs && !opencode_needs && !antigravity_needs {
         append_bram_trace_line(app, "auto-setup", "op=skip reason=current");
         return;
     }
@@ -37239,8 +37244,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
                 app,
                 "auto-setup",
                 &format!(
-                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} wrote={} skipped={}",
-                    first_run, claude_needs, codex_needs, opencode_needs, wrote, skipped
+                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} antigravityNeeded={} wrote={} skipped={}",
+                    first_run, claude_needs, codex_needs, opencode_needs, antigravity_needs, wrote, skipped
                 ),
             );
             if first_run && wrote > 0 {
@@ -54915,11 +54920,25 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         && (!core_installed
             || !(opencode_plugin_current || opencode_plugin_custom)
             || !opencode_instructions_current);
+    // antigravity-worklist-guard: agy's install is Bram's group in
+    // .agents/hooks.json, wherever agy can run. A file that isn't JSON raises
+    // no banner: Setup leaves it alone, so no Setup run could clear it (the
+    // reasoning for OpenCode's unparseable config). The self-test still fails
+    // it, since agy then runs without the guard.
+    let antigravity_wanted = antigravity_hooks_wanted(&proj);
+    let antigravity_hooks = antigravity_hooks_state(&proj);
+    let antigravity_needs_setup = antigravity_wanted
+        && (!core_installed
+            || matches!(
+                antigravity_hooks,
+                AntigravityHooksState::Missing | AntigravityHooksState::Stale
+            ));
     let provider_needs_setup = provider_needs_setup_for(
         active_provider,
         claude_needs_setup,
         codex_needs_setup,
         opencode_needs_setup,
+        antigravity_needs_setup,
     );
     let active_provider_json = match active_provider {
         Some(SessionProvider::Claude) => json!("claude"),
@@ -55021,6 +55040,9 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "opencodePluginCurrent": opencode_plugin_current,
         "opencodePluginCustom": opencode_plugin_custom,
         "opencodeInstructionsCurrent": opencode_instructions_current,
+        "antigravityNeedsSetup": antigravity_needs_setup,
+        "antigravityWanted": antigravity_wanted,
+        "antigravityHooks": antigravity_hooks.as_str(),
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
         "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
@@ -55744,6 +55766,14 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     if opencode_plugin_wanted(app, &proj) {
         seed_opencode_instructions(&proj, is_source_repo, &mut wrote, &mut skipped)?;
     }
+    // antigravity-worklist-guard: agy's guard registration, Bram's group in
+    // .agents/hooks.json. Runs on the source repo too, as OpenCode's plugin
+    // does. The link exists here: Setup refused above if it couldn't make it.
+    if antigravity_hooks_wanted(&proj) {
+        if let Some(command) = expected_antigravity_guard_command() {
+            seed_antigravity_hooks(&proj, &command, &mut wrote, &mut skipped)?;
+        }
+    }
 
     // issue-227: surface stale legacy-hook references in user-global settings.
     // These block the #217 shim prune; Setup cannot fix them, only name them.
@@ -56092,6 +56122,316 @@ mod opencode_instructions_tests {
             instructions(&dir),
             vec!["app/__shell/conventions.md", "docs/developing-bram.md"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// antigravity-worklist-guard: agy's guard registration is a named group in the
+// project's .agents/hooks.json, the workspace hooks file agy reads (as do the
+// Antigravity App and IDE). The file maps group names to their events, so
+// Bram owns one group and a user's own groups are kept. The global
+// ~/.gemini/config/hooks.json was rejected: it applies to every project, and
+// the guard must know which project a call belongs to. agy has no untracked
+// local hooks file, so in a project that tracks .agents/hooks.json, Setup's
+// group (an absolute path to the guard) changes a tracked file, as OpenCode's
+// `instructions` entry does.
+const ENHANCE_ANTIGRAVITY_HOOKS_REL: &str = ".agents/hooks.json";
+const ANTIGRAVITY_HOOKS_GROUP: &str = "bram-worklist-guard";
+// The tools that change files in agy 1.4.12 (the specimen pack, and the tool
+// list in resources/worklist-drafts/antigravity-worklist-guard.md); the others
+// read, search, ask, schedule or manage subagents. Codex's matcher has the
+// same shape.
+const ANTIGRAVITY_GUARD_MATCHER: &str = "^(write_file|edit_file|run_command)$";
+// agy kills a hook at its timeout and blocks the call (the 2026-10-31 spike),
+// so this only bounds a hung guard. Codex's registration uses 10 s too.
+const ANTIGRAVITY_GUARD_TIMEOUT_SECS: u64 = 10;
+
+fn expected_antigravity_guard_command() -> Option<String> {
+    guard_link_if_installed().map(|link| antigravity_guard_command(&link))
+}
+
+// What agy runs. agy lets a tool call through when its hook exits 0 with
+// empty output (the 2026-10-31 spike), and that is exactly what a guard that
+// doesn't know `antigravity-worklist` does: Bram 0.8.1's prints
+// "unknown hook" to stderr and exits 0. ~/.bram/bram-guard follows whichever
+// running Bram re-pointed it last, so with an older Bram running beside this
+// one, agy's writes would pass unchecked. The wrapper turns no decision into
+// a deny that says why, as OpenCode's plugin does with any non-decision.
+// agy runs hook commands through a shell (the spike's quoted `printf` hooks
+// worked). Windows keeps the bare command until a capture shows which shell
+// agy uses there.
+fn antigravity_guard_command(link: &Path) -> String {
+    let bare = guard::guard_hook_command(link, "antigravity-worklist");
+    if cfg!(windows) {
+        return bare;
+    }
+    format!(
+        "out=$({}); if [ -n \"$out\" ]; then printf '%s\\n' \"$out\"; else printf '%s\\n' '{}'; fi",
+        bare, ANTIGRAVITY_NO_DECISION_DENY
+    )
+}
+
+// Single-quoted in the shell, so no apostrophes.
+const ANTIGRAVITY_NO_DECISION_DENY: &str = r#"{"decision":"deny","reason":"Blocked: the Bram worklist guard gave no decision. The guard ~/.bram/bram-guard reaches is probably from an older Bram that predates Antigravity support. Update or relaunch every running Bram, then retry."}"#;
+
+fn antigravity_hooks_group(command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "PreToolUse": [{
+            "matcher": ANTIGRAVITY_GUARD_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": command,
+                "timeout": ANTIGRAVITY_GUARD_TIMEOUT_SECS,
+            }],
+        }],
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntigravityHooksState {
+    // No file, or no Bram group in it.
+    Missing,
+    Current,
+    // Bram's group differs from what Setup writes (an older command, or no
+    // guard link to compare with).
+    Stale,
+    // Not a JSON object. Setup leaves it alone and names it in `skipped`.
+    Unparseable,
+}
+
+impl AntigravityHooksState {
+    fn as_str(self) -> &'static str {
+        match self {
+            AntigravityHooksState::Missing => "missing",
+            AntigravityHooksState::Current => "current",
+            AntigravityHooksState::Stale => "stale",
+            AntigravityHooksState::Unparseable => "unparseable",
+        }
+    }
+}
+
+fn antigravity_hooks_state_of(text: Option<&str>, command: Option<&str>) -> AntigravityHooksState {
+    let Some(text) = text else {
+        return AntigravityHooksState::Missing;
+    };
+    let Some(value) = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .filter(|v| v.is_object())
+    else {
+        return AntigravityHooksState::Unparseable;
+    };
+    match (value.get(ANTIGRAVITY_HOOKS_GROUP), command) {
+        (None, _) => AntigravityHooksState::Missing,
+        (Some(group), Some(cmd)) if *group == antigravity_hooks_group(cmd) => {
+            AntigravityHooksState::Current
+        }
+        (Some(_), _) => AntigravityHooksState::Stale,
+    }
+}
+
+fn antigravity_hooks_state(proj: &Path) -> AntigravityHooksState {
+    let text = std::fs::read_to_string(proj.join(ENHANCE_ANTIGRAVITY_HOOKS_REL)).ok();
+    antigravity_hooks_state_of(
+        text.as_deref(),
+        expected_antigravity_guard_command().as_deref(),
+    )
+}
+
+// As for OpenCode's plugin: where agy can run (its CLI on the host's PATH) or
+// where Bram's group is already installed and so kept current. Projects whose
+// users never run agy get no .agents/hooks.json. The active-agent case arrives
+// with SessionProvider::Antigravity (antigravity-provider-switch).
+fn antigravity_hooks_wanted(proj: &Path) -> bool {
+    matches!(
+        antigravity_hooks_state(proj),
+        AntigravityHooksState::Current | AntigravityHooksState::Stale
+    ) || agent_cli_on_path("agy")
+}
+
+// Writes Bram's group into .agents/hooks.json, creating the file when it is
+// absent and keeping every other group (keys may be re-sorted on rewrite, as
+// with .opencode/opencode.json). A file that isn't a JSON object is left
+// alone and reported in `skipped`. The caller decides whether agy is wanted.
+fn seed_antigravity_hooks(
+    proj: &Path,
+    command: &str,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let path = proj.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
+    let mut value = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) if v.is_object() => v,
+            _ => {
+                skipped.push(path.display().to_string());
+                return Ok(());
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+    };
+    let group = antigravity_hooks_group(command);
+    let Some(root) = value.as_object_mut() else {
+        return Ok(());
+    };
+    if root.get(ANTIGRAVITY_HOOKS_GROUP) == Some(&group) {
+        return Ok(());
+    }
+    root.insert(ANTIGRAVITY_HOOKS_GROUP.to_string(), group);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(&path, format!("{}\n", text))
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    wrote.push(path.display().to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+mod antigravity_hooks_tests {
+    use super::{
+        antigravity_guard_command, antigravity_hooks_group, antigravity_hooks_state_of,
+        seed_antigravity_hooks, AntigravityHooksState::*, ANTIGRAVITY_HOOKS_GROUP,
+        ENHANCE_ANTIGRAVITY_HOOKS_REL,
+    };
+
+    const CMD: &str = "\"/Users/example/.bram/bram-guard\" guard antigravity-worklist";
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-agy-hooks-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // The registered command, run the way agy runs it (a shell), against
+    // fake guards. The silent one is Bram 0.8.1's answer to a hook it
+    // doesn't know: "unknown hook" on stderr, exit 0, nothing on stdout.
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_turns_no_decision_into_a_deny() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let dir = scratch("wrapper");
+        let fake = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let run = |guard: &std::path::Path| -> serde_json::Value {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(antigravity_guard_command(guard))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(br#"{"toolCall":{"name":"write_file","args":{}}}"#)
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            serde_json::from_slice(&out.stdout).unwrap()
+        };
+        let silent = fake(
+            "silent",
+            "cat > /dev/null; echo \"bram guard: unknown hook 'antigravity-worklist'\" >&2",
+        );
+        let v = run(&silent);
+        assert_eq!(v["decision"], "deny");
+        assert!(v["reason"].as_str().unwrap().contains("older Bram"), "{v}");
+        // The payload reaches the guard, and a decision passes through as is.
+        let reader = fake(
+            "reader",
+            r#"grep -q write_file && echo '{"decision":"deny","reason":"saw write_file"}'"#,
+        );
+        assert_eq!(
+            run(&reader),
+            serde_json::json!({ "decision": "deny", "reason": "saw write_file" })
+        );
+        let allow = fake("allow", r#"cat > /dev/null; echo '{"decision":"allow"}'"#);
+        assert_eq!(run(&allow), serde_json::json!({ "decision": "allow" }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_reads_only_brams_group() {
+        let current = serde_json::json!({ ANTIGRAVITY_HOOKS_GROUP: antigravity_hooks_group(CMD) })
+            .to_string();
+        assert_eq!(antigravity_hooks_state_of(None, Some(CMD)), Missing);
+        assert_eq!(
+            antigravity_hooks_state_of(Some(r#"{"mine":{}}"#), Some(CMD)),
+            Missing
+        );
+        assert_eq!(
+            antigravity_hooks_state_of(Some(&current), Some(CMD)),
+            Current
+        );
+        let older = current.replace("antigravity-worklist", "antigravity-old");
+        assert_eq!(antigravity_hooks_state_of(Some(&older), Some(CMD)), Stale);
+        // No guard link: nothing to call Bram's group current against.
+        assert_eq!(antigravity_hooks_state_of(Some(&current), None), Stale);
+        assert_eq!(
+            antigravity_hooks_state_of(Some("not json"), Some(CMD)),
+            Unparseable
+        );
+        assert_eq!(
+            antigravity_hooks_state_of(Some("[]"), Some(CMD)),
+            Unparseable
+        );
+    }
+
+    #[test]
+    fn seed_merges_and_is_idempotent() {
+        let dir = scratch("merge");
+        let path = dir.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let users = serde_json::json!({
+            "my-logger": { "Stop": [{ "type": "command", "command": "echo done" }] }
+        });
+        std::fs::write(&path, users.to_string()).unwrap();
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(wrote.len(), 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["my-logger"], users["my-logger"],
+            "the user's group is kept"
+        );
+        assert_eq!(v[ANTIGRAVITY_HOOKS_GROUP], antigravity_hooks_group(CMD));
+        assert_eq!(antigravity_hooks_state_of(Some(&text), Some(CMD)), Current);
+        // A second run changes nothing.
+        let (mut wrote2, mut skipped2) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote2, &mut skipped2).unwrap();
+        assert!(wrote2.is_empty() && skipped2.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_creates_the_file_and_leaves_unparseable_alone() {
+        let dir = scratch("create");
+        let path = dir.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(wrote.len(), 1);
+        assert!(path.is_file());
+        std::fs::write(&path, "{ not json").unwrap();
+        let (mut wrote2, mut skipped2) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote2, &mut skipped2).unwrap();
+        assert!(wrote2.is_empty());
+        assert_eq!(skipped2.len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -70683,20 +71023,24 @@ mod needs_you_tests {
     fn provider_needs_setup_none_falls_back_to_project_level() {
         // No provider active — the fresh/failure-path launch #320 is about.
         assert!(
-            provider_needs_setup_for(None, true, false, false),
+            provider_needs_setup_for(None, true, false, false, false),
             "claude needs → banner"
         );
         assert!(
-            provider_needs_setup_for(None, false, true, false),
+            provider_needs_setup_for(None, false, true, false, false),
             "codex needs → banner"
         );
         assert!(
-            provider_needs_setup_for(None, false, false, true),
+            provider_needs_setup_for(None, false, false, true, false),
             "opencode needs (only ever true where it's installed) → banner"
         );
-        assert!(provider_needs_setup_for(None, true, true, false));
         assert!(
-            !provider_needs_setup_for(None, false, false, false),
+            provider_needs_setup_for(None, false, false, false, true),
+            "antigravity needs (only ever true where agy can run) → banner"
+        );
+        assert!(provider_needs_setup_for(None, true, true, false, false));
+        assert!(
+            !provider_needs_setup_for(None, false, false, false, false),
             "none needs → no banner"
         );
         // Provider active — unchanged: exactly that provider's need.
@@ -70704,11 +71048,13 @@ mod needs_you_tests {
             Some(SessionProvider::Claude),
             true,
             false,
+            false,
             false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Claude),
             false,
+            true,
             true,
             true
         ));
@@ -70716,12 +71062,14 @@ mod needs_you_tests {
             Some(SessionProvider::Codex),
             false,
             true,
+            false,
             false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Codex),
             true,
             false,
+            true,
             true
         ));
         // opencode-worklist-guard: an OpenCode session answers for its plugin
@@ -70730,13 +71078,15 @@ mod needs_you_tests {
             Some(SessionProvider::Opencode),
             false,
             false,
-            true
+            true,
+            false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Opencode),
             true,
             true,
-            false
+            false,
+            true
         ));
     }
 
@@ -79041,6 +79391,28 @@ fn guard_selftest_run_case(
             ),
         };
     }
+    // antigravity-worklist-guard: agy reads {"decision", "reason"} from
+    // stdout, exit 0. Empty output would let agy run the tool, so a missing
+    // decision fails here rather than passing as an allow.
+    if hook.starts_with("antigravity") {
+        if code != Some(0) {
+            return (
+                "error".to_string(),
+                format!("exit {:?}: {}", code, short(&stderr)),
+            );
+        }
+        let line = stdout.trim().lines().last().unwrap_or("");
+        let v: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
+        let reason = v.get("reason").and_then(|m| m.as_str()).unwrap_or("");
+        return match v.get("decision").and_then(|d| d.as_str()) {
+            Some("allow") => ("allow".to_string(), String::new()),
+            Some("deny") => ("deny".to_string(), short(reason)),
+            _ => (
+                "error".to_string(),
+                format!("no decision: {}", short(&stdout)),
+            ),
+        };
+    }
     match code {
         Some(0) => ("allow".to_string(), String::new()),
         Some(2) => ("deny".to_string(), short(&stderr)),
@@ -79228,6 +79600,51 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                     "mcp": {"server": "filesystem", "tool": "write_file"},
                     "input": {"path": file("src/covered.txt"), "content": "y"}}),
                 ),
+                // antigravity-worklist-guard: agy 1.4.12's PreToolUse payloads,
+                // shaped as the specimen pack captured them. The project is
+                // `workspacePaths[0]`; there is no `cwd`. A signed forge case
+                // waits for Antigravity's signature
+                // (antigravity-signature-and-conventions).
+                (
+                    "antigravity-write-covered",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "write_file", "args": {"Path": file("src/covered.txt"), "Content": "y"}}}),
+                ),
+                (
+                    "antigravity-write-uncovered",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "write_file", "args": {"Path": file("src/uncovered.txt"), "Content": "y"}}}),
+                ),
+                (
+                    "antigravity-edit-uncovered",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "edit_file", "args": {"Path": file("src/uncovered.txt"), "Target": "a", "Replacement": "b"}}}),
+                ),
+                (
+                    "antigravity-command-harmless",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "WaitMsBeforeAsync": 5000}}}),
+                ),
+                (
+                    "antigravity-forge-unsigned",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "gh issue comment 5 --body \"guard self-test\"", "WaitMsBeforeAsync": 5000}}}),
+                ),
             ];
             for (id, hook, expect, payload) in specs {
                 let (got, reason) = guard_selftest_run_case(link, hook, &payload);
@@ -79306,6 +79723,23 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     if !opencode_ok {
         failed.push("opencode-registration".to_string());
     }
+    // antigravity-worklist-guard: agy's registration is Bram's group in the
+    // project's .agents/hooks.json, checked wherever agy is wanted
+    // (antigravity_hooks_wanted, the rule Setup and antigravityNeedsSetup use).
+    // An unparseable file fails here although it raises no banner: agy then
+    // runs without the guard, and only a hand edit can fix it.
+    let (antigravity_wanted, antigravity_hooks) = project_root(Some(app))
+        .map(|proj| {
+            (
+                antigravity_hooks_wanted(&proj),
+                antigravity_hooks_state(&proj),
+            )
+        })
+        .unwrap_or((false, AntigravityHooksState::Missing));
+    let antigravity_ok = !antigravity_wanted || antigravity_hooks == AntigravityHooksState::Current;
+    if !antigravity_ok {
+        failed.push("antigravity-registration".to_string());
+    }
     let ok = failed.is_empty();
     append_bram_trace_line(
         app,
@@ -79360,6 +79794,11 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
             },
             "codex": { "ok": codex_ok },
             "opencode": { "ok": opencode_ok, "wanted": opencode_wanted, "custom": opencode_custom },
+            "antigravity": {
+                "ok": antigravity_ok,
+                "wanted": antigravity_wanted,
+                "state": antigravity_hooks.as_str(),
+            },
         },
         "ranAtMs": unix_now_ms(),
     })
@@ -79430,6 +79869,52 @@ mod guard_selftest_tests {
         let silent = fake("silent", "exit 0");
         assert_eq!(
             guard_selftest_run_case(&silent, "opencode-worklist", &payload).0,
+            "error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // antigravity-worklist-guard: agy reads {"decision", "reason"}. A guard
+    // that exits 0 with no output is the one case agy lets through (the
+    // 2026-10-31 spike), so the self-test must fail it, not pass it as allow.
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_answer_needs_a_decision() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "bram-guard-selftest-antigravity-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let payload = serde_json::json!({ "toolCall": { "name": "write_file", "args": {} } });
+        let deny = fake(
+            "deny",
+            r#"echo '{"decision":"deny","reason":"Blocked: uncovered"}'"#,
+        );
+        assert_eq!(
+            guard_selftest_run_case(&deny, "antigravity-worklist", &payload),
+            ("deny".to_string(), "Blocked: uncovered".to_string())
+        );
+        let allow = fake("allow", r#"echo '{"decision":"allow"}'"#);
+        assert_eq!(
+            guard_selftest_run_case(&allow, "antigravity-worklist", &payload).0,
+            "allow"
+        );
+        let silent = fake("silent", "exit 0");
+        assert_eq!(
+            guard_selftest_run_case(&silent, "antigravity-worklist", &payload).0,
+            "error"
+        );
+        let crashed = fake("crashed", "exit 1");
+        assert_eq!(
+            guard_selftest_run_case(&crashed, "antigravity-worklist", &payload).0,
             "error"
         );
         let _ = std::fs::remove_dir_all(&dir);

@@ -38,6 +38,7 @@ xmlui-desktop
 AGENTS.md
 .opencode/plugins/bram.js
 .opencode/opencode.json
+.agents/hooks.json
 
 # This repo opts out of committed worklist-history snapshots for the
 # Codex-themed release; revisit whether to track them in a later release.

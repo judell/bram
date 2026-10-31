@@ -289,19 +289,22 @@
       idKey="{findPlan ? '__findKey' : 'id'}"
       onScroll="(ev) => atBottom = window.__bramFollowClassify(atBottom, ev.atEnd, $props.agentId)"
       onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range, transcriptList, $props.agentId)">
-      <!-- transcript-worklist-bar-full-width: "No transcript yet" lives in
+      <!-- transcript-worklist-bar-full-width: the empty message lives in
            the List's own empty state
            (https://www.xmlui.org/docs/reference/components/List). Above the
            split it was 35 px that vanished when the transcript loaded, which
            shifted the split up until the next re-measure ~0.8 s later: the
-           bar's jump up and back on every load. The `when` keeps a find
-           with no matches from claiming there is no transcript. -->
+           bar's jump up and back on every load.
+           transcript-tool-expand-lag: keep this Text static. A
+           when="{events.length === 0}" here delayed tool-row expansion by up
+           to ~10 s (mechanism unknown; bisected to this binding). The List
+           shows this for an empty transcript and a find with no matches
+           alike, hence the neutral wording. -->
       <property name="emptyListTemplate">
         <Text
-          when="{events.length === 0}"
           paddingHorizontal="$space-4"
           color="$textColor-secondary"
-          value="No transcript yet." />
+          value="Nothing to show." />
       </property>
       <VStack gap="$space-1" paddingVertical="$space-1" paddingHorizontal="$space-4">
         <!-- user message -->

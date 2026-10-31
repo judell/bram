@@ -87658,8 +87658,44 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         .find(|h| h.field.equiv("Origin"))
         .map(|h| h.value.as_str().to_string());
 
+    // issue-465: one gate for state-changing requests and for any Host that
+    // isn't this instance's loopback address (DNS rebinding). Refusals are
+    // traced so a false refusal shows up in the log.
+    let request_host: Option<String> = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Host"))
+        .map(|h| h.value.as_str().to_string());
+    let gate_refusal = loopback_gate_refusal(
+        &method,
+        path,
+        request_origin.as_deref(),
+        request_host.as_deref(),
+        LOOPBACK_PORT.get().copied(),
+    );
+    if let Some(reason) = gate_refusal {
+        append_bram_trace_line(
+            app,
+            "loopback-refusal",
+            &format!(
+                "op=refuse reason={} method={} path=/{} origin={} host={}",
+                reason,
+                method,
+                path,
+                request_origin.as_deref().unwrap_or("(none)"),
+                request_host.as_deref().unwrap_or("(none)")
+            ),
+        );
+    }
+
     // POST-only routes (route_request is GET-only).
-    let (status, content_type, body) = if path == "__self-update" {
+    let (status, content_type, body) = if gate_refusal.is_some() {
+        (
+            403,
+            "text/plain; charset=utf-8",
+            b"forbidden: cross-origin caller".to_vec(),
+        )
+    } else if path == "__self-update" {
         // clickable-update-from-banner: start the install flow (idempotent
         // guard: 409 while one runs). Progress rides /__self-update/status +
         // the self-update-changed event.
@@ -87674,20 +87710,6 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         } else {
             handle_self_update_relaunch(app)
         }
-    } else if path == "__issue/comment" && !issue_comment_origin_allowed(request_origin.as_deref())
-    {
-        // M7 (docs/security.md): /__issue/comment is a forge WRITE posting as
-        // the user; a browser page that learned the port must not drive it.
-        // Refuse when a FOREIGN Origin is present — no-Origin callers (the
-        // pane's own fetches, which the H6 soak showed send no Origin, and
-        // curl) and the shell origin itself pass. This is exactly H6's
-        // accepted-residual boundary, enforced with its soaked platform-aware
-        // SHELL_ORIGIN rather than a fresh predicate.
-        (
-            403,
-            "text/plain; charset=utf-8",
-            b"forbidden: cross-origin caller".to_vec(),
-        )
     } else if path == "query" {
         // issue-355: the dataType="sql" receiving end. Unprefixed on
         // purpose — target markup calls it with a relative URL, matching
@@ -87979,32 +88001,153 @@ fn cors_allowed_origin(request_origin: Option<&str>) -> Option<&'static str> {
     }
 }
 
-// M7 (docs/security.md): the write-route screen built on the same boundary.
-// CORS stops a foreign page READING responses; it does not stop the request
-// itself, and /__issue/comment has an external side effect. So the request is
-// refused outright when a foreign Origin is present. No-Origin callers pass —
-// the pane's own fetches send no Origin (H6 soak receipt) and a same-user
-// local process is the accepted residual. Pure for unit testing.
-fn issue_comment_origin_allowed(request_origin: Option<&str>) -> bool {
+// issue-465 (docs/security.md H6 send half, M7): the Origin rule for
+// state-changing requests. CORS stops a foreign page READING responses; it does
+// not stop the request, so a foreign Origin is refused outright. No-Origin
+// callers pass (the pane's own fetches, hooks, guards, scripts and curl send
+// none; a same-user local process is H6's accepted residual). The shell origin
+// passes. `Origin: null` (sandboxed iframes, file:// pages) is foreign. The
+// display-only target pane (`bramapp://localhost`) is foreign here too.
+// Pure for unit testing.
+fn state_change_origin_allowed(request_origin: Option<&str>) -> bool {
     match request_origin {
         None => true,
         Some(o) => o == SHELL_ORIGIN,
     }
 }
 
+// GET routes that change state or have side effects beyond reading. Origin
+// rule applies to them as to non-GET methods. Keep in step with route_request.
+const STATE_CHANGING_GET_PATHS: &[&str] = &[
+    "__issue/comment",    // forge write
+    "__enhance/run",      // runs Setup (writes files, hooks)
+    "__restart-server",   // restarts the spawned project server
+    "__worklist/init",    // creates worklist.json
+    "__worklist/resolve", // consumes the recorded approval
+    "__startup-ready",    // emits startup events
+];
+
+fn request_changes_state(method: &str, path: &str) -> bool {
+    !matches!(method, "GET" | "HEAD" | "OPTIONS") || STATE_CHANGING_GET_PATHS.contains(&path)
+}
+
+// Host must be 127.0.0.1 or localhost at this instance's port; anything else
+// is a DNS-rebinding attempt. A missing Host passes: HTTP/1.1 requires one, so
+// only a hand-rolled HTTP/1.0 client omits it, and a browser (the rebinding
+// vector) always sends it. Pure for unit testing.
+fn loopback_host_allowed(host: Option<&str>, port: Option<u16>) -> bool {
+    let Some(host) = host else { return true };
+    let Some(port) = port else { return true };
+    let host = host.trim().to_ascii_lowercase();
+    host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}")
+}
+
+// The gate: Some(reason) when the request must be refused with 403.
+fn loopback_gate_refusal(
+    method: &str,
+    path: &str,
+    request_origin: Option<&str>,
+    request_host: Option<&str>,
+    port: Option<u16>,
+) -> Option<&'static str> {
+    if !loopback_host_allowed(request_host, port) {
+        return Some("bad-host");
+    }
+    if request_changes_state(method, path) && !state_change_origin_allowed(request_origin) {
+        return Some("foreign-origin");
+    }
+    None
+}
+
 #[cfg(test)]
 mod cors_origin_tests {
-    use super::{cors_allowed_origin, issue_comment_origin_allowed, SHELL_ORIGIN};
+    use super::{
+        cors_allowed_origin, loopback_gate_refusal, loopback_host_allowed,
+        state_change_origin_allowed, SHELL_ORIGIN,
+    };
 
     #[test]
-    fn issue_comment_screen_passes_no_origin_and_shell_only() {
-        // M7: no-Origin (pane fetches, curl) and the shell origin pass; any
-        // foreign Origin — another page, the display-only target pane — is
-        // refused before the forge write runs.
-        assert!(issue_comment_origin_allowed(None));
-        assert!(issue_comment_origin_allowed(Some(SHELL_ORIGIN)));
-        assert!(!issue_comment_origin_allowed(Some("https://evil.example")));
-        assert!(!issue_comment_origin_allowed(Some("bramapp://localhost")));
+    fn state_change_rule_passes_no_origin_and_shell_only() {
+        assert!(state_change_origin_allowed(None));
+        assert!(state_change_origin_allowed(Some(SHELL_ORIGIN)));
+        assert!(!state_change_origin_allowed(Some("https://evil.example")));
+        assert!(!state_change_origin_allowed(Some("bramapp://localhost")));
+        assert!(!state_change_origin_allowed(Some(
+            "http://bramapp.localhost"
+        )));
+        assert!(!state_change_origin_allowed(Some("null")));
+        assert!(!state_change_origin_allowed(Some("")));
+    }
+
+    #[test]
+    fn host_must_be_loopback_at_our_port() {
+        let p = Some(5000u16);
+        assert!(loopback_host_allowed(Some("127.0.0.1:5000"), p));
+        assert!(loopback_host_allowed(Some("localhost:5000"), p));
+        assert!(loopback_host_allowed(Some("LocalHost:5000"), p));
+        assert!(loopback_host_allowed(None, p));
+        assert!(!loopback_host_allowed(Some("127.0.0.1:5001"), p));
+        assert!(!loopback_host_allowed(Some("127.0.0.1"), p));
+        assert!(!loopback_host_allowed(Some("evil.example:5000"), p));
+        assert!(!loopback_host_allowed(
+            Some("127.0.0.1.evil.example:5000"),
+            p
+        ));
+        assert!(!loopback_host_allowed(Some(""), p));
+    }
+
+    #[test]
+    fn gate_refuses_foreign_origin_on_state_changes_only() {
+        let h = Some("127.0.0.1:5000");
+        let p = Some(5000u16);
+        let evil = Some("https://evil.example");
+        // state-changing: POST, and the GET routes with side effects
+        assert_eq!(
+            loopback_gate_refusal("POST", "__worklist/reorder", evil, h, p),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal(
+                "POST",
+                "__worklist/reorder",
+                Some("bramapp://localhost"),
+                h,
+                p
+            ),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal("GET", "__enhance/run", evil, h, p),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal("GET", "__issue/comment", evil, h, p),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal("POST", "__self-update", evil, h, p),
+            Some("foreign-origin")
+        );
+        // legitimate
+        assert_eq!(
+            loopback_gate_refusal("POST", "__worklist/reorder", None, h, p),
+            None
+        );
+        assert_eq!(
+            loopback_gate_refusal("POST", "__worklist/reorder", Some(SHELL_ORIGIN), h, p),
+            None
+        );
+        // reads from a foreign origin still reach the handler (CORS governs reading)
+        assert_eq!(loopback_gate_refusal("GET", "__worklist", evil, h, p), None);
+        assert_eq!(
+            loopback_gate_refusal("OPTIONS", "__worklist", evil, h, p),
+            None
+        );
+        // bad Host refused even for a read
+        assert_eq!(
+            loopback_gate_refusal("GET", "__worklist", None, Some("evil.example:5000"), p),
+            Some("bad-host")
+        );
     }
 
     #[test]

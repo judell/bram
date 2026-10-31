@@ -1,9 +1,9 @@
-// Shadow port of the Claude worklist guard (bram-guard-worklist-policy-shadow),
-// phase 1 of the Python-hook retirement. The authoritative implementation is
-// app/provider-hooks/claude-worklist-guard.py; this module reproduces its
-// decision pipeline as a pure-ish function so `bram guard claude-worklist` can
-// write one breadcrumb per invocation and the divergence check is a grep-join
-// against the Python guard's own `[worklist-guard]` trace lines.
+// The Claude worklist guard's policy (see guard.rs). It began as a shadow port
+// (bram-guard-worklist-policy-shadow) of a Python guard, since retired, with
+// `bram guard claude-worklist` writing one breadcrumb per invocation so the two
+// could be compared. The decision pipeline here is now the implementation. The
+// shadow path still runs (guard.rs), so the discipline below, written against
+// the Python guard, still describes it until that path is removed.
 //
 // Shadow discipline, contractual:
 //

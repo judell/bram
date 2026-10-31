@@ -31154,9 +31154,9 @@ struct SessionEntry {
 enum SessionProvider {
     Claude,
     Codex,
-    // opencode-provider-switch: launch, resume and the header switcher only.
-    // Its sessions live in SQLite, not transcript files, so every
-    // file-discovery site answers "none" for it until opencode-sessions-browser.
+    // Its sessions live in SQLite, not transcript files. Bram exports each one
+    // to a Claude-shaped JSONL, which file discovery then reads
+    // (opencode-sessions-browser).
     Opencode,
 }
 
@@ -44640,10 +44640,8 @@ fn session_size_status_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json:
 
 // Outbound turn envelope — the persistence contract (schema v1). One JSON
 // file per Bram-authored user turn under resources/outbound-turns/. The
-// send path starts WRITING these in a later phase (doc step 6); the
-// projection resolves them now so history authored by the archived
-// 2026-07-02 attempt renders correctly and the write switch needs no
-// reader changes.
+// send path writes these (doc step 6, 69f027bd); the projection also
+// resolves history authored by the archived 2026-07-02 attempt.
 //
 //   {
 //     "schema": 1,

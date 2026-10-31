@@ -1029,6 +1029,27 @@ computes (the board header, strip wording); those stay rendered checks.
 It needs a windowing session, so it runs on demand, not in CI, like
 `setup-harness.sh`.
 
+### Forcing the suspicious-silence banner
+
+The footer's "terminal is suspiciously silent" banner normally needs a real
+silence with the terminal hidden. To raise it on demand, **Shift-click the
+button that hides the terminal**, while the terminal is showing. A plain click
+hides it with no banner, and a Shift-click that shows it does nothing extra.
+
+This is a deliberate self-test (`app/main.js`, `postSuspiciousSilenceSelfTest`).
+It posts the banner's message from the parent shell to the pane, and doesn't
+touch the live turn or the host's detector. It logs `op=self-test-dispatched`
+and an `op=warn` with `provider=self-test`. **Open terminal** clears it, the
+same way it clears a real one.
+
+For a footer layout check, start a slow turn first (`sleep 120` in the agent's
+shell), so the banner sits beside "working…", then resize the window. The
+trace's pass condition is no `flip:true` and no `wide` on
+`transcript-split-height`. An overlap inside the footer doesn't overflow the
+page, so the trace can't see it: a person has to look. On 2026-10-31 this test
+showed the jitter fixed while **Open terminal** still sat on top of the status
+label (footer-silence-banner-overflow-jitter).
+
 ### Relationship to the scripted sections
 
 The Worklist-gate walkthrough and the startup-dance harness are

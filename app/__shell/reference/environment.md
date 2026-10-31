@@ -296,6 +296,21 @@ fine. *Local absence is not disproof* (in `diagnostics.md` §Log-first
 development) is the special case of this rule for machine-specific
 artifacts; this is the general one.
 
+### Coordinate on the record, not session to session
+
+Some agents can message other running sessions directly. Don't, by
+default. The user can't see that exchange, and it leaves nothing for
+later readers: no issue, no Worklist item, no Bram turn.
+
+- Put a request for another session on the relevant forge issue, signed
+  as usual, or tell the user what to relay.
+- Message a session directly only when the user says to for that case,
+  and tell the user that it happened and by what channel.
+- If it has already happened, put the request and its outcome on the
+  issue so the record is whole.
+- Reading another session's transcript, trace or repo is observation,
+  not messaging. It stays allowed.
+
 ### The thread is the design document
 
 Chat dies with the session; the thread is what the other side reads,

@@ -572,6 +572,10 @@ work where it *runs*. If the user proceeds from here anyway, make any
 artifact left in the target project (issue, doc, commit message)
 self-contained, carrying the evidence inline.
 
+**Sessions coordinate on the record.** Don't message another agent
+session directly unless the user says to for that case. Post on a forge
+issue, or tell the user what to relay.
+
 - **Two sessions coordinating across a boundary (upstream, another machine, another agent)** → read `.claude/bram-reference/environment.md` (§Working across project boundaries).
 
 ### Suggest a fresh session for a new line of work

@@ -31992,20 +31992,111 @@ fn codex_payload_is_subagent(payload: &serde_json::Value) -> bool {
         || payload.pointer("/source/subagent").is_some()
 }
 
-fn codex_subagent_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u128, u64, bool)>> {
-    static CODEX_SUBAGENT_CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (u128, u64, bool)>>,
-    > = std::sync::OnceLock::new();
-    CODEX_SUBAGENT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+#[derive(Clone)]
+struct CodexChildMeta {
+    parent_id: String,
+    agent_path: String,
+    nickname: String,
+}
+
+fn codex_payload_child_meta(payload: &serde_json::Value) -> Option<CodexChildMeta> {
+    if !codex_payload_is_subagent(payload) {
+        return None;
+    }
+    let spawn = payload.pointer("/source/subagent/thread_spawn");
+    let field = |name: &str| {
+        payload
+            .get(name)
+            .or_else(|| spawn.and_then(|s| s.get(name)))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    Some(CodexChildMeta {
+        parent_id: field("parent_thread_id"),
+        agent_path: field("agent_path"),
+        nickname: field("agent_nickname"),
+    })
+}
+
+static CODEX_CHILD_CACHE: CodexMetaCache<Option<CodexChildMeta>> = std::sync::OnceLock::new();
+
+fn codex_child_meta(path: &Path) -> std::io::Result<Option<CodexChildMeta>> {
+    let cache =
+        CODEX_CHILD_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    codex_cached_read(cache, path, |p| {
+        Ok(codex_session_meta_payload(p)?
+            .as_ref()
+            .and_then(codex_payload_child_meta))
+    })
 }
 
 fn codex_session_is_subagent(path: &Path) -> std::io::Result<bool> {
-    codex_cached_read(codex_subagent_cache(), path, |p| {
-        Ok(codex_session_meta_payload(p)?
-            .as_ref()
-            .is_some_and(codex_payload_is_subagent))
-    })
+    Ok(codex_child_meta(path)?.is_some())
+}
+
+// codex-subagent-roster-and-transcripts: a parent's children, wherever they
+// are under `sessions_root`. A resumed parent writes its children under
+// today's date directory, not its own.
+fn codex_child_rollouts_in(
+    sessions_root: &Path,
+    parent_id: &str,
+) -> Vec<(String, PathBuf, CodexChildMeta)> {
+    let mut paths = Vec::new();
+    if collect_codex_session_paths(sessions_root, &mut paths).is_err() {
+        return Vec::new();
+    }
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let child = codex_child_meta(&path).ok().flatten()?;
+            if child.parent_id != parent_id {
+                return None;
+            }
+            let (id, _) = codex_session_meta(&path).ok().flatten()?;
+            Some((id, path, child))
+        })
+        .collect()
+}
+
+fn codex_child_rollouts(session_path: &Path) -> Vec<(String, PathBuf, CodexChildMeta)> {
+    let Some((parent_id, _)) = codex_session_meta(session_path).ok().flatten() else {
+        return Vec::new();
+    };
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    codex_child_rollouts_in(&home.join(".codex").join("sessions"), &parent_id)
+}
+
+// A child's rollout opens with a replay of its parent's history, and its own
+// work starts after the developer message that tells it it was spawned. Take
+// the last one: a grandchild replays its parent's. With no marker (a CLI that
+// doesn't write it), the whole file. Every parsed line is compared, because a
+// session about this code quotes the phrase.
+fn codex_child_own_records(text: &str) -> &str {
+    const SPAWNED: &str = "You are now a newly spawned child agent";
+    let mut start = 0;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        if !line.contains(SPAWNED) {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let is_spawn_note = record.pointer("/payload/role").and_then(|v| v.as_str())
+            == Some("developer")
+            && record
+                .pointer("/payload/content/0/text")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t.starts_with(SPAWNED));
+        if is_spawn_note {
+            start = offset;
+        }
+    }
+    &text[start..]
 }
 
 // The rollout's session id when it is a main session of this project: its cwd
@@ -44129,6 +44220,18 @@ fn st_tag_agent_tool_entries(session_path: &Path, turns: &mut [serde_json::Value
     }
 }
 
+// A Codex child's chip label: the last segment of its agent path, the name its
+// parent gave it ("/root/list_files" -> "list_files").
+fn codex_child_label(child: &CodexChildMeta) -> String {
+    child
+        .agent_path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&child.nickname)
+        .to_string()
+}
+
 // /__turns?agent=<agentId> — project one subagent's transcript under the
 // ACTIVE session. Same parse + projection pass as the main route; the
 // response adds the meta.json label fields and a `finished` flag. No
@@ -44150,6 +44253,32 @@ fn read_subagent_turns<R: tauri::Runtime>(
     let Some(session_path) = active_session_path(app)? else {
         return empty();
     };
+    if jsonl_completion_provider_for_path(&session_path) == Some(JsonlCompletionProvider::Codex) {
+        let Some((_, path, child)) = codex_child_rollouts(&session_path)
+            .into_iter()
+            .find(|(id, _, _)| id == agent_id)
+        else {
+            return empty();
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return empty();
+        };
+        let mut turns = st_parse_lines_to_turns(codex_child_own_records(&text));
+        project_user_turns(app, &mut turns);
+        apply_describe_overlay(&mut turns, &describe_overlay_snapshot(app));
+        apply_menu_answer_overlay(&mut turns, &menu_answer_overlay_snapshot());
+        let body = serde_json::json!({
+            "sid": session_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            "agentId": agent_id,
+            "agentType": child.nickname,
+            "description": codex_child_label(&child),
+            "toolUseId": "",
+            "model": st_last_session_model(&path),
+            "turns": turns,
+            "finished": false,
+        });
+        return serde_json::to_vec(&body).map_err(|e| e.to_string());
+    }
     // subagent-discovery-workflow-dirs: resolve the agent id across both
     // layouts (flat Task subagents and nested Workflow run dirs).
     let Some(sf) = st_subagent_files(&session_path)
@@ -44255,6 +44384,38 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0)
     };
+    if jsonl_completion_provider_for_path(&session_path) == Some(JsonlCompletionProvider::Codex) {
+        let now_ms = to_ms(std::time::SystemTime::now());
+        let mut agents: Vec<serde_json::Value> = Vec::new();
+        for (id, path, child) in codex_child_rollouts(&session_path) {
+            let Ok(md) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
+            // No parent-side completion yet, so a child reads running, then
+            // waiting (codex-subagent-refresh-and-completion).
+            let state = st_subagent_state_str(false, updated_at_ms, now_ms);
+            agents.push(serde_json::json!({
+                "agentId": id,
+                "agentType": child.nickname,
+                "description": codex_child_label(&child),
+                "toolUseId": "",
+                "workflowId": "",
+                "model": st_last_session_model(&path),
+                "state": state,
+                "finished": false,
+                "startedAtMs": md.created().map(to_ms).unwrap_or(updated_at_ms),
+                "updatedAtMs": updated_at_ms,
+            }));
+        }
+        agents.sort_by_key(|a| a.get("startedAtMs").and_then(|v| v.as_i64()).unwrap_or(0));
+        let body = serde_json::json!({
+            "sid": sid,
+            "agents": agents,
+            "mainModel": main_session_model(app, &session_path),
+        });
+        return serde_json::to_vec(&body).map_err(|e| e.to_string());
+    }
     let files = st_subagent_files(&session_path);
     if files.is_empty() {
         return empty_session();
@@ -63253,7 +63414,10 @@ fn is_own_subagent_transcript_path(path: &Path, sessions_dir: Option<&Path>) -> 
 
 #[cfg(test)]
 mod codex_subagent_tests {
-    use super::{canonical_path_string, codex_main_session_id, codex_session_is_subagent};
+    use super::{
+        canonical_path_string, codex_child_label, codex_child_meta, codex_child_own_records,
+        codex_child_rollouts_in, codex_main_session_id, codex_session_is_subagent,
+    };
     use std::path::{Path, PathBuf};
 
     const CHILD: &str =
@@ -63281,6 +63445,61 @@ mod codex_subagent_tests {
         assert!(codex_session_is_subagent(&child).unwrap());
         assert_eq!(codex_main_session_id(&child, &cwd).unwrap(), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_parent_finds_its_children_in_any_date_directory() {
+        let dir = scratch("codex-roster");
+        let today = dir.join("2026").join("10").join("30");
+        std::fs::create_dir_all(&today).unwrap();
+        let child = rollout(&today, "rollout-child.jsonl", CHILD);
+        let parent_id = "01a185dd-483e-77a2-96e8-500da7e1f28d";
+        let found = codex_child_rollouts_in(&dir, parent_id);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "01a185dd-7608-7633-bf83-a90ee4131cb4");
+        assert_eq!(found[0].1, child);
+        assert_eq!(codex_child_label(&found[0].2), "pong");
+        assert!(codex_child_rollouts_in(&dir, "someone-else").is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_child_takes_its_fields_from_thread_spawn_when_flat_ones_are_absent() {
+        let dir = scratch("codex-spawn-only");
+        let path = dir.join("r.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"c","cwd":"/w","source":{"subagent":{"thread_spawn":{"parent_thread_id":"p","agent_path":"/root/a/b","agent_nickname":"Bohr"}}}}}"#,
+        )
+        .unwrap();
+        let child = codex_child_meta(&path).unwrap().unwrap();
+        assert_eq!(child.parent_id, "p");
+        assert_eq!(child.nickname, "Bohr");
+        assert_eq!(codex_child_label(&child), "b");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn spawn_note() -> String {
+        r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are now a newly spawned child agent. The"}]}}"#.to_string() + "\n"
+    }
+
+    #[test]
+    fn a_childs_transcript_starts_after_the_replayed_parent() {
+        let replay = "{\"replayed\":1}\n";
+        let own = "{\"own\":1}\n";
+        let text = format!("{replay}{}{own}", spawn_note());
+        assert_eq!(codex_child_own_records(&text), own);
+        // A grandchild replays its parent's spawn note first.
+        let text = format!("{replay}{}{replay}{}{own}", spawn_note(), spawn_note());
+        assert_eq!(codex_child_own_records(&text), own);
+    }
+
+    #[test]
+    fn quoting_the_marker_does_not_cut_the_transcript() {
+        let quoted = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"You are now a newly spawned child agent"}]}}"#;
+        let text = format!("{quoted}\n{{\"own\":1}}\n");
+        assert_eq!(codex_child_own_records(&text), text);
+        assert_eq!(codex_child_own_records("{\"a\":1}\n"), "{\"a\":1}\n");
     }
 
     #[test]

@@ -22,7 +22,7 @@ The pseudo-terminal opened by `pty_spawn`. [`src-tauri/src/lib.rs:19669-19677`](
 
 ## Agent CLI
 
-`claude`, `codex` or `opencode`. [`src-tauri/src/lib.rs:27334-27341`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/src-tauri/src/lib.rs?plain=1#L27334-L27341) Bram doesn't parse the CLI's answer into a reply; it watches signals around it (see the terminal output and JSONL turn-end scan arrows). The repo doesn't say what model or version Bram expects of each CLI beyond specimens under `docs/agent-specimens/`; I did not read them.
+`claude`, `codex` or `opencode`. [`src-tauri/src/lib.rs:27334-27341`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/src-tauri/src/lib.rs?plain=1#L27334-L27341) Bram doesn't parse the CLI's answer into a reply; it watches signals around it (see the terminal output and JSONL turn-end scan arrows). Bram pins no expected model for each CLI. The versions it knows are those of the captured specimens: Claude Code 2.1.312, codex-cli 0.165.0, OpenCode 2.1.4 and a Cursor agent, all captured on 2026-10-28, each with a "Model and version" row saying where the version shows on screen. [`docs/agent-specimens/README.md:12-15`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/docs/agent-specimens/README.md?plain=1#L12-L15) [`docs/agent-specimens/README.md:50-50`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/docs/agent-specimens/README.md?plain=1#L50-L50)
 
 ## Provider transcript
 

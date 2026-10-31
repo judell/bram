@@ -130,6 +130,11 @@
       }
       if (details[text] != null) {
         el.setAttribute("data-key", text);
+        // Keyboard reach: a focusable button that Enter and Space activate
+        // (see diagramDocument). aria-label names the item for screen readers.
+        el.setAttribute("tabindex", "0");
+        el.setAttribute("role", "button");
+        el.setAttribute("aria-label", text);
         el.setAttribute("class", el.getAttribute("class") + " has-detail");
       }
     };
@@ -158,8 +163,9 @@
     return new XMLSerializer().serializeToString(svgRoot);
   }
 
-  // The iframe's whole document. A click on an item with detail posts
-  // {type: 'arch-detail', diagram, key} to the app's MessageListener.
+  // The iframe's whole document. A click, or Enter or Space on a focused item
+  // with detail, posts {type: 'arch-detail', diagram, key} to the app's
+  // MessageListener. Key events reach this document when the frame has focus.
   const diagramDocument = (svg, diagram) =>
     "<!doctype html><html><head><meta charset='utf-8'><style>"
     + "html,body{margin:0;background:transparent;font-family:system-ui,sans-serif}"
@@ -169,11 +175,19 @@
     + "g.has-detail{cursor:pointer}"
     + "g.node.has-detail:hover rect,g.node.has-detail:hover path,g.node.has-detail:hover polygon{stroke-width:2.5px}"
     + "g.edgeLabel.has-detail:hover text{text-decoration:underline}"
+    + "g.has-detail:focus{outline:none}"
+    + "g.has-detail:focus-visible{outline:2px solid #2f5d8a;outline-offset:2px}"
+    + "g.node.has-detail:focus-visible rect,g.node.has-detail:focus-visible path,g.node.has-detail:focus-visible polygon{stroke:#2f5d8a;stroke-width:3px}"
+    + "g.edgeLabel.has-detail:focus-visible text{text-decoration:underline}"
+    + "g.edgeLabel.has-detail:focus-visible rect{stroke:#2f5d8a;stroke-width:2px}"
     + "</style></head><body>" + svg
-    + "<script>document.addEventListener('click',function(e){"
+    + "<script>function openDetail(g){parent.postMessage({type:'arch-detail',diagram:" + JSON.stringify(diagram)
+    + ",key:g.getAttribute('data-key')},'*');}"
+    + "document.addEventListener('click',function(e){"
+    + "var g=e.target.closest&&e.target.closest('[data-key]');if(g)openDetail(g);});"
+    + "document.addEventListener('keydown',function(e){"
     + "var g=e.target.closest&&e.target.closest('[data-key]');"
-    + "if(g)parent.postMessage({type:'arch-detail',diagram:" + JSON.stringify(diagram)
-    + ",key:g.getAttribute('data-key')},'*');});</script>"
+    + "if(g&&(e.key==='Enter'||e.key===' ')){e.preventDefault();openDetail(g);}});</script>"
     + "</body></html>";
 
   // Mermaid emits width="100%" and no height; give the SVG its real size from
@@ -200,7 +214,7 @@
 
   const caption = "The big picture of " + SITE.name + " as of commit " + SITE.commit
     + " (" + SITE.date + "). Each diagram is a file in architecture/. Hover a box or"
-    + " arrow for a tip; click it for detail that cites the code.";
+    + " arrow for a tip; click it, or Tab to it and press Enter, for detail that cites the code.";
 
   root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail};
 })(globalThis);

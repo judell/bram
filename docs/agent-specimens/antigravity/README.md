@@ -46,6 +46,8 @@ files are rendered from those redacted streams.
 | `hooks/payloads/PostInvocation.jsonl` | Completed model invocation |
 | `hooks/payloads/Stop.jsonl` | `NO_TOOL_CALL`, `fullyIdle: true` on a completed no-tool turn |
 | `hooks/payloads/PostToolUse.jsonl` | Successful and failed file tool results |
+| `osc7501-turns.md` | How a turn ends: hook sequences vs OSC 7501 states for a completed turn, two interrupts and a background command, with `AGY_CLI_OSC7501=on` (2026-10-31, `antigravity-turn-lifecycle`) |
+| `hooks/payloads/Stop-background.jsonl` | The two `Stop` payloads of a background command: `fullyIdle: false` while it ran, then `true` after agy's own follow-up |
 | `capture/drive.py`, `capture/render.py` | PTY driver and minimal terminal renderer, copied from the Cursor pack |
 | `capture/redact.py` | Redacts the home directory, workspace, and email, renders `.txt`, and removes `_all.raw` |
 | `capture/schedules/idle-composer.json` | Idle screen schedule |
@@ -65,6 +67,7 @@ files are rendered from those redacted streams.
 | `capture/schedules/exit-double-ctrl-c.json`, `capture/schedules/exit-idle-settled.json` | Attempts to exit with a second Ctrl-C |
 | `capture/schedules/resume-then-exit.json` | Resume by conversation id, then interrupt the replayed turn |
 | `capture/schedules/logged-out.json` | Start under an isolated, empty `HOME` |
+| `capture/schedules/turn-completed.json`, `capture/schedules/turn-interrupt.json`, `capture/schedules/turn-background.json` | The three turn-ending runs in `osc7501-turns.md`; run with `AGY_CLI_OSC7501=on` and a session-only `command(sleep)` allow rule |
 
 ## How to replay
 
@@ -148,7 +151,8 @@ findings above are limited to the artifacts actually captured.
 | Session metadata and naming | `/rename` changes the title shown by `/resume`; durable title store not identified | `rename-result.txt`, `renamed-session-list.txt` |
 | Guard hook | Workspace `.agents/hooks.json`; failed command stopped later calls, and `deny.reason` reached the model | `hooks/hooks.json`, `hooks/deny-hooks.json`, `hook-deny.txt` |
 | Tool payload | `write_file` (`Content`, `Overwrite`, `Path`), `edit_file` (`Path`, `Replacement`, `Target`), and `run_command` (`CommandLine`, `WaitMsBeforeAsync`, `toolSummary`) | `hooks/payloads/PreToolUse.jsonl`, `hooks/payloads/PreToolUse-denied.jsonl` |
-| Turn hooks | `PreInvocation`, `PostInvocation` and `Stop` captured for a completed no-tool turn; interrupt/background cases not captured | `hooks/payloads/PreInvocation.jsonl`, `hooks/payloads/PostInvocation.jsonl`, `hooks/payloads/Stop.jsonl` |
+| Turn hooks | `PreInvocation`, `PostInvocation` and `Stop` on a completed turn. An interrupted turn fires **no** `Stop` or `PostInvocation`. A background command gets `Stop` with `fullyIdle: false`, then `true` after agy's own follow-up | `hooks/payloads/Stop.jsonl`, `hooks/payloads/Stop-background.jsonl`, `osc7501-turns.md` |
+| Turn state (OSC 7501) | With `AGY_CLI_OSC7501=on`: `state=working\|done\|idle:app=antigravity`. A completed turn ends at `done`, an interrupted one at `idle`. Launch reports `blocked:kind=auth` first, and the folder-trust dialog `blocked:kind=permission`. Without the variable, only the `7501;?` query | `osc7501-turns.md` |
 | Menus | `/hooks`, `/resume` conversation list, four-choice command approval | `hooks-view.txt`, `renamed-session-list.txt`, `permission-prompt.txt` |
 | Screen states | Trust prompt, idle composer, generating, first Ctrl-C hint | corresponding `.txt` screens |
 | Model and version | Gemini 3.8 Flash (High), agy 1.4.12 | `idle-composer.txt`, `version.txt`, `hooks/payloads/SessionStart.jsonl` |
@@ -193,6 +197,9 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `capture/schedules/tool-payloads-full.json` | agy 1.4.12 |
 | `capture/schedules/tool-payloads.json` | agy 1.4.12 |
 | `capture/schedules/trust-idle-exit.json` | agy 1.4.12 |
+| `capture/schedules/turn-background.json` | agy 1.4.12 (2026-10-31) |
+| `capture/schedules/turn-completed.json` | agy 1.4.12 (2026-10-31) |
+| `capture/schedules/turn-interrupt.json` | agy 1.4.12 (2026-10-31) |
 | `completed.raw` | agy 1.4.12 |
 | `completed.txt` | agy 1.4.12 |
 | `exit-ctrl-c.raw` | agy 1.4.12 |
@@ -221,6 +228,7 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `hooks/payloads/PreToolUse-denied.jsonl` | agy 1.4.12 |
 | `hooks/payloads/PreToolUse.jsonl` | agy 1.4.12 |
 | `hooks/payloads/SessionStart.jsonl` | agy 1.4.12 |
+| `hooks/payloads/Stop-background.jsonl` | agy 1.4.12 (2026-10-31) |
 | `hooks/payloads/Stop.jsonl` | agy 1.4.12 |
 | `hooks/permission-hooks.json` | agy 1.4.12 |
 | `idle-composer.raw` | agy 1.4.12 |
@@ -235,6 +243,7 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `lifecycle-working.txt` | agy 1.4.12 |
 | `logged-out.raw` | agy 1.4.12 |
 | `logged-out.txt` | agy 1.4.12 |
+| `osc7501-turns.md` | agy 1.4.12 (2026-10-31) |
 | `permission-declined.raw` | agy 1.4.12 |
 | `permission-declined.txt` | agy 1.4.12 |
 | `permission-prompt.raw` | agy 1.4.12 |

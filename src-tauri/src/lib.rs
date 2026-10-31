@@ -13241,6 +13241,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         }
     }
     note_agent_state_marker(chunk);
+    note_antigravity_state_markers(app, chunk);
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
@@ -19726,6 +19727,16 @@ fn pty_spawn(
         command.env(k, v);
     }
     command.env("TERM", "xterm-256color");
+    // antigravity-turn-lifecycle: agy reports its turn state over OSC 7501
+    // (note_antigravity_state_markers) only in a terminal that answers its
+    // `ESC ] 7501 ; ?` check, and xterm.js doesn't. agy 1.4.0's release note:
+    // "Set AGY_CLI_OSC7501=on for a terminal that supports it but doesn't
+    // answer the check." Set at spawn rather than typed into the launch
+    // command, so it holds under any shell, PowerShell included. A value the
+    // user set (`off`, say) is kept.
+    if std::env::var_os("AGY_CLI_OSC7501").is_none() {
+        command.env("AGY_CLI_OSC7501", "on");
+    }
     // Reset the host-owned current-provider record at spawn; autostart (below)
     // or the first deliberate transition writes the new value. The shell no
     // longer reads or writes this file, so no BRAM_AGENT_HINT env is injected.
@@ -87848,6 +87859,416 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
                 );
             }
         }
+    }
+}
+
+// --- antigravity-turn-lifecycle ---------------------------------------------
+// agy reports its state over OSC 7501 (`state=<s>:app=antigravity`) once Bram's
+// PTY sets AGY_CLI_OSC7501=on (pty_spawn). Its hooks can't carry a turn end: an
+// interrupted turn fires no Stop and no PostInvocation. A completed turn ends
+// with `done`, and an interrupted one with `idle` (the 2026-10-31 spike and a
+// demo-instance turn, docs/agent-specimens/antigravity/osc7501-turns.md);
+// `idle` also comes at launch and at exit. A background command's turn ends at
+// `done` too, and when the command finishes agy starts a new turn on its own
+// (`working`, then `done`). Every launch first reports `blocked:kind=auth`
+// ("Sign in required"): a fresh launch, not a blocked turn. A turn's start and
+// end drive what opencode_turn_started / opencode_turn_ended drive for
+// OpenCode.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntigravityMark {
+    Working,
+    // `done` (completed) or `idle` (interrupted, or between launches).
+    Ended,
+    // `blocked:kind=auth`, which every launch reports first.
+    Launch,
+    // Any other Antigravity state, such as a permission `blocked`.
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntigravityTurnEvent {
+    Start,
+    End,
+    // A launch arrived with a turn still open (agy exited mid-turn).
+    Reset,
+}
+
+// The bodies of the complete OSC 7501 state markers in `buf`, in order, and
+// where an incomplete trailing marker begins (`buf.len()` when none does).
+fn osc7501_state_bodies(buf: &[u8]) -> (Vec<String>, usize) {
+    const OSC: &[u8] = b"\x1b]7501;state=";
+    let mut bodies = Vec::new();
+    let mut i = 0;
+    while let Some(off) = buf[i..].windows(OSC.len()).position(|w| w == OSC) {
+        let start = i + off;
+        let rest = &buf[start + OSC.len()..];
+        let Some(end) = rest.iter().position(|b| *b == 0x07 || *b == 0x1b) else {
+            return (bodies, start);
+        };
+        bodies.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+        i = start + OSC.len() + end + 1;
+    }
+    // A marker whose introducer itself is split: the tail is a prefix of it.
+    let from = i.max(buf.len().saturating_sub(OSC.len() - 1));
+    let partial = (from..buf.len()).find(|&k| OSC.starts_with(&buf[k..]));
+    (bodies, partial.unwrap_or(buf.len()))
+}
+
+fn antigravity_mark(body: &str) -> Option<AntigravityMark> {
+    let mut fields = body.split(':');
+    let state = fields.next()?;
+    let rest: Vec<&str> = fields.collect();
+    if !rest.contains(&"app=antigravity") {
+        return None;
+    }
+    Some(match state {
+        "working" => AntigravityMark::Working,
+        "done" | "idle" => AntigravityMark::Ended,
+        "blocked" if rest.contains(&"kind=auth") => AntigravityMark::Launch,
+        _ => AntigravityMark::Other,
+    })
+}
+
+// One marker's effect on whether a turn is open.
+fn antigravity_turn_step(
+    open: bool,
+    mark: AntigravityMark,
+) -> (bool, Option<AntigravityTurnEvent>) {
+    match mark {
+        AntigravityMark::Working if !open => (true, Some(AntigravityTurnEvent::Start)),
+        AntigravityMark::Working => (true, None),
+        AntigravityMark::Ended if open => (false, Some(AntigravityTurnEvent::End)),
+        AntigravityMark::Ended => (false, None),
+        AntigravityMark::Launch if open => (false, Some(AntigravityTurnEvent::Reset)),
+        AntigravityMark::Launch => (false, None),
+        AntigravityMark::Other => (open, None),
+    }
+}
+
+// The open turn's start (ms), from its first `working` marker.
+fn antigravity_turn_cell() -> &'static Mutex<Option<i64>> {
+    static CELL: OnceLock<Mutex<Option<i64>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+// The start of a marker split across PTY chunks, held for the next chunk.
+fn antigravity_osc_carry_cell() -> &'static Mutex<Vec<u8>> {
+    static CELL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// Called with every PTY chunk (pty_menu_update). Acts only while Antigravity
+// is the current provider.
+fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
+    let bodies = {
+        let Ok(mut carry) = antigravity_osc_carry_cell().lock() else {
+            return;
+        };
+        let joined;
+        let buf: &[u8] = if carry.is_empty() {
+            chunk
+        } else {
+            joined = [carry.as_slice(), chunk].concat();
+            &joined
+        };
+        let (bodies, leftover) = osc7501_state_bodies(buf);
+        let rest = &buf[leftover..];
+        // A real marker is well under 1 KB (`done` carries a base64 summary);
+        // anything longer is not one, and is dropped rather than carried.
+        *carry = if rest.len() <= 4096 {
+            rest.to_vec()
+        } else {
+            Vec::new()
+        };
+        bodies
+    };
+    let marks: Vec<(AntigravityMark, String)> = bodies
+        .iter()
+        .filter_map(|b| {
+            let state = b.split(':').next().unwrap_or("").to_string();
+            antigravity_mark(b).map(|m| (m, state))
+        })
+        .collect();
+    if marks.is_empty() || current_provider(app) != Some(SessionProvider::Antigravity) {
+        return;
+    }
+    for (mark, state) in marks {
+        let now = unix_now_ms();
+        let started = antigravity_turn_cell().lock().ok().and_then(|g| *g);
+        let (open, event) = antigravity_turn_step(started.is_some(), mark);
+        if let Ok(mut g) = antigravity_turn_cell().lock() {
+            *g = if open { started.or(Some(now)) } else { None };
+        }
+        match event {
+            Some(AntigravityTurnEvent::Start) => antigravity_turn_started(app, now),
+            Some(AntigravityTurnEvent::End) => {
+                antigravity_turn_ended(app, started.unwrap_or(now), now, &state)
+            }
+            Some(AntigravityTurnEvent::Reset) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "antigravity-turn",
+                        &format!("op=reset reason=launch started={}", started.unwrap_or(0)),
+                    );
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+fn antigravity_turn_started<R: tauri::Runtime>(app: &AppHandle<R>, at_ms: i64) {
+    let next = AgentStatus {
+        provider: Some("antigravity".to_string()),
+        state: "working".to_string(),
+        verb: Some("working".to_string()),
+        elapsed_text: None,
+        substate: None,
+        output_tokens_text: None,
+        updated_at_ms: unix_now_ms(),
+        source: Some("osc7501".to_string()),
+    };
+    let mut emit_payload: Option<AgentStatus> = None;
+    if let Ok(mut cur) = agent_status_cell().lock() {
+        if cur.state != next.state || cur.provider != next.provider || cur.verb != next.verb {
+            *cur = next.clone();
+            emit_payload = Some(next);
+        }
+    }
+    if let Some(payload) = emit_payload {
+        maybe_emit_agent_status(app, &payload);
+    }
+    update_turn_state(app, "osc7501", "antigravity-working", |s| {
+        s.provider = Some("antigravity".to_string());
+        s.turn_stamp = Some(at_ms.to_string());
+        if s.pending_menu.is_none() {
+            s.phase = "working".to_string();
+        }
+    });
+    // A later turn of a multi-turn apply: the first turn's end retired the
+    // claim and the authorization is still live (no-op otherwise).
+    if inflight_claim_ids_and_claimed_at(app).is_none() {
+        rearm_claim_for_live_authorization(app);
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "antigravity-turn",
+            &format!("op=start via=osc7501 at={}", at_ms),
+        );
+    }
+}
+
+fn antigravity_turn_ended<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    started_at: i64,
+    at_ms: i64,
+    state: &str,
+) {
+    agent_status_emit_finished(app, "antigravity", None, None, "osc7501");
+    // The finished conversation's transcript has changed; a sessions pass
+    // re-projects and indexes it (antigravity-sessions-browser).
+    search_index_request(IndexBucket::Sessions);
+    clear_proposing_flag(app, "turn-finished");
+    end_turn_context_unless_fresh(app, "antigravity-turn-end");
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "antigravity-turn",
+            &format!(
+                "op=end via=osc7501 state={} started={} ms={}",
+                state,
+                started_at,
+                at_ms.saturating_sub(started_at)
+            ),
+        );
+    }
+    let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
+        return;
+    };
+    if claimed_ids.is_empty() {
+        return;
+    }
+    let ids_json = serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string());
+    // The turn's start is its input time: a turn that began before the claim
+    // belongs to earlier work, and the claim waits for its own turn's end.
+    match opencode_end_retires_claim(claimed_at, Some(started_at), at_ms, unix_now_ms()) {
+        Ok(()) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=clear-at-turn-end source=osc7501 provider=antigravity kind={} ids={}",
+                        inflight_claim_kind(app).as_deref().unwrap_or(""),
+                        ids_json
+                    ),
+                );
+            }
+            clear_inflight_claim_sentinel(app, &claimed_ids);
+        }
+        Err(reason) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=skip-clear source=osc7501 provider=antigravity reason={} claimed={} started={} ids={}",
+                        reason, claimed_at, started_at, ids_json
+                    ),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod antigravity_turn_tests {
+    use super::{
+        antigravity_mark, antigravity_turn_step, osc7501_state_bodies, AntigravityMark,
+        AntigravityTurnEvent,
+    };
+
+    fn marker(body: &str) -> Vec<u8> {
+        [b"\x1b]7501;state=".as_slice(), body.as_bytes(), b"\x07"].concat()
+    }
+
+    // The three runs of the 2026-10-31 spike, as agy 1.4.12 emitted them
+    // (docs/agent-specimens/antigravity/osc7501-turns.md), through the parser
+    // and the step function together.
+    fn events(states: &[&str]) -> Vec<AntigravityTurnEvent> {
+        let stream: Vec<u8> = states
+            .iter()
+            .flat_map(|s| [b"screen ".to_vec(), marker(s)].concat())
+            .collect();
+        let (bodies, rest) = osc7501_state_bodies(&stream);
+        assert_eq!(rest, stream.len());
+        let mut open = false;
+        let mut out = Vec::new();
+        for mark in bodies.iter().filter_map(|b| antigravity_mark(b)) {
+            let (next, event) = antigravity_turn_step(open, mark);
+            open = next;
+            out.extend(event);
+        }
+        out
+    }
+
+    #[test]
+    fn spike_runs_end_at_done_or_idle() {
+        use AntigravityTurnEvent::*;
+        let auth = "blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA==";
+        // A completed turn ends at `done`; the snapshot 14 s after the reply
+        // still ended there. The two trailing `idle`s came from the
+        // capture's closing Ctrl-C, with no turn open.
+        assert_eq!(
+            events(&[
+                auth,
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "done:app=antigravity:msg=VFVSTi1PSy03NzMx",
+                "idle:app=antigravity",
+                "idle:app=antigravity",
+            ]),
+            vec![Start, End]
+        );
+        // Esc during a command, then Esc while streaming: two turns, each
+        // ended by `idle`, although agy fired no Stop hook for either.
+        assert_eq!(
+            events(&[
+                auth,
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "idle:app=antigravity",
+                "idle:app=antigravity",
+            ]),
+            vec![Start, End, Start, End]
+        );
+        // A background command: its turn ends at `done` while the command
+        // runs, and agy's own follow-up when it finishes is a second turn.
+        assert_eq!(
+            events(&[
+                auth,
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "done:app=antigravity:msg=U1RBUlRFRA==",
+                "working:app=antigravity",
+                "done:app=antigravity:msg=ZG9uZQ==",
+                "idle:app=antigravity",
+            ]),
+            vec![Start, End, Start, End]
+        );
+        // The demo-instance turn (2026-10-31): working, then done, and no
+        // idle afterwards. Its end must not wait for one.
+        assert_eq!(
+            events(&[
+                "working:app=antigravity:msg=RWRpdA==",
+                "done:app=antigravity:msg=REVNTy1UVVJOLTc3MzE=",
+            ]),
+            vec![Start, End]
+        );
+    }
+
+    #[test]
+    fn a_launch_with_a_turn_open_resets_it() {
+        assert_eq!(
+            antigravity_turn_step(true, AntigravityMark::Launch),
+            (false, Some(AntigravityTurnEvent::Reset))
+        );
+        assert_eq!(
+            antigravity_turn_step(true, AntigravityMark::Other),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn marks_belong_to_antigravity_only() {
+        assert_eq!(
+            antigravity_mark("working:app=antigravity"),
+            Some(AntigravityMark::Working)
+        );
+        assert_eq!(
+            antigravity_mark("done:app=antigravity:msg=eA=="),
+            Some(AntigravityMark::Ended)
+        );
+        assert_eq!(
+            antigravity_mark("idle:app=antigravity"),
+            Some(AntigravityMark::Ended)
+        );
+        // The folder-trust dialog reports this; it is not a turn boundary.
+        assert_eq!(
+            antigravity_mark("blocked:kind=permission:app=antigravity:msg=VHJ1c3Q="),
+            Some(AntigravityMark::Other)
+        );
+        assert_eq!(antigravity_mark("idle:app=opencode"), None);
+        assert_eq!(antigravity_mark("idle:id=x:app=codex"), None);
+    }
+
+    #[test]
+    fn markers_end_at_bel_or_st_and_split_ones_are_carried() {
+        let st = b"a\x1b]7501;state=idle:app=antigravity\x1b\\b";
+        assert_eq!(
+            osc7501_state_bodies(st),
+            (vec!["idle:app=antigravity".to_string()], st.len())
+        );
+        // Split inside the body: nothing yet, and the marker's start is kept.
+        let body_split = b"xx\x1b]7501;state=work";
+        assert_eq!(osc7501_state_bodies(body_split), (vec![], 2));
+        // Split inside the introducer.
+        let intro_split = b"xx\x1b]75";
+        assert_eq!(osc7501_state_bodies(intro_split), (vec![], 2));
+        // The carried start plus the next chunk completes it.
+        let joined = [&body_split[2..], b"ing:app=antigravity\x07".as_slice()].concat();
+        assert_eq!(
+            osc7501_state_bodies(&joined),
+            (vec!["working:app=antigravity".to_string()], joined.len())
+        );
+        // A plain ESC sequence at the end is not a marker start.
+        let other = b"text\x1b[0m";
+        assert_eq!(osc7501_state_bodies(other), (vec![], other.len()));
     }
 }
 

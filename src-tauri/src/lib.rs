@@ -26357,11 +26357,10 @@ fn pending_codex_session_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<P
     paths
         .into_iter()
         .filter_map(|candidate| {
-            let (session_id, cwd) = codex_session_meta(&candidate).ok().flatten()?;
+            let session_id = codex_main_session_id(&candidate, &project_cwd)
+                .ok()
+                .flatten()?;
             if rec.previous_session_id.as_deref() == Some(session_id.as_str()) {
-                return None;
-            }
-            if canonical_path_string(Path::new(&cwd)) != project_cwd {
                 return None;
             }
             let metadata = std::fs::metadata(&candidate).ok()?;
@@ -31949,30 +31948,79 @@ fn codex_session_meta(path: &Path) -> std::io::Result<Option<(String, String)>> 
 }
 
 fn codex_session_meta_read(path: &Path) -> std::io::Result<Option<(String, String)>> {
+    Ok(codex_session_meta_payload(path)?.and_then(|payload| {
+        let id = payload.get("id")?.as_str()?.to_string();
+        let cwd = payload.get("cwd")?.as_str()?.to_string();
+        Some((id, cwd))
+    }))
+}
+
+// The head's `session_meta` payload: the first one carrying an id and cwd.
+fn codex_session_meta_payload(path: &Path) -> std::io::Result<Option<serde_json::Value>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     for line in reader.lines().take(20) {
         let line = line?;
         if line.is_empty() {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         if record.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
             continue;
         }
-        let Some(payload) = record.get("payload") else {
+        let Some(payload) = record.get_mut("payload").map(serde_json::Value::take) else {
             continue;
         };
-        let Some(id) = payload.get("id").and_then(|v| v.as_str()) else {
+        if payload.get("id").and_then(|v| v.as_str()).is_none()
+            || payload.get("cwd").and_then(|v| v.as_str()).is_none()
+        {
             continue;
-        };
-        let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        return Ok(Some((id.to_string(), cwd.to_string())));
+        }
+        return Ok(Some(payload));
     }
     Ok(None)
+}
+
+// codex-subagents-stay-out-of-main-session: a subagent is a rollout of its
+// own, in the same date directory and with its parent's cwd, so nothing about
+// its path or cwd sets it apart. Its session_meta does. Never use `session_id`
+// here: a child's is its parent's. See
+// docs/decisions/2026-10-30-subagent-transcript-provider-discovery.md.
+fn codex_payload_is_subagent(payload: &serde_json::Value) -> bool {
+    payload.get("thread_source").and_then(|v| v.as_str()) == Some("subagent")
+        || payload.pointer("/source/subagent").is_some()
+}
+
+fn codex_subagent_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u128, u64, bool)>> {
+    static CODEX_SUBAGENT_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (u128, u64, bool)>>,
+    > = std::sync::OnceLock::new();
+    CODEX_SUBAGENT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn codex_session_is_subagent(path: &Path) -> std::io::Result<bool> {
+    codex_cached_read(codex_subagent_cache(), path, |p| {
+        Ok(codex_session_meta_payload(p)?
+            .as_ref()
+            .is_some_and(codex_payload_is_subagent))
+    })
+}
+
+// The rollout's session id when it is a main session of this project: its cwd
+// matches and it isn't a subagent. A working child is often the most recent
+// writer, so every site that picks or lists main sessions goes through here
+// (the 2026-10-30 trace: the child named active, an empty roster, and Bram
+// switching between parent and child).
+fn codex_main_session_id(path: &Path, project_cwd: &str) -> std::io::Result<Option<String>> {
+    let Some((id, cwd)) = codex_session_meta(path)? else {
+        return Ok(None);
+    };
+    if canonical_path_string(Path::new(&cwd)) != project_cwd || codex_session_is_subagent(path)? {
+        return Ok(None);
+    }
+    Ok(Some(id))
 }
 
 fn codex_startup_context_text(text: &str) -> bool {
@@ -32335,12 +32383,10 @@ fn discover_codex_sessions<R: tauri::Runtime>(
     let mut total = 0usize;
     let mut hidden_bootstrap = 0usize;
     for path in paths {
-        let Some((id, cwd)) = codex_session_meta(&path).map_err(|e| e.to_string())? else {
+        let Some(id) = codex_main_session_id(&path, &project_cwd).map_err(|e| e.to_string())?
+        else {
             continue;
         };
-        if canonical_path_string(Path::new(&cwd)) != project_cwd {
-            continue;
-        }
         total += 1;
         let metadata = path.metadata().map_err(|e| e.to_string())?;
         let mtime = metadata
@@ -37935,10 +37981,10 @@ fn latest_codex_session_path<R: tauri::Runtime>(
     collect_codex_session_paths(&sessions_root, &mut paths)?;
     let mut all: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for path in paths {
-        let Some((_, cwd)) = codex_session_meta(&path).map_err(|e| e.to_string())? else {
-            continue;
-        };
-        if canonical_path_string(Path::new(&cwd)) != project_cwd {
+        if codex_main_session_id(&path, &project_cwd)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             continue;
         }
         let Ok(metadata) = path.metadata() else {
@@ -63205,6 +63251,50 @@ fn is_own_subagent_transcript_path(path: &Path, sessions_dir: Option<&Path>) -> 
     is_subagent_transcript_path(path) && sessions_dir.map_or(false, |sd| path.starts_with(sd))
 }
 
+#[cfg(test)]
+mod codex_subagent_tests {
+    use super::{canonical_path_string, codex_main_session_id, codex_session_is_subagent};
+    use std::path::{Path, PathBuf};
+
+    const CHILD: &str =
+        include_str!("../../docs/agent-specimens/codex/subagent-session-meta-record.jsonl");
+    const MAIN: &str = include_str!("../../docs/agent-specimens/codex/session-meta-record.jsonl");
+
+    fn rollout(dir: &Path, name: &str, specimen: &str) -> PathBuf {
+        let path = dir.join(name);
+        let cwd = canonical_path_string(dir);
+        std::fs::write(&path, specimen.replace("<workspace>", &cwd)).unwrap();
+        path
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bram-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_child_is_not_a_main_session_of_its_parents_project() {
+        let dir = scratch("codex-child");
+        let cwd = canonical_path_string(&dir);
+        let child = rollout(&dir, "child.jsonl", CHILD);
+        assert!(codex_session_is_subagent(&child).unwrap());
+        assert_eq!(codex_main_session_id(&child, &cwd).unwrap(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_main_rollout_in_this_project_keeps_its_id() {
+        let dir = scratch("codex-main");
+        let cwd = canonical_path_string(&dir);
+        let main = rollout(&dir, "main.jsonl", MAIN);
+        assert!(!codex_session_is_subagent(&main).unwrap());
+        assert!(codex_main_session_id(&main, &cwd).unwrap().is_some());
+        assert_eq!(codex_main_session_id(&main, "/elsewhere").unwrap(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 // JSONL-driven turn-end detection (#91 follow-up, broadened by #153).
 // Durable session output is the primary independent completion signal:
 // Claude writes assistant `stop_reason:"end_turn"`; Codex writes
@@ -63348,7 +63438,12 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // claim in 9 ms, locking the row while the parent was idle. Keep this
     // gate before BOTH the status updates and claim handling: working-status
     // transitions can themselves call rearm_claim_for_live_authorization.
-    if is_subagent_transcript_path(path) {
+    // A Codex child's path looks like any rollout's, and its task_complete
+    // would otherwise finish the parent's turn, so its session_meta decides.
+    if is_subagent_transcript_path(path)
+        || (provider == JsonlCompletionProvider::Codex
+            && codex_session_is_subagent(path).unwrap_or(false))
+    {
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,

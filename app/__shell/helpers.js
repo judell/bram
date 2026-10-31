@@ -4346,7 +4346,13 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
 window.__bramGateCommitTooltip = function (sel, branch, items, claim, ctx) {
   var scope = window.__bramGateScopeTooltip(sel, "commit", branch) || "";
   var why = window.__bramGateCommitWhyNot(items, sel, claim, ctx);
-  return why ? scope + (scope ? "\n\n" : "") + "**Why it's off:** " + why : scope;
+  if (why) return scope + (scope ? "\n\n" : "") + "**Why it's off:** " + why;
+  // gate-one-way-to-continue-one-to-finish: Commit on a `proposed` item sends
+  // apply-and-commit, which lets the agent make remaining edits first.
+  if (window.__bramSelectionNeedsProposedCommit(items, sel)) {
+    return "The agent may finish remaining edits before it commits." + (scope ? "\n\n" + scope : "");
+  }
+  return scope;
 };
 
 window.__bramSelectionAllCommittable = function (items, sel, claim) {

@@ -33260,11 +33260,27 @@ fn antigravity_summary_rows(canonical_root: &str) -> Vec<(String, String, i64)> 
     let Some(path) = antigravity_data_dir().map(|p| p.join("conversation_summaries.db")) else {
         return Vec::new();
     };
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return Vec::new();
+    antigravity_summary_rows_from_db(&path, canonical_root)
+}
+
+fn antigravity_summary_rows_from_db(
+    path: &Path,
+    canonical_root: &str,
+) -> Vec<(String, String, i64)> {
+    let read_only =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = match rusqlite::Connection::open_with_flags(path, read_only) {
+        Ok(conn) => conn,
+        Err(_) => {
+            // Antigravity removes its WAL sidecars on exit. Immutable mode
+            // reads the checkpointed database without requiring those files.
+            let uri = format!("file:{}?immutable=1", path.to_string_lossy());
+            let flags = read_only | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+            let Ok(conn) = rusqlite::Connection::open_with_flags(uri, flags) else {
+                return Vec::new();
+            };
+            conn
+        }
     };
     let Ok(mut stmt) = conn.prepare(
         "SELECT conversation_id, title, workspace_uris, last_modified_time
@@ -33305,15 +33321,24 @@ fn antigravity_summary_rows(canonical_root: &str) -> Vec<(String, String, i64)> 
             }
             // ISO-8601 timestamps sort lexically in the database query. Keep
             // an order-preserving numeric token for SessionRecord consumers.
-            let millis = modified
-                .chars()
-                .filter(char::is_ascii_digit)
-                .collect::<String>()
-                .parse::<i64>()
-                .unwrap_or(0);
+            let millis = antigravity_timestamp_ms(&modified);
             Some((id, title, millis))
         })
         .collect()
+}
+
+fn antigravity_timestamp_ms(value: &str) -> i64 {
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    let normalized = if value.as_bytes().get(10) == Some(&b' ') {
+        let mut value = value.to_string();
+        value.replace_range(10..11, "T");
+        value
+    } else {
+        value.to_string()
+    };
+    OffsetDateTime::parse(&normalized, &Rfc3339)
+        .map(|timestamp| (timestamp.unix_timestamp_nanos() / 1_000_000) as i64)
+        .unwrap_or(0)
 }
 
 fn antigravity_summary_rows_for_id<R: tauri::Runtime>(
@@ -33432,10 +33457,6 @@ fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, usize
             }
         }
     }
-    if unknown > 0 && bram_trace_enabled() {
-        let _ = source;
-        // Caller adds the app-scoped trace line after export.
-    }
     Ok((output, unknown))
 }
 
@@ -33443,6 +33464,19 @@ fn antigravity_export_path<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> O
     if !session_id_is_safe(id) {
         return None;
     }
+    let root = project_root(Some(app))?.canonicalize().ok()?;
+    antigravity_summary_rows(&root.to_string_lossy())
+        .iter()
+        .any(|row| row.0 == id)
+        .then_some(())?;
+    antigravity_export_path_for_project(app, id, &root)
+}
+
+fn antigravity_export_path_for_project<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    root: &Path,
+) -> Option<PathBuf> {
     let source_dir = antigravity_data_dir()?
         .join("brain")
         .join(id)
@@ -33457,17 +33491,14 @@ fn antigravity_export_path<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> O
         (Some(a), Some(b)) if b.len() > a.len() => full,
         (Some(_), Some(_)) => regular,
     };
-    let root = project_root(Some(app))?.canonicalize().ok()?;
-    antigravity_summary_rows(&root.to_string_lossy())
-        .iter()
-        .any(|row| row.0 == id)
-        .then_some(())?;
     let export = app
         .path()
         .app_cache_dir()
         .ok()?
         .join("antigravity-sessions")
-        .join(encode_path_for_filename(&strip_unc_prefix(root)))
+        .join(encode_path_for_filename(&strip_unc_prefix(
+            root.to_path_buf(),
+        )))
         .join(format!("{id}.jsonl"));
     let source_meta = std::fs::metadata(&source).ok()?;
     let fresh = std::fs::metadata(&export).ok().is_some_and(|m| {
@@ -33497,10 +33528,13 @@ fn discover_antigravity_sessions<R: tauri::Runtime>(
         .ok_or("could not resolve project root")?
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let rows = antigravity_summary_rows(&root.to_string_lossy());
+    let mut rows = antigravity_summary_rows(&root.to_string_lossy());
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
     let mut sessions = Vec::new();
     for (id, title, updated) in rows {
-        let Some(path) = antigravity_export_path(app, &id) else {
+        let Some(path) = antigravity_export_path_for_project(app, &id, &root) else {
             continue;
         };
         let meta = std::fs::metadata(&path).ok();
@@ -33512,9 +33546,6 @@ fn discover_antigravity_sessions<R: tauri::Runtime>(
             size: meta.map(|m| m.len()).unwrap_or(0),
             title: Some(title).filter(|t| !t.trim().is_empty()),
         });
-    }
-    if let Some(limit) = limit {
-        sessions.truncate(limit);
     }
     Ok(sessions)
 }
@@ -33576,6 +33607,58 @@ mod antigravity_transcript_tests {
             .iter()
             .flat_map(|turn| turn["entries"].as_array().into_iter().flatten())
             .any(|entry| entry["kind"] == "tool" && entry["isError"] == true));
+    }
+
+    #[test]
+    fn summary_reader_handles_checkpointed_wal_database_without_sidecars() {
+        use super::antigravity_summary_rows_from_db;
+        use std::path::PathBuf;
+
+        let path = std::env::temp_dir().join(format!(
+            "bram-antigravity-summary-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id TEXT, title TEXT NOT NULL DEFAULT '',
+                    workspace_uris TEXT NOT NULL, last_modified_time TEXT NOT NULL
+                 );
+                 INSERT INTO conversation_summaries
+                 VALUES ('fixture-session', 'Fixture title', '[\"file:///fixture/project\"]',
+                         '2026-10-31 21:17:11.439086+00:00');",
+            )
+            .unwrap();
+        }
+        assert!(!PathBuf::from(format!("{}-wal", path.display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", path.display())).exists());
+        let rows = antigravity_summary_rows_from_db(&path, "/fixture/project");
+        assert_eq!(
+            rows,
+            vec![(
+                "fixture-session".into(),
+                "Fixture title".into(),
+                1_793_481_431_439
+            )]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn summary_timestamps_parse_space_and_rfc3339_forms() {
+        use super::antigravity_timestamp_ms;
+
+        assert_eq!(
+            antigravity_timestamp_ms("2026-10-31 21:17:11.439086+00:00"),
+            1_793_481_431_439
+        );
+        assert_eq!(
+            antigravity_timestamp_ms("2026-10-31T21:17:11.439086Z"),
+            1_793_481_431_439
+        );
+        assert_eq!(antigravity_timestamp_ms("not a timestamp"), 0);
     }
 }
 

@@ -314,7 +314,11 @@ The receipts:
   scoped, rather than moving to `sessionStorage`. That move was tried first,
   and it would have dropped drafts on every relaunch.
 
-Existing unscoped keys haven't been audited against this rule yet.
+The unscoped keys were audited against this rule on 2026-10-31. Two project
+keys turned up, `bram.worklistSubmittedMessage` and `…Kind`, but nothing read
+them, so they were deleted, not scoped. When a key looks misfiled, check first
+that something reads it. `bram.dismissedAgentIds` stays unscoped: agent ids are
+unique per dispatch, so windows only share its cap of 500.
 
 ## Push over polling
 

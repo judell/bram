@@ -2109,9 +2109,9 @@ window.__bramTraceHelperTiming = function (name, t0, extra) {
 // name, remaining segments are a property path inside the parsed JSON
 // object. Used by the __bram-prefixed localStorage shim helpers below
 // so they can run in plain JS without re-entering XMLUI's statement
-// queue. `bram.worklistSubmittedMessage` reads
-// `JSON.parse(localStorage.bram).worklistSubmittedMessage`. Splitter keys
-// like `bram.splitter.worklist` are two-level.
+// queue. `bram.turnCompleteBeep` reads
+// `JSON.parse(localStorage.bram).turnCompleteBeep`. Splitter keys like
+// `bram.splitter.worklist` are two-level.
 function __bramSplitKey(key) {
   var s = String(key);
   var dot = s.indexOf(".");
@@ -3336,10 +3336,6 @@ window.__bramClearWorklistUiState = function () {
   try { sessionStorage.removeItem("bram.worklistUiState"); } catch (e) {}
 };
 
-window.__bramRestoreWorklistSubmittedMessage = function () {
-  return __bramReadLS("bram.worklistSubmittedMessage", "");
-};
-
 window.__bramRestoreWorklistSessionSubmittedMessage = function () {
   return __bramReadSS("bram.worklistSessionSubmittedMessage", "");
 };
@@ -3352,17 +3348,7 @@ window.__bramShouldDimAgentDockOnMount = function () {
   return true;
 };
 
-window.__bramRestoreWorklistSubmittedKind = function () {
-  var kind = __bramReadLS("bram.worklistSubmittedKind", "");
-  return kind === "message" || kind === "action" ? kind : null;
-};
-
 window.__bramSetWorklistSubmittedKind = function (kind) {
-  if (kind === "message" || kind === "action") {
-    __bramWriteLS("bram.worklistSubmittedKind", kind);
-  } else {
-    __bramWriteLS("bram.worklistSubmittedKind", "");
-  }
   return kind || null;
 };
 
@@ -3638,9 +3624,7 @@ window.__bramSubmitWorklistMessageFast = function (text, voiceTarget) {
   window.__bramIframeTrace("message-agent-submit", { stage: "after-toTurn", chars: toSend.length, sentAt: sentAt });
   var baseline = 0;
   __bramWriteMessageDraft("", "submit");
-  __bramWriteLS("bram.worklistSubmittedMessage", userTyped);
   __bramWriteSS("bram.worklistSessionSubmittedMessage", userTyped);
-  window.__bramSetWorklistSubmittedKind("message");
   return { message: userTyped, images: __bramExtractImagePaths(toSend), baseline: baseline, sentAtText: new Date().toLocaleTimeString() };
 };
 
@@ -8084,9 +8068,7 @@ window.__bramRecordWorklistFeedbackConversation = function (text) {
   if (!text || !text.trim()) return false;
   var message = text.trim();
   var baseline = 0;
-  __bramWriteLS("bram.worklistSubmittedMessage", message);
   __bramWriteSS("bram.worklistSessionSubmittedMessage", message);
-  window.__bramSetWorklistSubmittedKind("action");
   return { message: message, images: __bramExtractImagePaths(message), baseline: baseline, sentAtText: new Date().toLocaleTimeString() };
 };
 

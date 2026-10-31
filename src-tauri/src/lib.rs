@@ -6594,16 +6594,17 @@ const LOGIN_SWITCH_ORDER: [SessionProvider; 3] = [
     SessionProvider::Opencode,
 ];
 
-fn provider_slot(provider: SessionProvider) -> usize {
-    match provider {
-        SessionProvider::Claude => 0,
-        SessionProvider::Codex => 1,
-        SessionProvider::Opencode => 2,
-    }
+// The provider's slot in the fixed-size STARTUP_AGENTS arrays (`installed`,
+// `has_sessions`). Derived from the list rather than hand-numbered, so a
+// provider that isn't in it has no slot: Antigravity joins STARTUP_AGENTS in
+// antigravity-login-and-startup-choice, and until then the startup ladder
+// cannot pick it (antigravity-provider-switch).
+fn provider_slot(provider: SessionProvider) -> Option<usize> {
+    STARTUP_AGENTS.iter().position(|p| *p == provider)
 }
 
 fn installed_agent_flags() -> [bool; 3] {
-    STARTUP_AGENTS.map(|provider| agent_cli_on_path(session_provider_label(provider)))
+    STARTUP_AGENTS.map(|provider| agent_cli_on_path(provider_cli_name(provider)))
 }
 
 fn installed_agent_labels() -> Vec<&'static str> {
@@ -6611,7 +6612,7 @@ fn installed_agent_labels() -> Vec<&'static str> {
     STARTUP_AGENTS
         .iter()
         .copied()
-        .filter(|provider| installed[provider_slot(*provider)])
+        .filter(|provider| provider_slot(*provider).is_some_and(|slot| installed[slot]))
         .map(session_provider_label)
         .collect()
 }
@@ -6651,13 +6652,14 @@ fn login_switch_choice(
     installed: [bool; 3],
     has_sessions: [bool; 3],
 ) -> Option<SessionProvider> {
-    let eligible =
-        |provider: SessionProvider| provider != blocked && installed[provider_slot(provider)];
+    let eligible = |provider: SessionProvider| {
+        provider != blocked && provider_slot(provider).is_some_and(|slot| installed[slot])
+    };
     LOGIN_SWITCH_ORDER
         .iter()
         .copied()
         .filter(|provider| eligible(*provider))
-        .find(|provider| has_sessions[provider_slot(*provider)])
+        .find(|provider| provider_slot(*provider).is_some_and(|slot| has_sessions[slot]))
         .or_else(|| {
             LOGIN_SWITCH_ORDER
                 .iter()
@@ -8812,6 +8814,18 @@ fn session_provider_label(provider: SessionProvider) -> &'static str {
         SessionProvider::Claude => "claude",
         SessionProvider::Codex => "codex",
         SessionProvider::Opencode => "opencode",
+        SessionProvider::Antigravity => "antigravity",
+    }
+}
+
+// The CLI Bram looks for on PATH, and the command a launch starts. For three
+// providers the wire label IS the binary; Antigravity's is `agy`, so probing
+// PATH with the label would report it missing and the launch ladder would fall
+// back to another agent (antigravity-provider-switch).
+fn provider_cli_name(provider: SessionProvider) -> &'static str {
+    match provider {
+        SessionProvider::Antigravity => "agy",
+        other => session_provider_label(other),
     }
 }
 
@@ -10938,7 +10952,9 @@ fn esc_waits_for_agent_interrupt_now<R: tauri::Runtime>(app: &AppHandle<R>) -> b
 
 // How many Esc presses the pane's Esc button sends: two to stop a running
 // OpenCode turn, one otherwise (Claude stops on one; an idle Esc or an open
-// menu wants a single key).
+// menu wants a single key). Antigravity stops on one: the specimen pack's
+// permission capture has a single Escape interrupting an agy turn, and a
+// second press is not needed, so it takes the default.
 fn pane_esc_presses(provider: Option<SessionProvider>, phase: &str, menu_pending: bool) -> u8 {
     if provider == Some(SessionProvider::Opencode) && phase == "working" && !menu_pending {
         2
@@ -11056,6 +11072,7 @@ fn pty_turn_provider_label(provider: Option<SessionProvider>) -> &'static str {
     match provider {
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         Some(SessionProvider::Claude) | None => "claude",
     }
 }
@@ -11079,6 +11096,10 @@ mod pty_turn_provider_label_tests {
         assert_eq!(
             pty_turn_provider_label(Some(SessionProvider::Opencode)),
             "opencode"
+        );
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Antigravity)),
+            "antigravity"
         );
         assert_eq!(pty_turn_provider_label(None), "claude");
     }
@@ -20518,13 +20539,12 @@ fn run_startup_autostart(
     // other is present; when neither is found, leave the pick alone.
     {
         let picked = session_provider_label(launch.provider);
-        if !agent_cli_on_path(picked) {
+        if !agent_cli_on_path(provider_cli_name(launch.provider)) {
             // The other two, in STARTUP_AGENTS order: the first installed one
             // wins. With Claude and Codex installed this is exactly the old
             // pair; OpenCode is the last resort rather than unreachable.
             let fallback = STARTUP_AGENTS.iter().copied().find(|candidate| {
-                *candidate != launch.provider
-                    && agent_cli_on_path(session_provider_label(*candidate))
+                *candidate != launch.provider && agent_cli_on_path(provider_cli_name(*candidate))
             });
             if let Some(other) = fallback {
                 append_bram_trace_line(
@@ -20680,8 +20700,7 @@ fn startup_agent_pick(
         return StartupAgentPick::Configured;
     }
     let mut evidenced = STARTUP_AGENTS.iter().copied().filter(|provider| {
-        let slot = provider_slot(*provider);
-        installed[slot] && has_sessions[slot]
+        provider_slot(*provider).is_some_and(|slot| installed[slot] && has_sessions[slot])
     });
     match (evidenced.next(), evidenced.next()) {
         (Some(provider), None) => StartupAgentPick::Evidence(provider),
@@ -20824,11 +20843,22 @@ fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> 
 
 #[cfg(test)]
 mod startup_agent_pick_tests {
-    use super::{startup_agent_pick, SessionProvider, StartupAgentPick};
+    use super::{provider_slot, startup_agent_pick, SessionProvider, StartupAgentPick};
 
     // Slots: Claude, Codex, OpenCode.
     const ALL_INSTALLED: [bool; 3] = [true, true, true];
     const NO_SESSIONS: [bool; 3] = [false, false, false];
+
+    // antigravity-provider-switch: Antigravity is selectable in the switcher,
+    // but it is not a startup fallback or a login-switch target until
+    // antigravity-login-and-startup-choice. Its slot is what keeps it out of
+    // both fixed-size lists, so pin the absence rather than an index.
+    #[test]
+    fn antigravity_has_no_startup_slot_yet() {
+        assert_eq!(provider_slot(SessionProvider::Antigravity), None);
+        assert_eq!(provider_slot(SessionProvider::Claude), Some(0));
+        assert_eq!(provider_slot(SessionProvider::Opencode), Some(2));
+    }
 
     #[test]
     fn configured_agent_always_decides() {
@@ -21962,6 +21992,9 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
                 .cloned()
                 .or_else(|| codex_session_title(&path).ok().flatten()),
             SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
+            // No session discovery for Antigravity yet
+            // (antigravity-sessions-browser).
+            SessionProvider::Antigravity => None,
         };
         let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
         if let Some(obj) = item.as_object_mut() {
@@ -23411,6 +23444,7 @@ fn switch_agent(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "switch")?;
@@ -23552,6 +23586,14 @@ fn switch_agent(
     // first partner on another.
     let fresh_reason: Option<&'static str> = leaving.as_ref().and_then(|(p, sid)| {
         if partner.is_some() {
+            return None;
+        }
+        // antigravity-provider-switch: a fresh partner carries a queued name
+        // that binds when the new session's file surfaces, and agy's sessions
+        // are not visible to Bram yet (antigravity-sessions-browser). The
+        // switch still launches agy; it just doesn't start a partner. Partners
+        // arrive with antigravity-partner-handoff.
+        if target_provider == SessionProvider::Antigravity {
             return None;
         }
         // session-groups: the group has no session on this agent (or its
@@ -24141,6 +24183,9 @@ fn session_title_by_id<R: tauri::Runtime>(
         // the group line, and group naming compared against it).
         SessionProvider::Opencode => opencode_session_title_from_db(id)
             .or_else(|| claude_session_title(&path).ok().flatten()),
+        // session_path_for_id answers None for Antigravity, so this is
+        // unreachable until antigravity-sessions-browser; None keeps it honest.
+        SessionProvider::Antigravity => None,
     }
 }
 
@@ -24672,6 +24717,10 @@ fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
         SessionProvider::Codex => codex_catch_up_composer_ready(tail),
         SessionProvider::Opencode => opencode_composer_ready(tail),
         SessionProvider::Claude => true,
+        // No catch-up or fresh-partner path reaches an Antigravity session yet
+        // (antigravity-turn-lifecycle, antigravity-partner-handoff), so there
+        // is no composer marker to wait for.
+        SessionProvider::Antigravity => true,
     }
 }
 
@@ -25621,6 +25670,7 @@ fn session_provider_display(provider: SessionProvider) -> &'static str {
         SessionProvider::Claude => "Claude",
         SessionProvider::Codex => "Codex",
         SessionProvider::Opencode => "OpenCode",
+        SessionProvider::Antigravity => "Antigravity",
     }
 }
 
@@ -25648,6 +25698,8 @@ fn fallback_latest_session_id<R: tauri::Runtime>(
             .ok()
             .flatten()
             .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p)),
+        // Nothing to fall back to until antigravity-sessions-browser.
+        SessionProvider::Antigravity => None,
     }
 }
 
@@ -25766,6 +25818,8 @@ fn session_path_for_id<R: tauri::Runtime>(
         }
         SessionProvider::Codex => codex_session_path_for_id(app, id),
         SessionProvider::Opencode => opencode_session_path_for_id(app, id),
+        // No file-discovery for Antigravity yet (antigravity-sessions-browser).
+        SessionProvider::Antigravity => None,
     }
 }
 
@@ -26010,6 +26064,7 @@ fn reload_agent_session(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "session-reload")?;
@@ -26140,6 +26195,7 @@ fn start_agent_fresh(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "start-fresh")?;
@@ -26483,7 +26539,10 @@ fn apply_pending_session_title<R: tauri::Runtime>(
             // fresh-partner-takes-partner-name: an OpenCode fresh partner's
             // queued name lands here once its session rotates in; the rename
             // is a title UPDATE in OpenCode's database (509deb8).
-            SessionProvider::Claude | SessionProvider::Opencode => {
+            // Antigravity keeps the queued name unreachable for now: New
+            // session refuses it, and rename_session says so
+            // (antigravity-sessions-browser).
+            SessionProvider::Claude | SessionProvider::Opencode | SessionProvider::Antigravity => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
             }
         };
@@ -26540,12 +26599,13 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        agent_provider_from_command, agent_resume_command, claim_pending_session_title,
-        codex_session_is_visible, fresh_partner_reason, fresh_partner_title,
-        merge_pending_session_entry, new_session_launch_command,
+        agent_launch_command, agent_provider_from_command, agent_resume_command,
+        claim_pending_session_title, codex_session_is_visible, fresh_partner_reason,
+        fresh_partner_title, merge_pending_session_entry, new_session_launch_command,
         pending_session_title_abandoned_by_resume, pending_session_title_can_claim,
-        pending_title_marks_new_session, provider_switch_launch, session_change_snapshot,
-        switch_starts_fresh_partner, PendingSessionTitle, SessionEntry, SessionProvider,
+        pending_title_marks_new_session, provider_cli_name, provider_switch_launch,
+        session_change_snapshot, session_provider_label, switch_starts_fresh_partner,
+        PendingSessionTitle, SessionEntry, SessionProvider,
     };
 
     #[test]
@@ -26777,6 +26837,32 @@ mod pending_session_title_tests {
         assert_eq!(
             SessionProvider::from_str("opencode"),
             Some(SessionProvider::Opencode)
+        );
+        // antigravity-provider-switch: the label is `antigravity` but the CLI
+        // is `agy`, so the launch, the resume and the PATH probe all take the
+        // second name.
+        assert_eq!(agent_launch_command("antigravity"), Some("agy"));
+        assert_eq!(
+            agent_resume_command("antigravity", "").as_deref(),
+            Some("agy --continue")
+        );
+        assert_eq!(
+            agent_resume_command("antigravity", "3f6c1d2e").as_deref(),
+            Some("agy --conversation 3f6c1d2e")
+        );
+        assert_eq!(
+            agent_provider_from_command(Some("antigravity")),
+            "antigravity"
+        );
+        // A literal command in `shell.agent`, rather than the wire string.
+        assert_eq!(agent_provider_from_command(Some("agy")), "antigravity");
+        assert_eq!(
+            SessionProvider::from_str("antigravity"),
+            Some(SessionProvider::Antigravity)
+        );
+        assert_ne!(
+            provider_cli_name(SessionProvider::Antigravity),
+            session_provider_label(SessionProvider::Antigravity)
         );
         let rec = PendingSessionTitle {
             provider: "claude".into(),
@@ -27052,9 +27138,22 @@ fn create_new_session(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
+    // antigravity-provider-switch: New session promises a name, and a name
+    // lands by renaming the session once its file surfaces. Bram has no rename
+    // path into agy (its durable title store was not identified in the
+    // specimen pack) and cannot see its sessions yet
+    // (antigravity-sessions-browser), so the queued name would never apply.
+    // Refuse rather than create a session titled with its first message.
+    if provider_key == "antigravity" {
+        return Err(
+            "Named new sessions aren't available for Antigravity yet. Start a new session from inside Antigravity."
+                .to_string(),
+        );
+    }
     // session-groups (2026-10-28 05:15Z): OpenCode is named like the others.
     // This once skipped it ("Bram can't rename them"), but Bram writes
     // OpenCode titles into its database (opencode-session-rename) and the
@@ -27292,7 +27391,12 @@ fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfi
 
 fn agent_provider_from_command(command: Option<&str>) -> &'static str {
     let lower = command.unwrap_or("").to_ascii_lowercase();
-    if lower.contains("opencode") {
+    if lower.contains("antigravity") || lower.contains("agy") {
+        // antigravity-provider-switch: `shell.agent` holds either the wire
+        // string or a literal command, and agy's binary shares no substring
+        // with its provider name, so both spellings are checked here.
+        "antigravity"
+    } else if lower.contains("opencode") {
         "opencode"
     } else if lower.contains("codex") {
         "codex"
@@ -27336,6 +27440,10 @@ fn agent_launch_command(provider: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "claude" | "claud" => Some("claude"),
         "opencode" => Some("opencode"),
+        // Antigravity CLI 1.4.12 (docs/agent-specimens/antigravity/version.txt).
+        // It self-updates, so a behaviour change may arrive without a Bram
+        // release.
+        "antigravity" => Some("agy"),
         _ => None,
     }
 }
@@ -27359,6 +27467,9 @@ fn new_session_launch_command(provider: &str, title: &str, session_id: Option<&s
         // No naming flag, and New session refuses OpenCode until its
         // sessions are visible (opencode-sessions-browser).
         "opencode" => "opencode".to_string(),
+        // Same for Antigravity: `/rename` exists inside the TUI, but the
+        // durable title store was not identified in the specimen pack.
+        "antigravity" => "agy".to_string(),
         _ => "".to_string(),
     }
 }
@@ -27386,6 +27497,15 @@ fn agent_resume_command(provider: &str, session_id: &str) -> Option<String> {
             "opencode --continue".to_string()
         } else {
             format!("opencode --session {}", id)
+        }),
+        // antigravity-provider-switch: `-c/--continue` continues the most
+        // recent conversation, and `--conversation <id>` resumes a specific
+        // one (help.txt, resume-by-id.txt). Ids come from hook payloads and
+        // reach this once antigravity-sessions-browser lists sessions.
+        "antigravity" => Some(if id.is_empty() {
+            "agy --continue".to_string()
+        } else {
+            format!("agy --conversation {}", id)
         }),
         _ => None,
     }
@@ -31158,6 +31278,14 @@ enum SessionProvider {
     // Its sessions live in SQLite, not transcript files, so every
     // file-discovery site answers "none" for it until opencode-sessions-browser.
     Opencode,
+    // antigravity-provider-switch: launch, resume and the header switcher only,
+    // as OpenCode did. Its transcript lives under
+    // ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/, and the
+    // conversation-to-project mapping is unidentified, so every file-discovery
+    // site answers "none" for it until antigravity-sessions-browser. The CLI is
+    // `agy`, not `antigravity`: provider_cli_name is the binary, this label is
+    // the wire string.
+    Antigravity,
 }
 
 impl SessionProvider {
@@ -31166,6 +31294,7 @@ impl SessionProvider {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::Opencode),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -31189,9 +31318,8 @@ fn provider_needs_setup_for(
         Some(SessionProvider::Opencode) => opencode_needs,
         // opencode_needs is already false wherever OpenCode isn't installed
         // (opencode_plugin_wanted), so it raises no banner for non-users;
-        // antigravity_needs likewise (antigravity_hooks_wanted). Antigravity
-        // gets its own arm with its SessionProvider variant
-        // (antigravity-provider-switch).
+        // antigravity_needs likewise (antigravity_hooks_wanted).
+        Some(SessionProvider::Antigravity) => antigravity_needs,
         None => claude_needs || codex_needs || opencode_needs || antigravity_needs,
     }
 }
@@ -31357,6 +31485,8 @@ fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String>
             .file_stem()
             .and_then(|stem| stem.to_str())
             .map(str::to_string),
+        // No transcript paths for Antigravity until antigravity-sessions-browser.
+        SessionProvider::Antigravity => None,
     }
 }
 
@@ -33376,6 +33506,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
             SessionProvider::Claude => discover_claude_sessions(app, limit)?,
             SessionProvider::Codex => discover_codex_sessions(app, limit)?,
             SessionProvider::Opencode => discover_opencode_sessions(app, limit)?,
+            SessionProvider::Antigravity => Vec::new(),
         };
         return Ok((provider, sessions));
     }
@@ -33386,6 +33517,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
         SessionProvider::Claude => claude,
         SessionProvider::Codex => codex,
         SessionProvider::Opencode => Vec::new(),
+        SessionProvider::Antigravity => Vec::new(),
     };
     Ok((provider, sessions))
 }
@@ -33452,6 +33584,7 @@ fn session_meta<R: tauri::Runtime>(
         SessionProvider::Claude => count_claude_sessions(app)?,
         SessionProvider::Codex => count_codex_sessions(app)?,
         SessionProvider::Opencode => discover_opencode_sessions(app, None)?.len(),
+        SessionProvider::Antigravity => 0,
     };
     let discovery_notes = if provider == SessionProvider::Claude && count == 0 {
         claude_sessions_dir_lookup(app)
@@ -37717,6 +37850,9 @@ fn live_session_id<R: tauri::Runtime>(
                     .flatten()
                     .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p))
             }),
+        // No live-session cache and no discovery for Antigravity yet
+        // (antigravity-sessions-browser).
+        SessionProvider::Antigravity => None,
     }
 }
 
@@ -38010,6 +38146,11 @@ fn rename_session<R: tauri::Runtime>(
             // database, so the rename is a single UPDATE there.
             opencode_set_session_title(app, &session.id, trimmed)?;
         }
+        // A title store for agy was not identified in the specimen pack, and
+        // its sessions aren't listed yet (antigravity-sessions-browser).
+        SessionProvider::Antigravity => {
+            return Err("Antigravity sessions can't be renamed yet".to_string());
+        }
     }
     Ok(b"{\"ok\":true}".to_vec())
 }
@@ -38216,6 +38357,8 @@ fn latest_session_path<R: tauri::Runtime>(
         SessionProvider::Claude => latest_claude_session_path(app)?,
         SessionProvider::Codex => latest_codex_session_path(app)?,
         SessionProvider::Opencode => current_opencode_session_path(app)?,
+        // No session files to compare against the agent hint yet.
+        SessionProvider::Antigravity => None,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -38241,6 +38384,7 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
         SessionProvider::Opencode => current_opencode_session_path(app),
+        SessionProvider::Antigravity => Ok(None),
     }
 }
 
@@ -39354,6 +39498,7 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         None => "",
     };
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -39720,6 +39865,7 @@ fn read_conversation_state<R: tauri::Runtime>(
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         None => "",
     };
     let Some((path, mtime_ms, len)) = resolve_conversation_path_meta(app, preferred)? else {
@@ -44562,6 +44708,7 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         None => "unknown",
     };
     // session-size-note-not-warning (Jon, 2026-10-04): size is information,
@@ -45158,6 +45305,13 @@ fn stale_terminal_input_clear_for_provider(
     match provider {
         Some(SessionProvider::Codex) => ("\x15", "ctrl-u"),
         Some(SessionProvider::Opencode) => (OPENCODE_INPUT_CLEAR, "select-delete"),
+        // Antigravity CLI 1.4.12, captured 2026-10-31 at 120x40: Ctrl-U empties
+        // a one-line box, and is the only key tried that does. Esc leaves the
+        // text in place. A lone Ctrl-C leaves the text AND swaps the footer for
+        // "press ctrl+c again to exit", so the next Ctrl-C — this caller's
+        // retry, or a user's — would quit agy. Sent once, unlike OpenCode's
+        // two-write form.
+        Some(SessionProvider::Antigravity) => ("\x15", "ctrl-u"),
         _ => ("\x03", "ctrl-c"),
     }
 }
@@ -45188,6 +45342,16 @@ mod stale_terminal_input_clear_tests {
         assert_eq!(clear(Some(SessionProvider::Claude)), ("\x03", "ctrl-c"));
         assert_eq!(clear(Some(SessionProvider::Codex)), ("\x15", "ctrl-u"));
         assert_eq!(clear(None), ("\x03", "ctrl-c"));
+    }
+
+    #[test]
+    fn antigravity_clears_with_ctrl_u_and_never_a_lone_ctrl_c() {
+        // Captured from agy 1.4.12 on 2026-10-31: Ctrl-U emptied the box, Esc
+        // left the text, and a lone Ctrl-C left the text while arming
+        // "press ctrl+c again to exit" — so a second one would quit agy.
+        let (bytes, key) = clear(Some(SessionProvider::Antigravity));
+        assert_eq!((bytes, key), ("\x15", "ctrl-u"));
+        assert!(!bytes.contains('\x03'), "{bytes:?}");
     }
 }
 
@@ -53579,6 +53743,29 @@ fn collect_opencode_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<
     out
 }
 
+// antigravity-provider-switch: the Context tab needs an arm for every provider
+// (collect_context_files matches exhaustively). The specimen pack captured one
+// file agy reads from the project — the hook config Bram itself seeds — and
+// left agy's instructions-file chain uncaptured. So this lists what is
+// evidenced and claims nothing else; a larger list waits on a capture of
+// what agy actually loads.
+fn collect_antigravity_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<ContextFile> {
+    let mut out: Vec<ContextFile> = Vec::new();
+    let Some(proj_root) = project_root(Some(app)) else {
+        return out;
+    };
+    let hooks = proj_root.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
+    if hooks.is_file() {
+        out.push(ContextFile {
+            category: "hooks",
+            path: hooks,
+            display: ENHANCE_ANTIGRAVITY_HOOKS_REL.to_string(),
+            kind: Some("antigravity"),
+        });
+    }
+    out
+}
+
 fn collect_context_files<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -53587,6 +53774,7 @@ fn collect_context_files<R: tauri::Runtime>(
         SessionProvider::Claude => collect_claude_context_files(app),
         SessionProvider::Codex => collect_codex_context_files(app),
         SessionProvider::Opencode => collect_opencode_context_files(app),
+        SessionProvider::Antigravity => collect_antigravity_context_files(app),
     }
 }
 
@@ -53756,6 +53944,11 @@ fn context_list<R: tauri::Runtime>(
                 json!({ "key": "project", "label": "Project", "items": project }),
                 json!({ "key": "settings", "label": "Settings", "items": settings }),
             ],
+        ),
+        SessionProvider::Antigravity => (
+            "antigravity",
+            "Antigravity Context shows the `.agents/hooks.json` configuration `agy` reads from this project. The instructions files `agy` loads have not been captured yet, so they are not listed rather than guessed at.",
+            vec![json!({ "key": "hooks", "label": "Hooks", "items": hooks })],
         ),
     };
     json!({ "provider": provider_name, "summary": summary, "sections": sections })
@@ -54925,7 +55118,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // no banner: Setup leaves it alone, so no Setup run could clear it (the
     // reasoning for OpenCode's unparseable config). The self-test still fails
     // it, since agy then runs without the guard.
-    let antigravity_wanted = antigravity_hooks_wanted(&proj);
+    let antigravity_wanted = antigravity_hooks_wanted(app, &proj);
     let antigravity_hooks = antigravity_hooks_state(&proj);
     let antigravity_needs_setup = antigravity_wanted
         && (!core_installed
@@ -54944,6 +55137,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
         Some(SessionProvider::Opencode) => json!("opencode"),
+        Some(SessionProvider::Antigravity) => json!("antigravity"),
         None => serde_json::Value::Null,
     };
     // Mis-launch signals. Bram manages whatever directory it is started from,
@@ -55769,7 +55963,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // antigravity-worklist-guard: agy's guard registration, Bram's group in
     // .agents/hooks.json. Runs on the source repo too, as OpenCode's plugin
     // does. The link exists here: Setup refused above if it couldn't make it.
-    if antigravity_hooks_wanted(&proj) {
+    if antigravity_hooks_wanted(app, &proj) {
         if let Some(command) = expected_antigravity_guard_command() {
             seed_antigravity_hooks(&proj, &command, &mut wrote, &mut skipped)?;
         }
@@ -56239,13 +56433,16 @@ fn antigravity_hooks_state(proj: &Path) -> AntigravityHooksState {
 
 // As for OpenCode's plugin: where agy can run (its CLI on the host's PATH) or
 // where Bram's group is already installed and so kept current. Projects whose
-// users never run agy get no .agents/hooks.json. The active-agent case arrives
-// with SessionProvider::Antigravity (antigravity-provider-switch).
-fn antigravity_hooks_wanted(proj: &Path) -> bool {
+// users never run agy get no .agents/hooks.json. The active agent counts too
+// (antigravity-provider-switch): the host PATH probe can miss a CLI the PTY's
+// login shell finds, and a user who picked Antigravity in the switcher has
+// asked for it by name.
+fn antigravity_hooks_wanted<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
     matches!(
         antigravity_hooks_state(proj),
         AntigravityHooksState::Current | AntigravityHooksState::Stale
     ) || agent_cli_on_path("agy")
+        || current_provider(app) == Some(SessionProvider::Antigravity)
 }
 
 // Writes Bram's group into .agents/hooks.json, creating the file when it is
@@ -63964,6 +64161,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
             Some(SessionProvider::Claude) => "claude",
             Some(SessionProvider::Codex) => "codex",
             Some(SessionProvider::Opencode) => "opencode",
+            Some(SessionProvider::Antigravity) => "antigravity",
             None => "none",
         };
         if active != provider_label {
@@ -79731,7 +79929,7 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     let (antigravity_wanted, antigravity_hooks) = project_root(Some(app))
         .map(|proj| {
             (
-                antigravity_hooks_wanted(&proj),
+                antigravity_hooks_wanted(app, &proj),
                 antigravity_hooks_state(&proj),
             )
         })

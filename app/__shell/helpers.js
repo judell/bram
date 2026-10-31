@@ -924,13 +924,19 @@ window.__bramShowAgentSwitcher = function (pushedEvt, fetchedSettings, mainStatu
 // opencode-provider-switch: the one place a provider string is recognized.
 // Key is "" for anything unknown, so each caller picks its own default;
 // the label defaults to Claude, as the binary checks it replaces did.
+// antigravity-provider-switch adds Antigravity: its wire string is
+// `antigravity`, and its CLI (`agy`) never appears here — that name lives in
+// the host's provider_cli_name.
 window.__bramProviderKey = function (provider) {
   var p = String(provider || "").toLowerCase();
-  return p === "claude" || p === "codex" || p === "opencode" ? p : "";
+  return p === "claude" || p === "codex" || p === "opencode" || p === "antigravity" ? p : "";
 };
 window.__bramProviderLabel = function (provider) {
   var key = window.__bramProviderKey(provider);
-  return key === "codex" ? "Codex" : key === "opencode" ? "OpenCode" : "Claude";
+  return key === "codex" ? "Codex"
+    : key === "opencode" ? "OpenCode"
+    : key === "antigravity" ? "Antigravity"
+    : "Claude";
 };
 window.__bramAgentSwitcherLabel = function (provider) {
   return window.__bramProviderLabel(provider);

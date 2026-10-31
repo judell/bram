@@ -609,6 +609,7 @@
           <Option value="claude" label="Claude" />
           <Option value="codex" label="Codex" />
           <Option value="opencode" label="OpenCode" />
+          <Option value="antigravity" label="Antigravity" />
         </RadioGroup>
         <!-- agent-switcher-shows-stale-provider: RadioGroup's `initialValue`
              only seeds the mount

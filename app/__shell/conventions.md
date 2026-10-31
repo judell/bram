@@ -32,13 +32,9 @@ the xmlui_rules, and follow them.
 
 **Reference files.** Detail you need only in a recognizable situation
 lives beside this file in `.claude/bram-reference/`:
-`worklist-mechanics.md` (transports, entangled commits, delegation,
-enforcement), `diagnostics.md` (stuck spinners, traces, logs, evidence,
-Bram's guards), `environment.md` (target-app helpers, `/query`, forge
-CLI, test suites, Windows, voice input setup, cross-project work,
-fresh-session suggestions) and `orientation.md` (orienting in a new
-repo). Each section below says
-when to read which. Setup refreshes these files and Bram-bundled skills
+`worklist-mechanics.md`, `diagnostics.md`, `environment.md` and
+`orientation.md` (orienting in a new repo). Each section below says when
+to read which. Setup refreshes these files and Bram-bundled skills
 (`.claude/skills/<name>/SKILL.md` carrying a `<!-- bram-managed` marker);
 don't make functional edits to installed copies, since the next Setup
 overwrites them.
@@ -550,8 +546,6 @@ summary unless load-bearing. The Worklist tab shows the items, the diff
 shows the code; chat is for what those can't show.
 
 ### Narrate as you reach for tools
-
-Codex local launches use `--no-daemon` when supported.
 
 Before a tool call (or batch), say in a sentence what you're about to
 do and why. When a result changes your plan, say so before acting on

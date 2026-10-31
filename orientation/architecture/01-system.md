@@ -68,6 +68,10 @@ The host pushes state changes with `emit_replayable_payload`; for example the tu
 
 File edits by the agent are decided by `bram-guard`: "Worklist hooks decide with real exit codes and fail CLOSED on guard faults". [`src-tauri/src/guard.rs:1-13`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/src-tauri/src/guard.rs?plain=1#L1-L13) See diagram 3. Hooks "check coverage, which is not approval". [`app/__shell/conventions.md:505-508`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/app/__shell/conventions.md?plain=1#L505-L508)
 
+## Worklist calls
+
+This is how an agent advances, prunes or commits an item. Claude and OpenCode use loopback curl. [`app/__shell/conventions.md:413-413`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/app/__shell/conventions.md?plain=1#L413-L413) Codex's `workspace-write` sandbox refuses loopback connections, so it writes `resources/.worklist-intent.json` and reads a result file. Both transports reach the same host-side handlers, so the checks are identical. [`app/__shell/reference/worklist-mechanics.md:250-257`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/app/__shell/reference/worklist-mechanics.md?plain=1#L250-L257)
+
 ## serves project content
 
 The target-app scheme proxies `/__project/*` to the project's upstream, which is the loopback server by default or an external dev server configured in `.bram.json`. [`src-tauri/src/lib.rs:88204-88214`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/src-tauri/src/lib.rs?plain=1#L88204-L88214) [`src-tauri/src/lib.rs:88293-88296`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/src-tauri/src/lib.rs?plain=1#L88293-L88296) [`src-tauri/src/lib.rs:88819-88827`](https://github.com/judell/bram/blob/b2eb8e0b702970b3cfb160702268c51395cbe319/src-tauri/src/lib.rs?plain=1#L88819-L88827)

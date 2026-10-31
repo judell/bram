@@ -14,6 +14,7 @@ flowchart TD
   shell -->|"hosts"| loop
   shell -->|"Tauri events"| pane
   cli -->|"edits, gated by hooks"| repo
+  cli -->|"Worklist calls"| loop
   loop -->|"serves project content"| target
   repo -.->|"conventions it should follow"| cli
 
@@ -23,6 +24,7 @@ flowchart TD
 %% tip: Tauri shell :: The Rust host (src-tauri/src/lib.rs): PTY, loopback server, scheme handlers, watchers.
 %% tip: Terminal and agent CLI :: xterm.js in the host page, wired to a PTY running claude, codex or opencode.
 %% tip: Loopback server :: An HTTP server on 127.0.0.1 inside the Rust host; its port is in resources/.bram-port. A common gate refuses foreign Origins on state changes and Hosts that are not loopback.
+%% tip: Worklist calls :: How an agent advances, prunes or commits an item. Claude and OpenCode use loopback curl; Codex writes intent and result files, because its sandbox refuses loopback.
 %% tip: Target pane (optional) :: A display-only iframe for the project's own web UI. Off by default.
 %% tip: Project repo :: The git repo Bram was started in. State lives under resources/ and in refs/bram/.
 %% tip: clicks and messages :: Buttons and the message box call window helpers such as toTurn.

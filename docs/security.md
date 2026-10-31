@@ -322,8 +322,9 @@ red for the Antigravity cases (and for the signed forge cases, whose version
 the older guard rejects); that red is accurate about the link at that moment.
 An explicit `allow` doesn't skip agy's
 own permission check, and the guard never answers `auto_approve`, which would.
-Five cases run agy-shaped payloads, for 22 in all; a signed forge case waits
-for Antigravity's signature (antigravity-signature-and-conventions). Known
+Six cases run agy-shaped payloads, for 23 in all. The sixth is a forge write
+signed as `Antigravity`, which the guard allows; the guard accepts that name
+as `<Agent>` since antigravity-signature-and-conventions. Known
 limits: agy has no untracked local hooks file, so in a project that tracks
 `.agents/hooks.json`, Setup's group changes a tracked file. A file that isn't
 JSON is left alone and fails the self-test without raising the Setup banner,

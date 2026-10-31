@@ -55635,8 +55635,14 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // it, since agy then runs without the guard.
     let antigravity_wanted = antigravity_hooks_wanted(app, &proj);
     let antigravity_hooks = antigravity_hooks_state(&proj);
+    // antigravity-signature-and-conventions: and the conventions' rule
+    // slices, which Setup rewrites whenever the conventions change.
+    let antigravity_rules_current = seeded_conventions_bytes(app)
+        .map(|c| antigravity_rules_current(&proj, &c))
+        .unwrap_or(false);
     let antigravity_needs_setup = antigravity_wanted
         && (!core_installed
+            || !antigravity_rules_current
             || matches!(
                 antigravity_hooks,
                 AntigravityHooksState::Missing | AntigravityHooksState::Stale
@@ -55752,6 +55758,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "antigravityNeedsSetup": antigravity_needs_setup,
         "antigravityWanted": antigravity_wanted,
         "antigravityHooks": antigravity_hooks.as_str(),
+        "antigravityRulesCurrent": antigravity_rules_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
         "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
@@ -56478,10 +56485,17 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // antigravity-worklist-guard: agy's guard registration, Bram's group in
     // .agents/hooks.json. Runs on the source repo too, as OpenCode's plugin
     // does. The link exists here: Setup refused above if it couldn't make it.
+    // antigravity-signature-and-conventions: the conventions as always-on
+    // rules, under the same "wanted" rule. The source repo gets them too, cut
+    // from app/__shell/conventions.md (its .gitignore covers them), as
+    // OpenCode's `instructions` there name that file.
     if antigravity_hooks_wanted(app, &proj) {
         if let Some(command) = expected_antigravity_guard_command() {
             seed_antigravity_hooks(&proj, &command, &mut wrote, &mut skipped)?;
         }
+        let conventions = seeded_conventions_bytes(app)
+            .ok_or_else(|| "conventions template not found".to_string())?;
+        seed_antigravity_rules(&proj, &conventions, &mut wrote, &mut skipped)?;
     }
 
     // issue-227: surface stale legacy-hook references in user-global settings.
@@ -57144,6 +57158,378 @@ mod antigravity_hooks_tests {
         assert!(wrote2.is_empty());
         assert_eq!(skipped2.len(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// antigravity-signature-and-conventions: agy's always-on instruction channel.
+// agy 1.4.12 loads AGENTS.md, GEMINI.md and each `.agents/rules/*.md` whose
+// frontmatter says `trigger: always_on`; a rule without frontmatter is
+// rejected ("Invalid rule trigger"). It truncates a rule past 24,000 bytes of
+// what follows the frontmatter, silently but for a warning in its own log.
+// The seeded conventions are about 45 KB, so Setup cuts them at heading
+// boundaries into `.agents/rules/bram-conventions-<n>.md`. AGENTS.md's pointer
+// alone was rejected, as for OpenCode: following it is left to the model.
+// Evidence: docs/agent-specimens/antigravity/rules-and-transport.md.
+//
+// All always-on text shares a budget of about 60,000 bytes. Past it agy drops
+// the largest rule first, which is usually one of these slices; Bram's set
+// (the slices plus its AGENTS.md block) leaves about 8 KB for the user's own
+// always-on rules. Losing a slice costs guidance, not enforcement: the guard
+// in .agents/hooks.json still decides every write.
+const ENHANCE_ANTIGRAVITY_RULES_DIR_REL: &str = ".agents/rules";
+const ANTIGRAVITY_RULE_STEM: &str = "bram-conventions-";
+// Ownership, as for OpenCode's plugin: Setup rewrites or removes only slice
+// files carrying it, and a user's same-named rule is kept.
+const ANTIGRAVITY_RULE_MARKER: &str = "bram-managed";
+// agy's per-rule limit. Checked against the whole file, frontmatter included,
+// although agy counts only what follows the frontmatter. agy 1.4.12 expands
+// no `@` mention inside a rule (five forms tried), so a slice's size on disk
+// is the size agy loads.
+const ANTIGRAVITY_RULE_MAX_BYTES: usize = 24_000;
+// Two slices hold the conventions under their 45,000-character budget; more
+// are cut only if two can't each fit.
+const ANTIGRAVITY_RULE_MAX_SLICES: usize = 4;
+
+// Six lines: the frontmatter, a blank line, the marker, a blank line. The
+// setup harness strips them by count to reassemble the conventions.
+fn antigravity_rule_header(part: usize, parts: usize) -> String {
+    format!(
+        "---\ntrigger: always_on\n---\n\n<!-- {}: part {} of {} of Bram's conventions, cut to fit Antigravity's 24,000-byte rule limit. Setup rewrites this file; don't edit it. -->\n\n",
+        ANTIGRAVITY_RULE_MARKER, part, parts
+    )
+}
+
+// The rule files for the seeded conventions, whole (header and slice). Cuts
+// fall at the `##` / `###` heading nearest each equal share, never inside a
+// fenced block, so the slices concatenate back to `seeded` exactly. None when
+// no cut into ANTIGRAVITY_RULE_MAX_SLICES or fewer fits.
+fn antigravity_rule_slices(seeded: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if seeded.is_empty() {
+        return None;
+    }
+    let mut cuts: Vec<usize> = Vec::new();
+    let mut fenced = false;
+    let mut off = 0;
+    for line in seeded.split_inclusive(|b| *b == b'\n') {
+        if line.starts_with(b"```") {
+            fenced = !fenced;
+        } else if !fenced && off > 0 && (line.starts_with(b"## ") || line.starts_with(b"### ")) {
+            cuts.push(off);
+        }
+        off += line.len();
+    }
+    for n in 1..=ANTIGRAVITY_RULE_MAX_SLICES {
+        let mut bounds = vec![0usize];
+        for k in 1..n {
+            let target = seeded.len() * k / n;
+            let last = *bounds.last().unwrap_or(&0);
+            if let Some(&cut) = cuts
+                .iter()
+                .filter(|&&c| c > last)
+                .min_by_key(|&&c| c.abs_diff(target))
+            {
+                bounds.push(cut);
+            }
+        }
+        bounds.push(seeded.len());
+        let parts = bounds.len() - 1;
+        let slices: Vec<Vec<u8>> = bounds
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| {
+                let mut out = antigravity_rule_header(i + 1, parts).into_bytes();
+                out.extend_from_slice(&seeded[w[0]..w[1]]);
+                out
+            })
+            .collect();
+        if slices.iter().all(|s| s.len() <= ANTIGRAVITY_RULE_MAX_BYTES) {
+            return Some(slices);
+        }
+    }
+    None
+}
+
+fn antigravity_rule_path(proj: &Path, part: usize) -> PathBuf {
+    proj.join(ENHANCE_ANTIGRAVITY_RULES_DIR_REL)
+        .join(format!("{}{}.md", ANTIGRAVITY_RULE_STEM, part))
+}
+
+// The header's marker line, not a mention anywhere: the conventions' own text
+// names the skills' `bram-managed` marker, and so might a user's rule.
+fn antigravity_rule_is_bram_managed(bytes: &[u8]) -> bool {
+    let prefix = format!(
+        "---\ntrigger: always_on\n---\n\n<!-- {}:",
+        ANTIGRAVITY_RULE_MARKER
+    );
+    bytes.starts_with(prefix.as_bytes())
+}
+
+// Bram's slice files numbered past `parts`, left by a release that cut more.
+fn antigravity_stale_rule_files(proj: &Path, parts: usize) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(proj.join(ENHANCE_ANTIGRAVITY_RULES_DIR_REL)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.strip_prefix(ANTIGRAVITY_RULE_STEM)
+                .and_then(|r| r.strip_suffix(".md"))
+                .and_then(|d| d.parse::<usize>().ok())
+                .is_some_and(|k| {
+                    name == format!("{}{}.md", ANTIGRAVITY_RULE_STEM, k) && (k == 0 || k > parts)
+                })
+        })
+        .map(|e| e.path())
+        .filter(|p| {
+            std::fs::read(p)
+                .map(|b| antigravity_rule_is_bram_managed(&b))
+                .unwrap_or(false)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+// A user's rule under a slice's name counts as current, since Setup keeps it
+// and no Setup run could change it (the reasoning for OpenCode's custom
+// plugin). So does conventions text that can't be cut: Setup names it in
+// `skipped` instead.
+fn antigravity_rules_current(proj: &Path, seeded: &[u8]) -> bool {
+    let Some(slices) = antigravity_rule_slices(seeded) else {
+        return true;
+    };
+    slices.iter().enumerate().all(|(i, want)| {
+        match std::fs::read(antigravity_rule_path(proj, i + 1)) {
+            Ok(have) => have == *want || !antigravity_rule_is_bram_managed(&have),
+            Err(_) => false,
+        }
+    }) && antigravity_stale_rule_files(proj, slices.len()).is_empty()
+}
+
+// Writes each slice, refreshing Bram's own files and keeping a user's
+// same-named rule (reported in `skipped`), then removes Bram's slices
+// numbered past the current count. The caller decides whether agy is wanted.
+fn seed_antigravity_rules(
+    proj: &Path,
+    seeded: &[u8],
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let Some(slices) = antigravity_rule_slices(seeded) else {
+        skipped.push(format!(
+            "{}: the conventions can't be cut into {} or fewer rules of at most {} bytes, \
+             so Antigravity loads none of them",
+            ENHANCE_ANTIGRAVITY_RULES_DIR_REL,
+            ANTIGRAVITY_RULE_MAX_SLICES,
+            ANTIGRAVITY_RULE_MAX_BYTES
+        ));
+        return Ok(());
+    };
+    for (i, want) in slices.iter().enumerate() {
+        let path = antigravity_rule_path(proj, i + 1);
+        match std::fs::read(&path) {
+            Ok(have) if have == *want => continue,
+            Ok(have) if !antigravity_rule_is_bram_managed(&have) => {
+                skipped.push(path.display().to_string());
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        }
+        std::fs::write(&path, want).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        wrote.push(path.display().to_string());
+    }
+    for stale in antigravity_stale_rule_files(proj, slices.len()) {
+        std::fs::remove_file(&stale).map_err(|e| format!("remove {}: {}", stale.display(), e))?;
+        wrote.push(format!(
+            "deleted stale Antigravity rule {}",
+            stale.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod antigravity_rules_tests {
+    use super::{
+        antigravity_rule_header, antigravity_rule_path, antigravity_rule_slices,
+        antigravity_rules_current, seed_antigravity_rules, ANTIGRAVITY_RULE_MAX_BYTES,
+    };
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-agy-rules-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // What seeded_conventions_bytes produces: the version stamp, then the
+    // bundled conventions.
+    fn seeded_bundle() -> Vec<u8> {
+        let path: std::path::PathBuf = [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "app",
+            "__shell",
+            "conventions.md",
+        ]
+        .iter()
+        .collect();
+        let mut out = format!("<!-- bram v{} -->\n", env!("CARGO_PKG_VERSION")).into_bytes();
+        out.extend_from_slice(&std::fs::read(path).unwrap());
+        out
+    }
+
+    // A synthetic document: `sections` headed sections of `size` bytes each.
+    fn doc(sections: usize, size: usize) -> Vec<u8> {
+        let mut out = b"# Title\n\n".to_vec();
+        for s in 0..sections {
+            out.extend_from_slice(format!("## Section {}\n\n", s).as_bytes());
+            let line = format!("words for section {} that pad it out to size.\n", s);
+            let start = out.len();
+            while out.len() - start < size {
+                out.extend_from_slice(line.as_bytes());
+            }
+        }
+        out
+    }
+
+    fn body<'a>(slice: &'a [u8], part: usize, parts: usize) -> &'a [u8] {
+        let header = antigravity_rule_header(part, parts);
+        assert!(
+            slice.starts_with(header.as_bytes()),
+            "slice {} header",
+            part
+        );
+        &slice[header.len()..]
+    }
+
+    // The plan's checks, against the conventions Setup actually seeds: two
+    // always-on rules, each within agy's limit, cut at headings, and nothing
+    // dropped or added when the slices are put back together.
+    #[test]
+    fn bundled_conventions_cut_into_two_rules_that_reassemble() {
+        let seeded = seeded_bundle();
+        let slices = antigravity_rule_slices(&seeded).expect("the conventions cut");
+        assert_eq!(
+            slices.len(),
+            2,
+            "the docs and the setup harness expect bram-conventions-1.md and -2.md"
+        );
+        let mut joined: Vec<u8> = Vec::new();
+        for (i, s) in slices.iter().enumerate() {
+            assert!(
+                s.len() <= ANTIGRAVITY_RULE_MAX_BYTES,
+                "slice {} is {} bytes, over agy's {}-byte rule limit",
+                i + 1,
+                s.len(),
+                ANTIGRAVITY_RULE_MAX_BYTES
+            );
+            assert!(s.starts_with(b"---\ntrigger: always_on\n---\n"));
+            let b = body(s, i + 1, slices.len());
+            if i > 0 {
+                assert!(
+                    b.starts_with(b"## ") || b.starts_with(b"### "),
+                    "slice {} starts at a heading",
+                    i + 1
+                );
+            }
+            joined.extend_from_slice(b);
+        }
+        assert_eq!(joined, seeded, "the slices reassemble the conventions");
+    }
+
+    #[test]
+    fn cuts_balance_and_skip_fenced_headings() {
+        let small = doc(3, 100);
+        assert_eq!(antigravity_rule_slices(&small).unwrap().len(), 1);
+        // A heading-shaped line inside a fence, right at the midpoint, is
+        // never a cut.
+        let mut fenced = doc(4, 7_000);
+        let mid = fenced.len() / 2;
+        let at = mid + fenced[mid..].iter().position(|b| *b == b'\n').unwrap() + 1;
+        fenced.splice(at..at, b"```\n## not a heading\n```\n".iter().copied());
+        let slices = antigravity_rule_slices(&fenced).unwrap();
+        assert_eq!(slices.len(), 2);
+        assert!(body(&slices[1], 2, 2).starts_with(b"## Section 2\n"));
+        // Too big for two: three, each within the limit.
+        let big = doc(9, 5_500);
+        let slices = antigravity_rule_slices(&big).unwrap();
+        assert_eq!(slices.len(), 3);
+        assert!(slices.iter().all(|s| s.len() <= ANTIGRAVITY_RULE_MAX_BYTES));
+        // One section too big to fit any rule: no cut.
+        assert!(antigravity_rule_slices(&doc(1, 30_000)).is_none());
+    }
+
+    #[test]
+    fn seed_writes_then_is_idempotent() {
+        let dir = scratch("seed");
+        let seeded = doc(4, 7_000);
+        assert!(!antigravity_rules_current(&dir, &seeded));
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &seeded, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(wrote.len(), 2);
+        assert!(skipped.is_empty());
+        assert!(antigravity_rules_current(&dir, &seeded));
+        let first = std::fs::read(antigravity_rule_path(&dir, 1)).unwrap();
+        let (mut wrote2, mut skipped2) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &seeded, &mut wrote2, &mut skipped2).unwrap();
+        assert!(
+            wrote2.is_empty() && skipped2.is_empty(),
+            "second Setup writes nothing"
+        );
+        assert_eq!(
+            std::fs::read(antigravity_rule_path(&dir, 1)).unwrap(),
+            first
+        );
+        // New conventions make the slices stale until Setup runs.
+        let newer = doc(4, 7_100);
+        assert!(!antigravity_rules_current(&dir, &newer));
+        let (mut wrote3, mut skipped3) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &newer, &mut wrote3, &mut skipped3).unwrap();
+        assert_eq!(wrote3.len(), 2);
+        assert!(antigravity_rules_current(&dir, &newer));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_users_rule_is_kept_and_brams_extra_slices_go() {
+        let dir = scratch("owned");
+        let rules = dir.join(".agents/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        // Mentioning the marker in its body doesn't make a rule Bram's.
+        let mine = "---\ntrigger: always_on\n---\n\nmy own rule, about a bram-managed skill\n";
+        std::fs::write(rules.join("bram-conventions-2.md"), mine).unwrap();
+        // Left by a release that cut three: Bram's goes, a user's stays.
+        std::fs::write(
+            rules.join("bram-conventions-3.md"),
+            antigravity_rule_header(3, 3),
+        )
+        .unwrap();
+        std::fs::write(rules.join("bram-conventions-4.md"), mine).unwrap();
+        let seeded = doc(4, 7_000);
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &seeded, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(skipped.len(), 1, "the user's -2 is reported, not rewritten");
+        assert_eq!(
+            std::fs::read_to_string(rules.join("bram-conventions-2.md")).unwrap(),
+            mine
+        );
+        assert!(!rules.join("bram-conventions-3.md").exists());
+        assert!(rules.join("bram-conventions-4.md").exists());
+        assert_eq!(wrote.len(), 2, "-1 written, -3 removed");
+        assert!(
+            antigravity_rules_current(&dir, &seeded),
+            "a kept user rule raises no banner"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -72988,10 +73374,12 @@ fn iterate_feedback_draft_text<R: tauri::Runtime>(app: &AppHandle<R>, turn_text:
 fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
     // opencode-signature-and-conventions: OpenCode writes no transcript its
     // guard could read the phrase from either, so it takes Codex's
-    // host-side record.
+    // host-side record. antigravity-signature-and-conventions: so does agy,
+    // whose hook payload carries no Claude-shaped transcript_path; its guard
+    // reads the record through the same fresh_bypass().
     if !matches!(
         current_provider(app),
-        Some(SessionProvider::Codex | SessionProvider::Opencode)
+        Some(SessionProvider::Codex | SessionProvider::Opencode | SessionProvider::Antigravity)
     ) {
         return;
     }
@@ -80168,6 +80556,11 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                 env!("CARGO_PKG_VERSION"),
                 os
             );
+            let antigravity_signed = format!(
+                "Bram's Antigravity (Bram {}, main thread, selftest, {}, selftest) speaking from the Selftest project (github.com/example/bram-guard-selftest):\n\nguard self-test",
+                env!("CARGO_PKG_VERSION"),
+                os
+            );
             let add = "*** Begin Patch\n*** Add File: src/uncovered.txt\n+y\n*** End Patch";
             let update =
                 "*** Begin Patch\n*** Update File: src/covered.txt\n@@\n-x\n+y\n*** End Patch";
@@ -80315,8 +80708,8 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                 ),
                 // antigravity-worklist-guard: agy 1.4.12's PreToolUse payloads,
                 // shaped as the specimen pack captured them. The project is
-                // `workspacePaths[0]`; there is no `cwd`. A signed forge case
-                // waits for Antigravity's signature
+                // `workspacePaths[0]`; there is no `cwd`. The signed forge
+                // case signs as `Antigravity`
                 // (antigravity-signature-and-conventions).
                 (
                     "antigravity-write-covered",
@@ -80357,6 +80750,14 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                     serde_json::json!({
                     "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
                     "toolCall": {"name": "run_command", "args": {"CommandLine": "gh issue comment 5 --body \"guard self-test\"", "WaitMsBeforeAsync": 5000}}}),
+                ),
+                (
+                    "antigravity-forge-signed",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": format!("gh issue comment 5 --body {}", serde_json::json!(antigravity_signed)), "WaitMsBeforeAsync": 5000}}}),
                 ),
             ];
             for (id, hook, expect, payload) in specs {

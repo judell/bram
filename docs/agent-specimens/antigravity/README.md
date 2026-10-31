@@ -34,6 +34,8 @@ files are rendered from those redacted streams.
 | `transcript-record-denied.jsonl` | Transcript record for the denied file write and the model's response |
 | `transcript-record-lifecycle.jsonl` | Transcript record for the completed no-tool lifecycle turn |
 | `transcript-record-tools.jsonl` | Transcript with file write, file edit, and shell tool calls |
+| `rules-and-transport.md` | Which instruction files agy loads, the 24,000-byte rule truncation, the shared always-on budget and its largest-first demotion, `@` mentions in rules, the three convention questions, and loopback curl with and without a command grant (2026-10-31, `antigravity-signature-and-conventions`) |
+| `capture/rule-probes.py` | Lays out the instruction-file probes of `rules-and-transport.md` in a scratch repo |
 | `hooks/hooks.json` | Workspace logger configuration from the relative-path failure probe |
 | `hooks/lifecycle-hooks.json` | Same event logger with absolute pack paths; replace `<pack>` before replay |
 | `hooks/permission-hooks.json` | Hook configuration that forced the captured approval prompt |
@@ -132,8 +134,9 @@ throwaway `HOME` on 2026-10-30. Rendering its terminal stream reproduced
   `Stop` (`terminationReason: NO_TOOL_CALL`, `fullyIdle: true`). Interrupt and
   background-task lifecycle behavior remain unknown.
 - The logged-out profile showed Google OAuth and Google Cloud project choices.
-  Image delivery, subagents, loopback, instructions-file loading and background
-  task state remain uncaptured. `agy --help` lists no ACP subcommand, but ACP
+  Image delivery, subagents and background task state remain uncaptured.
+  Instructions-file loading and loopback were captured on 2026-10-31; see
+  `rules-and-transport.md`. `agy --help` lists no ACP subcommand, but ACP
   behavior was not independently probed.
 
 The official [Antigravity hooks reference](https://antigravity.google/docs/hooks)
@@ -157,6 +160,8 @@ findings above are limited to the artifacts actually captured.
 | Screen states | Trust prompt, idle composer, generating, first Ctrl-C hint | corresponding `.txt` screens |
 | Model and version | Gemini 3.8 Flash (High), agy 1.4.12 | `idle-composer.txt`, `version.txt`, `hooks/payloads/SessionStart.jsonl` |
 | ACP | No ACP subcommand in help; not independently probed | `help.txt` |
+| Instructions | `AGENTS.md`, `GEMINI.md`, and `.agents/rules/*.md` with `trigger: always_on` frontmatter; a rule without it is rejected. Each rule is cut silently past 24,000 bytes after its frontmatter. Always-on text shares about 60,000 bytes, and past it the largest rule goes first. No `@` mention in a rule was expanded | `rules-and-transport.md` |
+| Agent → Bram channel | Loopback curl works (no network sandbox as Bram launches agy), behind agy's own "command" permission; a prefix grant doesn't cover a chained command | `rules-and-transport.md` |
 
 Signed: Codex, 2026-10-30. The captures were made in a throwaway workspace;
 the scratch tree was removed after the specimens and transcripts were
@@ -174,6 +179,7 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `capture/drive.py` | copied capture utility |
 | `capture/redact.py` | pack redaction utility |
 | `capture/render.py` | copied capture utility |
+| `capture/rule-probes.py` | probe layout utility (2026-10-31) |
 | `capture/schedules/exit-double-ctrl-c.json` | agy 1.4.12 |
 | `capture/schedules/exit-idle-settled.json` | agy 1.4.12 |
 | `capture/schedules/exit-idle.json` | agy 1.4.12 |
@@ -258,6 +264,7 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `resume-by-id.txt` | agy 1.4.12 |
 | `resume-picker.raw` | agy 1.4.12 |
 | `resume-picker.txt` | agy 1.4.12 |
+| `rules-and-transport.md` | agy 1.4.12 (2026-10-31) |
 | `second-tool.raw` | agy 1.4.12 |
 | `second-tool.txt` | agy 1.4.12 |
 | `shell-approval-resume.raw` | agy 1.4.12 |

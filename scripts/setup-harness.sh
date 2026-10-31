@@ -257,10 +257,40 @@ assert_setup_landed() {
     else
       bad "Antigravity hooks register the guard" "$(head -12 "$dir/.agents/hooks.json" 2>/dev/null)"
     fi
-  elif [ -e "$dir/.agents/hooks.json" ]; then
-    bad "no .agents/hooks.json without agy" "Setup created it with no agy on PATH"
+    # antigravity-signature-and-conventions: agy loads the conventions as
+    # always-on rules, cut in two to fit its 24,000-byte limit, which it
+    # enforces by truncating silently. Each slice must fit, and the slices
+    # minus their six header lines must give back the seeded conventions.
+    # assert_idempotent then covers a second Setup leaving them byte-identical.
+    assert_field antigravityRulesCurrent true
+    local slice slices_ok=1 slice_bad=""
+    for slice in "$dir/.agents/rules/bram-conventions-1.md" "$dir/.agents/rules/bram-conventions-2.md"; do
+      if [ ! -f "$slice" ]; then
+        slices_ok=0; slice_bad="$slice_bad missing:${slice##*/}"
+      elif [ "$(wc -c < "$slice")" -gt 24000 ]; then
+        slices_ok=0; slice_bad="$slice_bad over-24000:${slice##*/}"
+      elif [ "$(sed -n 2p "$slice")" != "trigger: always_on" ]; then
+        slices_ok=0; slice_bad="$slice_bad no-trigger:${slice##*/}"
+      fi
+    done
+    if [ "$slices_ok" = 1 ]; then
+      ok "Antigravity rules: two always-on slices within 24,000 bytes"
+    else
+      bad "Antigravity rules: two always-on slices within 24,000 bytes" "$slice_bad"
+    fi
+    if [ -e "$dir/.agents/rules/bram-conventions-3.md" ]; then
+      bad "Antigravity rules: no third slice" "bram-conventions-3.md present"
+    fi
+    if { tail -n +7 "$dir/.agents/rules/bram-conventions-1.md"; tail -n +7 "$dir/.agents/rules/bram-conventions-2.md"; } 2>/dev/null \
+         | cmp -s - "$dir/.claude/bram-conventions.md"; then
+      ok "Antigravity rules reassemble the seeded conventions"
+    else
+      bad "Antigravity rules reassemble the seeded conventions" "slices minus headers differ from .claude/bram-conventions.md"
+    fi
+  elif [ -e "$dir/.agents/hooks.json" ] || [ -e "$dir/.agents/rules" ]; then
+    bad "no .agents/ seeding without agy" "Setup created .agents/ files with no agy on PATH"
   else
-    ok "no .agents/hooks.json without agy"
+    ok "no .agents/ seeding without agy"
   fi
 
   # Tonight's bug: firstRun keys on .bram.json (lib.rs:33551 / 21336), which

@@ -414,9 +414,10 @@ response saying the commit "ALREADY RAN" is success.
 
 ### Transports
 
-**Claude and OpenCode: loopback curl.** Bram writes its port to `resources/.bram-port`
-(plain decimal). Read it once and substitute the literal number
-(`$BRAM_PORT` won't match the permission allowlist):
+**Claude, OpenCode and Antigravity: loopback curl.** Bram writes its port to
+`resources/.bram-port` (plain decimal). Read it once and put the literal
+number where `61455` appears (`$BRAM_PORT` won't match the permission
+allowlist):
 
 ```
 curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \
@@ -432,8 +433,7 @@ curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST \
   "http://127.0.0.1:61455/__worklist/commit"
 ```
 
-(replace `61455` with the value from `resources/.bram-port`). Two
-pitfalls:
+Two pitfalls:
 
 - **Include literal `-X POST`.** `--data` alone matches neither the
   POST nor the GET allowlist entry.
@@ -602,8 +602,9 @@ For example:
   `Bram unknown`, never a guess. Prefer the live `/__app-info` value: a
   long-running session's imported copy can be stale, and a present but
   wrong version is denied.
-- `<Agent>` — `Claude`, `Codex` or `OpenCode`. `<thread>` — `main
-  thread` or `subagent`. `<model>` — the model producing the words.
+- `<Agent>` — `Claude`, `Codex`, `OpenCode` or `Antigravity`.
+  `<thread>` — `main thread` or `subagent`. `<model>` — the model
+  producing the words.
 - `<os>` — `macOS`, `Windows` or `Linux`. `<machine>` — short hostname
   (`hostname -s`; `COMPUTERNAME` on Windows).
 - The locator is the checkout's `origin` normalized to `host/path`: no

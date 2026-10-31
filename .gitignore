@@ -39,6 +39,7 @@ AGENTS.md
 .opencode/plugins/bram.js
 .opencode/opencode.json
 .agents/hooks.json
+.agents/rules/bram-conventions-*.md
 
 # This repo opts out of committed worklist-history snapshots for the
 # Codex-themed release; revisit whether to track them in a later release.

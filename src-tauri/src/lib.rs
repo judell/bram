@@ -26856,6 +26856,33 @@ mod pending_session_title_tests {
         );
         // A literal command in `shell.agent`, rather than the wire string.
         assert_eq!(agent_provider_from_command(Some("agy")), "antigravity");
+        // antigravity-agent-command-detection: `agy` counts as the command's
+        // own name only, never as three letters inside a path or argument.
+        for agy in [
+            "agy --model gemini-3.8-flash-high",
+            "/Users/x/.local/bin/agy",
+            "\"/Users/x/.local/bin/agy\" --continue",
+            "C:\\Users\\x\\bin\\agy.exe",
+            "AGY",
+        ] {
+            assert_eq!(
+                agent_provider_from_command(Some(agy)),
+                "antigravity",
+                "{agy}"
+            );
+        }
+        for (command, provider) in [
+            ("/Users/nagy/.local/bin/codex", "codex"),
+            ("claude --name hagyma", "claude"),
+            ("/opt/agy/bin/opencode", "opencode"),
+            ("agyx", "claude"),
+        ] {
+            assert_eq!(
+                agent_provider_from_command(Some(command)),
+                provider,
+                "{command}"
+            );
+        }
         assert_eq!(
             SessionProvider::from_str("antigravity"),
             Some(SessionProvider::Antigravity)
@@ -27391,7 +27418,7 @@ fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfi
 
 fn agent_provider_from_command(command: Option<&str>) -> &'static str {
     let lower = command.unwrap_or("").to_ascii_lowercase();
-    if lower.contains("antigravity") || lower.contains("agy") {
+    if lower.contains("antigravity") || command_head_is_agy(&lower) {
         // antigravity-provider-switch: `shell.agent` holds either the wire
         // string or a literal command, and agy's binary shares no substring
         // with its provider name, so both spellings are checked here.
@@ -27404,6 +27431,18 @@ fn agent_provider_from_command(command: Option<&str>) -> &'static str {
         // Covers claude/claud and the empty/unknown setting default.
         "claude"
     }
+}
+
+// antigravity-agent-command-detection: "agy" turns up inside ordinary words
+// and paths (`/Users/nagy/.local/bin/codex`, `--name hagyma`), and the
+// Antigravity check runs before the others, so a substring match took those
+// for Antigravity. It counts only as the command's own name: the first word,
+// with any directory, surrounding quotes and a Windows `.exe` stripped.
+fn command_head_is_agy(lower: &str) -> bool {
+    let (head, _) = split_command_head_tail(lower);
+    let head = head.trim_matches(['"', '\'']);
+    let name = head.rsplit(['/', '\\']).next().unwrap_or(head);
+    name == "agy" || name == "agy.exe"
 }
 
 fn split_command_head_tail(command: &str) -> (&str, &str) {

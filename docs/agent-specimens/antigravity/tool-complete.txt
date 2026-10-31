@@ -1,0 +1,29 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)
+   ▄▀▀    ▀▀▄     <workspace>
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Create tool-probe.txt with exactly FIRST-VALUE. Then use your file editing tool to replace FIRST-VALUE with
+  SECOND-VALUE. Finally run the harmless shell command echo RUN-COMMAND-7731 and report its output.
+
+○ Thought for 3.8s (Initial file creation will ensure the `tool-probe.txt` exists with the correct initial value, `F...)
+●
+● Ran (echo RUN-COMMAND-7731) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Requesting permission for:
+   echo RUN-COMMAND-7731
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'echo'
+  3. Yes, and always allow for commands that start with 'echo' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel                                                                                    Gemini 3.8 Flash · high

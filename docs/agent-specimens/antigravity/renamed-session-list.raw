@@ -1,0 +1,117 @@
+[>q[c[?2026$p[?2027$p]11;?]7501;?[?25l[?5W[?2004h[>4;2m[>1u[?u[J
+[5C▄▀▀▄
+[5D▀▀▀▀▀▀
+[7D▀▀▀▀▀▀▀▀
+  ▄▀▀    ▀▀▄
+ ▄▀▀      ▀▀▄
+
+ Welcome to the Antigravity CLI. You are currently not signed in.
+
+ ⣷  Signing in...[0 q[8A[12D ▄▀▀▄        Antigravity CLI 1.4.12
+[36D ▀▀▀▀▀▀       <user-email>
+    ▀▀▀▀▀▀▀▀      <workspace>
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────[K
+> Create specimen.txt with exactly FIRST-VALUE using your file creation tool, then edit it to exactly SECOND-VALUE using
+  your file edit tool. Finally run the harmless shell command: echo RUN-COMMAND-7731. Do not modify any other files.
+
+○ Thought for 4.7s (The task requires writing a file, editing it, and executing a shell command, all within specific...)
+● Edited 1 file (specimen.txt) (ctrl+o to expand)
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts[2A[2C[?25h[?25l[13A		  Gemini 3.8 Flash (High)[K
+[23D<workspace>
+
+
+
+
+
+
+
+
+
+
+
+
+
+		 Gemini 3.8 Flash · high[2A[2C[?25h[?25l[2A[K
+ ┃ Verbosity now defaults to medium[K
+ ┃ Verbosity is now medium by default, so tool calls and thoughts roll up into summaries. You can change your
+ ┃ preferred verbosity anytime in /config > Verbosity.[K
+ ┃ esc to dismiss[K
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 3.8 Flash · high[2A[2C[?25h[?25l[19A[35C (Antigravity Starter Quota)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[63D[?25h[?25l/
+
+> /add-dir             Add a directory to the workspace[K
+  /agents              List available custom agents
+  /artifact            View and review artifacts
+  /btw                 Ask a side question without interrupting the current task
+  /changelog           Show release notes and changes
+   ↓ 39 more
+
+  ↑/↓ Navigate · enter Select · tab Complete
+? for shortcuts                                                                                  Gemini 3.8 Flash · high[10A[3C[?25h[?25l
+
+
+
+
+
+[J[6A[2C/resume
+
+[6Dresume  Browse and resume past conversations[K
+[K
+  ↑/↓ Navigate · enter Select · tab Complete[K
+esc to cancel                                                                                    Gemini 3.8 Flash · high[5A[9C[?25h[?25l
+
+[J[4A────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                    Gemini 3.8 Flash · high[2A[2C[?25h[?25l[0 q[6A────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   CLI    Other   (tab to cycle)[K
+[K
+  Conversations[K
+  Type to search conversations...
+> File Creation And Command Execution                                                              9 steps        3m ago
+  File Creation And Command Execution                                                              9 steps        4m ago
+  File Creation And Command Execution                                                              5 steps        5m ago
+  Ignore Previous Instructions Test                                                                2 steps        7m ago
+  Create Blocked By Hook File                                                                      4 steps       10m ago
+  Create Blocked By Hook File                                                                      4 steps       11m ago
+  Run Harmless Shell Command                                                                       1 steps       12m ago
+  Execute Harmless Shell Command                                                                   3 steps       12m ago
+  Run Harmless Shell Command                                                                       3 steps       13m ago
+  [CURRENT] SPECIMEN-RENAMED-7731                                                                  3 steps       19m ago
+  [1-10 of 12 items]
+
+Keyboard: ↑/↓ Navigate  ←/→ Page  enter Select  f2 Rename  f4 Delete  tab Switch Tab  esc Go back / Clear search
+
+[15DGemini 3.8 Flash · high

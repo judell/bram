@@ -1,0 +1,32 @@
+{
+  "specimen-logger": {
+    "SessionStart": [
+      { "type": "command", "command": "bash hooks/log-hook.sh SessionStart" }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "bash hooks/log-hook.sh PreToolUse" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "bash hooks/log-hook.sh PostToolUse" }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      { "type": "command", "command": "bash hooks/log-hook.sh PreInvocation" }
+    ],
+    "PostInvocation": [
+      { "type": "command", "command": "bash hooks/log-hook.sh PostInvocation" }
+    ],
+    "Stop": [
+      { "type": "command", "command": "bash hooks/log-hook.sh Stop" }
+    ]
+  }
+}

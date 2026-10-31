@@ -1,0 +1,21 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    Gemini 3.8 Flash (High)
+   ▄<workspace>
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Hooks
+   5 hook types
+
+ > PreToolUse      Before tool execution  1 hook
+   PostToolUse     After tool execution  1 hook
+   PreInvocation   Before each LLM invocation  1 hook
+   PostInvocation  After each LLM invocation  1 hook
+   Stop            When agent tries to exit  1 hook
+
+   ↑/↓ Navigate · enter Select
+                                                                                                 Gemini 3.8 Flash · high

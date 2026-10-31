@@ -46,11 +46,12 @@ Both terminate here, then feed curated rows in `../pty-menu-shapes.md`:
 ```yaml
 ---
 observed: 2026-06-17        # date seen
-provider: claude            # claude | codex
+provider: claude            # claude | codex | antigravity
 cli_version: 2.1.169        # `claude --version` / `codex --version`
 shape: askuserquestion      # catalog id, or `unknown`
-source: screenshot          # screenshot | paste | trace-excerpt
+source: screenshot          # screenshot | paste | trace-excerpt | terminal-capture
 screenshot: 2026-06-17-claude-askuserquestion.png   # optional
+raw: ../agent-specimens/antigravity/permission-prompt.raw # optional terminal capture
 ---
 ```
 

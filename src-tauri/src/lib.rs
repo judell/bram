@@ -1285,41 +1285,93 @@ struct LastResolvedPromptInfo {
 static LAST_RESOLVED_PROMPT: std::sync::Mutex<Option<LastResolvedPromptInfo>> =
     std::sync::Mutex::new(None);
 
-fn prompt_shown<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+struct PromptShownEvent {
+    prompt_id: String,
+    tool: String,
+    tool_use_id: Option<String>,
+    labels: Vec<String>,
+    source: &'static str,
+    at_ms: i64,
+}
+
+struct PromptResolvedEvent {
+    open: OpenPrompt,
+    outcome: String,
+    detail: String,
+    at_ms: i64,
+}
+
+fn prompt_resolved_in(
+    open: &mut Option<OpenPrompt>,
+    expected_source: Option<&str>,
+    outcome: &str,
+    detail: &str,
+    now: i64,
+) -> Option<PromptResolvedEvent> {
+    if let Some(src) = expected_source {
+        if open.as_ref().map(|o| o.source) != Some(src) {
+            return None;
+        }
+    }
+    let o = open.take()?;
+    Some(PromptResolvedEvent {
+        open: o,
+        outcome: outcome.to_string(),
+        detail: detail.to_string(),
+        at_ms: now,
+    })
+}
+
+fn prompt_shown_in(
+    open: &mut Option<OpenPrompt>,
     tool: &str,
     tool_use_id: Option<&str>,
     labels: Vec<String>,
     source: &'static str,
-) {
-    {
-        let Ok(mut open) = prompt_open_cell().lock() else {
-            return;
-        };
-        if let Some(o) = open.as_mut() {
-            if o.tool == tool && o.labels == labels {
-                // Same prompt re-emitted (enrichment, redetect). Adopt a
-                // newly-known id; no lifecycle event.
-                if o.tool_use_id.is_none() {
-                    o.tool_use_id = tool_use_id.map(|s| s.to_string());
-                }
-                return;
+    now: i64,
+) -> (Option<PromptResolvedEvent>, Option<PromptShownEvent>) {
+    if let Some(o) = open.as_mut() {
+        if o.tool == tool && o.labels == labels {
+            // Same prompt re-emitted (enrichment, redetect). Adopt a
+            // newly-known id; no lifecycle event.
+            if o.tool_use_id.is_none() {
+                o.tool_use_id = tool_use_id.map(|s| s.to_string());
             }
+            return (None, None);
         }
     }
     // A different prompt: the open one is superseded first.
-    prompt_resolved(app, "superseded", source);
+    let superseded = prompt_resolved_in(open, None, "superseded", source, now);
     let seq = PROMPT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let now = unix_now_ms();
     let prompt_id = format!("p{}-{}", now, seq);
+    let ev = PromptShownEvent {
+        prompt_id: prompt_id.clone(),
+        tool: tool.to_string(),
+        tool_use_id: tool_use_id.map(|s| s.to_string()),
+        labels: labels.clone(),
+        source,
+        at_ms: now,
+    };
+    *open = Some(OpenPrompt {
+        prompt_id,
+        tool: tool.to_string(),
+        tool_use_id: tool_use_id.map(|s| s.to_string()),
+        labels,
+        source,
+        shown_at_ms: now,
+    });
+    (superseded, Some(ev))
+}
+
+fn record_prompt_shown<R: tauri::Runtime>(app: &AppHandle<R>, ev: PromptShownEvent) {
     let rec = serde_json::json!({
         "event": "prompt-shown",
-        "promptId": prompt_id,
-        "tool": tool,
-        "toolUseId": tool_use_id,
-        "labels": labels,
-        "source": source,
-        "atMs": now,
+        "promptId": ev.prompt_id,
+        "tool": ev.tool,
+        "toolUseId": ev.tool_use_id,
+        "labels": ev.labels,
+        "source": ev.source,
+        "atMs": ev.at_ms,
     });
     prompt_history_push(rec);
     if bram_trace_enabled() {
@@ -1328,23 +1380,82 @@ fn prompt_shown<R: tauri::Runtime>(
             "prompt-lifecycle",
             &format!(
                 "op=shown id={} tool={} source={} tool_use_id={} labels=[{}]",
-                prompt_id,
-                tool,
-                source,
-                tool_use_id.unwrap_or("none"),
-                labels_preview(&labels),
+                ev.prompt_id,
+                ev.tool,
+                ev.source,
+                ev.tool_use_id.as_deref().unwrap_or("none"),
+                labels_preview(&ev.labels),
             ),
         );
     }
-    if let Ok(mut open) = prompt_open_cell().lock() {
-        *open = Some(OpenPrompt {
-            prompt_id,
-            tool: tool.to_string(),
-            tool_use_id: tool_use_id.map(|s| s.to_string()),
-            labels,
-            source,
-            shown_at_ms: now,
+}
+
+fn record_prompt_resolved<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ev: PromptResolvedEvent,
+) -> OpenPrompt {
+    let o = ev.open;
+    if ev.outcome == "superseded" {
+        LAST_SUPERSEDE_MS.store(ev.at_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Ok(mut last) = LAST_RESOLVED_PROMPT.lock() {
+        *last = Some(LastResolvedPromptInfo {
+            at_ms: ev.at_ms,
+            prompt_id: o.prompt_id.clone(),
+            tool: o.tool.clone(),
+            outcome: ev.outcome.clone(),
+            labels: labels_preview(&o.labels),
         });
+    }
+    let rec = serde_json::json!({
+        "event": "prompt-resolved",
+        "promptId": o.prompt_id,
+        "tool": o.tool,
+        "toolUseId": o.tool_use_id,
+        "source": o.source,
+        "outcome": ev.outcome,
+        "detail": ev.detail,
+        "shownAtMs": o.shown_at_ms,
+        "atMs": ev.at_ms,
+        "openMs": ev.at_ms - o.shown_at_ms,
+    });
+    prompt_history_push(rec);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "prompt-lifecycle",
+            &format!(
+                "op=resolved id={} tool={} outcome={} detail={} open_ms={}",
+                o.prompt_id,
+                o.tool,
+                ev.outcome,
+                ev.detail,
+                ev.at_ms - o.shown_at_ms,
+            ),
+        );
+    }
+    o
+}
+
+fn prompt_shown<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool: &str,
+    tool_use_id: Option<&str>,
+    labels: Vec<String>,
+    source: &'static str,
+) {
+    let now = unix_now_ms();
+    let (superseded, shown) = {
+        let Ok(mut open) = prompt_open_cell().lock() else {
+            return;
+        };
+        prompt_shown_in(&mut open, tool, tool_use_id, labels, source, now)
+    };
+    if let Some(sup) = superseded {
+        let _ = record_prompt_resolved(app, sup);
+    }
+    if let Some(ev) = shown {
+        record_prompt_shown(app, ev);
     }
 }
 
@@ -1375,49 +1486,12 @@ fn prompt_resolved<R: tauri::Runtime>(
     outcome: &str,
     detail: &str,
 ) -> Option<OpenPrompt> {
-    let open = prompt_open_cell().lock().ok().and_then(|mut o| o.take());
-    let o = open?;
     let now = unix_now_ms();
-    if outcome == "superseded" {
-        LAST_SUPERSEDE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
-    }
-    if let Ok(mut last) = LAST_RESOLVED_PROMPT.lock() {
-        *last = Some(LastResolvedPromptInfo {
-            at_ms: now,
-            prompt_id: o.prompt_id.clone(),
-            tool: o.tool.clone(),
-            outcome: outcome.to_string(),
-            labels: labels_preview(&o.labels),
-        });
-    }
-    let rec = serde_json::json!({
-        "event": "prompt-resolved",
-        "promptId": o.prompt_id,
-        "tool": o.tool,
-        "toolUseId": o.tool_use_id,
-        "source": o.source,
-        "outcome": outcome,
-        "detail": detail,
-        "shownAtMs": o.shown_at_ms,
-        "atMs": now,
-        "openMs": now - o.shown_at_ms,
-    });
-    prompt_history_push(rec);
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "prompt-lifecycle",
-            &format!(
-                "op=resolved id={} tool={} outcome={} detail={} open_ms={}",
-                o.prompt_id,
-                o.tool,
-                outcome,
-                detail,
-                now - o.shown_at_ms,
-            ),
-        );
-    }
-    Some(o)
+    let ev = prompt_open_cell()
+        .lock()
+        .ok()
+        .and_then(|mut o| prompt_resolved_in(&mut o, None, outcome, detail, now))?;
+    Some(record_prompt_resolved(app, ev))
 }
 
 // claim-id-resolution (upstream ask #1 implemented locally):
@@ -22065,15 +22139,23 @@ fn drain_pty_intents<R: tauri::Runtime>(
                         .map(|t| menu_answer_opens_free_text(t.pending_menu.as_ref(), data))
                         .unwrap_or(false);
                     let r = pty_write_internal(app, state, data, "pty-intent-menuAnswer");
-                    if r.is_ok() && opens_free_text {
-                        AUQ_FREE_TEXT_SINCE_MS
-                            .store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "send-gate",
-                                &format!("op=free-text-open key={}", data.trim()),
-                            );
+                    if r.is_ok() {
+                        let resolved = prompt_open_cell().lock().ok().and_then(|mut open| {
+                            finish_antigravity_menu_answer_prompt(&mut open, unix_now_ms())
+                        });
+                        if let Some(ev) = resolved {
+                            let _ = record_prompt_resolved(app, ev);
+                        }
+                        if opens_free_text {
+                            AUQ_FREE_TEXT_SINCE_MS
+                                .store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+                            if bram_trace_enabled() {
+                                append_bram_trace_line(
+                                    app,
+                                    "send-gate",
+                                    &format!("op=free-text-open key={}", data.trim()),
+                                );
+                            }
                         }
                     }
                     r
@@ -90583,6 +90665,84 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
     }
 }
 
+enum AntigravityMenuTransition {
+    Unchanged,
+    Show {
+        menu: PtyMenu,
+        superseded: Option<PromptResolvedEvent>,
+        shown: Option<PromptShownEvent>,
+    },
+    Clear {
+        resolved: Option<PromptResolvedEvent>,
+    },
+}
+
+fn antigravity_menu_identity(menu: &PtyMenu) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        menu.text,
+        menu.tool_call_signature.as_deref().unwrap_or(""),
+        menu.tool_call_diff.is_some(),
+        menu.options
+            .iter()
+            .map(|o| format!("{}:{}", o.key, o.label))
+            .collect::<Vec<_>>()
+            .join("|")
+    )
+}
+
+fn antigravity_apply_menu_detection(
+    current_shown: &mut Option<String>,
+    open_prompt: &mut Option<OpenPrompt>,
+    menu: Option<PtyMenu>,
+    now: i64,
+) -> AntigravityMenuTransition {
+    let identity = menu.as_ref().map(antigravity_menu_identity);
+    if identity == *current_shown {
+        return AntigravityMenuTransition::Unchanged;
+    }
+    if let Some(menu) = menu {
+        let labels = menu.options.iter().map(|o| o.label.clone()).collect();
+        let (superseded, shown) =
+            prompt_shown_in(open_prompt, &menu.tool, None, labels, "antigravity", now);
+        *current_shown = identity;
+        let mut bound = Some(menu);
+        bind_menu_prompt_id(
+            &mut bound,
+            open_prompt.as_ref().map(|p| p.prompt_id.as_str()),
+        );
+        AntigravityMenuTransition::Show {
+            menu: bound.unwrap(),
+            superseded,
+            shown,
+        }
+    } else if current_shown.take().is_some() {
+        let resolved = prompt_resolved_in(
+            open_prompt,
+            Some("antigravity"),
+            "superseded",
+            "no-menu",
+            now,
+        );
+        AntigravityMenuTransition::Clear { resolved }
+    } else {
+        AntigravityMenuTransition::Unchanged
+    }
+}
+
+fn finish_antigravity_menu_answer_prompt(
+    open_prompt: &mut Option<OpenPrompt>,
+    now: i64,
+) -> Option<PromptResolvedEvent> {
+    prompt_resolved_in(
+        open_prompt,
+        Some("antigravity"),
+        "answered",
+        "antigravity-permission",
+        now,
+    )
+}
+
 fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tail: &str) {
     let provider = current_provider(app) == Some(SessionProvider::Antigravity);
     if !provider {
@@ -90604,45 +90764,43 @@ fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tai
     if let Some(m) = menu.as_mut() {
         antigravity_enrich_file_dialog(app, m);
     }
-    let shown = antigravity_permission_menu_shown_cell();
-    let identity = menu.as_ref().map(|m| {
-        format!(
-            "{}|{}|{}|{}",
-            m.text,
-            m.tool_call_signature.as_deref().unwrap_or(""),
-            m.tool_call_diff.is_some(),
-            m.options
-                .iter()
-                .map(|o| format!("{}:{}", o.key, o.label))
-                .collect::<Vec<_>>()
-                .join("|")
-        )
-    });
-    let Ok(mut current) = shown.lock() else {
-        return;
+    let transition = {
+        let Ok(mut current) = antigravity_permission_menu_shown_cell().lock() else {
+            return;
+        };
+        let Ok(mut open) = prompt_open_cell().lock() else {
+            return;
+        };
+        antigravity_apply_menu_detection(&mut current, &mut open, menu, unix_now_ms())
     };
-    if identity == *current {
-        return;
-    }
-    if let Some(menu) = menu {
-        if bram_trace_enabled() {
-            append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-show");
+    match transition {
+        AntigravityMenuTransition::Unchanged => {}
+        AntigravityMenuTransition::Show {
+            menu,
+            superseded,
+            shown,
+        } => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-show");
+            }
+            if let Some(sup) = superseded {
+                let _ = record_prompt_resolved(app, sup);
+            }
+            if let Some(ev) = shown {
+                record_prompt_shown(app, ev);
+            }
+            turn_state_set_menu(app, Some(menu), "antigravity-permission", "detected");
         }
-        prompt_shown(
-            app,
-            &menu.tool,
-            None,
-            menu.options.iter().map(|o| o.label.clone()).collect(),
-            "antigravity",
-        );
-        turn_state_set_menu(app, Some(menu), "antigravity-permission", "detected");
-        *current = identity;
-    } else if current.take().is_some() {
-        clear_antigravity_enrichment();
-        if bram_trace_enabled() {
-            append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-clear");
+        AntigravityMenuTransition::Clear { resolved } => {
+            clear_antigravity_enrichment();
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-clear");
+            }
+            if let Some(ev) = resolved {
+                let _ = record_prompt_resolved(app, ev);
+            }
+            turn_state_set_menu(app, None, "antigravity-permission", "dismissed");
         }
-        turn_state_set_menu(app, None, "antigravity-permission", "dismissed");
     }
 }
 
@@ -91309,6 +91467,151 @@ mod antigravity_permission_menu_tests {
             false,
         );
         assert_eq!(d.turn_state.phase, "working");
+    }
+
+    // agy-menu-resolve-open-prompt: identical back-to-back Antigravity file-edit
+    // menus have the same `tool` ("Antigravity permission") and option `labels`.
+    // Answering through `menuAnswer` or clearing the menu on `working` must
+    // resolve `OpenPrompt` so the next menu mints a fresh `promptId`, while
+    // in-place enrichment of the same still-open menu keeps its `promptId`.
+    #[test]
+    fn consecutive_identical_antigravity_prompts_mint_distinct_ids_after_answer_or_clear() {
+        use super::{
+            antigravity_apply_menu_detection, finish_antigravity_menu_answer_prompt,
+            menu_answer_identity_verdict, AntigravityMenuTransition, MenuAnswerIdentityVerdict,
+            OpenPrompt,
+        };
+
+        let edit_menu_for = |file: &str| {
+            let mut m = antigravity_permission_menu(
+                true,
+                Some(STATE),
+                &collapse_tail(raw("write").as_bytes(), 1200),
+            )
+            .expect("file write menu");
+            m.text = format!("Allow creation of this file?\n{file}");
+            m
+        };
+
+        let mut shown: Option<String> = None;
+        let mut open: Option<OpenPrompt> = None;
+
+        // 1. First file menu shows and mints prompt_id p1.
+        let p1 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            Some(edit_menu_for("src/a.rs")),
+            1_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected initial Show"),
+        };
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p1),
+            MenuAnswerIdentityVerdict::Accept
+        );
+
+        // 1b. Transcript enrichment of the SAME open menu updates identity
+        //     without minting a new prompt_id.
+        let mut enriched = edit_menu_for("src/a.rs");
+        enriched.tool_call_signature = Some("write_file src/a.rs".into());
+        let p1_after_enrich =
+            match antigravity_apply_menu_detection(&mut shown, &mut open, Some(enriched), 1_050) {
+                AntigravityMenuTransition::Show {
+                    menu,
+                    shown: None,
+                    superseded: None,
+                } => menu.prompt_id.expect("preserved prompt_id"),
+                _ => panic!("expected in-place Show without new shown event"),
+            };
+        assert_eq!(p1_after_enrich, p1);
+
+        // 2. Answering via `menuAnswer` resolves p1 immediately (`outcome=answered`),
+        //    and the subsequent `working` clear is a no-op (1:1 shown/resolved).
+        let answered = finish_antigravity_menu_answer_prompt(&mut open, 1_100)
+            .expect("menuAnswer must resolve open Antigravity prompt");
+        assert_eq!(answered.open.prompt_id, p1);
+        assert_eq!(answered.outcome, "answered");
+        assert_eq!(answered.detail, "antigravity-permission");
+        assert!(open.is_none());
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p1),
+            MenuAnswerIdentityVerdict::NoOpenPrompt
+        );
+        match antigravity_apply_menu_detection(&mut shown, &mut open, None, 1_120) {
+            AntigravityMenuTransition::Clear { resolved: None } => {}
+            _ => panic!("clear after menuAnswer should not emit a second resolved event"),
+        }
+
+        // 3. Second identical file-edit menu mints a distinct prompt_id p2 != p1.
+        let p2 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            Some(edit_menu_for("src/b.rs")),
+            2_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected fresh Show for second file"),
+        };
+        assert_ne!(p2, p1, "second menu must not reuse resolved prompt_id");
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p2),
+            MenuAnswerIdentityVerdict::Accept
+        );
+
+        // 4. Answering directly in the terminal skips `menuAnswer`; the clear
+        //    branch resolves p2 (`superseded` / `no-menu`), so a third identical
+        //    menu still mints a distinct prompt_id p3.
+        match antigravity_apply_menu_detection(&mut shown, &mut open, None, 2_500) {
+            AntigravityMenuTransition::Clear { resolved: Some(ev) } => {
+                assert_eq!(ev.open.prompt_id, p2);
+                assert_eq!(ev.outcome, "superseded");
+                assert_eq!(ev.detail, "no-menu");
+            }
+            _ => panic!("clear after terminal answer must resolve open Antigravity prompt"),
+        }
+        let p3 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            Some(edit_menu_for("src/c.rs")),
+            3_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected fresh Show for third file"),
+        };
+        assert_ne!(p3, p2);
+        assert_ne!(p3, p1);
+
+        // 5. Provider-switch safety: clearing Antigravity's shown marker never
+        //    clobbers another source's OpenPrompt.
+        open = Some(OpenPrompt {
+            prompt_id: "p-claude-hook".into(),
+            tool: "Edit".into(),
+            tool_use_id: Some("toolu_1".into()),
+            labels: vec!["Yes".into(), "No".into()],
+            source: "hook",
+            shown_at_ms: 3_100,
+        });
+        match antigravity_apply_menu_detection(&mut shown, &mut open, None, 3_200) {
+            AntigravityMenuTransition::Clear { resolved: None } => {}
+            _ => panic!("must not resolve a non-antigravity OpenPrompt"),
+        }
+        assert_eq!(
+            open.as_ref().map(|p| p.prompt_id.as_str()),
+            Some("p-claude-hook")
+        );
     }
 }
 

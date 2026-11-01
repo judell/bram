@@ -33832,6 +33832,78 @@ fn antigravity_system_message(content: &str) -> &str {
     }
 }
 
+// agy-file-edits-in-pane: the four tools the local transcripts actually hold
+// file and shell work in, in Claude's names and fields, so the Transcript's
+// existing rows and diffs work. Any other tool keeps agy's name and arguments.
+fn antigravity_translate_tool_call(
+    name: &str,
+    args: &serde_json::Value,
+) -> (String, serde_json::Value) {
+    let str_opt = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    match name {
+        "write_file" => {
+            let mut input = serde_json::Map::new();
+            input.insert(
+                "file_path".into(),
+                serde_json::Value::String(str_opt("Path").unwrap_or_default()),
+            );
+            input.insert(
+                "content".into(),
+                serde_json::Value::String(str_opt("Content").unwrap_or_default()),
+            );
+            if args.get("Append").and_then(|v| v.as_bool()) == Some(true) {
+                input.insert("append".into(), serde_json::Value::Bool(true));
+            }
+            ("Write".to_string(), serde_json::Value::Object(input))
+        }
+        "edit_file" => (
+            "Edit".to_string(),
+            serde_json::json!({
+                "file_path": str_opt("Path").unwrap_or_default(),
+                "old_string": str_opt("Target").unwrap_or_default(),
+                "new_string": str_opt("Replacement").unwrap_or_default(),
+            }),
+        ),
+        "run_command" => {
+            let mut input = serde_json::Map::new();
+            input.insert(
+                "command".into(),
+                serde_json::Value::String(str_opt("CommandLine").unwrap_or_default()),
+            );
+            if let Some(desc) = str_opt("toolSummary").filter(|s| !s.trim().is_empty()) {
+                input.insert("description".into(), serde_json::Value::String(desc));
+            }
+            ("Bash".to_string(), serde_json::Value::Object(input))
+        }
+        "read_file" => {
+            let mut input = serde_json::Map::new();
+            input.insert(
+                "file_path".into(),
+                serde_json::Value::String(str_opt("Path").unwrap_or_default()),
+            );
+            let start = args
+                .get("StartLine")
+                .and_then(|v| v.as_u64())
+                .filter(|&n| n > 0);
+            let end = args
+                .get("EndLine")
+                .and_then(|v| v.as_u64())
+                .filter(|&n| n > 0);
+            if let Some(s) = start {
+                input.insert("offset".into(), serde_json::json!(s));
+            }
+            if let Some(e) = end {
+                let s = start.unwrap_or(1);
+                if e >= s {
+                    input.insert("limit".into(), serde_json::json!(e - s + 1));
+                }
+            }
+            ("Read".to_string(), serde_json::Value::Object(input))
+        }
+        _ => (name.to_string(), args.clone()),
+    }
+}
+
 fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, Vec<String>), String> {
     let mut output = String::new();
     let mut unknown = Vec::new();
@@ -33893,6 +33965,7 @@ fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, Vec<S
                             .get("args")
                             .cloned()
                             .unwrap_or_else(|| serde_json::json!({}));
+                        let (tool_name, tool_input) = antigravity_translate_tool_call(name, &args);
                         let tool_id = format!(
                             "agy-{}-{}",
                             id,
@@ -33903,7 +33976,7 @@ fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, Vec<S
                                 * 100
                                 + i as u64
                         );
-                        content.push(serde_json::json!({"type":"tool_use","id":tool_id,"name":name,"input":args}));
+                        content.push(serde_json::json!({"type":"tool_use","id":tool_id,"name":tool_name,"input":tool_input}));
                         pending_tool_results.push_back(tool_id);
                     }
                 }
@@ -33950,9 +34023,11 @@ fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, Vec<S
 
 // Raise the suffix when the projection changes. A session that has finished
 // never changes again, so without a new directory its old export would stay
-// fresh forever. v2: tool results paired, agy's own text as notes.
-const ANTIGRAVITY_EXPORT_DIR: &str = "antigravity-sessions-v2";
-const ANTIGRAVITY_RETIRED_EXPORT_DIRS: &[&str] = &["antigravity-sessions"];
+// fresh forever. v2: tool results paired, agy's own text as notes; v3: tool
+// calls translated to Claude's names/inputs for Transcript diffs & summaries.
+const ANTIGRAVITY_EXPORT_DIR: &str = "antigravity-sessions-v3";
+const ANTIGRAVITY_RETIRED_EXPORT_DIRS: &[&str] =
+    &["antigravity-sessions", "antigravity-sessions-v2"];
 
 fn retire_stale_antigravity_exports(cache_dir: &Path, encoded_project: &str) {
     for dir in ANTIGRAVITY_RETIRED_EXPORT_DIRS {
@@ -34051,11 +34126,14 @@ fn antigravity_export_path_for_project<R: tauri::Runtime>(
         .join("logs");
     let regular = source_dir.join("transcript.jsonl");
     let full = source_dir.join("transcript_full.jsonl");
+    // `transcript_full.jsonl` holds untruncated records and native JSON tool
+    // args; compact `transcript.jsonl` stringifies every arg, which often makes
+    // it slightly larger on disk despite truncating long steps.
     let source = match (regular.metadata().ok(), full.metadata().ok()) {
         (None, None) => return None,
         (Some(_), None) => regular,
         (None, Some(_)) => full,
-        (Some(a), Some(b)) if b.len() > a.len() => full,
+        (Some(_), Some(b)) if b.len() > 0 => full,
         (Some(_), Some(_)) => regular,
     };
     let export = app
@@ -34353,21 +34431,96 @@ mod antigravity_transcript_tests {
         let tmp = std::env::temp_dir().join(format!("bram-agy-retire-{}", uuid::Uuid::new_v4()));
         let v1_this = tmp.join("antigravity-sessions").join("-Users-me-bram");
         let v1_other = tmp.join("antigravity-sessions").join("-Users-me-other");
-        let v2_this = tmp.join(ANTIGRAVITY_EXPORT_DIR).join("-Users-me-bram");
+        let v2_this = tmp.join("antigravity-sessions-v2").join("-Users-me-bram");
+        let v2_other = tmp.join("antigravity-sessions-v2").join("-Users-me-other");
+        let v3_this = tmp.join(ANTIGRAVITY_EXPORT_DIR).join("-Users-me-bram");
         std::fs::create_dir_all(&v1_this).unwrap();
         std::fs::create_dir_all(&v1_other).unwrap();
         std::fs::create_dir_all(&v2_this).unwrap();
+        std::fs::create_dir_all(&v2_other).unwrap();
+        std::fs::create_dir_all(&v3_this).unwrap();
         std::fs::write(v1_this.join("old.jsonl"), "{}").unwrap();
         std::fs::write(v1_other.join("keep.jsonl"), "{}").unwrap();
-        std::fs::write(v2_this.join("new.jsonl"), "{}").unwrap();
+        std::fs::write(v2_this.join("old2.jsonl"), "{}").unwrap();
+        std::fs::write(v2_other.join("keep2.jsonl"), "{}").unwrap();
+        std::fs::write(v3_this.join("new.jsonl"), "{}").unwrap();
         retire_stale_antigravity_exports(&tmp, "-Users-me-bram");
         assert!(
             !v1_this.exists(),
             "v1 dir for this project should be removed"
         );
-        assert!(v1_other.exists(), "other project's cache untouched");
-        assert!(v2_this.join("new.jsonl").exists(), "v2 export untouched");
+        assert!(
+            !v2_this.exists(),
+            "v2 dir for this project should be removed"
+        );
+        assert!(v1_other.exists(), "other project's v1 cache untouched");
+        assert!(v2_other.exists(), "other project's v2 cache untouched");
+        assert!(v3_this.join("new.jsonl").exists(), "v3 export untouched");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn translated_tools_drive_transcript_summaries_diffs_and_current_turn_edits() {
+        use super::compute_current_turn_edits_from_text;
+        let specimen =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
+        let (specimen_jsonl, _) = antigravity_transcript_jsonl("spec", specimen).unwrap();
+        let specimen_turns = st_parse_lines_to_turns(&specimen_jsonl);
+        let spec_tools: Vec<&serde_json::Value> = specimen_turns
+            .iter()
+            .flat_map(|t| t["entries"].as_array().into_iter().flatten())
+            .filter(|e| e["kind"] == "tool")
+            .collect();
+        assert_eq!(spec_tools.len(), 4, "{spec_tools:?}");
+        assert_eq!(spec_tools[0]["name"], "Write");
+        assert_eq!(
+            spec_tools[0]["summary"],
+            "<workspace>/tool-probe.txt — wrote 1 line"
+        );
+        assert_eq!(spec_tools[0]["isError"], true);
+        assert_eq!(spec_tools[1]["name"], "Write");
+        assert_eq!(
+            spec_tools[1]["summary"],
+            "<workspace>/tool-probe.txt — wrote 1 line"
+        );
+        assert_eq!(spec_tools[2]["name"], "Edit");
+        assert_eq!(
+            spec_tools[2]["summary"],
+            "<workspace>/tool-probe.txt edited"
+        );
+        let edit_diff = spec_tools[2]["diff"].as_str().expect("Edit row diff");
+        assert!(edit_diff.contains("-FIRST-VALUE"), "{edit_diff}");
+        assert!(edit_diff.contains("+SECOND-VALUE"), "{edit_diff}");
+        assert_eq!(spec_tools[3]["name"], "Bash");
+        assert_eq!(spec_tools[3]["summary"], "echo RUN-COMMAND-7731");
+        assert_eq!(spec_tools[3]["description"], "Echo test command");
+
+        let turn_edits = compute_current_turn_edits_from_text(&specimen_jsonl);
+        let edited_paths: Vec<String> = turn_edits
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["filePath"].as_str().map(String::from))
+            .collect();
+        assert_eq!(edited_paths, vec!["<workspace>/tool-probe.txt".to_string()]);
+
+        // Read gets Claude's fields, and an untranslated tool keeps agy's.
+        let others = [
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\nrun tools\n</USER_REQUEST>"}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":2,"content":"Checking.","tool_calls":[{"name":"read_file","args":{"Path":"/repo/src/lib.rs","StartLine":10,"EndLine":20}},{"name":"send_message","args":{"Recipient":"a","Message":"hi"}}]}"#,
+        ]
+        .join("\n");
+        let (jsonl, _) = antigravity_transcript_jsonl("all", &others).unwrap();
+        let turns = st_parse_lines_to_turns(&jsonl);
+        let tools: Vec<&serde_json::Value> = turns
+            .iter()
+            .flat_map(|t| t["entries"].as_array().into_iter().flatten())
+            .filter(|e| e["kind"] == "tool")
+            .collect();
+        assert_eq!(tools.len(), 2, "{tools:?}");
+        assert_eq!(tools[0]["name"], "Read");
+        assert_eq!(tools[0]["summary"], "/repo/src/lib.rs:10-20");
+        assert_eq!(tools[1]["name"], "send_message");
     }
 
     #[test]
@@ -89972,6 +90125,269 @@ fn antigravity_file_subject(prefix: &str) -> Option<String> {
     (!subject.is_empty()).then(|| subject.to_string())
 }
 
+// Past this the transcript isn't the live session's.
+const ANTIGRAVITY_IN_FLIGHT_MAX_AGE_MS: u128 = 300_000;
+// Larger files get a path and no diff: this runs on the PTY reader thread.
+const ANTIGRAVITY_MAX_DIFF_FILE_BYTES: u64 = 512 * 1024;
+
+// What a file dialog was enriched with, computed once per dialog. The key is
+// the dialog's unenriched text. It's cleared when the menu clears, because two
+// dialogs in a row can have identical text.
+#[derive(Clone)]
+struct AntigravityMenuEnrichment {
+    key: String,
+    text: String,
+    signature: Option<String>,
+    diff: Option<String>,
+}
+
+fn antigravity_enrichment_cell() -> &'static Mutex<Option<AntigravityMenuEnrichment>> {
+    static CELL: OnceLock<Mutex<Option<AntigravityMenuEnrichment>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn clear_antigravity_enrichment() {
+    if let Ok(mut g) = antigravity_enrichment_cell().lock() {
+        *g = None;
+    }
+}
+
+// Antigravity flushes the `PLANNER_RESPONSE` record (carrying `tool_calls`) before painting the
+// permission prompt and appends one `GENERIC` record as each call finishes, so
+// `tool_calls[completed_generics]` is the call currently held at the prompt.
+fn antigravity_in_flight_tool_from_transcript_str(source: &str) -> Option<PendingToolCall> {
+    let mut in_flight: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut completed = 0usize;
+    for line in source.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match record.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "USER_INPUT" | "CHECKPOINT" => {
+                in_flight.clear();
+                completed = 0;
+            }
+            "PLANNER_RESPONSE" => {
+                in_flight.clear();
+                completed = 0;
+                if let Some(calls) = record.get("tool_calls").and_then(|v| v.as_array()) {
+                    for call in calls {
+                        let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let args = call
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        in_flight.push(antigravity_translate_tool_call(name, &args));
+                    }
+                }
+            }
+            "GENERIC" => {
+                completed += 1;
+            }
+            _ => {}
+        }
+    }
+    let (name, input) = in_flight.get(completed)?.clone();
+    matches!(name.as_str(), "Edit" | "Write").then_some(PendingToolCall {
+        name,
+        input,
+        id: String::new(),
+    })
+}
+
+fn antigravity_in_flight_tool_for_project(root: &Path) -> Option<PendingToolCall> {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let (id, _, _) = antigravity_summary_rows(&canonical.to_string_lossy())
+        .into_iter()
+        .next()?;
+    let logs = antigravity_data_dir()?
+        .join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs");
+    let full = logs.join("transcript_full.jsonl");
+    let regular = logs.join("transcript.jsonl");
+    let source = match (regular.metadata().ok(), full.metadata().ok()) {
+        (_, Some(b)) if b.len() > 0 => full,
+        (Some(_), _) => regular,
+        _ => return None,
+    };
+    let modified = std::fs::metadata(&source).ok()?.modified().ok()?;
+    if modified.elapsed().ok()?.as_millis() > ANTIGRAVITY_IN_FLIGHT_MAX_AGE_MS {
+        return None;
+    }
+    let text = std::fs::read_to_string(&source).ok()?;
+    antigravity_in_flight_tool_from_transcript_str(&text)
+}
+
+fn antigravity_subject_matches_path(subject: &str, file_path: &str) -> bool {
+    let s = subject.trim();
+    if s.is_empty() {
+        return true;
+    }
+    file_path == s || file_path.starts_with(s) || file_path.ends_with(s)
+}
+
+fn antigravity_tool_call_diff(
+    call: &PendingToolCall,
+    project_root: Option<&Path>,
+) -> Option<String> {
+    use similar::TextDiff;
+    let field = |k: &str| call.input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let file_path = field("file_path");
+    let display_path = if file_path.is_empty() {
+        String::new()
+    } else if let Some(root) = project_root {
+        match Path::new(file_path).strip_prefix(root) {
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => file_path.trim_start_matches('/').to_string(),
+        }
+    } else {
+        file_path.trim_start_matches('/').to_string()
+    };
+    let header_old_rel = if display_path.is_empty() {
+        "a".to_string()
+    } else {
+        format!("a/{display_path}")
+    };
+    let header_new_rel = if display_path.is_empty() {
+        "b".to_string()
+    } else {
+        format!("b/{display_path}")
+    };
+    match call.name.as_str() {
+        "Edit" => {
+            let old_string = field("old_string");
+            let new_string = field("new_string");
+            if old_string.is_empty() && new_string.is_empty() {
+                return None;
+            }
+            let diff = TextDiff::from_lines(old_string, new_string)
+                .unified_diff()
+                .context_radius(3)
+                .missing_newline_hint(false)
+                .header(&header_old_rel, &header_new_rel)
+                .to_string();
+            (!diff.is_empty()).then_some(diff)
+        }
+        "Write" => {
+            let content = field("content");
+            let append = call
+                .input
+                .get("append")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if std::fs::metadata(file_path).is_ok_and(|m| m.len() > ANTIGRAVITY_MAX_DIFF_FILE_BYTES)
+            {
+                return None;
+            }
+            let existing = (!file_path.is_empty())
+                .then(|| std::fs::read_to_string(file_path).ok())
+                .flatten();
+            let (old_text, new_text, h_old): (String, String, &str) = match (append, existing) {
+                (true, Some(ex)) => {
+                    let combined = format!("{ex}{content}");
+                    (ex, combined, header_old_rel.as_str())
+                }
+                (_, Some(ex)) => (ex, content.to_string(), header_old_rel.as_str()),
+                (_, None) => {
+                    if content.is_empty() {
+                        return None;
+                    }
+                    (String::new(), content.to_string(), "/dev/null")
+                }
+            };
+            let diff = TextDiff::from_lines(&old_text, &new_text)
+                .unified_diff()
+                .context_radius(3)
+                .missing_newline_hint(false)
+                .header(h_old, &header_new_rel)
+                .to_string();
+            (!diff.is_empty()).then_some(diff)
+        }
+        _ => None,
+    }
+}
+
+fn antigravity_enrich_permission_menu(
+    menu: &mut PtyMenu,
+    call: &PendingToolCall,
+    project_root: Option<&Path>,
+) -> bool {
+    let mut lines = menu.text.lines();
+    let first_line = lines.next().unwrap_or("");
+    let screen_subject = lines.next();
+    let title = match (first_line, call.name.as_str()) {
+        ("Accept this file edit?", "Edit") => "Accept this file edit?",
+        ("Allow creation of this file?", "Write") => "Allow creation of this file?",
+        (s, "Edit") if s.starts_with("Permission required (top of dialog scrolled off") => {
+            "Accept this file edit?"
+        }
+        (s, "Write") if s.starts_with("Permission required (top of dialog scrolled off") => {
+            "Allow creation of this file?"
+        }
+        _ => return false,
+    };
+    let file_path = call
+        .input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if file_path.is_empty() {
+        return false;
+    }
+    if let Some(subj) = screen_subject {
+        if !antigravity_subject_matches_path(subj, file_path) {
+            return false;
+        }
+    }
+    menu.text = format!("{title}\n{file_path}");
+    menu.tool_call_signature = Some(format_pending_tool_call(call));
+    menu.tool_call_diff = antigravity_tool_call_diff(call, project_root);
+    true
+}
+
+fn antigravity_may_be_file_dialog(text: &str) -> bool {
+    let first = text.lines().next().unwrap_or("");
+    first == "Accept this file edit?"
+        || first == "Allow creation of this file?"
+        || first.starts_with("Permission required (top of dialog scrolled off")
+}
+
+// Only file dialogs read the transcript, and each only until it has its call:
+// this runs for every chunk while a dialog is up.
+fn antigravity_enrich_file_dialog<R: tauri::Runtime>(app: &AppHandle<R>, menu: &mut PtyMenu) {
+    if !antigravity_may_be_file_dialog(&menu.text) {
+        return;
+    }
+    let key = menu.text.clone();
+    if let Ok(g) = antigravity_enrichment_cell().lock() {
+        if let Some(done) = g.as_ref().filter(|done| done.key == key) {
+            menu.text = done.text.clone();
+            menu.tool_call_signature = done.signature.clone();
+            menu.tool_call_diff = done.diff.clone();
+            return;
+        }
+    }
+    let root = project_root(Some(app));
+    let Some(call) = root
+        .as_deref()
+        .and_then(antigravity_in_flight_tool_for_project)
+    else {
+        return;
+    };
+    if antigravity_enrich_permission_menu(menu, &call, root.as_deref()) {
+        if let Ok(mut g) = antigravity_enrichment_cell().lock() {
+            *g = Some(AntigravityMenuEnrichment {
+                key,
+                text: menu.text.clone(),
+                signature: menu.tool_call_signature.clone(),
+                diff: menu.tool_call_diff.clone(),
+            });
+        }
+    }
+}
+
 // Called with every PTY chunk (pty_menu_update). Acts only while Antigravity
 // is the current provider.
 fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
@@ -90024,13 +90440,17 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
         }
         match event {
             Some(AntigravityTurnEvent::Start) => antigravity_turn_started(app, now),
-            Some(AntigravityTurnEvent::End) => antigravity_turn_ended(
-                app,
-                started.unwrap_or(now),
-                now,
-                state.split(':').next().unwrap_or("ended"),
-            ),
+            Some(AntigravityTurnEvent::End) => {
+                clear_antigravity_enrichment();
+                antigravity_turn_ended(
+                    app,
+                    started.unwrap_or(now),
+                    now,
+                    state.split(':').next().unwrap_or("ended"),
+                );
+            }
             Some(AntigravityTurnEvent::Reset) => {
+                clear_antigravity_enrichment();
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         app,
@@ -90054,17 +90474,23 @@ fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tai
         if let Ok(mut latest) = antigravity_latest_state_cell().lock() {
             *latest = None;
         }
+        clear_antigravity_enrichment();
     }
     let state = antigravity_latest_state_cell()
         .lock()
         .ok()
         .and_then(|g| g.clone());
-    let menu = antigravity_permission_menu(provider, state.as_deref(), tail);
+    let mut menu = antigravity_permission_menu(provider, state.as_deref(), tail);
+    if let Some(m) = menu.as_mut() {
+        antigravity_enrich_file_dialog(app, m);
+    }
     let shown = antigravity_permission_menu_shown_cell();
     let identity = menu.as_ref().map(|m| {
         format!(
-            "{}|{}",
+            "{}|{}|{}|{}",
             m.text,
+            m.tool_call_signature.as_deref().unwrap_or(""),
+            m.tool_call_diff.is_some(),
             m.options
                 .iter()
                 .map(|o| format!("{}:{}", o.key, o.label))
@@ -90092,6 +90518,7 @@ fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tai
         turn_state_set_menu(app, Some(menu), "antigravity-permission", "detected");
         *current = identity;
     } else if current.take().is_some() {
+        clear_antigravity_enrichment();
         if bram_trace_enabled() {
             append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-clear");
         }
@@ -90393,6 +90820,176 @@ mod antigravity_permission_menu_tests {
         );
         let labels: Vec<_> = menu.options.iter().map(|o| o.label.as_str()).collect();
         assert_eq!(labels, vec!["Yes, allow creation", "No, deny creation"]);
+    }
+
+    #[test]
+    fn only_file_dialogs_read_the_transcript() {
+        use super::antigravity_may_be_file_dialog;
+        assert!(antigravity_may_be_file_dialog("Accept this file edit?"));
+        assert!(antigravity_may_be_file_dialog(
+            "Allow creation of this file?\n/p/a.txt"
+        ));
+        assert!(antigravity_may_be_file_dialog(
+            "Permission required (top of dialog scrolled off — check terminal for full details)"
+        ));
+        assert!(!antigravity_may_be_file_dialog(
+            "Run this command?\necho hi"
+        ));
+    }
+
+    #[test]
+    fn a_write_over_a_large_file_gets_no_diff() {
+        use super::{antigravity_tool_call_diff, PendingToolCall, ANTIGRAVITY_MAX_DIFF_FILE_BYTES};
+        let dir = std::env::temp_dir().join(format!("bram-agy-big-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.txt");
+        std::fs::write(&big, "x\n".repeat(ANTIGRAVITY_MAX_DIFF_FILE_BYTES as usize)).unwrap();
+        let small = dir.join("small.txt");
+        std::fs::write(&small, "old\n").unwrap();
+        let call = |path: &std::path::Path| PendingToolCall {
+            name: "Write".into(),
+            input: serde_json::json!({ "file_path": path, "content": "new\n" }),
+            id: String::new(),
+        };
+        assert_eq!(antigravity_tool_call_diff(&call(&big), None), None);
+        assert!(antigravity_tool_call_diff(&call(&small), None)
+            .unwrap()
+            .contains("+new"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_second_call_of_a_response_is_in_flight_once_the_first_has_its_result() {
+        use super::antigravity_in_flight_tool_from_transcript_str;
+        let planner = r#"{"type":"PLANNER_RESPONSE","step_index":1,"content":"x","tool_calls":[{"name":"edit_file","args":{"Path":"/a","Target":"1","Replacement":"2"}},{"name":"edit_file","args":{"Path":"/b","Target":"3","Replacement":"4"}}]}"#;
+        let path = |source: &str| {
+            antigravity_in_flight_tool_from_transcript_str(source)
+                .map(|c| c.input["file_path"].as_str().unwrap().to_string())
+        };
+        assert_eq!(path(planner).as_deref(), Some("/a"));
+        let one_done = format!("{planner}\n{}", r#"{"type":"GENERIC","content":"done"}"#);
+        assert_eq!(path(&one_done).as_deref(), Some("/b"));
+    }
+
+    #[test]
+    fn file_edit_and_creation_menus_get_full_path_and_unified_diff() {
+        use super::{
+            antigravity_enrich_permission_menu, antigravity_in_flight_tool_from_transcript_str,
+            PendingToolCall,
+        };
+        use std::path::Path;
+
+        // 1. Live edit specimen (`raw("shell")` has "Accept this file edit?" on
+        //    `<workspace>/tool-probe.txt`) + transcript fallback up to line 6
+        //    (step 5's `PLANNER_RESPONSE` for `edit_file`, before its `GENERIC`).
+        let transcript =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
+        let until_edit_prompt = transcript.lines().take(6).collect::<Vec<_>>().join("\n");
+        let in_flight = antigravity_in_flight_tool_from_transcript_str(&until_edit_prompt)
+            .expect("in-flight edit call");
+        assert_eq!(in_flight.name, "Edit");
+
+        let mut edit_menu =
+            antigravity_permission_menu(true, Some(STATE), &raw("shell")).expect("edit menu");
+        let root = Path::new("<workspace>");
+        assert!(antigravity_enrich_permission_menu(
+            &mut edit_menu,
+            &in_flight,
+            Some(root)
+        ));
+        assert_eq!(
+            edit_menu.tool_call_signature.as_deref(),
+            Some("Edit(<workspace>/tool-probe.txt)")
+        );
+        let diff = edit_menu.tool_call_diff.as_deref().expect("edit diff");
+        assert!(diff.contains("--- a/tool-probe.txt"), "{diff}");
+        assert!(diff.contains("+++ b/tool-probe.txt"), "{diff}");
+        assert!(diff.contains("-FIRST-VALUE"), "{diff}");
+        assert!(diff.contains("+SECOND-VALUE"), "{diff}");
+
+        // 1b. Long diff pushed "Pending edit <path>" out of the 1200-char tail,
+        //     leaving `menu.text == "Accept this file edit?"` with no subject:
+        //     enrichment restores both the full path and the unified diff.
+        let header_scrolled_tail = raw("shell").replace("Pending edit ", "");
+        let mut subjectless_edit_menu =
+            antigravity_permission_menu(true, Some(STATE), &header_scrolled_tail)
+                .expect("subjectless edit menu");
+        assert_eq!(subjectless_edit_menu.text, "Accept this file edit?");
+        assert!(antigravity_enrich_permission_menu(
+            &mut subjectless_edit_menu,
+            &in_flight,
+            Some(root)
+        ));
+        assert_eq!(
+            subjectless_edit_menu.text,
+            "Accept this file edit?\n<workspace>/tool-probe.txt"
+        );
+        assert!(subjectless_edit_menu.tool_call_diff.is_some());
+
+        // 2. Narrow terminal (`LIVE_CUT_PATH`, clipped at column 46) recovers the full path
+        //    and gets a unified diff for file creation, while rejecting an unrelated path.
+        let mut cut_menu =
+            antigravity_permission_menu(true, Some(STATE), LIVE_CUT_PATH).expect("cut menu");
+        let unrelated = PendingToolCall {
+            name: "Write".into(),
+            input: serde_json::json!({
+                "file_path": "/completely/different/path.txt",
+                "content": "hello\n",
+            }),
+            id: String::new(),
+        };
+        assert!(!antigravity_enrich_permission_menu(
+            &mut cut_menu,
+            &unrelated,
+            None
+        ));
+        let full_path = "/private/tmp/claude-501/-Users-someone-code-project/src/new_module.rs";
+        let matching_write = PendingToolCall {
+            name: "Write".into(),
+            input: serde_json::json!({
+                "file_path": full_path,
+                "content": "pub fn greet() {}\n",
+            }),
+            id: String::new(),
+        };
+        assert!(antigravity_enrich_permission_menu(
+            &mut cut_menu,
+            &matching_write,
+            Some(Path::new(
+                "/private/tmp/claude-501/-Users-someone-code-project"
+            ))
+        ));
+        assert_eq!(
+            cut_menu.text,
+            format!("Allow creation of this file?\n{full_path}")
+        );
+        assert!(cut_menu
+            .tool_call_signature
+            .as_deref()
+            .unwrap_or("")
+            .starts_with(&format!("Write({full_path})\n")));
+        let write_diff = cut_menu.tool_call_diff.as_deref().expect("write diff");
+        assert!(write_diff.contains("--- /dev/null"), "{write_diff}");
+        assert!(
+            write_diff.contains("+++ b/src/new_module.rs"),
+            "{write_diff}"
+        );
+        assert!(write_diff.contains("+pub fn greet() {}"), "{write_diff}");
+
+        // 3. 46x12 scrolled-off title upgrades from generic placeholder to title + path + diff.
+        let scrolled_raw = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-scrolled-title-46x12.raw"
+        );
+        let mut scrolled_menu =
+            antigravity_permission_menu(true, Some(STATE), &collapse_tail(scrolled_raw, 1200))
+                .expect("scrolled menu");
+        assert!(antigravity_enrich_permission_menu(
+            &mut scrolled_menu,
+            &in_flight,
+            Some(root)
+        ));
+        assert!(scrolled_menu.text.starts_with("Accept this file edit?\n"));
+        assert!(scrolled_menu.tool_call_diff.is_some());
     }
 
     #[test]

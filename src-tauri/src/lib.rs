@@ -13022,6 +13022,21 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
         .get("present")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // antigravity-live-check-fixes: while Antigravity is current, its approval
+    // menu is read from the screen with its OSC state
+    // (antigravity_permission_menu) and answered with a digit alone. Live
+    // (2026-10-31) the grid also read that dialog's "1. Yes … 2. No", and its
+    // rescue superseded the Antigravity menu with one whose answers default to
+    // "<n>\r"; the Enter lands in agy's composer. So the grid stands aside.
+    if current_provider(&app) == Some(SessionProvider::Antigravity) {
+        if let Ok(mut cell) = latest_grid_menu_cell().lock() {
+            *cell = None;
+        }
+        if present && bram_trace_enabled() {
+            append_bram_trace_line(&app, "grid-menu", "op=skip reason=antigravity-screen-menu");
+        }
+        return;
+    }
     // Update the stored grid menu. Scoped so the lock is released before the
     // forced pty_menu_update() below re-locks it via the detect-path override.
     {
@@ -88892,33 +88907,16 @@ fn antigravity_permission_menu(
     if terminal_attention_prompt_shape(tail) != Some("antigravity-permission") {
         return None;
     }
+    // antigravity-live-check-fixes: the subject is informational and never
+    // gates the menu. Live, a long workspace path is cut off at the terminal
+    // width, which also pushes the "+1" diff stat off the line.
     let subject = if title == "Run this command?" {
-        let requested = tail[..title_at]
-            .rsplit_once("Requesting permission for:")?
-            .1
-            .trim();
-        requested.to_string()
+        tail[..title_at]
+            .rsplit_once("Requesting permission for:")
+            .map(|(_, s)| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     } else {
-        let prefix = &tail[..title_at];
-        let (header_at, header_len) = ["Create file", "Pending edit"]
-            .into_iter()
-            .filter_map(|header| prefix.rfind(header).map(|at| (at, header.len())))
-            .max_by_key(|(at, _)| *at)?;
-        let body = &prefix[header_at + header_len..];
-        let from = body.find("<workspace>/").or_else(|| body.find('/'))?;
-        let path_and_diff = &body[from..];
-        let mut stat_at = None;
-        for (i, _) in path_and_diff.match_indices(" +") {
-            let digits = path_and_diff[i + 2..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .count();
-            if digits > 0 {
-                stat_at = Some(i);
-                break;
-            }
-        }
-        path_and_diff[..stat_at?].trim().to_string()
+        antigravity_file_subject(&tail[..title_at])
     };
     let reason = tail[..title_at].rsplit_once("Reason:").map(|(_, s)| {
         s.split("Requesting permission for:")
@@ -88964,9 +88962,11 @@ fn antigravity_permission_menu(
     if options.is_empty() {
         return None;
     }
-    let text = reason
-        .map(|r| format!("{}\n{}\n{}", title, subject, r))
-        .unwrap_or_else(|| format!("{}\n{}", title, subject));
+    let text = [Some(title.to_string()), subject, reason]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(PtyMenu {
         tool: "Antigravity permission".into(),
         text,
@@ -88979,6 +88979,38 @@ fn antigravity_permission_menu(
         at_host_ms: None,
         signature_source: None,
     })
+}
+
+// The file a creation or edit approval names: after the "Create file" /
+// "Pending edit" header (and any rule run), up to the first of the diff stat
+// (" +1"), a diff line (" 1 + …", " 1 - …") or the title. agy 1.4.12 cuts a
+// long path off at the terminal width, and the stat with it, so a cut path is
+// returned as drawn.
+fn antigravity_file_subject(prefix: &str) -> Option<String> {
+    let (at, len) = ["Create file", "Pending edit"]
+        .into_iter()
+        .filter_map(|header| prefix.rfind(header).map(|at| (at, header.len())))
+        .max_by_key(|(at, _)| *at)?;
+    let body = prefix[at + len..].trim_start_matches(|c: char| c == '─' || c.is_whitespace());
+    let mut end = body.len();
+    for (i, c) in body.char_indices() {
+        if c != ' ' {
+            continue;
+        }
+        let rest = &body[i + 1..];
+        let stat = rest
+            .strip_prefix('+')
+            .is_some_and(|r| r.starts_with(|d: char| d.is_ascii_digit()));
+        let digits = rest.chars().take_while(|d| d.is_ascii_digit()).count();
+        let diff_line =
+            digits > 0 && (rest[digits..].starts_with(" + ") || rest[digits..].starts_with(" - "));
+        if stat || diff_line {
+            end = i;
+            break;
+        }
+    }
+    let subject = body[..end].trim();
+    (!subject.is_empty()).then(|| subject.to_string())
 }
 
 // Called with every PTY chunk (pty_menu_update). Acts only while Antigravity
@@ -89166,6 +89198,74 @@ mod antigravity_permission_menu_tests {
             );
         }
     }
+
+    // antigravity-live-check-fixes: the live 2026-10-31 tail (path shortened
+    // and redacted). The workspace path is cut off at the terminal width, so
+    // no "+1" diff stat is drawn. The first parser required one and showed
+    // no menu.
+    const LIVE_CUT_PATH: &str = "\u{25cf} Edited 1 file (live-...) (ctrl+o to expand) \
+        Create file /private/tmp/claude-501/-Users-someone-cod 1 + hello \
+        Allow creation of this file? > 1. Yes, allow creation 2. No, deny creation \
+        \u{2191}/\u{2193} Navigate \u{b7} tab Amend \u{b7} f full diff esc to cancel \
+        Gemini 3.8 Flash \u{b7} high";
+
+    #[test]
+    fn a_path_cut_at_the_terminal_width_still_gets_its_menu() {
+        let menu = antigravity_permission_menu(true, Some(STATE), LIVE_CUT_PATH)
+            .expect("menu for the live tail");
+        assert_eq!(
+            menu.text,
+            "Allow creation of this file?\n/private/tmp/claude-501/-Users-someone-cod"
+        );
+        let answers: Vec<_> = menu
+            .options
+            .iter()
+            .map(|o| (o.label.as_str(), o.answer_keys.as_deref()))
+            .collect();
+        assert_eq!(
+            answers,
+            vec![
+                ("Yes, allow creation", Some("1")),
+                ("No, deny creation", Some("2"))
+            ]
+        );
+    }
+
+    #[test]
+    fn each_file_specimen_with_its_stat_cut_off_keeps_its_menu() {
+        for name in ["approval", "write", "edit", "shell"] {
+            let tail = raw(name);
+            // The dialog's own path and stat: the last "<workspace>/…" and
+            // the " +1" (and " -1") after it.
+            let start = tail.rfind("<workspace>/").expect("path");
+            let stat = start + tail[start..].find(" +1").expect("stat");
+            let mut end = stat + " +1".len();
+            if tail[end..].starts_with(" -1") {
+                end += " -1".len();
+            }
+            let cut = format!(
+                "{}/Users/someone/a-very-long-workspa{}",
+                &tail[..start],
+                &tail[end..]
+            );
+            let menu = antigravity_permission_menu(true, Some(STATE), &cut)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(
+                menu.text.contains("/Users/someone/a-very-long-workspa"),
+                "{name}: {}",
+                menu.text
+            );
+        }
+    }
+
+    #[test]
+    fn a_subject_that_cannot_be_read_does_not_hide_the_menu() {
+        let no_header = LIVE_CUT_PATH.replace("Create file ", "");
+        let menu = antigravity_permission_menu(true, Some(STATE), &no_header).expect("menu");
+        assert_eq!(menu.text, "Allow creation of this file?");
+        assert_eq!(menu.options.len(), 2);
+    }
+
     #[test]
     fn no_menu_for_other_provider_state_shapes_or_quoted_dialog() {
         let active = raw("command");
@@ -89246,6 +89346,22 @@ fn antigravity_turn_started<R: tauri::Runtime>(app: &AppHandle<R>, at_ms: i64) {
     }
 }
 
+// antigravity-live-check-fixes: Bram hears that a session changed from the
+// session-file watcher (Claude's and Codex's directories) or from OpenCode's
+// plugin events. agy's sessions live in a database under ~/.gemini, so nothing
+// signalled them: live (2026-10-31), a fresh agy partner's queued name never
+// bound to the conversation agy started, and no group formed. A turn's end is
+// when agy has written its conversation row. Not at the start: a fresh
+// partner's row may not exist yet, and the newest one would be the previous
+// conversation. Off the PTY reader thread, since the pass reads agy's
+// database and re-projects its transcript.
+fn antigravity_session_changed<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        emit_talk_session_changed_for_provider(&app, Some(SessionProvider::Antigravity));
+    });
+}
+
 fn antigravity_turn_ended<R: tauri::Runtime>(
     app: &AppHandle<R>,
     started_at: i64,
@@ -89256,6 +89372,7 @@ fn antigravity_turn_ended<R: tauri::Runtime>(
     // The finished conversation's transcript has changed; a sessions pass
     // re-projects and indexes it (antigravity-sessions-browser).
     search_index_request(IndexBucket::Sessions);
+    antigravity_session_changed(app);
     clear_proposing_flag(app, "turn-finished");
     end_turn_context_unless_fresh(app, "antigravity-turn-end");
     if bram_trace_enabled() {

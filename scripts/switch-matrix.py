@@ -203,7 +203,10 @@ def matrix(r: Run, turns: bool, agents: list[str], new_session_only: bool = Fals
             return
 
         # fresh partners: a New-session-born session starts a named, paired partner.
-        for p in ("opencode", "codex"):
+        # antigravity-live-check-fixes: agy's partner pairs at the end of its
+        # first turn (agy signals session changes only at turn boundaries),
+        # well inside self_timeout.
+        for p in ("opencode", "codex", "antigravity"):
             if p not in agents:
                 r.skip(f"fresh-partner-{p}", "agent not selected")
                 continue
@@ -226,7 +229,7 @@ def matrix(r: Run, turns: bool, agents: list[str], new_session_only: bool = Fals
             ])
             if p == "opencode":
                 b = pid
-            else:
+            elif p == "codex":
                 x = pid
             # No wait for the partner's catch-up turn: people switch mid-turn,
             # and Bram escalates when an agent doesn't exit (op=exit-retry).

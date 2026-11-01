@@ -58206,11 +58206,12 @@ mod opencode_instructions_tests {
 // `instructions` entry does.
 const ENHANCE_ANTIGRAVITY_HOOKS_REL: &str = ".agents/hooks.json";
 const ANTIGRAVITY_HOOKS_GROUP: &str = "bram-worklist-guard";
-// The tools that change files in agy 1.4.12 (the specimen pack, and the tool
-// list in resources/worklist-drafts/antigravity-worklist-guard.md); the others
-// read, search, ask, schedule or manage subagents. Codex's matcher has the
-// same shape.
-const ANTIGRAVITY_GUARD_MATCHER: &str = "^(write_file|edit_file|run_command)$";
+// The tools that change files in agy 1.4.12 (PreToolUse.jsonl in the specimen
+// pack, and the tool list in resources/worklist-drafts/antigravity-worklist-guard.md),
+// plus `call_mcp_tool`, the tool name captured for MCP server calls on both
+// global and plugin MCP servers (agy-guard-mcp-coverage). The remaining native
+// tools read, search, ask, schedule or manage subagents.
+const ANTIGRAVITY_GUARD_MATCHER: &str = "^(write_file|edit_file|run_command|call_mcp_tool)$";
 // agy kills a hook at its timeout and blocks the call (the 2026-10-31 spike),
 // so this only bounds a hung guard. Codex's registration uses 10 s too.
 const ANTIGRAVITY_GUARD_TIMEOUT_SECS: u64 = 10;
@@ -58365,8 +58366,8 @@ fn seed_antigravity_hooks(
 mod antigravity_hooks_tests {
     use super::{
         antigravity_guard_command, antigravity_hooks_group, antigravity_hooks_state_of,
-        seed_antigravity_hooks, AntigravityHooksState::*, ANTIGRAVITY_HOOKS_GROUP,
-        ENHANCE_ANTIGRAVITY_HOOKS_REL,
+        seed_antigravity_hooks, AntigravityHooksState::*, ANTIGRAVITY_GUARD_MATCHER,
+        ANTIGRAVITY_HOOKS_GROUP, ENHANCE_ANTIGRAVITY_HOOKS_REL,
     };
 
     const CMD: &str = "\"/Users/example/.bram/bram-guard\" guard antigravity-worklist";
@@ -58505,6 +58506,37 @@ mod antigravity_hooks_tests {
         assert_eq!(skipped2.len(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matcher_covers_every_pinned_pre_tool_use_specimen_and_marks_pre_mcp_stale() {
+        let alts: Vec<&str> = ANTIGRAVITY_GUARD_MATCHER
+            .strip_prefix("^(")
+            .and_then(|s| s.strip_suffix(")$"))
+            .expect("anchored alternation")
+            .split('|')
+            .collect();
+        assert!(alts.contains(&"call_mcp_tool"), "{alts:?}");
+        assert!(!alts.contains(&"read_file"), "{alts:?}");
+        let specimens =
+            include_str!("../../docs/agent-specimens/antigravity/hooks/payloads/PreToolUse.jsonl");
+        for line in specimens.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            let name = v["toolCall"]["name"].as_str().unwrap();
+            assert!(
+                alts.contains(&name),
+                "ANTIGRAVITY_GUARD_MATCHER missing specimen tool {name}"
+            );
+        }
+        let pre_mcp = serde_json::json!({
+            ANTIGRAVITY_HOOKS_GROUP: antigravity_hooks_group(CMD)
+        })
+        .to_string()
+        .replace(
+            ANTIGRAVITY_GUARD_MATCHER,
+            "^(write_file|edit_file|run_command)$",
+        );
+        assert_eq!(antigravity_hooks_state_of(Some(&pre_mcp), Some(CMD)), Stale);
     }
 }
 
@@ -81900,6 +81932,7 @@ fn guard_selftest_fixture() -> Result<PathBuf, String> {
         r#"{"kind":"","ids":[],"items":[]}"#,
     )?;
     w("src/covered.txt", "x\n")?;
+    std::fs::create_dir_all(dir.join(".agents")).map_err(|e| e.to_string())?;
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .current_dir(&dir)
@@ -81929,13 +81962,24 @@ fn guard_selftest_run_case(
 ) -> (String, String) {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = match std::process::Command::new(link)
-        .args(["guard", hook])
+    let mut cmd = std::process::Command::new(link);
+    cmd.args(["guard", hook])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // agy 1.4.12 spawns `.agents/hooks.json` hooks from `<workspace>/.agents`.
+    if hook.starts_with("antigravity") {
+        if let Some(ws) = payload
+            .pointer("/workspacePaths/0")
+            .and_then(|v| v.as_str())
+        {
+            let dot_agents = Path::new(ws).join(".agents");
+            if dot_agents.is_dir() {
+                cmd.current_dir(dot_agents);
+            }
+        }
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -82262,6 +82306,26 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                     serde_json::json!({
                     "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
                     "toolCall": {"name": "run_command", "args": {"CommandLine": format!("gh issue comment 5 --body {}", serde_json::json!(antigravity_signed)), "WaitMsBeforeAsync": 5000}}}),
+                ),
+                (
+                    "antigravity-mcp-write-uncovered",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "call_mcp_tool", "args": {
+                        "ServerName": "filesystem", "ToolName": "write_file",
+                        "Arguments": {"path": file("src/uncovered.txt"), "content": "y"}}}}),
+                ),
+                (
+                    "antigravity-mcp-write-covered",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "call_mcp_tool", "args": {
+                        "ServerName": "filesystem", "ToolName": "write_file",
+                        "Arguments": {"path": file("src/covered.txt"), "content": "y"}}}}),
                 ),
             ];
             for (id, hook, expect, payload) in specs {

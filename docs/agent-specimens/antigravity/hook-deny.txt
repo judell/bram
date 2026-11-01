@@ -1,0 +1,27 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    Gemini 3.8 Flash (High)
+   ▄<workspace>
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Create blocked-by-hook.txt containing only SAFE-MARKER-7731.
+⡿  Ge Checking if the file already exists in the target directory before attempting creation. Alternatively, will attemp
+
+○ Thought for 5.1s (Checking if the file already exists in the target directory before attempting creation. Alternat...)
+● Edited 1 file (blocked-by-hook.txt) (ctrl+o to expand)
+
+▸ , 467 tokens4s
+
+ create blocked-by-hook.              txt failed because the tool call was denied by   a pre-tool hook:
+
+    SPECIMEN-DENY-7731: blocked by the capture hook.
+
+  In accordance with safety guidelines regarding access controls and permission checks, I cannot bypass this hook. The
+  operation is blocked.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 3.8 Flash · high

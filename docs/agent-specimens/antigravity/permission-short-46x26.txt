@@ -1,0 +1,26 @@
+● Ran (curl -4 -sS --r...) (ctrl+o to expand)
+
+Command
+──────────────────────────────────────────────
+
+Requesting permission for:
+   curl -4 -sS --retry-connrefused
+--retry 3 --retry-delay 1 -X POST -H
+"Content-Type: application/json" --data
+@/tmp/no-such-body.json
+"http://127.0.0.1:9/__worklist/commit"
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this
+conversation for commands that start with
+'curl -4 -sS --retry-connrefused --retry 3 -
+-retry-delay 1 -X POST -H "Content-Ty...'
+  3. Yes, and always allow for commands that
+start with 'curl -4 -sS --retry-connrefused
+--retry 3 --retry-delay 1 -X POST -H
+"Content-Ty...' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expan
+esc to cancel          Gemini 4 Argon · medium

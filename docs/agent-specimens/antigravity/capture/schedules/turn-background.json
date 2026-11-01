@@ -1,0 +1,1 @@
+[[8,null,"idle"],[9,"Start the shell command sleep 40 as a background command without waiting for it to finish, then immediately reply STARTED and end your turn.",null],[10,"\\r",null],[30,null,"after-start"],[60,null,"after-bg-done"],[61,"\\u0003",null],[61.2,"\\u0003",null],[63,null,"exit"]]

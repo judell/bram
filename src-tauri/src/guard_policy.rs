@@ -2006,7 +2006,7 @@ pub(crate) fn parse_agent_signature(line: &str) -> Option<AgentSignature<'_>> {
         return None;
     }
     let (agent, rest) = rest.split_once(" (")?;
-    if !matches!(agent, "Claude" | "Codex" | "OpenCode") {
+    if !matches!(agent, "Claude" | "Codex" | "OpenCode" | "Antigravity") {
         return None;
     }
     let (standing, rest) = rest.split_once(") speaking from the ")?;
@@ -6414,6 +6414,25 @@ mod guard_policy_tests {
             "Asish's Opencode (Bram 0.7.7, main thread, x, macOS, Mac) speaking from the Bram project (github.com/judell/bram):",
         )
         .is_none());
+
+        // (f) antigravity-signature-and-conventions: agy signs as
+        // `Antigravity`, the product name, not its `agy` command. Miscased
+        // or abbreviated names still fail.
+        let sig = parse_agent_signature(
+            "Asish's Antigravity (Bram 0.8.1, main thread, Gemini 3.8 Flash, macOS, Mac) speaking from the Bram project (github.com/judell/bram):",
+        )
+        .expect("Antigravity signature should parse");
+        assert_eq!(sig.model, "Gemini 3.8 Flash");
+        assert_eq!(sig.locator, "github.com/judell/bram");
+        for wrong in ["AntiGravity", "antigravity", "agy"] {
+            assert!(
+                parse_agent_signature(&format!(
+                    "Asish's {wrong} (Bram 0.8.1, main thread, x, macOS, Mac) speaking from the Bram project (github.com/judell/bram):",
+                ))
+                .is_none(),
+                "{wrong} must not parse as signed"
+            );
+        }
     }
 
     #[test]

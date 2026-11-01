@@ -1,0 +1,15 @@
+{
+  "specimen-deny": {
+    "PreToolUse": [
+      {
+        "matcher": "write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 <pack>/hooks/deny-hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}

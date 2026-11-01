@@ -1,0 +1,16 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    Gemini 3.8 Flash (High)
+   ▄<workspace>
+  ▄▀▀      ▀▀▄
+
+
+ ┃ Verbosity now defaults to medium
+ ┃ Verbosity is now medium by default, so tool calls and thoughts roll up into summaries. You can change your
+ ┃ preferred verbosity anytime in /config > Verbosity.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 3.8 Flash · high

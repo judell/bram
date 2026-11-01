@@ -723,7 +723,7 @@ The status says *which* check failed, not only that one did (#465):
 | field | meaning |
 |---|---|
 | `claudeDocsCurrent`, `menuHookRegistered` | the two halves of `claudeNeedsSetup` that were once invisible (`hookRegistered` and `coreInstalled` are the others) |
-| `setupReasons` | stable codes, computed beside the verdict for the providers `providerNeedsSetup` consults: `not-installed`, `claude-hook-missing`, `claude-menu-hook-missing`, `claude-instructions-stale`, `codex-hook-missing`, `codex-developer-instructions-missing`, `codex-instructions-stale`, `opencode-plugin-missing`, `opencode-instructions-missing`. The banner and an agent read this one list |
+| `setupReasons` | stable codes, computed beside the verdict for the providers `providerNeedsSetup` consults: `not-installed`, `claude-hook-missing`, `claude-menu-hook-missing`, `claude-instructions-stale`, `codex-hook-missing`, `codex-developer-instructions-missing`, `codex-instructions-stale`, `opencode-plugin-missing`, `opencode-instructions-missing`, `antigravity-hook-missing`, `antigravity-rules-stale`. The banner and an agent read this one list |
 | `runningVersion`, `checkoutVersion`, `processOlderThanCheckout` | the process's `CARGO_PKG_VERSION` against `src-tauri/Cargo.toml` beside the on-disk `app/` root; `checkoutVersion` is null when serving the embedded tree. Compared numerically |
 | `providerSetupKind` | `repo-setup`, `codex-hook-refresh`, or `restart-older-process` (the banner offers no Run Setup button there) |
 
@@ -1109,6 +1109,10 @@ fields of config away:
 |---|---|
 | Claude logged out | `CLAUDE_CONFIG_DIR=$(mktemp -d)`, unset `ANTHROPIC_API_KEY`, and pre-set onboarding and folder trust in its `.claude.json` (`hasCompletedOnboarding`, `projects."<dir>".hasTrustDialogAccepted`). Otherwise the first-run theme picker and the folder-trust prompt come first. |
 | Codex logged out | `CODEX_HOME=$(mktemp -d)`, unset `OPENAI_API_KEY`, and pre-trust the folder in its `config.toml` (`[projects."<dir>"] trust_level = "trusted"`). |
+| Antigravity logged out | Use the whole-screen specimen in `docs/agent-specimens/antigravity/logged-out.txt` (Antigravity CLI 1.4.12); it offers Google OAuth or a Google Cloud project. |
+| Antigravity folder trust | Use a fresh workspace with no trusted-workspace entry; see `docs/agent-specimens/antigravity/first-run-trust.txt` (CLI 1.4.12). |
+| Antigravity resume picker | Open the conversation picker at an idle composer; see `docs/agent-specimens/antigravity/resume-picker.txt` (CLI 1.4.12). |
+| Antigravity approval prompts | The `permission-prompt.txt` snapshot is an ordinary working screen, not an approval dialog. Use the captured file approvals (`approval.txt`, `tool-write-approval.txt`, `tool-edit-approval.txt`, `tool-shell-approval.txt`) or command approval (`command-approval.txt`), all Antigravity CLI 1.4.12. |
 | A first-run prompt | the same throwaway directory with nothing pre-set |
 | An OpenCode dialog | At an idle composer, Ctrl+P opens the command palette, and Ctrl+X then `m`, `l` or `a` opens the model, session or agent list. Bram drains its tail on every keystroke, so capture what is drawn after the last key, not the whole stream. |
 | OpenCode logged out | No such screen in 2.1.4. With empty `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME`, it prints a stack trace (`cli.server-connection.resolve`) and exits before drawing its composer. With a real config, it runs its free models without signing in. |

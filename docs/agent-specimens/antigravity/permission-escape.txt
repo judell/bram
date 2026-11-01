@@ -1,0 +1,17 @@
+
+                  Antigravity CLI 1.4.12
+                  <user-email>     (Google AI Pro)
+    Gemini 4 Argon (Medium)
+    <workspace>
+
+
+────────────────────────────────────────────────────────────
+> Run the shell command: echo ESC-DIALOG-7731 . Report its output.
+
+● Ran (echo ESC-DIALOG-7731) (ctrl+o to expand)
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 4 Argon · medium

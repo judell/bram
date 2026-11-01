@@ -1,0 +1,246 @@
+[>q[c[?2026$p[?2027$p]7501;?]11;?[?25l[?5W[?2004h[>4;2m[>1u[?u[J
+[5C▄▀▀▄
+[5D▀▀▀▀▀▀
+[7D▀▀▀▀▀▀▀▀
+  ▄▀▀    ▀▀▄
+ ▄▀▀      ▀▀▄
+
+ Welcome to the Antigravity CLI. You are currently not signed in.
+
+ ⣷  Signing in... ⣯  ⣟  ⡿  ⢿ [0 q[8A   ▄▀▀▄        Antigravity CLI 1.4.12
+[36D ▀▀▀▀▀▀       <user-email>
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)
+   ▄▀▀    ▀▀▄     <workspace>
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 3.8 Flash · high[2A[2C[?25h[?25lM[K
+ ┃ Verbosity now defaults to medium
+ ┃ Verbosity is now medium by default, so tool calls and thoughts roll up into summaries. You can change your[K
+ ┃ preferred verbosity anytime in /config > Verbosity.[K
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 3.8 Flash · high[2A[2C[?25h[?25l[11A[35C (Antigravity Starter Quota)
+
+
+
+
+
+
+
+
+
+
+[63D[?25h[?25lC[?25h[?25lreate tool-probe.txt with exactly
+
+[60C[1K G[2A[61D[?25h[?25lFIRST-VALUE. Then use your file editing[?25h[?25l tool to replace FIRST-VALUE with SECOND-V[?25h[?25l[8D[K
+  SECOND-VALUE. Finally run the harmless shell c[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[97CGemini 3.8 Flash · high[2A[48C[?25h[?25lommand echo RUN-COMMAND-7731 and re[?25h[?25lport its output.[?25h[?25l
+
+[J[3A[2C[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[96C[1K Gemini 3.8 Flash · high[2A[2C[?25h[?25l
+
+[J[8A────────────────────────────────────────────────────────────
+> Create tool-probe.txt with exactly FIRST-VALUE. Then use your file editing tool to replace FIRST-VALUE with
+  SECOND-VALUE. Finally run the harmless shell command echo RUN-COMMAND-7731 and report its output.[K
+⣷  Generating...[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                    Gemini 3.8 Flash · high[2A[2C[?25h[?25l[2A⣯ 
+
+[?25h[?25l[2A⣟ 
+
+[?25h[?25l[2A⡿ 
+
+[?25h[?25l[2A⢿ 
+
+[?25h[?25l[2A⣻ 
+
+[?25h[?25l[2A⣽  G
+
+[?25h[?25l[2A⣾  Gen
+
+[4D[?25h[?25l[2A⣷  Gene
+
+[5D[?25h[?25l[2A⣯  Gener
+
+[6D[?25h[?25l[2A⣟  Genera
+
+[7D[?25h[?25l[2A⡿  Generat
+
+[8D[?25h[?25l[2A⢿  Generatin
+
+[10D[?25h[?25l[2A⣻  Generating
+
+[11D[?25h[?25l[2A⣽  Generating.
+
+[12D[?25h[?25l[2A⣾  Generating..
+
+[13D[?25h[?25l[2A⣷  Generating...
+
+[14D[?25h[?25l[2A⣯  Generating
+
+[11D[?25h[?25l[2A⣟  Generating.
+
+[12D[?25h[?25l[2A⡿  Generating...
+
+[14D[?25h[?25l[2A⢿ 
+
+[?25h[?25l[2A⣻ 
+
+[?25h[?25l[2A⣽ 
+
+[?25h[?25l[2A⣾ 
+
+[?25h[?25l[2A⣷ 
+
+[?25h[?25l[2A⣯  G
+
+[?25h[?25l[2A⣟  Ge
+
+[?25h[?25l[2A⡿  Gene
+
+[5D[?25h[?25l[2A⢿  Gener
+
+[6D[?25h[?25l[2A⣻  Genera
+
+[7D[?25h[?25l[2A⣽  Generat
+
+[8D[?25h[?25l[2A⣾  Generati
+
+[9D[?25h[?25l[2A⣷  Generating
+
+[11D[?25h[?25l[2A⣯  Generating.
+
+[12D[?25h[?25l[2A⣟  Generating..
+
+[13D[?25h[?25l[2A⡿  Generating...
+
+[14D[?25h[?25l[2A⢿  Generating
+
+[11D[?25h[?25l[2A⣻  Generating.
+
+[12D[?25h[?25l[2A⣽  Initial file creation will ensure the `tool-probe.txt` exists with the correct initial value, `FIRST-VALUE`. Subse...
+└ Tip: Press shift+tab to cycle modes (default, accept-edits, plan).[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                    Gemini 3.8 Flash · high[2A[2C[?25h[?25l[3A[K
+○ Thought for 3.8s (Initial file creation will ensure the `tool-probe.txt` exists with the correct initial value, `F...)
+○ Editing 1 file (tool-probe.txt) (ctrl+o to expand)[K
+⣽  Editing files...
+└ Tip: Press shift+tab to cycle modes (default, accept-edits, plan).[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                    Gemini 3.8 Flash · high[2A[2C[?25h[?25l[0 q[4A● Edited 1 file (tool-probe.txt) (ctrl+o to expand)[K
+[K
+Create file[K
+
+[K
+<workspace>/tool-probe.txt  +1[K
+  1  +  FIRST-VALUE[K
+
+Allow creation of this file?
+> 1. Yes, allow creation[K
+  2. No, deny creation
+
+  ↑/↓ Navigate · tab Amend · f full diff
+esc to cancel                                                                                    Gemini 3.8 Flash · high[0 q[6A[J[7A[6Cing 1 file (tool-probe.txt) (ctrl+o to expand)
+⣷  Editing files...
+└ Tip: Press ctrl+b to send a long task to the background.
+
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                    Gemini 3.8 Flash · high[2A[2C[?25h[?25l[4A● Edited 1 file (tool-probe.txt) (ctrl+o to expand)[K
+
+
+
+[49D[?25h[?25l[3A⣯  Editi
+
+
+[6D[?25h[?25l[3A⣟  Editin
+
+
+[7D[?25h[?25l[3A⡿  Editing
+
+
+[8D[?25h[?25l[3A⢿  Editing 
+
+
+[9D[?25h[?25l[3A⣻  Editing fi
+
+
+[11D[?25h[?25l[3A⣽  Editing fil
+
+
+[12D[?25h[?25l[3A⣾  Editing file
+
+
+[13D[?25h[?25l[3A⣷  Editing files
+
+
+[14D[?25h[?25l[3A⣯  Editing files..
+
+
+[16D[?25h[?25l[3A⣟  Editing files...
+
+
+[17D[?25h[?25l[3A⡿  Editing file
+
+
+[13D[?25h[?25l[3A⢿  Editing files
+
+
+[14D[?25h[?25l[3A⣻  Editing files.
+
+
+[15D[?25h[?25l[3A⣽  Editing files...
+
+
+[17D[?25h[?25l[3A⣾ 
+
+
+[?25h[?25l[3A⣷ 
+
+
+[?25h[?25l[3A⣯ 
+
+
+[?25h[?25l[3A⣟ 
+
+
+[?25h[?25l[3A⡿ 
+
+
+[?25h[?25l[3A Ed
+
+
+[?25h[?25l[4A[31C[K
+● Editing 1 file (tool-probe.txt) (ctrl+o to expand)
+⡿  Editing files...[K
+└ Tip: Press ctrl+b to send a long task to the background.[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                    Gemini 3.8 Flash · high[2A[2C[?25h[?25l[0 q[5A●				 (ctrl+o to expand)
+[K
+Create file[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[K
+<workspace>/tool-probe.txt  +1
+  1  +  FIRST-VALUE[K
+[K
+Allow creation of this file?
+> 1. Yes, allow creation[K
+  2. No, deny creation
+
+  ↑/↓ Navigate · tab Amend · f full diff
+esc to cancel                                                                                    Gemini 3.8 Flash · high

@@ -1,0 +1,19 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    Gemini 3.8 Flash (High)
+   ▄<workspace>
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Create specimen.txt with exactly FIRST-VALUE using your file creation tool, then edit it to exactly SECOND-VALUE using
+  your file edit tool. Finally run the harmless shell command: echo RUN-COMMAND-7731. Do not modify any other files.
+
+○ Thought for 4.7s (The task requires writing a file, editing it, and executing a shell command, all within specific...)
+● Edited 1 file (specimen.txt) (ctrl+o to expand)
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 3.8 Flash · high

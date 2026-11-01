@@ -93,6 +93,7 @@
             <Option value="claude" label="Claude" />
             <Option value="codex" label="Codex" />
             <Option value="opencode" label="OpenCode" />
+            <Option value="antigravity" label="Antigravity" />
           </RadioGroup>
           <Select
             id="startupPolicyBox"

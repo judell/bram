@@ -301,6 +301,55 @@ the slowest 0.03 ms), and 2.5–9 ms for the first call after a project loads.
 Code mode's `execute` itself couldn't write a file through Node's `fs` when
 tested, so the guard sees every write as a tool call.
 
+Antigravity's registration (antigravity-worklist-guard) is a named group,
+`bram-worklist-guard`, that Setup merges into the project's
+`.agents/hooks.json` wherever `agy` is on PATH, keeping the user's own groups.
+It runs the `antigravity-worklist` hook on agy's `write_file`, `edit_file`,
+`run_command` and `call_mcp_tool`, translating the first three to Claude's
+`Write`, `Edit` and `Bash` and `call_mcp_tool` (`ServerName`, `ToolName`,
+`Arguments`) to `mcp__<ServerName>__<ToolName>` in Claude's MCP branch before
+the shared policy decides (`agy-guard-mcp-coverage`, captured on 1.4.12 against
+both a global `xmlui` server and a throwaway plugin `filesystem` server in
+`PreToolUse.jsonl`; because agy spawns `.agents/hooks.json` hooks from
+`<workspace>/.agents`, the guard switches to `workspacePaths[0]` first so
+whitespace-free content strings aren't resolved as `.agents/<token>` candidate
+paths). A spike on agy 1.4.12 (2026-10-31)
+settled the failure modes: a hook that crashes, exits nonzero, hangs past its
+`timeout` or prints invalid JSON blocks the call, and only exit 0 with empty
+output lets it through. So the guard always prints a decision, and the
+self-test fails a guard that doesn't. That isn't enough on its own: a guard
+that predates this change answers `antigravity-worklist` with exit 0 and no
+output (measured on 0.8.1), and `~/.bram/bram-guard` follows whichever
+running Bram re-pointed it last. So the registered command wraps the guard in
+a shell test that turns empty output into a deny naming the cause, the same
+role OpenCode's plugin plays by denying any non-decision. Windows registers
+the bare command until a capture shows which shell agy uses there. The
+self-test runs the link directly, so with an older Bram running it can read
+red for the Antigravity cases (and for the signed forge cases, whose version
+the older guard rejects); that red is accurate about the link at that moment.
+An explicit `allow` doesn't skip agy's
+own permission check, and the guard never answers `auto_approve`, which would.
+Eight cases run agy-shaped payloads, for 25 in all, including a forge write
+signed as `Antigravity` (accepted as `<Agent>` since
+antigravity-signature-and-conventions) and uncovered and covered
+`call_mcp_tool` writes. Known
+limits: agy has no untracked local hooks file, so in a project that tracks
+`.agents/hooks.json`, Setup's group changes a tracked file. A file that isn't
+JSON is left alone and fails the self-test without raising the Setup banner,
+since no Setup run could fix it. Both global and plugin MCP servers on 1.4.12
+registered their tools lazily through `call_mcp_tool`; agy's system prompt also
+describes an eager `mcp_<server>_<tool>` form that neither server produced and
+that `agy mcp add` offers no flag for, so that shape remains uncaptured and
+outside the matcher.
+
+Subagents' tool calls do reach the hook. Live on agy 1.4.12 (2026-10-31), with
+nothing authorized, `write_file` was denied with a `decided=deny` line from a
+direct call, from `invoke_subagent`, from a `define_subagent` type with
+`EnableWriteTools`, and from a subagent whose `Workspace` pointed at another
+folder and whose path pointed into the project (the root stayed the project).
+agy's logs show the subagents ran. Only `write_file` was tried through a
+subagent, not `edit_file`, `run_command` or `call_mcp_tool`.
+
 ## Ranked action plan
 
 Severity is impact-weighted against the threat model. Effort: **S** = < half a

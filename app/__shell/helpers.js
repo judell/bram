@@ -924,13 +924,19 @@ window.__bramShowAgentSwitcher = function (pushedEvt, fetchedSettings, mainStatu
 // opencode-provider-switch: the one place a provider string is recognized.
 // Key is "" for anything unknown, so each caller picks its own default;
 // the label defaults to Claude, as the binary checks it replaces did.
+// antigravity-provider-switch adds Antigravity: its wire string is
+// `antigravity`, and its CLI (`agy`) never appears here — that name lives in
+// the host's provider_cli_name.
 window.__bramProviderKey = function (provider) {
   var p = String(provider || "").toLowerCase();
-  return p === "claude" || p === "codex" || p === "opencode" ? p : "";
+  return p === "claude" || p === "codex" || p === "opencode" || p === "antigravity" ? p : "";
 };
 window.__bramProviderLabel = function (provider) {
   var key = window.__bramProviderKey(provider);
-  return key === "codex" ? "Codex" : key === "opencode" ? "OpenCode" : "Claude";
+  return key === "codex" ? "Codex"
+    : key === "opencode" ? "OpenCode"
+    : key === "antigravity" ? "Antigravity"
+    : "Claude";
 };
 window.__bramAgentSwitcherLabel = function (provider) {
   return window.__bramProviderLabel(provider);
@@ -1118,7 +1124,7 @@ window.__bramSwitchAgent = function (provider) {
     if (!p || !p.pending) return null;
     if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
     // The host names the agents installed on this machine, so the card offers
-    // every one of them — three, since OpenCode joined Claude and Codex. An
+    // every one of them — now including Antigravity. An
     // older host sends no list; the two-agent pair is then the honest answer.
     var installed = Array.isArray(p.installed) && p.installed.length
       ? p.installed.filter(function (key) { return window.__bramProviderKey(key); })
@@ -1281,8 +1287,8 @@ window.__bramSwitchAgent = function (provider) {
     notify(reason);
   };
   window.__bramPairOfferDismiss = function (value) { dismiss(value, "dismiss-click"); };
-  // opencode-partner-handoff: the two sides as `<provider>=<id>`, any two of
-  // claude / codex / opencode.
+  // opencode-partner-handoff, antigravity-partner-handoff: the two sides as
+  // `<provider>=<id>`, any two of the session providers.
   window.__bramPairOfferKeep = function (value, toastApi) {
     if (!value) return;
     var from = window.__bramProviderKey(value.fromProvider);
@@ -1363,7 +1369,7 @@ window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendin
 
 // session-groups: the Sessions row's group line. Members share the group's
 // name (Jon, 2026-10-28), so only the agents are listed: "In a group with
-// Claude, Codex".
+// Claude, Antigravity".
 window.__bramSessionGroupLabel = function (item) {
   var g = item && item.group;
   if (!g) return "";
@@ -7018,6 +7024,8 @@ window.__bramSetupReasonText = function (code) {
     "codex-instructions-stale": "This project's AGENTS.md instructions for Codex are out of date",
     "opencode-plugin-missing": "The OpenCode guard plugin is missing or out of date",
     "opencode-instructions-missing": "OpenCode isn't configured to load the Bram instructions",
+    "antigravity-hook-missing": "Antigravity's Bram hooks are missing or out of date",
+    "antigravity-rules-stale": "Antigravity's Bram rule files are missing or out of date",
   };
   return m[code] || code;
 };
@@ -7033,6 +7041,8 @@ window.__bramSetupReasonCost = function (code) {
     "codex-instructions-stale": "Until then Codex works from older instructions.",
     "opencode-plugin-missing": "Until then the Worklist isn't enforced for OpenCode.",
     "opencode-instructions-missing": "Until then OpenCode works without Bram's instructions.",
+    "antigravity-hook-missing": "Until then the Worklist isn't enforced for Antigravity.",
+    "antigravity-rules-stale": "Until then Antigravity works without current Bram instructions.",
   };
   return m[code] || "";
 };
@@ -7062,6 +7072,7 @@ window.__bramSetupInfoMarkdown = function () {
     "- **Claude:** an import in `CLAUDE.md`, and the worklist-guard and permission hooks.",
     "- **Codex:** a block in `AGENTS.md`, plus `developer_instructions` and hooks in `~/.codex/config.toml`.",
     "- **OpenCode, where installed:** the guard plugin in `.opencode/plugins/`, and the conventions entry in `.opencode/opencode.json`.",
+    "- **Antigravity, where installed:** the guard group in `.agents/hooks.json`, and the conventions rules in `.agents/rules/`.",
     "",
     "**After Setup runs**",
     "",
@@ -10064,6 +10075,18 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     if (value && value.shape === "codex-login") {
       return "Codex is asking you to sign in. Open the terminal to sign in.";
     }
+    if (value && value.shape === "antigravity-login") {
+      return "Antigravity is asking you to sign in. Open the terminal to sign in.";
+    }
+    if (value && value.shape === "antigravity-folder-trust") {
+      return "Antigravity is asking you to trust this folder. Open the terminal to review it.";
+    }
+    if (value && value.shape === "antigravity-resume-picker") {
+      return "Antigravity has its conversation picker open. Open the terminal to choose a conversation.";
+    }
+    if (value && value.shape === "antigravity-permission") {
+      return "Antigravity is asking permission in the terminal. Answer it there.";
+    }
     // v080-codex-session-lock: Bram never picks retry or fork for the user.
     if (value && value.shape === "codex-session-lock") {
       return "Codex says this conversation is open in another app. Open the terminal to retry, fork or exit.";
@@ -10082,7 +10105,7 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     return "The terminal is waiting at a prompt Bram can't answer.";
   };
   // The host names the alternative only when its CLI is on PATH, and with
-  // three agents it is never simply "the other one" — so the label comes from
+  // several agents it is never simply "the other one" — so the label comes from
   // the provider key, never a two-way ternary.
   window.__bramTerminalAttentionSwitchLabel = function (value) {
     var to = value && value.switchTo;
@@ -11505,8 +11528,26 @@ window.__bramShapePrecedingIntent = function (prose) {
   if (!prose) return "";
   var flat = String(prose).replace(/\s+/g, " ").trim();
   if (!flat) return "";
-  var m = flat.match(/[^.!?]*[.!?:]?\s*$/);
-  var tail = ((m && m[0]) || flat).trim();
+  // row-intent-splits-at-a-filename-dot: a sentence ends at . ! or ? only
+  // when whitespace follows, so `lib.rs`, 0.8.2 and URLs stay whole, and
+  // never inside a closed inline code span. An unpaired backtick opens no
+  // span. A colon still doesn't end a sentence, as before.
+  var ticks = [];
+  for (var t = 0; t < flat.length; t++) if (flat.charAt(t) === "`") ticks.push(t);
+  var inCode = function (i) {
+    for (var p = 0; p + 1 < ticks.length; p += 2) {
+      if (i > ticks[p] && i < ticks[p + 1]) return true;
+    }
+    return false;
+  };
+  var start = 0;
+  for (var i = 0; i < flat.length - 1; i++) {
+    var c = flat.charAt(i);
+    if ((c === "." || c === "!" || c === "?") && flat.charAt(i + 1) === " " && !inCode(i)) {
+      start = i + 1;
+    }
+  }
+  var tail = flat.slice(start).trim();
   if (!tail) tail = flat;
   if (tail.length > 90) tail = tail.slice(0, 89).trim() + "…";
   if (tail.length < 12) return "";
@@ -16615,6 +16656,15 @@ window.__bramGuardRegistrationLine = function (r) {
   if (o && o.wanted) {
     parts.push("OpenCode: " + (o.custom ? "your own plugin, so Bram's checks are off"
       : o.ok ? "plugin current" : "plugin missing or stale (run Setup)"));
+  }
+  // antigravity-worklist-guard: Bram's group in .agents/hooks.json, only
+  // where agy is wanted; an older host sends no antigravity entry. Setup
+  // leaves a file that isn't JSON alone, so that case asks for a hand fix.
+  var a = reg.antigravity;
+  if (a && a.wanted) {
+    parts.push("Antigravity: " + (a.ok ? "hook current"
+      : a.state === "unparseable" ? ".agents/hooks.json isn't valid JSON, so agy runs without the guard (fix it by hand)"
+      : "hook missing or stale (run Setup)"));
   }
   return parts.join(" · ");
 };

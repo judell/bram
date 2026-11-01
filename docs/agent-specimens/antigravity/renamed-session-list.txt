@@ -1,0 +1,36 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    Gemini 3.8 Flash (High)
+   ▄<workspace>
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Create specimen.txt with exactly FIRST-VALUE using your file creation tool, then edit it to exactly SECOND-VALUE using
+  your file edit tool. Finally run the harmless shell command: echo RUN-COMMAND-7731. Do not modify any other files.
+
+○ Thought for 4.7s (The task requires writing a file, editing it, and executing a shell command, all within specific...)
+● Edited 1 file (specimen.txt) (ctrl+o to expand)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   CLI    Other   (tab to cycle)
+
+  Conversations
+  Type to search conversations...
+> File Creation And Command Execution                                                              9 steps        3m ago
+  File Creation And Command Execution                                                              9 steps        4m ago
+  File Creation And Command Execution                                                              5 steps        5m ago
+  Ignore Previous Instructions Test                                                                2 steps        7m ago
+  Create Blocked By Hook File                                                                      4 steps       10m ago
+  Create Blocked By Hook File                                                                      4 steps       11m ago
+  Run Harmless Shell Command                                                                       1 steps       12m ago
+  Execute Harmless Shell Command                                                                   3 steps       12m ago
+  Run Harmless Shell Command                                                                       3 steps       13m ago
+  [CURRENT] SPECIMEN-RENAMED-7731                                                                  3 steps       19m ago
+  [1-10 of 12 items]
+
+Keyboard: ↑/↓ Navigate  ←/→ Page  enter Select  f2 Rename  f4 Delete  tab Switch Tab  esc Go back / Clear search
+
+                                                                                                 Gemini 3.8 Flash · high

@@ -108,7 +108,7 @@ their gaps. TTLs and the consumption distinction are explained below.
 | Drop / verified cleanup | `handle_worklist_drop_direct`, `handle_worklist_clear_landed`, `worklist_item_landed_since` |
 | Recommendation | `validate_worklist_plan_steps`, `worklist_plan_current`; pane executes the current plan |
 | Codex filesystem transport | `drain_worklist_intent` dispatches to the same handlers |
-| Tool enforcement | [guard.rs](../src-tauri/src/guard.rs) dispatches hooks; [guard_policy.rs](../src-tauri/src/guard_policy.rs) implements decisions for both providers |
+| Tool enforcement | [guard.rs](../src-tauri/src/guard.rs) dispatches hooks and translates OpenCode's and Antigravity's tool calls into Claude's or Codex's shapes; [guard_policy.rs](../src-tauri/src/guard_policy.rs) implements the decisions for every provider. Registrations: Claude's `.claude/settings.local.json`, Codex's `~/.codex/config.toml`, OpenCode's seeded plugin, Antigravity's group in the project's `.agents/hooks.json` |
 | Retirement / interruption | `retire_worklist_authorization_record`, `shrink_inflight_claim_sentinel`, `invalidate_worklist_authorization`, `worklist_auth_freshness_ok` |
 
 The ordinary two-stage flow is:

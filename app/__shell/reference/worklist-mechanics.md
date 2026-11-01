@@ -32,6 +32,11 @@ are honored. The user-facing contract is identical for every agent.
   `bram-guard guard opencode-worklist`) reads the record through the
   same `fresh_bypass()` path. As with Codex, only a message sent through
   Bram is seen; words typed straight into OpenCode's own prompt are not.
+- **Antigravity, prose opt-out.** Same host-side record again: agy's hook
+  payload carries no transcript a guard could read. Its guard (Bram's
+  `bram-worklist-guard` group in `.agents/hooks.json`, deciding through
+  `bram-guard guard antigravity-worklist`) reads the record through
+  `fresh_bypass()`. Only a message sent through Bram is seen.
 - **`skip-worklist:` prefix (every agent).** When the host's `toTurn`
   write path sees the prefix it writes the same `direct-edit`
   record to `resources/.worklist-direct-edit.json`, then forwards the
@@ -244,6 +249,16 @@ without a sandbox, so it needs no filesystem channel like Codex's. Its
 instructions reach it through `.opencode/opencode.json`'s
 `instructions` list, which Setup keeps pointing at this file's core,
 `.claude/bram-conventions.md`.
+
+**Antigravity** (`agy`) uses the same curl shapes. Its shell isn't
+sandboxed as Bram launches it, so loopback works, but agy asks before it
+runs any command (its own "command" permission) unless the user has
+allowed it; agy judges each part of a chained command separately. Its
+instructions arrive as always-on rules: Setup cuts the core into
+`.agents/rules/bram-conventions-1.md` and `-2.md`, each under agy's
+24,000-byte rule limit, and rewrites them when the core changes. Bram's
+`AGENTS.md` block, which agy also loads, describes Codex's filesystem
+channel; that works too, since the host drains it for every agent.
 
 ## Codex transport: filesystem intent/result files
 
@@ -759,8 +774,8 @@ Continue to use the prescribed approval flow despite these limits.
 
 ## Signature deny reasons
 
-Both provider guards check the forge-artifact signature on `PreToolUse`
-and **deny** rather than warn. They fail open only when no inspectable
+Every agent's guard checks the forge-artifact signature on `PreToolUse`
+and **denies** rather than warns. Each fails open only when no inspectable
 prose body exists (`--body-file -` or a metadata-only command with no
 body flag). Coverage includes issue/PR/MR prose writes, GitHub gists,
 GitLab snippets, and inspectable `gh api` comment/gist writes.

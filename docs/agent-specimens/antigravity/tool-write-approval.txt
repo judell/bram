@@ -1,0 +1,26 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)
+   ▄▀▀    ▀▀▄     <workspace>
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Create tool-probe.txt with exactly FIRST-VALUE. Then use your file editing tool to replace FIRST-VALUE with
+  SECOND-VALUE. Finally run the harmless shell command echo RUN-COMMAND-7731 and report its output.
+
+○ Thought for 3.8s (Initial file creation will ensure the `tool-probe.txt` exists with the correct initial value, `F...)
+● Edited 1 file (tool-probe.txt) (ctrl+o to expand)
+
+Create file
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+<workspace>/tool-probe.txt  +1
+  1  +  FIRST-VALUE
+
+Allow creation of this file?
+> 1. Yes, allow creation
+  2. No, deny creation
+
+  ↑/↓ Navigate · tab Amend · f full diff
+esc to cancel                                                                                    Gemini 3.8 Flash · high

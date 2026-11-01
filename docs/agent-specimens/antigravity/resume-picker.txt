@@ -1,0 +1,32 @@
+
+      ▄▀▀▄        Antigravity CLI 1.4.12
+     ▀▀▀▀▀▀       <user-email>        (Antigravity Starter Quota)
+    Gemini 3.8 Flash (High)
+   ▄<workspace>
+  ▄▀▀      ▀▀▄
+
+> /rename
+  ⎿  Error: Failed to rename conversation: no active conversation
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   CLI    Other   (tab to cycle)
+
+  Conversations
+  Type to search conversations...
+> File Creation And Command Execution                                                              9 steps        1m ago
+  File Creation And Command Execution                                                              9 steps        2m ago
+  File Creation And Command Execution                                                              5 steps        3m ago
+  Ignore Previous Instructions Test                                                                2 steps        6m ago
+  Create Blocked By Hook File                                                                      4 steps        8m ago
+  Create Blocked By Hook File                                                                      4 steps        9m ago
+  Run Harmless Shell Command                                                                       1 steps       10m ago
+  Execute Harmless Shell Command                                                                   3 steps       11m ago
+  Run Harmless Shell Command                                                                       3 steps       12m ago
+  File Creation and Shell Execution                                                                3 steps       18m ago
+  [1-10 of 12 items]
+
+Keyboard: ↑/↓ Navigate  ←/→ Page  enter Select  f2 Rename  f4 Delete  tab Switch Tab  esc Go back / Clear search
+
+                                                                                                 Gemini 3.8 Flash · high

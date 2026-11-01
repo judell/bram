@@ -239,6 +239,60 @@ assert_setup_landed() {
     ok "no .opencode/ without OpenCode"
   fi
 
+  # antigravity-worklist-guard: Bram's guard group is seeded into
+  # .agents/hooks.json where agy is installed (antigravity_hooks_wanted keys
+  # on its CLI) and nowhere else. assert_idempotent's fingerprint covers the
+  # file, so a second Setup must leave it byte-identical.
+  assert_field antigravityNeedsSetup false
+  if command -v agy > /dev/null 2>&1; then
+    assert_file "$dir" ".agents/hooks.json"
+    # The command wraps the guard so that no decision (an older guard that
+    # doesn't know the hook) becomes a deny; agy lets empty output through.
+    if jq -e '.["bram-worklist-guard"].PreToolUse[0]
+              | (.matcher == "^(write_file|edit_file|run_command)$")
+                and (.hooks[0].command | contains("guard antigravity-worklist"))
+                and (.hooks[0].command | contains("\"decision\":\"deny\""))' \
+         "$dir/.agents/hooks.json" > /dev/null 2>&1; then
+      ok "Antigravity hooks register the guard"
+    else
+      bad "Antigravity hooks register the guard" "$(head -12 "$dir/.agents/hooks.json" 2>/dev/null)"
+    fi
+    # antigravity-signature-and-conventions: agy loads the conventions as
+    # always-on rules, cut in two to fit its 24,000-byte limit, which it
+    # enforces by truncating silently. Each slice must fit, and the slices
+    # minus their six header lines must give back the seeded conventions.
+    # assert_idempotent then covers a second Setup leaving them byte-identical.
+    assert_field antigravityRulesCurrent true
+    local slice slices_ok=1 slice_bad=""
+    for slice in "$dir/.agents/rules/bram-conventions-1.md" "$dir/.agents/rules/bram-conventions-2.md"; do
+      if [ ! -f "$slice" ]; then
+        slices_ok=0; slice_bad="$slice_bad missing:${slice##*/}"
+      elif [ "$(wc -c < "$slice")" -gt 24000 ]; then
+        slices_ok=0; slice_bad="$slice_bad over-24000:${slice##*/}"
+      elif [ "$(sed -n 2p "$slice")" != "trigger: always_on" ]; then
+        slices_ok=0; slice_bad="$slice_bad no-trigger:${slice##*/}"
+      fi
+    done
+    if [ "$slices_ok" = 1 ]; then
+      ok "Antigravity rules: two always-on slices within 24,000 bytes"
+    else
+      bad "Antigravity rules: two always-on slices within 24,000 bytes" "$slice_bad"
+    fi
+    if [ -e "$dir/.agents/rules/bram-conventions-3.md" ]; then
+      bad "Antigravity rules: no third slice" "bram-conventions-3.md present"
+    fi
+    if { tail -n +7 "$dir/.agents/rules/bram-conventions-1.md"; tail -n +7 "$dir/.agents/rules/bram-conventions-2.md"; } 2>/dev/null \
+         | cmp -s - "$dir/.claude/bram-conventions.md"; then
+      ok "Antigravity rules reassemble the seeded conventions"
+    else
+      bad "Antigravity rules reassemble the seeded conventions" "slices minus headers differ from .claude/bram-conventions.md"
+    fi
+  elif [ -e "$dir/.agents/hooks.json" ] || [ -e "$dir/.agents/rules" ]; then
+    bad "no .agents/ seeding without agy" "Setup created .agents/ files with no agy on PATH"
+  else
+    ok "no .agents/ seeding without agy"
+  fi
+
   # Tonight's bug: firstRun keys on .bram.json (lib.rs:33551 / 21336), which
   # Setup does not write, so the "first time in this repo" banner survives a
   # successful Setup. Same shape as #211.
@@ -389,6 +443,52 @@ scenario_stale_instructions() {
   shutdown_bram
 }
 
+scenario_antigravity_reasons() {
+  # agy-setup-reasons: with Antigravity active, removing Bram's group from
+  # .agents/hooks.json or staling .agents/rules/ must report its own code in
+  # setupReasons rather than leaving setupReasons empty.
+  local dir="$WORK_ROOT/antigravity_reasons"; mkdir -p "$dir"
+  git -C "$dir" init -q
+  printf '# scratch\n' > "$dir/README.md"
+  printf '{"shell":{"agent":"antigravity","startupPolicy":"none"}}\n' > "$dir/.bram.json"
+  launch "$dir" || return
+  run_setup; sleep 1
+  assert_field activeProvider antigravity
+  assert_field antigravityNeedsSetup false
+  assert_field providerNeedsSetup false
+  local reasons; reasons="$(api __enhance/status | jq -c '.setupReasons')"
+  if [ "$reasons" = '[]' ]; then
+    ok "setupReasons empty when Antigravity setup is current"
+  else
+    bad "setupReasons empty when Antigravity setup is current" "got: $reasons"
+  fi
+  jq 'del(.["bram-worklist-guard"])' "$dir/.agents/hooks.json" > "$dir/.agents/hooks.json.tmp" \
+    && mv "$dir/.agents/hooks.json.tmp" "$dir/.agents/hooks.json"
+  sleep 1
+  assert_field antigravityNeedsSetup true
+  assert_field providerNeedsSetup true
+  assert_field antigravityHooks missing
+  reasons="$(api __enhance/status | jq -c '.setupReasons')"
+  if [ "$reasons" = '["antigravity-hook-missing"]' ]; then
+    ok "setupReasons names missing Antigravity hook group"
+  else
+    bad "setupReasons names missing Antigravity hook group" "got: $reasons"
+  fi
+  rm -f "$dir/.agents/rules/bram-conventions-1.md"
+  sleep 1
+  assert_field antigravityRulesCurrent false
+  reasons="$(api __enhance/status | jq -c '.setupReasons')"
+  if [ "$reasons" = '["antigravity-hook-missing","antigravity-rules-stale"]' ]; then
+    ok "setupReasons names missing hook group and stale rules"
+  else
+    bad "setupReasons names missing hook group and stale rules" "got: $reasons"
+  fi
+  run_setup; sleep 1
+  assert_field antigravityNeedsSetup false
+  assert_field providerNeedsSetup false
+  shutdown_bram
+}
+
 scenario_legacy_hooks() {
   # #173: a project carrying the retired generic hook names.
   local dir="$WORK_ROOT/legacy_hooks"; mkdir -p "$dir/.claude/hooks"
@@ -439,7 +539,7 @@ require_bin
 command -v jq >/dev/null || { echo "jq required"; exit 127; }
 printf 'workdir: %s\n' "$WORK_ROOT"
 
-SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions legacy_hooks nested)
+SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested)
 [ $# -gt 0 ] && SCENARIOS=("$@")
 
 for s in "${SCENARIOS[@]}"; do

@@ -1,0 +1,33 @@
+     ▄▀▀▄
+    ▀▀▀▀▀▀
+   ▀▀▀▀▀▀▀▀
+  ▄▀▀    ▀▀▄
+ ▄▀▀      ▀▀▄
+
+ Welcome to the Antigravity CLI. You are currently not signed in.
+
+
+      ▄▀▀▄
+     ▀▀▀▀▀▀
+    ▀▀▀▀▀▀▀▀
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+  Antigravity CLI 1.4.12
+  ser-email>          (Antigravity Starter Quota)
+  Gemini 3.8 Flash (High)
+  <workspace>
+
+────────────────────────────────────────────────────────────
+> Run the shell command: echo DIGIT-7731 . Report its output.
+
+● Ran ing (echo DIGIT-7731) (ctrl+o to expand)
+
+  The command output is:
+
+    DIGIT-7731
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 3.8 Flash · high

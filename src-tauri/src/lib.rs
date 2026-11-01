@@ -1285,41 +1285,93 @@ struct LastResolvedPromptInfo {
 static LAST_RESOLVED_PROMPT: std::sync::Mutex<Option<LastResolvedPromptInfo>> =
     std::sync::Mutex::new(None);
 
-fn prompt_shown<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+struct PromptShownEvent {
+    prompt_id: String,
+    tool: String,
+    tool_use_id: Option<String>,
+    labels: Vec<String>,
+    source: &'static str,
+    at_ms: i64,
+}
+
+struct PromptResolvedEvent {
+    open: OpenPrompt,
+    outcome: String,
+    detail: String,
+    at_ms: i64,
+}
+
+fn prompt_resolved_in(
+    open: &mut Option<OpenPrompt>,
+    expected_source: Option<&str>,
+    outcome: &str,
+    detail: &str,
+    now: i64,
+) -> Option<PromptResolvedEvent> {
+    if let Some(src) = expected_source {
+        if open.as_ref().map(|o| o.source) != Some(src) {
+            return None;
+        }
+    }
+    let o = open.take()?;
+    Some(PromptResolvedEvent {
+        open: o,
+        outcome: outcome.to_string(),
+        detail: detail.to_string(),
+        at_ms: now,
+    })
+}
+
+fn prompt_shown_in(
+    open: &mut Option<OpenPrompt>,
     tool: &str,
     tool_use_id: Option<&str>,
     labels: Vec<String>,
     source: &'static str,
-) {
-    {
-        let Ok(mut open) = prompt_open_cell().lock() else {
-            return;
-        };
-        if let Some(o) = open.as_mut() {
-            if o.tool == tool && o.labels == labels {
-                // Same prompt re-emitted (enrichment, redetect). Adopt a
-                // newly-known id; no lifecycle event.
-                if o.tool_use_id.is_none() {
-                    o.tool_use_id = tool_use_id.map(|s| s.to_string());
-                }
-                return;
+    now: i64,
+) -> (Option<PromptResolvedEvent>, Option<PromptShownEvent>) {
+    if let Some(o) = open.as_mut() {
+        if o.tool == tool && o.labels == labels {
+            // Same prompt re-emitted (enrichment, redetect). Adopt a
+            // newly-known id; no lifecycle event.
+            if o.tool_use_id.is_none() {
+                o.tool_use_id = tool_use_id.map(|s| s.to_string());
             }
+            return (None, None);
         }
     }
     // A different prompt: the open one is superseded first.
-    prompt_resolved(app, "superseded", source);
+    let superseded = prompt_resolved_in(open, None, "superseded", source, now);
     let seq = PROMPT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let now = unix_now_ms();
     let prompt_id = format!("p{}-{}", now, seq);
+    let ev = PromptShownEvent {
+        prompt_id: prompt_id.clone(),
+        tool: tool.to_string(),
+        tool_use_id: tool_use_id.map(|s| s.to_string()),
+        labels: labels.clone(),
+        source,
+        at_ms: now,
+    };
+    *open = Some(OpenPrompt {
+        prompt_id,
+        tool: tool.to_string(),
+        tool_use_id: tool_use_id.map(|s| s.to_string()),
+        labels,
+        source,
+        shown_at_ms: now,
+    });
+    (superseded, Some(ev))
+}
+
+fn record_prompt_shown<R: tauri::Runtime>(app: &AppHandle<R>, ev: PromptShownEvent) {
     let rec = serde_json::json!({
         "event": "prompt-shown",
-        "promptId": prompt_id,
-        "tool": tool,
-        "toolUseId": tool_use_id,
-        "labels": labels,
-        "source": source,
-        "atMs": now,
+        "promptId": ev.prompt_id,
+        "tool": ev.tool,
+        "toolUseId": ev.tool_use_id,
+        "labels": ev.labels,
+        "source": ev.source,
+        "atMs": ev.at_ms,
     });
     prompt_history_push(rec);
     if bram_trace_enabled() {
@@ -1328,23 +1380,82 @@ fn prompt_shown<R: tauri::Runtime>(
             "prompt-lifecycle",
             &format!(
                 "op=shown id={} tool={} source={} tool_use_id={} labels=[{}]",
-                prompt_id,
-                tool,
-                source,
-                tool_use_id.unwrap_or("none"),
-                labels_preview(&labels),
+                ev.prompt_id,
+                ev.tool,
+                ev.source,
+                ev.tool_use_id.as_deref().unwrap_or("none"),
+                labels_preview(&ev.labels),
             ),
         );
     }
-    if let Ok(mut open) = prompt_open_cell().lock() {
-        *open = Some(OpenPrompt {
-            prompt_id,
-            tool: tool.to_string(),
-            tool_use_id: tool_use_id.map(|s| s.to_string()),
-            labels,
-            source,
-            shown_at_ms: now,
+}
+
+fn record_prompt_resolved<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ev: PromptResolvedEvent,
+) -> OpenPrompt {
+    let o = ev.open;
+    if ev.outcome == "superseded" {
+        LAST_SUPERSEDE_MS.store(ev.at_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Ok(mut last) = LAST_RESOLVED_PROMPT.lock() {
+        *last = Some(LastResolvedPromptInfo {
+            at_ms: ev.at_ms,
+            prompt_id: o.prompt_id.clone(),
+            tool: o.tool.clone(),
+            outcome: ev.outcome.clone(),
+            labels: labels_preview(&o.labels),
         });
+    }
+    let rec = serde_json::json!({
+        "event": "prompt-resolved",
+        "promptId": o.prompt_id,
+        "tool": o.tool,
+        "toolUseId": o.tool_use_id,
+        "source": o.source,
+        "outcome": ev.outcome,
+        "detail": ev.detail,
+        "shownAtMs": o.shown_at_ms,
+        "atMs": ev.at_ms,
+        "openMs": ev.at_ms - o.shown_at_ms,
+    });
+    prompt_history_push(rec);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "prompt-lifecycle",
+            &format!(
+                "op=resolved id={} tool={} outcome={} detail={} open_ms={}",
+                o.prompt_id,
+                o.tool,
+                ev.outcome,
+                ev.detail,
+                ev.at_ms - o.shown_at_ms,
+            ),
+        );
+    }
+    o
+}
+
+fn prompt_shown<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool: &str,
+    tool_use_id: Option<&str>,
+    labels: Vec<String>,
+    source: &'static str,
+) {
+    let now = unix_now_ms();
+    let (superseded, shown) = {
+        let Ok(mut open) = prompt_open_cell().lock() else {
+            return;
+        };
+        prompt_shown_in(&mut open, tool, tool_use_id, labels, source, now)
+    };
+    if let Some(sup) = superseded {
+        let _ = record_prompt_resolved(app, sup);
+    }
+    if let Some(ev) = shown {
+        record_prompt_shown(app, ev);
     }
 }
 
@@ -1375,49 +1486,12 @@ fn prompt_resolved<R: tauri::Runtime>(
     outcome: &str,
     detail: &str,
 ) -> Option<OpenPrompt> {
-    let open = prompt_open_cell().lock().ok().and_then(|mut o| o.take());
-    let o = open?;
     let now = unix_now_ms();
-    if outcome == "superseded" {
-        LAST_SUPERSEDE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
-    }
-    if let Ok(mut last) = LAST_RESOLVED_PROMPT.lock() {
-        *last = Some(LastResolvedPromptInfo {
-            at_ms: now,
-            prompt_id: o.prompt_id.clone(),
-            tool: o.tool.clone(),
-            outcome: outcome.to_string(),
-            labels: labels_preview(&o.labels),
-        });
-    }
-    let rec = serde_json::json!({
-        "event": "prompt-resolved",
-        "promptId": o.prompt_id,
-        "tool": o.tool,
-        "toolUseId": o.tool_use_id,
-        "source": o.source,
-        "outcome": outcome,
-        "detail": detail,
-        "shownAtMs": o.shown_at_ms,
-        "atMs": now,
-        "openMs": now - o.shown_at_ms,
-    });
-    prompt_history_push(rec);
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "prompt-lifecycle",
-            &format!(
-                "op=resolved id={} tool={} outcome={} detail={} open_ms={}",
-                o.prompt_id,
-                o.tool,
-                outcome,
-                detail,
-                now - o.shown_at_ms,
-            ),
-        );
-    }
-    Some(o)
+    let ev = prompt_open_cell()
+        .lock()
+        .ok()
+        .and_then(|mut o| prompt_resolved_in(&mut o, None, outcome, detail, now))?;
+    Some(record_prompt_resolved(app, ev))
 }
 
 // claim-id-resolution (upstream ask #1 implemented locally):
@@ -3896,19 +3970,7 @@ fn pty_tail_snippet_or_drained(max_chars: usize) -> String {
         Ok(g) => g.clone(),
         Err(e) => e.into_inner().clone(),
     };
-    let stripped = strip_ansi(&raw);
-    let text = String::from_utf8_lossy(&stripped);
-    let collapsed = text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace('"', "'");
-    let n = collapsed.chars().count();
-    if n <= max_chars {
-        collapsed
-    } else {
-        collapsed.chars().skip(n - max_chars).collect()
-    }
+    collapse_tail(&raw, max_chars)
 }
 
 fn pty_tail_snippet(max_chars: usize) -> String {
@@ -3916,7 +3978,11 @@ fn pty_tail_snippet(max_chars: usize) -> String {
         Ok(g) => g.clone(),
         Err(e) => e.into_inner().clone(),
     };
-    let stripped = strip_ansi(&raw);
+    collapse_tail(&raw, max_chars)
+}
+
+fn collapse_tail(raw: &[u8], max_chars: usize) -> String {
+    let stripped = strip_ansi(raw);
     let text = String::from_utf8_lossy(&stripped);
     let collapsed = text
         .split_whitespace()
@@ -6162,6 +6228,25 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     const CLAUDE_LOGIN_WINDOW: usize = 60;
     const CODEX_LOGIN_MARKERS: &[&str] = &["sign in with chatgpt", "provide your own api key"];
     const CODEX_LOGIN_FOOTER: &str = "press enter to continue";
+    // Antigravity CLI 1.4.12, captured in docs/agent-specimens/antigravity.
+    // The login chooser has its own footer. Trust/resume and approval screens
+    // need their captured menu footer to be almost the last thing drawn: in
+    // every capture only the "esc to cancel" hint and agy's model line follow
+    // it (19 to 55 squashed chars, the model line 19 of them). The model line
+    // ("Gemini 3.8 Flash · high") is the user's model and thinking level, so
+    // it is not matched (antigravity-login-and-startup-choice review). A reply
+    // quoting a dialog is followed by agy's composer, two full-width rules
+    // and "? for shortcuts", which puts the quoted footer past the bound.
+    const AGY_LOGIN_MARKER: &str = "you are currently not signed in";
+    const AGY_LOGIN_FOOTER: &str = "↑/↓ navigate · enter select";
+    const AGY_TRUST_MARKER: &str = "do you trust the contents of this project?";
+    const AGY_TRUST_FOOTER: &str = "↑/↓ navigate · enter confirm";
+    const AGY_RESUME_MARKERS: &[&str] = &["conversations", "type to search conversations"];
+    const AGY_RESUME_FOOTER: &str = "f2 rename f4 delete tab switch tab esc go back / clear search";
+    const AGY_PERMISSION_FOOTER: &str = "↑/↓ navigate · tab amend";
+    // Squashed chars allowed after a dialog footer: the captures' 36 of fixed
+    // hints plus room for a model line up to 64 chars.
+    const AGY_AFTER_FOOTER_MAX: usize = 100;
     // v080-codex-session-lock: resuming a session that another Codex process
     // (an old shared server) still owns draws "This conversation is open in
     // another app … r retry f fork esc/ctrl+c/q exit". Its keys are bare
@@ -6278,6 +6363,27 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     if CODEX_LOGIN_MARKERS.iter().any(|m| has(m)) && ends_with_footer(CODEX_LOGIN_FOOTER) {
         return Some("codex-login");
     }
+    if has(AGY_LOGIN_MARKER) && ends_with_footer(AGY_LOGIN_FOOTER) {
+        return Some("antigravity-login");
+    }
+    let agy_footer_last = |marker: &str| {
+        let m = squash(marker);
+        tail.rfind(&m)
+            .is_some_and(|i| tail[i + m.len()..].chars().count() <= AGY_AFTER_FOOTER_MAX)
+    };
+    if has(AGY_TRUST_MARKER) && agy_footer_last(AGY_TRUST_FOOTER) {
+        return Some("antigravity-folder-trust");
+    }
+    if AGY_RESUME_MARKERS.iter().all(|m| has(m)) && agy_footer_last(AGY_RESUME_FOOTER) {
+        return Some("antigravity-resume-picker");
+    }
+    // agy-permission-menu-parser: the footer alone, last on the screen. Its
+    // title and first option can scroll off a dialog taller than the screen
+    // (the 46x12 specimen), so neither can be required, and the footer belongs
+    // to this dialog alone.
+    if agy_footer_last(AGY_PERMISSION_FOOTER) {
+        return Some("antigravity-permission");
+    }
     if CODEX_SESSION_LOCK_MARKERS.iter().any(|m| has(m))
         && ends_with_footer(CODEX_SESSION_LOCK_FOOTER)
     {
@@ -6328,6 +6434,7 @@ struct TerminalAttentionTracker {
     silent_ms: i64,
     active: bool,
     shape: Option<&'static str>,
+    permission_blocked_active: bool,
     // Guards both the Fire and the observe-only Candidate paths to at most
     // one evaluation per continuous silence episode. Byte-silence means the
     // tail can't have changed since the last evaluation, so re-checking
@@ -6343,6 +6450,7 @@ impl TerminalAttentionTracker {
             silent_ms: 0,
             active: false,
             shape: None,
+            permission_blocked_active: false,
             episode_evaluated: false,
         }
     }
@@ -6365,6 +6473,7 @@ impl TerminalAttentionTracker {
         self.step_with_permission_block(authoritative_open, bytes, false, tail_fn)
     }
 
+    #[cfg(test)]
     fn step_with_permission_block<F: FnOnce() -> (String, Option<SessionProvider>)>(
         &mut self,
         authoritative_open: bool,
@@ -6372,26 +6481,58 @@ impl TerminalAttentionTracker {
         permission_blocked: bool,
         tail_fn: F,
     ) -> Vec<TerminalAttentionTransition> {
+        self.step_with_permission_block_shape(
+            authoritative_open,
+            false,
+            bytes,
+            permission_blocked.then_some("codex-permission"),
+            tail_fn,
+        )
+    }
+
+    fn step_with_permission_block_shape<F: FnOnce() -> (String, Option<SessionProvider>)>(
+        &mut self,
+        authoritative_open: bool,
+        menu_displayed: bool,
+        bytes: usize,
+        permission_block: Option<&'static str>,
+        tail_fn: F,
+    ) -> Vec<TerminalAttentionTransition> {
         let mut out = Vec::new();
 
-        if self.active && self.shape == Some("codex-permission") && !permission_blocked {
-            out.push(TerminalAttentionTransition::Clear {
-                reason: "permission-unblocked",
-            });
-            self.active = false;
-            self.shape = None;
-            self.episode_evaluated = false;
+        if self.permission_blocked_active && permission_block.is_none() {
+            self.permission_blocked_active = false;
+            if self.active {
+                out.push(TerminalAttentionTransition::Clear {
+                    reason: "permission-unblocked",
+                });
+                self.active = false;
+                self.shape = None;
+                self.episode_evaluated = false;
+            }
         }
 
         // Unlike a guessed boot prompt, the CLI explicitly reports this
         // block. Reveal it immediately, even during an open turn/redraw.
-        if permission_blocked {
-            if !self.active || self.shape != Some("codex-permission") {
+        if let Some(block_shape) = permission_block {
+            self.permission_blocked_active = true;
+            if !self.active || self.shape != Some(block_shape) {
                 self.active = true;
-                self.shape = Some("codex-permission");
-                out.push(TerminalAttentionTransition::Fire {
-                    shape: "codex-permission",
+                self.shape = Some(block_shape);
+                out.push(TerminalAttentionTransition::Fire { shape: block_shape });
+            }
+            return out;
+        }
+
+        if menu_displayed {
+            self.silent_ms = 0;
+            self.episode_evaluated = false;
+            if self.active {
+                out.push(TerminalAttentionTransition::Clear {
+                    reason: "menu-displayed",
                 });
+                self.active = false;
+                self.shape = None;
             }
             return out;
         }
@@ -6498,6 +6639,58 @@ mod terminal_attention_permission_tests {
                 .is_empty());
         }
     }
+
+    #[test]
+    fn displayed_menu_suppresses_antigravity_silence_fire_and_clears_active_banner() {
+        let approval = include_str!("../../docs/agent-specimens/antigravity/approval.txt");
+        assert_eq!(
+            prompt_shape_for_provider(approval, Some(SessionProvider::Antigravity)),
+            Some("antigravity-permission")
+        );
+
+        let silent_ticks = (TERMINAL_ATTENTION_SILENT_MS / REVEAL_FLOOR_TICK_MS) + 5;
+
+        let mut suppressed = TerminalAttentionTracker::new();
+        for _ in 0..silent_ticks {
+            assert!(suppressed
+                .step_with_permission_block_shape(false, true, 0, None, || (
+                    approval.to_string(),
+                    Some(SessionProvider::Antigravity),
+                ))
+                .is_empty());
+        }
+        assert!(!suppressed.active);
+        assert_eq!(suppressed.silent_ms, 0);
+
+        let mut tracker = TerminalAttentionTracker::new();
+        let mut fired = Vec::new();
+        for _ in 0..silent_ticks {
+            fired.extend(
+                tracker.step_with_permission_block_shape(false, false, 0, None, || {
+                    (approval.to_string(), Some(SessionProvider::Antigravity))
+                }),
+            );
+        }
+        assert_eq!(
+            fired,
+            vec![TerminalAttentionTransition::Fire {
+                shape: "antigravity-permission",
+            }]
+        );
+        assert!(tracker.active);
+
+        assert_eq!(
+            tracker.step_with_permission_block_shape(false, true, 0, None, || {
+                panic!("menu-displayed clear must not inspect tail")
+            }),
+            vec![TerminalAttentionTransition::Clear {
+                reason: "menu-displayed",
+            }]
+        );
+        assert!(!tracker.active);
+        assert_eq!(tracker.shape, None);
+        assert_eq!(tracker.silent_ms, 0);
+    }
 }
 
 fn trace_terminal_attention_transition<R: tauri::Runtime>(
@@ -6574,36 +6767,38 @@ fn emit_terminal_attention<R: tauri::Runtime>(
     );
 }
 
-// Three agents, one slot order: Claude, Codex, OpenCode. Index into every
+// Four agents, one slot order: Claude, Codex, OpenCode, Antigravity. Index into every
 // per-agent flag array here, so the picker, the login offer and their tests
 // can't drift apart. issue-448's picker and terminal-attention-login-screen's
 // offer were written for two agents; catch-up-with-main-after-v0.7.8 widened
 // both.
-const STARTUP_AGENTS: [SessionProvider; 3] = [
+const STARTUP_AGENTS: [SessionProvider; 4] = [
     SessionProvider::Claude,
     SessionProvider::Codex,
     SessionProvider::Opencode,
+    SessionProvider::Antigravity,
 ];
 
 // The login offer's preference order when no installed agent has sessions in
 // this project: Codex, Claude, OpenCode. Codex first keeps the two-agent
 // behaviour — a logged-out Claude was always traded for Codex.
-const LOGIN_SWITCH_ORDER: [SessionProvider; 3] = [
+const LOGIN_SWITCH_ORDER: [SessionProvider; 4] = [
     SessionProvider::Codex,
     SessionProvider::Claude,
     SessionProvider::Opencode,
+    SessionProvider::Antigravity,
 ];
 
-fn provider_slot(provider: SessionProvider) -> usize {
-    match provider {
-        SessionProvider::Claude => 0,
-        SessionProvider::Codex => 1,
-        SessionProvider::Opencode => 2,
-    }
+// The provider's slot in the fixed-size STARTUP_AGENTS arrays (`installed`,
+// `has_sessions`). Derived from the list rather than hand-numbered, so a
+// provider that isn't in it has no slot; Antigravity is explicitly the final
+// slot so the established three-agent order remains intact.
+fn provider_slot(provider: SessionProvider) -> Option<usize> {
+    STARTUP_AGENTS.iter().position(|p| *p == provider)
 }
 
-fn installed_agent_flags() -> [bool; 3] {
-    STARTUP_AGENTS.map(|provider| agent_cli_on_path(session_provider_label(provider)))
+fn installed_agent_flags() -> [bool; 4] {
+    STARTUP_AGENTS.map(|provider| agent_cli_on_path(provider_cli_name(provider)))
 }
 
 fn installed_agent_labels() -> Vec<&'static str> {
@@ -6611,7 +6806,7 @@ fn installed_agent_labels() -> Vec<&'static str> {
     STARTUP_AGENTS
         .iter()
         .copied()
-        .filter(|provider| installed[provider_slot(*provider)])
+        .filter(|provider| provider_slot(*provider).is_some_and(|slot| installed[slot]))
         .map(session_provider_label)
         .collect()
 }
@@ -6623,12 +6818,12 @@ fn provider_has_sessions<R: tauri::Runtime>(app: &AppHandle<R>, provider: Sessio
         .is_some()
 }
 
-fn session_flags<R: tauri::Runtime>(app: &AppHandle<R>) -> [bool; 3] {
+fn session_flags<R: tauri::Runtime>(app: &AppHandle<R>) -> [bool; 4] {
     STARTUP_AGENTS.map(|provider| provider_has_sessions(app, provider))
 }
 
 // terminal-attention-login-screen (#448): the pane offers one other agent, but
-// only when its CLI is on PATH. With three agents "the other one" isn't
+// only when its CLI is on PATH. With multiple agents "the other one" isn't
 // defined, so the offer is the installed agent with sessions in this project,
 // else the first installed one in LOGIN_SWITCH_ORDER — never the agent that
 // isn't logged in.
@@ -6639,25 +6834,27 @@ fn login_switch_target<R: tauri::Runtime>(
     let blocked = match shape {
         Some("claude-login") => SessionProvider::Claude,
         Some("codex-login") => SessionProvider::Codex,
+        Some("antigravity-login") => SessionProvider::Antigravity,
         _ => return None,
     };
     login_switch_choice(blocked, installed_agent_flags(), session_flags(app))
         .map(session_provider_label)
 }
 
-// The pure half, so the three-agent rule is testable without an AppHandle.
+// The pure half, so the four-agent rule is testable without an AppHandle.
 fn login_switch_choice(
     blocked: SessionProvider,
-    installed: [bool; 3],
-    has_sessions: [bool; 3],
+    installed: [bool; 4],
+    has_sessions: [bool; 4],
 ) -> Option<SessionProvider> {
-    let eligible =
-        |provider: SessionProvider| provider != blocked && installed[provider_slot(provider)];
+    let eligible = |provider: SessionProvider| {
+        provider != blocked && provider_slot(provider).is_some_and(|slot| installed[slot])
+    };
     LOGIN_SWITCH_ORDER
         .iter()
         .copied()
         .filter(|provider| eligible(*provider))
-        .find(|provider| has_sessions[provider_slot(*provider)])
+        .find(|provider| provider_slot(*provider).is_some_and(|slot| has_sessions[slot]))
         .or_else(|| {
             LOGIN_SWITCH_ORDER
                 .iter()
@@ -6670,9 +6867,9 @@ fn login_switch_choice(
 mod login_switch_offer_tests {
     use super::{login_switch_choice, SessionProvider};
 
-    // Slots: Claude, Codex, OpenCode.
-    const ALL_INSTALLED: [bool; 3] = [true, true, true];
-    const NO_SESSIONS: [bool; 3] = [false, false, false];
+    // Slots: Claude, Codex, OpenCode, Antigravity.
+    const ALL_INSTALLED: [bool; 4] = [true, true, true, true];
+    const NO_SESSIONS: [bool; 4] = [false, false, false, false];
 
     #[test]
     fn a_logged_out_claude_is_traded_for_codex_as_before() {
@@ -6687,14 +6884,38 @@ mod login_switch_offer_tests {
     }
 
     #[test]
+    fn antigravity_is_eligible_last_in_the_fallback_order() {
+        assert_eq!(
+            login_switch_choice(
+                SessionProvider::Claude,
+                [false, false, false, true],
+                NO_SESSIONS
+            ),
+            Some(SessionProvider::Antigravity)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Antigravity, ALL_INSTALLED, NO_SESSIONS),
+            Some(SessionProvider::Codex)
+        );
+    }
+
+    #[test]
     fn opencode_is_offered_when_it_is_the_installed_alternative() {
         // The only other CLI on this machine.
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, [true, false, true], NO_SESSIONS),
+            login_switch_choice(
+                SessionProvider::Claude,
+                [true, false, true, false],
+                NO_SESSIONS
+            ),
             Some(SessionProvider::Opencode)
         );
         assert_eq!(
-            login_switch_choice(SessionProvider::Codex, [false, true, true], NO_SESSIONS),
+            login_switch_choice(
+                SessionProvider::Codex,
+                [false, true, true, false],
+                NO_SESSIONS
+            ),
             Some(SessionProvider::Opencode)
         );
     }
@@ -6704,7 +6925,11 @@ mod login_switch_offer_tests {
         // Codex is installed, but this project has only ever run OpenCode:
         // offer the agent that already has context here.
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [false, false, true]),
+            login_switch_choice(
+                SessionProvider::Claude,
+                ALL_INSTALLED,
+                [false, false, true, false]
+            ),
             Some(SessionProvider::Opencode)
         );
     }
@@ -6713,11 +6938,19 @@ mod login_switch_offer_tests {
     fn the_logged_out_agent_is_never_offered() {
         // Codex has sessions here, but Codex is the one that isn't logged in.
         assert_eq!(
-            login_switch_choice(SessionProvider::Codex, ALL_INSTALLED, [false, true, false]),
+            login_switch_choice(
+                SessionProvider::Codex,
+                ALL_INSTALLED,
+                [false, true, false, false]
+            ),
             Some(SessionProvider::Claude)
         );
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [true, false, false]),
+            login_switch_choice(
+                SessionProvider::Claude,
+                ALL_INSTALLED,
+                [true, false, false, false]
+            ),
             Some(SessionProvider::Codex)
         );
     }
@@ -6725,15 +6958,19 @@ mod login_switch_offer_tests {
     #[test]
     fn no_installed_alternative_offers_nothing() {
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, [true, false, false], NO_SESSIONS),
+            login_switch_choice(
+                SessionProvider::Claude,
+                [true, false, false, false],
+                NO_SESSIONS
+            ),
             None
         );
         // Sessions of an uninstalled agent don't make it offerable.
         assert_eq!(
             login_switch_choice(
                 SessionProvider::Claude,
-                [true, false, false],
-                [false, false, true]
+                [true, false, false, false],
+                [false, false, true, false]
             ),
             None
         );
@@ -6759,6 +6996,8 @@ mod terminal_attention_login_tests {
         Business, and Enterprise plans 2. Sign in with Device Code Sign in from another \
         device with a one-time code 3. Provide your own API key Pay for what you use \
         Press enter to continue";
+    const AGY_LOGGED_OUT: &str =
+        include_str!("../../docs/agent-specimens/antigravity/logged-out.txt");
 
     #[test]
     fn specimens_classify() {
@@ -6769,6 +7008,10 @@ mod terminal_attention_login_tests {
         assert_eq!(
             terminal_attention_prompt_shape(CODEX_SIGN_IN),
             Some("codex-login")
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape(AGY_LOGGED_OUT),
+            Some("antigravity-login")
         );
     }
 
@@ -6784,6 +7027,10 @@ mod terminal_attention_login_tests {
         let codex_quoting = "Codex says Sign in with ChatGPT then Press enter to continue. \
             › Ask Codex to do anything ? for shortcuts";
         assert_eq!(terminal_attention_prompt_shape(codex_quoting), None);
+        let agy_quoting = format!(
+            "Antigravity may show this login screen: {AGY_LOGGED_OUT}\n────────────────────────\n> composer text"
+        );
+        assert_eq!(terminal_attention_prompt_shape(&agy_quoting), None);
     }
 
     #[test]
@@ -6799,6 +7046,14 @@ mod terminal_attention_login_tests {
         // Codex's screen counts only while Codex is the live agent.
         assert_eq!(
             pane_input_blocking_prompt(CODEX_SIGN_IN, Some(SessionProvider::Claude)),
+            None
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(AGY_LOGGED_OUT, Some(SessionProvider::Antigravity)),
+            Some("antigravity-login")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(AGY_LOGGED_OUT, Some(SessionProvider::Claude)),
             None
         );
     }
@@ -7061,6 +7316,190 @@ mod terminal_attention_tests {
     #[test]
     fn empty_tail_is_none() {
         assert_eq!(terminal_attention_prompt_shape(""), None);
+    }
+}
+
+#[cfg(test)]
+mod antigravity_prompt_specimen_tests {
+    use super::{pane_input_blocking_prompt, terminal_attention_prompt_shape, SessionProvider};
+
+    // Whole Antigravity CLI 1.4.12 captures; pinned with the original text in
+    // docs/agent-specimens/antigravity so markers stay specimen-derived.
+    const TRUST: &str = include_str!("../../docs/agent-specimens/antigravity/first-run-trust.txt");
+    const RESUME: &str = include_str!("../../docs/agent-specimens/antigravity/resume-picker.txt");
+    const APPROVAL: &str = include_str!("../../docs/agent-specimens/antigravity/approval.txt");
+    const TOOL_WRITE_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/tool-write-approval.txt");
+    const TOOL_EDIT_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/tool-edit-approval.txt");
+    const TOOL_SHELL_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/tool-shell-approval.txt");
+    const COMMAND_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/command-approval.txt");
+    const MCP_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/mcp-approval.txt");
+    const MCP_APPROVAL_REASON: &str =
+        include_str!("../../docs/agent-specimens/antigravity/mcp-approval-reason.txt");
+    const WORKING_PROMPT: &str =
+        include_str!("../../docs/agent-specimens/antigravity/permission-prompt.txt");
+    const WORKING_LIFECYCLE: &str =
+        include_str!("../../docs/agent-specimens/antigravity/lifecycle-working.txt");
+
+    #[test]
+    fn captured_dialogs_classify_and_hold_only_antigravity() {
+        for (screen, shape) in [
+            (TRUST, "antigravity-folder-trust"),
+            (RESUME, "antigravity-resume-picker"),
+            (APPROVAL, "antigravity-permission"),
+            (TOOL_WRITE_APPROVAL, "antigravity-permission"),
+            (TOOL_EDIT_APPROVAL, "antigravity-permission"),
+            (TOOL_SHELL_APPROVAL, "antigravity-permission"),
+            (COMMAND_APPROVAL, "antigravity-permission"),
+            (MCP_APPROVAL, "antigravity-permission"),
+            (MCP_APPROVAL_REASON, "antigravity-permission"),
+        ] {
+            assert_eq!(terminal_attention_prompt_shape(screen), Some(shape));
+            assert_eq!(
+                pane_input_blocking_prompt(screen, Some(SessionProvider::Antigravity)),
+                Some(shape)
+            );
+            assert_eq!(
+                pane_input_blocking_prompt(screen, Some(SessionProvider::Claude)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_dialog_text_followed_by_composer_is_a_near_miss() {
+        for screen in [TRUST, RESUME] {
+            let quoted = format!(
+                "I saw this Antigravity screen: {screen}\n────────────────────────────────────────\n> {}\n────────────────────────────────────────\nGemini 3.8 Flash · high",
+                "ordinary composer text ".repeat(30)
+            );
+            assert_eq!(terminal_attention_prompt_shape(&quoted), None);
+            assert_eq!(
+                pane_input_blocking_prompt(&quoted, Some(SessionProvider::Antigravity)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_working_screens_do_not_classify_as_permission_prompts() {
+        for screen in [WORKING_PROMPT, WORKING_LIFECYCLE] {
+            assert_ne!(
+                terminal_attention_prompt_shape(screen),
+                Some("antigravity-permission")
+            );
+            assert_eq!(
+                pane_input_blocking_prompt(screen, Some(SessionProvider::Antigravity)),
+                None
+            );
+        }
+    }
+
+    // The tail Bram really classifies: the raw PTY stream, ANSI-stripped and
+    // whitespace-collapsed by the same collapse_tail pty_tail_snippet uses.
+    fn collapsed_tail(raw: &[u8]) -> String {
+        super::collapse_tail(raw, super::TERMINAL_ATTENTION_TAIL_CHARS)
+    }
+
+    #[test]
+    fn collapsed_raw_streams_classify() {
+        for (raw, shape) in [
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/first-run-trust.raw")[..],
+                "antigravity-folder-trust",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/resume-picker.raw")[..],
+                "antigravity-resume-picker",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/approval.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval-reason.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!(
+                    "../../docs/agent-specimens/antigravity/permission-full-screen-44x67.raw"
+                )[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!(
+                    "../../docs/agent-specimens/antigravity/permission-short-46x26.raw"
+                )[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!(
+                    "../../docs/agent-specimens/antigravity/permission-scrolled-title-46x12.raw"
+                )[..],
+                "antigravity-permission",
+            ),
+        ] {
+            let tail = collapsed_tail(raw);
+            assert_eq!(
+                terminal_attention_prompt_shape(&tail),
+                Some(shape),
+                "{tail}"
+            );
+        }
+        for raw in [
+            &include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw")[..],
+            &include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-working.raw")[..],
+        ] {
+            assert_eq!(terminal_attention_prompt_shape(&collapsed_tail(raw)), None);
+        }
+    }
+
+    // The model line is the user's model and thinking level: a dialog drawn
+    // under another model, with a longer line, still holds.
+    #[test]
+    fn dialogs_classify_whatever_the_model_line_says() {
+        for (screen, shape) in [
+            (TRUST, "antigravity-folder-trust"),
+            (RESUME, "antigravity-resume-picker"),
+            (APPROVAL, "antigravity-permission"),
+            (COMMAND_APPROVAL, "antigravity-permission"),
+        ] {
+            assert!(screen.contains("Gemini 3.8 Flash · high"));
+            let other = screen.replace(
+                "Gemini 3.8 Flash · high",
+                "Claude Sonnet 4.6 (Thinking) · low",
+            );
+            assert_eq!(terminal_attention_prompt_shape(&other), Some(shape));
+            assert_eq!(
+                pane_input_blocking_prompt(&other, Some(SessionProvider::Antigravity)),
+                Some(shape)
+            );
+        }
+    }
+
+    // What the model-line check used to catch: agy's own reply quoting a
+    // dialog, followed by its idle composer. The composer's rules push the
+    // quoted footer past the bound.
+    #[test]
+    fn quoted_dialog_followed_by_agys_idle_composer_is_a_near_miss() {
+        let rule = "─".repeat(120);
+        for screen in [TRUST, RESUME, APPROVAL, COMMAND_APPROVAL] {
+            let quoted =
+                format!("{screen}\n{rule}\n>\n{rule}\n? for shortcuts    Gemini 3.8 Pro · low");
+            assert_eq!(terminal_attention_prompt_shape(&quoted), None);
+        }
     }
 }
 
@@ -8756,7 +9195,7 @@ fn update_turn_state<R: tauri::Runtime, F>(
         // attributed (each turn gets its own window and capture boundary)
         // and the gate is locked exactly while something is running — never
         // between turns, which is where the wedge used to live.
-        if prev.phase != "working" && next.phase == "working" {
+        if turn_state_transition_rearms_claim(&prev, &next) {
             rearm_claim_for_live_authorization(app);
         }
         trace_turn_state_transition(app, &prev, &next, emitted);
@@ -8764,6 +9203,10 @@ fn update_turn_state<R: tauri::Runtime, F>(
     if let Some(payload) = emit_payload {
         emit_replayable_payload(app, "turn-state-changed", &payload);
     }
+}
+
+fn turn_state_transition_rearms_claim(prev: &TurnState, next: &TurnState) -> bool {
+    prev.phase != "working" && next.phase == "working"
 }
 
 // separate-authorization-from-claim: re-establish the execution claim at the
@@ -8812,6 +9255,18 @@ fn session_provider_label(provider: SessionProvider) -> &'static str {
         SessionProvider::Claude => "claude",
         SessionProvider::Codex => "codex",
         SessionProvider::Opencode => "opencode",
+        SessionProvider::Antigravity => "antigravity",
+    }
+}
+
+// The CLI Bram looks for on PATH, and the command a launch starts. For three
+// providers the wire label IS the binary; Antigravity's is `agy`, so probing
+// PATH with the label would report it missing and the launch ladder would fall
+// back to another agent (antigravity-provider-switch).
+fn provider_cli_name(provider: SessionProvider) -> &'static str {
+    match provider {
+        SessionProvider::Antigravity => "agy",
+        other => session_provider_label(other),
     }
 }
 
@@ -8858,16 +9313,46 @@ fn turn_state_set_menu<R: tauri::Runtime>(
         );
         m.at_host_ms = Some(unix_now_ms());
     }
-    let phase = if menu.is_some() {
-        "waiting-for-permission"
-    } else {
-        "working"
-    };
+    let antigravity_turn_open = source == "antigravity-permission"
+        && antigravity_turn_cell()
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some();
     update_turn_state(app, source, reason, |s| {
-        s.provider = current_provider(app).map(|p| session_provider_label(p).to_string());
-        s.phase = phase.to_string();
-        s.pending_menu = menu;
+        apply_menu_turn_state(
+            s,
+            current_provider(app).map(|p| session_provider_label(p).to_string()),
+            menu,
+            source,
+            antigravity_turn_open,
+        );
     });
+}
+
+fn apply_menu_turn_state(
+    s: &mut TurnState,
+    provider: Option<String>,
+    menu: Option<PtyMenu>,
+    source: &str,
+    antigravity_turn_open: bool,
+) {
+    s.provider = provider;
+    if let Some(phase) = if menu.is_some() {
+        Some("waiting-for-permission")
+    } else if source == "antigravity-permission" && !antigravity_turn_open {
+        // agy-menu-clear-keeps-turn-closed: note_antigravity_state_markers runs
+        // before antigravity_permission_menu_update on the same chunk. When Esc
+        // (permission-escape.raw) or shutdown ends the turn on `idle`, the turn
+        // is already closed (`finished`); clearing the menu must not put phase
+        // back to `working` or re-arm a live authorization's claim.
+        None
+    } else {
+        Some("working")
+    } {
+        s.phase = phase.to_string();
+    }
+    s.pending_menu = menu;
 }
 
 fn stamp_pty_menu_payload(
@@ -10938,7 +11423,9 @@ fn esc_waits_for_agent_interrupt_now<R: tauri::Runtime>(app: &AppHandle<R>) -> b
 
 // How many Esc presses the pane's Esc button sends: two to stop a running
 // OpenCode turn, one otherwise (Claude stops on one; an idle Esc or an open
-// menu wants a single key).
+// menu wants a single key). Antigravity stops on one: the specimen pack's
+// permission capture has a single Escape interrupting an agy turn, and a
+// second press is not needed, so it takes the default.
 fn pane_esc_presses(provider: Option<SessionProvider>, phase: &str, menu_pending: bool) -> u8 {
     if provider == Some(SessionProvider::Opencode) && phase == "working" && !menu_pending {
         2
@@ -11056,6 +11543,7 @@ fn pty_turn_provider_label(provider: Option<SessionProvider>) -> &'static str {
     match provider {
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         Some(SessionProvider::Claude) | None => "claude",
     }
 }
@@ -11079,6 +11567,10 @@ mod pty_turn_provider_label_tests {
         assert_eq!(
             pty_turn_provider_label(Some(SessionProvider::Opencode)),
             "opencode"
+        );
+        assert_eq!(
+            pty_turn_provider_label(Some(SessionProvider::Antigravity)),
+            "antigravity"
         );
         assert_eq!(pty_turn_provider_label(None), "claude");
     }
@@ -12752,6 +13244,21 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
         .get("present")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // antigravity-live-check-fixes: while Antigravity is current, its approval
+    // menu is read from the screen with its OSC state
+    // (antigravity_permission_menu) and answered with a digit alone. Live
+    // (2026-10-31) the grid also read that dialog's "1. Yes … 2. No", and its
+    // rescue superseded the Antigravity menu with one whose answers default to
+    // "<n>\r"; the Enter lands in agy's composer. So the grid stands aside.
+    if current_provider(&app) == Some(SessionProvider::Antigravity) {
+        if let Ok(mut cell) = latest_grid_menu_cell().lock() {
+            *cell = None;
+        }
+        if present && bram_trace_enabled() {
+            append_bram_trace_line(&app, "grid-menu", "op=skip reason=antigravity-screen-menu");
+        }
+        return;
+    }
     // Update the stored grid menu. Scoped so the lock is released before the
     // forced pty_menu_update() below re-locks it via the detect-path override.
     {
@@ -13220,6 +13727,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         }
     }
     note_agent_state_marker(chunk);
+    note_antigravity_state_markers(app, chunk);
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
@@ -13256,6 +13764,28 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         if let Some(nl_pos) = tail.iter().position(|&b| b == b'\n') {
             tail.drain(..=nl_pos);
         }
+    }
+    // antigravity-permission-menu: two in-memory checks first, because this
+    // runs for every chunk of every provider. The latest-state cell is only
+    // written while Antigravity is current (note_antigravity_state_markers),
+    // and the update reads the provider itself (a file read) and clears a
+    // shown menu once Antigravity isn't current.
+    let state_is_permission = antigravity_latest_state_cell()
+        .lock()
+        .ok()
+        .and_then(|state| {
+            state.as_deref().map(|state| {
+                state.starts_with("blocked:kind=permission") && state.contains("app=antigravity")
+            })
+        })
+        .unwrap_or(false);
+    let menu_is_shown = antigravity_permission_menu_shown_cell()
+        .lock()
+        .map(|shown| shown.is_some())
+        .unwrap_or(false);
+    if state_is_permission || menu_is_shown {
+        let collapsed = collapse_tail(&tail, TERMINAL_ATTENTION_TAIL_CHARS);
+        antigravity_permission_menu_update(app, &collapsed);
     }
     // menus.parseAndDisplay off (the default): the rolling pty_tail is kept up
     // to date above -- pty_agent_status_update reads it to scrape the status
@@ -19705,6 +20235,16 @@ fn pty_spawn(
         command.env(k, v);
     }
     command.env("TERM", "xterm-256color");
+    // antigravity-turn-lifecycle: agy reports its turn state over OSC 7501
+    // (note_antigravity_state_markers) only in a terminal that answers its
+    // `ESC ] 7501 ; ?` check, and xterm.js doesn't. agy 1.4.0's release note:
+    // "Set AGY_CLI_OSC7501=on for a terminal that supports it but doesn't
+    // answer the check." Set at spawn rather than typed into the launch
+    // command, so it holds under any shell, PowerShell included. A value the
+    // user set (`off`, say) is kept.
+    if std::env::var_os("AGY_CLI_OSC7501").is_none() {
+        command.env("AGY_CLI_OSC7501", "on");
+    }
     // Reset the host-owned current-provider record at spawn; autostart (below)
     // or the first deliberate transition writes the new value. The shell no
     // longer reads or writes this file, so no BRAM_AGENT_HINT env is injected.
@@ -20038,16 +20578,35 @@ fn pty_spawn(
                         _ => {}
                     }
                 }
-                let permission_blocked =
-                    codex_permission_blocked_since_launch(current_provider(&app_for_throughput))
-                        && turn_state_cell()
-                            .lock()
-                            .map(|s| s.pending_menu.is_none())
-                            .unwrap_or(false);
-                for transition in terminal_attention.step_with_permission_block(
+                let live_provider = current_provider(&app_for_throughput);
+                let no_pending_menu = turn_state_cell()
+                    .lock()
+                    .map(|s| s.pending_menu.is_none())
+                    .unwrap_or(false);
+                let menu_displayed = turn_state_cell()
+                    .lock()
+                    .map(|s| s.pending_menu.is_some())
+                    .unwrap_or(false)
+                    || PANE_MENU_DISPLAYED.load(Ordering::Relaxed);
+                let permission_block_shape =
+                    if no_pending_menu && codex_permission_blocked_since_launch(live_provider) {
+                        Some("codex-permission")
+                    } else if no_pending_menu
+                        && antigravity_permission_blocked_since_launch(live_provider)
+                    {
+                        let tail = pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS);
+                        match prompt_shape_for_provider(&tail, live_provider) {
+                            Some("antigravity-folder-trust") => Some("antigravity-folder-trust"),
+                            _ => Some("antigravity-permission"),
+                        }
+                    } else {
+                        None
+                    };
+                for transition in terminal_attention.step_with_permission_block_shape(
                     authoritative_open,
+                    menu_displayed,
                     bytes,
-                    permission_blocked,
+                    permission_block_shape,
                     || {
                         (
                             pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS),
@@ -20518,13 +21077,12 @@ fn run_startup_autostart(
     // other is present; when neither is found, leave the pick alone.
     {
         let picked = session_provider_label(launch.provider);
-        if !agent_cli_on_path(picked) {
+        if !agent_cli_on_path(provider_cli_name(launch.provider)) {
             // The other two, in STARTUP_AGENTS order: the first installed one
             // wins. With Claude and Codex installed this is exactly the old
             // pair; OpenCode is the last resort rather than unreachable.
             let fallback = STARTUP_AGENTS.iter().copied().find(|candidate| {
-                *candidate != launch.provider
-                    && agent_cli_on_path(session_provider_label(*candidate))
+                *candidate != launch.provider && agent_cli_on_path(provider_cli_name(*candidate))
             });
             if let Some(other) = fallback {
                 append_bram_trace_line(
@@ -20669,8 +21227,8 @@ enum StartupAgentPick {
 
 fn startup_agent_pick(
     agent_configured: bool,
-    installed: [bool; 3],
-    has_sessions: [bool; 3],
+    installed: [bool; 4],
+    has_sessions: [bool; 4],
 ) -> StartupAgentPick {
     // The launch ladder already decides when the project named an agent, and
     // its sole-CLI rung covers a machine with one agent installed. With two or
@@ -20680,8 +21238,7 @@ fn startup_agent_pick(
         return StartupAgentPick::Configured;
     }
     let mut evidenced = STARTUP_AGENTS.iter().copied().filter(|provider| {
-        let slot = provider_slot(*provider);
-        installed[slot] && has_sessions[slot]
+        provider_slot(*provider).is_some_and(|slot| installed[slot] && has_sessions[slot])
     });
     match (evidenced.next(), evidenced.next()) {
         (Some(provider), None) => StartupAgentPick::Evidence(provider),
@@ -20824,11 +21381,19 @@ fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> 
 
 #[cfg(test)]
 mod startup_agent_pick_tests {
-    use super::{startup_agent_pick, SessionProvider, StartupAgentPick};
+    use super::{provider_slot, startup_agent_pick, SessionProvider, StartupAgentPick};
 
-    // Slots: Claude, Codex, OpenCode.
-    const ALL_INSTALLED: [bool; 3] = [true, true, true];
-    const NO_SESSIONS: [bool; 3] = [false, false, false];
+    // Slots: Claude, Codex, OpenCode, Antigravity.
+    const ALL_INSTALLED: [bool; 4] = [true, true, true, true];
+    const NO_SESSIONS: [bool; 4] = [false, false, false, false];
+
+    // Antigravity is now the fourth startup slot, after the established trio.
+    #[test]
+    fn antigravity_is_last_in_startup_slots() {
+        assert_eq!(provider_slot(SessionProvider::Antigravity), Some(3));
+        assert_eq!(provider_slot(SessionProvider::Claude), Some(0));
+        assert_eq!(provider_slot(SessionProvider::Opencode), Some(2));
+    }
 
     #[test]
     fn configured_agent_always_decides() {
@@ -20837,7 +21402,7 @@ mod startup_agent_pick_tests {
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(true, ALL_INSTALLED, [true, true, true]),
+            startup_agent_pick(true, ALL_INSTALLED, [true, true, true, true]),
             StartupAgentPick::Configured
         );
     }
@@ -20845,15 +21410,19 @@ mod startup_agent_pick_tests {
     #[test]
     fn one_cli_leaves_it_to_the_sole_cli_rung() {
         assert_eq!(
-            startup_agent_pick(false, [true, false, false], NO_SESSIONS),
+            startup_agent_pick(false, [true, false, false, false], NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(false, [false, true, false], NO_SESSIONS),
+            startup_agent_pick(false, [false, true, false, false], NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(false, [false, false, true], NO_SESSIONS),
+            startup_agent_pick(false, [false, false, true, false], NO_SESSIONS),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(false, [false, false, false, true], NO_SESSIONS),
             StartupAgentPick::Configured
         );
     }
@@ -20861,16 +21430,20 @@ mod startup_agent_pick_tests {
     #[test]
     fn sessions_for_one_agent_pick_it() {
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [false, true, false]),
+            startup_agent_pick(false, ALL_INSTALLED, [false, true, false, false]),
             StartupAgentPick::Evidence(SessionProvider::Codex)
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [true, false, false]),
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, false, false]),
             StartupAgentPick::Evidence(SessionProvider::Claude)
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [false, false, true]),
+            startup_agent_pick(false, ALL_INSTALLED, [false, false, true, false]),
             StartupAgentPick::Evidence(SessionProvider::Opencode)
+        );
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, [false, false, false, true]),
+            StartupAgentPick::Evidence(SessionProvider::Antigravity)
         );
     }
 
@@ -20878,12 +21451,16 @@ mod startup_agent_pick_tests {
     fn two_installed_agents_can_still_use_evidence() {
         // Claude and OpenCode installed, OpenCode the only one with sessions.
         assert_eq!(
-            startup_agent_pick(false, [true, false, true], [false, false, true]),
+            startup_agent_pick(
+                false,
+                [true, false, true, false],
+                [false, false, true, false]
+            ),
             StartupAgentPick::Evidence(SessionProvider::Opencode)
         );
         // ... and with no sessions anywhere, the card asks.
         assert_eq!(
-            startup_agent_pick(false, [true, false, true], NO_SESSIONS),
+            startup_agent_pick(false, [true, false, true, false], NO_SESSIONS),
             StartupAgentPick::Ask
         );
     }
@@ -20892,7 +21469,11 @@ mod startup_agent_pick_tests {
     fn sessions_for_an_uninstalled_agent_do_not_pick_it() {
         // OpenCode ran here once but its CLI is gone: starting it would fail.
         assert_eq!(
-            startup_agent_pick(false, [true, true, false], [false, false, true]),
+            startup_agent_pick(
+                false,
+                [true, true, false, false],
+                [false, false, true, false]
+            ),
             StartupAgentPick::Ask
         );
     }
@@ -20904,11 +21485,11 @@ mod startup_agent_pick_tests {
             StartupAgentPick::Ask
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [true, true, true]),
+            startup_agent_pick(false, ALL_INSTALLED, [true, true, true, true]),
             StartupAgentPick::Ask
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [true, false, true]),
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, true, false]),
             StartupAgentPick::Ask
         );
     }
@@ -21396,9 +21977,11 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // user answers the prompt. codex-update joins them: its Enter runs
     // "Update now" and exits Codex. slash-panel is left out: Esc closes it,
     // and an Enter there grants nothing.
-    let prompt_shape = pane_input_blocking_prompt(
+    let live_provider = current_provider(app);
+    let prompt_shape = pane_input_blocking_prompt_or_osc(
         &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
-        current_provider(app),
+        live_provider,
+        antigravity_permission_blocked_since_launch(live_provider),
     );
     let mut prompt_restores: Vec<(String, String)> = Vec::new();
     let mut esc_held: usize = 0;
@@ -21643,15 +22226,23 @@ fn drain_pty_intents<R: tauri::Runtime>(
                         .map(|t| menu_answer_opens_free_text(t.pending_menu.as_ref(), data))
                         .unwrap_or(false);
                     let r = pty_write_internal(app, state, data, "pty-intent-menuAnswer");
-                    if r.is_ok() && opens_free_text {
-                        AUQ_FREE_TEXT_SINCE_MS
-                            .store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "send-gate",
-                                &format!("op=free-text-open key={}", data.trim()),
-                            );
+                    if r.is_ok() {
+                        let resolved = prompt_open_cell().lock().ok().and_then(|mut open| {
+                            finish_antigravity_menu_answer_prompt(&mut open, unix_now_ms())
+                        });
+                        if let Some(ev) = resolved {
+                            let _ = record_prompt_resolved(app, ev);
+                        }
+                        if opens_free_text {
+                            AUQ_FREE_TEXT_SINCE_MS
+                                .store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+                            if bram_trace_enabled() {
+                                append_bram_trace_line(
+                                    app,
+                                    "send-gate",
+                                    &format!("op=free-text-open key={}", data.trim()),
+                                );
+                            }
                         }
                     }
                     r
@@ -21962,6 +22553,12 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
                 .cloned()
                 .or_else(|| codex_session_title(&path).ok().flatten()),
             SessionProvider::Opencode => claude_session_title(&path).ok().flatten(),
+            // No session discovery for Antigravity yet
+            // (antigravity-sessions-browser).
+            SessionProvider::Antigravity => antigravity_summary_rows_for_id(app, &sid)
+                .map(|(_, title, _)| title)
+                .filter(|title| !title.trim().is_empty())
+                .or_else(|| claude_session_title(&path).ok().flatten()),
         };
         let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
         if let Some(obj) = item.as_object_mut() {
@@ -22810,6 +23407,8 @@ static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic
 static AGENT_LAUNCH_BEGAN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 static CODEX_PERMISSION_BLOCKED_AT_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+static ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
 
 fn codex_permission_marker(body: &str) -> bool {
     // Captured Codex 0.165.0 Windows OSC 7501, 2026-10-28 (#455).
@@ -22822,6 +23421,20 @@ fn codex_permission_marker(body: &str) -> bool {
 fn codex_permission_blocked_since_launch(provider: Option<SessionProvider>) -> bool {
     let at = CODEX_PERMISSION_BLOCKED_AT_MS.load(std::sync::atomic::Ordering::SeqCst);
     provider == Some(SessionProvider::Codex)
+        && at > 0
+        && at >= AGENT_LAUNCH_BEGAN_MS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn antigravity_permission_state(body: &str) -> bool {
+    let parts: Vec<&str> = body.split(':').collect();
+    parts.first() == Some(&"blocked")
+        && parts.contains(&"app=antigravity")
+        && parts.contains(&"kind=permission")
+}
+
+fn antigravity_permission_blocked_since_launch(provider: Option<SessionProvider>) -> bool {
+    let at = ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.load(std::sync::atomic::Ordering::SeqCst);
+    provider == Some(SessionProvider::Antigravity)
         && at > 0
         && at >= AGENT_LAUNCH_BEGAN_MS.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -22873,6 +23486,7 @@ fn agent_state_marker_since_launch(provider: SessionProvider) -> bool {
 
 fn begin_agent_launch() -> u64 {
     CODEX_PERMISSION_BLOCKED_AT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+    ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
     AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms(), std::sync::atomic::Ordering::SeqCst);
     // codex-resume-false-working: a fresh launch hasn't shown its composer.
     CODEX_COMPOSER_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -23411,6 +24025,7 @@ fn switch_agent(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "switch")?;
@@ -23919,7 +24534,9 @@ fn switch_agent(
                     // show its prompt, so it is waited on like Codex.
                     if matches!(
                         target_provider,
-                        SessionProvider::Codex | SessionProvider::Opencode
+                        SessionProvider::Codex
+                            | SessionProvider::Opencode
+                            | SessionProvider::Antigravity
                     ) {
                         let app2 = app.clone();
                         std::thread::spawn(move || {
@@ -24046,8 +24663,7 @@ type PairSide = (SessionProvider, String);
 // disk.
 fn parse_pair_sessions_query(query: &str) -> Result<(PairSide, PairSide), String> {
     // opencode-partner-handoff: the two sides arrive as `<provider>=<id>`,
-    // any two of claude / codex / opencode (the pane always sent claude and
-    // codex before).
+    // any two known session providers.
     let mut sides: Vec<PairSide> = Vec::new();
     // provider-session-digest-for-codex: the side the offer was about (the
     // session you switched away from), whose digest the other side reads.
@@ -24140,6 +24756,12 @@ fn session_title_by_id<R: tauri::Runtime>(
         // (2026-10-28 04:11Z: a renamed member still showed its old name in
         // the group line, and group naming compared against it).
         SessionProvider::Opencode => opencode_session_title_from_db(id)
+            .or_else(|| claude_session_title(&path).ok().flatten()),
+        // session_path_for_id answers None for Antigravity, so this is
+        // unreachable until antigravity-sessions-browser; None keeps it honest.
+        SessionProvider::Antigravity => antigravity_summary_rows_for_id(app, id)
+            .map(|(_, title, _)| title)
+            .filter(|title| !title.trim().is_empty())
             .or_else(|| claude_session_title(&path).ok().flatten()),
     }
 }
@@ -24579,6 +25201,81 @@ fn opencode_composer_ready(tail: &str) -> bool {
     squashed.contains("ctrl+pcommands") || squashed.contains("askanything\u{2026}")
 }
 
+// Antigravity's idle composer has a `>` row between horizontal rules and a
+// shortcuts footer. Anchor the footer at the end; the account-specific model
+// text after the footer marker is intentionally not part of this signal.
+fn antigravity_composer_ready(tail: &str) -> bool {
+    let squashed: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    let Some(footer) = squashed.rfind("?forshortcuts") else {
+        return false;
+    };
+    if squashed[footer + "?forshortcuts".len()..].chars().count() > 100 {
+        return false;
+    }
+    let Some(prompt) = squashed[..footer].rfind('>') else {
+        return false;
+    };
+    squashed[..prompt].ends_with('─') && squashed[prompt + 1..footer].contains('─')
+}
+
+#[cfg(test)]
+mod antigravity_composer_ready_tests {
+    use super::{antigravity_composer_ready, collapse_tail};
+
+    #[test]
+    fn raw_idle_composer_captures_are_ready() {
+        for raw in [
+            include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/tool-idle.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-idle.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/resume-by-id.raw").as_slice(),
+        ] {
+            assert!(antigravity_composer_ready(&collapse_tail(raw, 1200)));
+        }
+    }
+
+    #[test]
+    fn raw_working_and_dialog_captures_are_not_ready() {
+        for raw in [
+            include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-working.raw")
+                .as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-complete.raw")
+                .as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/completed.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/first-run-trust.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")
+                .as_slice(),
+        ] {
+            assert!(!antigravity_composer_ready(&collapse_tail(raw, 1200)));
+        }
+    }
+
+    #[test]
+    fn startup_prefix_before_composer_is_not_ready() {
+        let raw = include_bytes!("../../docs/agent-specimens/antigravity/startup.raw");
+        let composer_start = raw
+            .windows(b"\r\n>\r\n".len())
+            .position(|window| window == b"\r\n>\r\n")
+            .expect("startup capture contains its composer row");
+        assert!(!antigravity_composer_ready(&collapse_tail(
+            &raw[..composer_start],
+            1200
+        )));
+    }
+
+    #[test]
+    fn model_label_is_not_part_of_the_ready_signal() {
+        let raw = include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw");
+        let collapsed =
+            collapse_tail(raw, 1200).replace("Gemini 3.8 Flash · high", "Gemini 3.8 Pro · low");
+        assert!(antigravity_composer_ready(&collapsed));
+    }
+}
+
 #[cfg(test)]
 mod opencode_composer_ready_tests {
     use super::opencode_composer_ready;
@@ -24672,6 +25369,7 @@ fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
         SessionProvider::Codex => codex_catch_up_composer_ready(tail),
         SessionProvider::Opencode => opencode_composer_ready(tail),
         SessionProvider::Claude => true,
+        SessionProvider::Antigravity => antigravity_composer_ready(tail),
     }
 }
 
@@ -25621,6 +26319,7 @@ fn session_provider_display(provider: SessionProvider) -> &'static str {
         SessionProvider::Claude => "Claude",
         SessionProvider::Codex => "Codex",
         SessionProvider::Opencode => "OpenCode",
+        SessionProvider::Antigravity => "Antigravity",
     }
 }
 
@@ -25648,6 +26347,12 @@ fn fallback_latest_session_id<R: tauri::Runtime>(
             .ok()
             .flatten()
             .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p)),
+        // Nothing to fall back to until antigravity-sessions-browser.
+        SessionProvider::Antigravity => discover_antigravity_sessions(app, Some(1))
+            .ok()?
+            .into_iter()
+            .next()
+            .map(|s| s.id),
     }
 }
 
@@ -25766,6 +26471,8 @@ fn session_path_for_id<R: tauri::Runtime>(
         }
         SessionProvider::Codex => codex_session_path_for_id(app, id),
         SessionProvider::Opencode => opencode_session_path_for_id(app, id),
+        // No file-discovery for Antigravity yet (antigravity-sessions-browser).
+        SessionProvider::Antigravity => antigravity_export_path(app, id),
     }
 }
 
@@ -26010,6 +26717,7 @@ fn reload_agent_session(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "session-reload")?;
@@ -26140,6 +26848,7 @@ fn start_agent_fresh(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "start-fresh")?;
@@ -26483,7 +27192,10 @@ fn apply_pending_session_title<R: tauri::Runtime>(
             // fresh-partner-takes-partner-name: an OpenCode fresh partner's
             // queued name lands here once its session rotates in; the rename
             // is a title UPDATE in OpenCode's database (509deb8).
-            SessionProvider::Claude | SessionProvider::Opencode => {
+            // Antigravity keeps the queued name unreachable for now: New
+            // session refuses it, and rename_session says so
+            // (antigravity-sessions-browser).
+            SessionProvider::Claude | SessionProvider::Opencode | SessionProvider::Antigravity => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
             }
         };
@@ -26540,12 +27252,13 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        agent_provider_from_command, agent_resume_command, claim_pending_session_title,
-        codex_session_is_visible, fresh_partner_reason, fresh_partner_title,
-        merge_pending_session_entry, new_session_launch_command,
+        agent_launch_command, agent_provider_from_command, agent_resume_command,
+        claim_pending_session_title, codex_session_is_visible, fresh_partner_reason,
+        fresh_partner_title, merge_pending_session_entry, new_session_launch_command,
         pending_session_title_abandoned_by_resume, pending_session_title_can_claim,
-        pending_title_marks_new_session, provider_switch_launch, session_change_snapshot,
-        switch_starts_fresh_partner, PendingSessionTitle, SessionEntry, SessionProvider,
+        pending_title_marks_new_session, provider_cli_name, provider_switch_launch,
+        session_change_snapshot, session_provider_label, switch_starts_fresh_partner,
+        PendingSessionTitle, SessionEntry, SessionProvider,
     };
 
     #[test]
@@ -26777,6 +27490,59 @@ mod pending_session_title_tests {
         assert_eq!(
             SessionProvider::from_str("opencode"),
             Some(SessionProvider::Opencode)
+        );
+        // antigravity-provider-switch: the label is `antigravity` but the CLI
+        // is `agy`, so the launch, the resume and the PATH probe all take the
+        // second name.
+        assert_eq!(agent_launch_command("antigravity"), Some("agy"));
+        assert_eq!(
+            agent_resume_command("antigravity", "").as_deref(),
+            Some("agy --continue")
+        );
+        assert_eq!(
+            agent_resume_command("antigravity", "3f6c1d2e").as_deref(),
+            Some("agy --conversation 3f6c1d2e")
+        );
+        assert_eq!(
+            agent_provider_from_command(Some("antigravity")),
+            "antigravity"
+        );
+        // A literal command in `shell.agent`, rather than the wire string.
+        assert_eq!(agent_provider_from_command(Some("agy")), "antigravity");
+        // antigravity-agent-command-detection: `agy` counts as the command's
+        // own name only, never as three letters inside a path or argument.
+        for agy in [
+            "agy --model gemini-3.8-flash-high",
+            "/Users/x/.local/bin/agy",
+            "\"/Users/x/.local/bin/agy\" --continue",
+            "C:\\Users\\x\\bin\\agy.exe",
+            "AGY",
+        ] {
+            assert_eq!(
+                agent_provider_from_command(Some(agy)),
+                "antigravity",
+                "{agy}"
+            );
+        }
+        for (command, provider) in [
+            ("/Users/nagy/.local/bin/codex", "codex"),
+            ("claude --name hagyma", "claude"),
+            ("/opt/agy/bin/opencode", "opencode"),
+            ("agyx", "claude"),
+        ] {
+            assert_eq!(
+                agent_provider_from_command(Some(command)),
+                provider,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            SessionProvider::from_str("antigravity"),
+            Some(SessionProvider::Antigravity)
+        );
+        assert_ne!(
+            provider_cli_name(SessionProvider::Antigravity),
+            session_provider_label(SessionProvider::Antigravity)
         );
         let rec = PendingSessionTitle {
             provider: "claude".into(),
@@ -27052,9 +27818,22 @@ fn create_new_session(
         "codex" => "codex",
         "claude" | "claud" => "claude",
         "opencode" => "opencode",
+        "antigravity" => "antigravity",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
+    // antigravity-provider-switch: New session promises a name, and a name
+    // lands by renaming the session once its file surfaces. Bram has no rename
+    // path into agy (its durable title store was not identified in the
+    // specimen pack) and cannot see its sessions yet
+    // (antigravity-sessions-browser), so the queued name would never apply.
+    // Refuse rather than create a session titled with its first message.
+    if provider_key == "antigravity" {
+        return Err(
+            "Named new sessions aren't available for Antigravity yet. Start a new session from inside Antigravity."
+                .to_string(),
+        );
+    }
     // session-groups (2026-10-28 05:15Z): OpenCode is named like the others.
     // This once skipped it ("Bram can't rename them"), but Bram writes
     // OpenCode titles into its database (opencode-session-rename) and the
@@ -27292,7 +28071,12 @@ fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfi
 
 fn agent_provider_from_command(command: Option<&str>) -> &'static str {
     let lower = command.unwrap_or("").to_ascii_lowercase();
-    if lower.contains("opencode") {
+    if lower.contains("antigravity") || command_head_is_agy(&lower) {
+        // antigravity-provider-switch: `shell.agent` holds either the wire
+        // string or a literal command, and agy's binary shares no substring
+        // with its provider name, so both spellings are checked here.
+        "antigravity"
+    } else if lower.contains("opencode") {
         "opencode"
     } else if lower.contains("codex") {
         "codex"
@@ -27300,6 +28084,18 @@ fn agent_provider_from_command(command: Option<&str>) -> &'static str {
         // Covers claude/claud and the empty/unknown setting default.
         "claude"
     }
+}
+
+// antigravity-agent-command-detection: "agy" turns up inside ordinary words
+// and paths (`/Users/nagy/.local/bin/codex`, `--name hagyma`), and the
+// Antigravity check runs before the others, so a substring match took those
+// for Antigravity. It counts only as the command's own name: the first word,
+// with any directory, surrounding quotes and a Windows `.exe` stripped.
+fn command_head_is_agy(lower: &str) -> bool {
+    let (head, _) = split_command_head_tail(lower);
+    let head = head.trim_matches(['"', '\'']);
+    let name = head.rsplit(['/', '\\']).next().unwrap_or(head);
+    name == "agy" || name == "agy.exe"
 }
 
 fn split_command_head_tail(command: &str) -> (&str, &str) {
@@ -27336,6 +28132,10 @@ fn agent_launch_command(provider: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "claude" | "claud" => Some("claude"),
         "opencode" => Some("opencode"),
+        // Antigravity CLI 1.4.12 (docs/agent-specimens/antigravity/version.txt).
+        // It self-updates, so a behaviour change may arrive without a Bram
+        // release.
+        "antigravity" => Some("agy"),
         _ => None,
     }
 }
@@ -27359,6 +28159,9 @@ fn new_session_launch_command(provider: &str, title: &str, session_id: Option<&s
         // No naming flag, and New session refuses OpenCode until its
         // sessions are visible (opencode-sessions-browser).
         "opencode" => "opencode".to_string(),
+        // Same for Antigravity: `/rename` exists inside the TUI, but the
+        // durable title store was not identified in the specimen pack.
+        "antigravity" => "agy".to_string(),
         _ => "".to_string(),
     }
 }
@@ -27386,6 +28189,15 @@ fn agent_resume_command(provider: &str, session_id: &str) -> Option<String> {
             "opencode --continue".to_string()
         } else {
             format!("opencode --session {}", id)
+        }),
+        // antigravity-provider-switch: `-c/--continue` continues the most
+        // recent conversation, and `--conversation <id>` resumes a specific
+        // one (help.txt, resume-by-id.txt). Ids come from hook payloads and
+        // reach this once antigravity-sessions-browser lists sessions.
+        "antigravity" => Some(if id.is_empty() {
+            "agy --continue".to_string()
+        } else {
+            format!("agy --conversation {}", id)
         }),
         _ => None,
     }
@@ -31158,6 +31970,14 @@ enum SessionProvider {
     // to a Claude-shaped JSONL, which file discovery then reads
     // (opencode-sessions-browser).
     Opencode,
+    // antigravity-provider-switch: launch, resume and the header switcher only,
+    // as OpenCode did. Its transcript lives under
+    // ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/, and the
+    // conversation-to-project mapping is unidentified, so every file-discovery
+    // site answers "none" for it until antigravity-sessions-browser. The CLI is
+    // `agy`, not `antigravity`: provider_cli_name is the binary, this label is
+    // the wire string.
+    Antigravity,
 }
 
 impl SessionProvider {
@@ -31166,6 +31986,7 @@ impl SessionProvider {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::Opencode),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -31181,14 +32002,17 @@ fn provider_needs_setup_for(
     claude_needs: bool,
     codex_needs: bool,
     opencode_needs: bool,
+    antigravity_needs: bool,
 ) -> bool {
     match active {
         Some(SessionProvider::Claude) => claude_needs,
         Some(SessionProvider::Codex) => codex_needs,
         Some(SessionProvider::Opencode) => opencode_needs,
         // opencode_needs is already false wherever OpenCode isn't installed
-        // (opencode_plugin_wanted), so it raises no banner for non-users.
-        None => claude_needs || codex_needs || opencode_needs,
+        // (opencode_plugin_wanted), so it raises no banner for non-users;
+        // antigravity_needs likewise (antigravity_hooks_wanted).
+        Some(SessionProvider::Antigravity) => antigravity_needs,
+        None => claude_needs || codex_needs || opencode_needs || antigravity_needs,
     }
 }
 
@@ -31350,6 +32174,11 @@ fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String>
         SessionProvider::Codex => codex_session_meta(path).ok().flatten().map(|(id, _)| id),
         // An export is named for its session.
         SessionProvider::Opencode => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string),
+        // No transcript paths for Antigravity until antigravity-sessions-browser.
+        SessionProvider::Antigravity => path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .map(str::to_string),
@@ -33051,6 +33880,929 @@ fn opencode_session_path_for_id<R: tauri::Runtime>(
         .map(|s| s.path)
 }
 
+// Antigravity stores the project association in conversation_summaries.db;
+// the per-conversation brain directory contains the transcript, not a cwd.
+// Both inputs are opened read-only. The provider's records are unlike Claude's
+// JSONL, so a disposable Claude-shaped projection in Bram's cache lets every
+// existing transcript consumer keep using the same parser.
+fn antigravity_data_dir() -> Option<PathBuf> {
+    Some(home_dir()?.join(".gemini").join("antigravity-cli"))
+}
+
+fn antigravity_workspace_matches(value: &str, canonical: &str) -> bool {
+    let decoded = percent_decode(value);
+    let path = decoded
+        .strip_prefix("file://")
+        .unwrap_or(&decoded)
+        .trim_end_matches('/');
+    let canonical = canonical.trim_end_matches('/');
+    path == canonical || path.strip_prefix("file://") == Some(canonical)
+}
+
+fn antigravity_summary_rows(canonical_root: &str) -> Vec<(String, String, i64)> {
+    let Some(path) = antigravity_data_dir().map(|p| p.join("conversation_summaries.db")) else {
+        return Vec::new();
+    };
+    antigravity_summary_rows_from_db(&path, canonical_root)
+}
+
+fn antigravity_summary_rows_from_db(
+    path: &Path,
+    canonical_root: &str,
+) -> Vec<(String, String, i64)> {
+    let read_only =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = match rusqlite::Connection::open_with_flags(path, read_only) {
+        Ok(conn) => conn,
+        Err(_) => {
+            // Antigravity removes its WAL sidecars on exit. Immutable mode
+            // reads the checkpointed database without requiring those files.
+            let uri = format!("file:{}?immutable=1", path.to_string_lossy());
+            let flags = read_only | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+            let Ok(conn) = rusqlite::Connection::open_with_flags(uri, flags) else {
+                return Vec::new();
+            };
+            conn
+        }
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT conversation_id, title, workspace_uris, last_modified_time
+         FROM conversation_summaries ORDER BY last_modified_time DESC",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok)
+        .filter_map(|(id, title, workspaces, modified)| {
+            if !session_id_is_safe(&id) {
+                return None;
+            }
+            let value: serde_json::Value = serde_json::from_str(&workspaces).ok()?;
+            let matches = value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|s| antigravity_workspace_matches(s, canonical_root))
+                })
+                .unwrap_or_else(|| {
+                    value
+                        .as_str()
+                        .is_some_and(|s| antigravity_workspace_matches(s, canonical_root))
+                });
+            if !matches {
+                return None;
+            }
+            // ISO-8601 timestamps sort lexically in the database query. Keep
+            // an order-preserving numeric token for SessionRecord consumers.
+            let millis = antigravity_timestamp_ms(&modified);
+            Some((id, title, millis))
+        })
+        .collect()
+}
+
+fn antigravity_timestamp_ms(value: &str) -> i64 {
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    let normalized = if value.as_bytes().get(10) == Some(&b' ') {
+        let mut value = value.to_string();
+        value.replace_range(10..11, "T");
+        value
+    } else {
+        value.to_string()
+    };
+    OffsetDateTime::parse(&normalized, &Rfc3339)
+        .map(|timestamp| (timestamp.unix_timestamp_nanos() / 1_000_000) as i64)
+        .unwrap_or(0)
+}
+
+fn antigravity_summary_rows_for_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Option<(String, String, i64)> {
+    let root = project_root(Some(app))?.canonicalize().ok()?;
+    antigravity_summary_rows(&root.to_string_lossy())
+        .into_iter()
+        .find(|row| row.0 == id)
+}
+
+// agy-session-export-and-search: agy wraps what the user typed. Every USER_INPUT
+// record reads `<USER_REQUEST>…</USER_REQUEST>`, followed by metadata blocks
+// the user never wrote. Only the request is a user turn: anything that reads
+// the export expects a turn to start with what was sent (`approved:`, `iterate:`).
+fn antigravity_user_text(content: &str) -> &str {
+    const OPEN: &str = "<USER_REQUEST>";
+    const CLOSE: &str = "</USER_REQUEST>";
+    match (content.find(OPEN), content.rfind(CLOSE)) {
+        (Some(start), Some(end)) if start + OPEN.len() <= end => {
+            content[start + OPEN.len()..end].trim()
+        }
+        _ => content,
+    }
+}
+
+// agy's own text, as a quiet note rather than anyone's speech: the prefix is
+// the notification shape st_notification_turn renders.
+fn antigravity_note(text: &str, stamp: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"type":"user","message":{"role":"user","content":format!("[SYSTEM NOTIFICATION] {text}")},"timestamp":stamp})
+}
+
+// A SYSTEM_MESSAGE opens with a sentence for the model, which names the tag
+// itself, followed by `\n\n<SYSTEM_MESSAGE>\n`. Match the standalone line
+// opener first so `<SYSTEM_MESSAGE>` inside a background task's output cannot
+// cut the note mid-stream.
+fn antigravity_system_message(content: &str) -> &str {
+    const LINE_OPEN: &str = "\n<SYSTEM_MESSAGE>";
+    const OPEN: &str = "<SYSTEM_MESSAGE>";
+    const CLOSE: &str = "</SYSTEM_MESSAGE>";
+    let open_end = if content.starts_with(OPEN) {
+        Some(OPEN.len())
+    } else {
+        content.find(LINE_OPEN).map(|i| i + LINE_OPEN.len())
+    }
+    .or_else(|| content.rfind(OPEN).map(|i| i + OPEN.len()));
+    match (open_end, content.rfind(CLOSE)) {
+        (Some(start), Some(end)) if start <= end => content[start..end].trim(),
+        _ => content,
+    }
+}
+
+// agy-file-edits-in-pane: the four tools the local transcripts actually hold
+// file and shell work in, in Claude's names and fields, so the Transcript's
+// existing rows and diffs work. Any other tool keeps agy's name and arguments.
+fn antigravity_translate_tool_call(
+    name: &str,
+    args: &serde_json::Value,
+) -> (String, serde_json::Value) {
+    let str_opt = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    match name {
+        "write_file" => {
+            let mut input = serde_json::Map::new();
+            input.insert(
+                "file_path".into(),
+                serde_json::Value::String(str_opt("Path").unwrap_or_default()),
+            );
+            input.insert(
+                "content".into(),
+                serde_json::Value::String(str_opt("Content").unwrap_or_default()),
+            );
+            if args.get("Append").and_then(|v| v.as_bool()) == Some(true) {
+                input.insert("append".into(), serde_json::Value::Bool(true));
+            }
+            ("Write".to_string(), serde_json::Value::Object(input))
+        }
+        "edit_file" => (
+            "Edit".to_string(),
+            serde_json::json!({
+                "file_path": str_opt("Path").unwrap_or_default(),
+                "old_string": str_opt("Target").unwrap_or_default(),
+                "new_string": str_opt("Replacement").unwrap_or_default(),
+            }),
+        ),
+        "run_command" => {
+            let mut input = serde_json::Map::new();
+            input.insert(
+                "command".into(),
+                serde_json::Value::String(str_opt("CommandLine").unwrap_or_default()),
+            );
+            if let Some(desc) = str_opt("toolSummary").filter(|s| !s.trim().is_empty()) {
+                input.insert("description".into(), serde_json::Value::String(desc));
+            }
+            ("Bash".to_string(), serde_json::Value::Object(input))
+        }
+        "read_file" => {
+            let mut input = serde_json::Map::new();
+            input.insert(
+                "file_path".into(),
+                serde_json::Value::String(str_opt("Path").unwrap_or_default()),
+            );
+            let start = args
+                .get("StartLine")
+                .and_then(|v| v.as_u64())
+                .filter(|&n| n > 0);
+            let end = args
+                .get("EndLine")
+                .and_then(|v| v.as_u64())
+                .filter(|&n| n > 0);
+            if let Some(s) = start {
+                input.insert("offset".into(), serde_json::json!(s));
+            }
+            if let Some(e) = end {
+                let s = start.unwrap_or(1);
+                if e >= s {
+                    input.insert("limit".into(), serde_json::json!(e - s + 1));
+                }
+            }
+            ("Read".to_string(), serde_json::Value::Object(input))
+        }
+        _ => (name.to_string(), args.clone()),
+    }
+}
+
+fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, Vec<String>), String> {
+    let mut output = String::new();
+    let mut unknown = Vec::new();
+    // One GENERIC record follows each call of a response, in order.
+    let mut pending_tool_results = std::collections::VecDeque::new();
+    let mut emit = |record: serde_json::Value| -> Result<(), String> {
+        output.push_str(&serde_json::to_string(&record).map_err(|e| e.to_string())?);
+        output.push('\n');
+        Ok(())
+    };
+    for line in source.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = record
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let stamp = record
+            .get("created_at")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match kind {
+            "USER_INPUT" => {
+                pending_tool_results.clear();
+                let text = antigravity_user_text(
+                    record.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                );
+                emit(
+                    serde_json::json!({"type":"user","message":{"role":"user","content":text},"timestamp":stamp}),
+                )?;
+            }
+            "PLANNER_RESPONSE" => {
+                // A call with no result (an interrupted turn) must not take
+                // the next response's.
+                pending_tool_results.clear();
+                let mut content = Vec::new();
+                if let Some(text) = record
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    content.push(serde_json::json!({"type":"text","text":text}));
+                }
+                if let Some(thinking) = record
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    content.push(serde_json::json!({"type":"thinking","thinking":thinking}));
+                }
+                if let Some(calls) = record.get("tool_calls").and_then(|v| v.as_array()) {
+                    for (i, call) in calls.iter().enumerate() {
+                        let name = call
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown_tool");
+                        let args = call
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let (tool_name, tool_input) = antigravity_translate_tool_call(name, &args);
+                        let tool_id = format!(
+                            "agy-{}-{}",
+                            id,
+                            record
+                                .get("step_index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                * 100
+                                + i as u64
+                        );
+                        content.push(serde_json::json!({"type":"tool_use","id":tool_id,"name":tool_name,"input":tool_input}));
+                        pending_tool_results.push_back(tool_id);
+                    }
+                }
+                if content.is_empty() {
+                    content.push(serde_json::json!({"type":"text","text":"(Antigravity produced an empty planner response)"}));
+                }
+                emit(
+                    serde_json::json!({"type":"assistant","message":{"role":"assistant","content":content,"stop_reason":"end_turn"},"timestamp":stamp}),
+                )?;
+            }
+            "GENERIC" => {
+                let text = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tool_id) = pending_tool_results.pop_front() {
+                    let result = serde_json::json!({"type":"tool_result","tool_use_id":tool_id,"content":text,"is_error":record.get("status").and_then(|v|v.as_str()) == Some("ERROR")});
+                    emit(
+                        serde_json::json!({"type":"user","message":{"role":"user","content":[result]},"timestamp":stamp}),
+                    )?;
+                } else if !text.is_empty() {
+                    emit(antigravity_note(text, &stamp))?;
+                }
+            }
+            "SYSTEM_MESSAGE" => {
+                let text = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                emit(antigravity_note(antigravity_system_message(text), &stamp))?;
+            }
+            // Its content is agy's summary for the model, which can run to
+            // pages. The Transcript above it already holds what it summarizes.
+            "CHECKPOINT" => emit(antigravity_note(
+                "Antigravity compacted this conversation.",
+                &stamp,
+            ))?,
+            other => {
+                unknown.push(other.to_string());
+                let content = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                emit(antigravity_note(
+                    &format!("[Antigravity {other} record] {content}"),
+                    &stamp,
+                ))?;
+            }
+        }
+    }
+    Ok((output, unknown))
+}
+
+// Raise the suffix when the projection changes. A session that has finished
+// never changes again, so without a new directory its old export would stay
+// fresh forever. v2: tool results paired, agy's own text as notes; v3: tool
+// calls translated to Claude's names/inputs for Transcript diffs & summaries.
+const ANTIGRAVITY_EXPORT_DIR: &str = "antigravity-sessions-v3";
+const ANTIGRAVITY_RETIRED_EXPORT_DIRS: &[&str] =
+    &["antigravity-sessions", "antigravity-sessions-v2"];
+
+fn retire_stale_antigravity_exports(cache_dir: &Path, encoded_project: &str) {
+    for dir in ANTIGRAVITY_RETIRED_EXPORT_DIRS {
+        let stale = cache_dir.join(dir).join(encoded_project);
+        if stale.exists() {
+            let _ = std::fs::remove_dir_all(&stale);
+        }
+    }
+}
+
+fn antigravity_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join(ANTIGRAVITY_EXPORT_DIR)
+        .join(encode_path_for_filename(&abs)))
+}
+
+fn format_unknown_antigravity_types(unknown: &[String]) -> String {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for raw in unknown {
+        let safe: String = raw
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .collect();
+        let key = if safe.is_empty() {
+            "empty".to_string()
+        } else {
+            safe
+        };
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(k, n)| format!("{k}:{n}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+// The export and its source are different formats, so only their times compare.
+fn antigravity_export_is_fresh(export: &Path, source: &Path) -> bool {
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    match (modified(export), modified(source)) {
+        (Some(exported), Some(written)) => exported >= written,
+        _ => false,
+    }
+}
+
+// Returns Ok(Some(unknown_types)) when `export` was written, or Ok(None) when
+// `export` was already fresh and left untouched on disk.
+fn antigravity_refresh_export(
+    id: &str,
+    source: &Path,
+    export: &Path,
+) -> Result<Option<Vec<String>>, String> {
+    std::fs::metadata(source).map_err(|e| e.to_string())?;
+    if antigravity_export_is_fresh(export, source) {
+        return Ok(None);
+    }
+    let input = std::fs::read_to_string(source).map_err(|e| e.to_string())?;
+    let (text, unknown) = antigravity_transcript_jsonl(id, &input)?;
+    let parent = export.parent().ok_or("export path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    atomic_write_text(export, &text)?;
+    Ok(Some(unknown))
+}
+
+fn antigravity_export_path<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Option<PathBuf> {
+    if !session_id_is_safe(id) {
+        return None;
+    }
+    let root = project_root(Some(app))?.canonicalize().ok()?;
+    antigravity_summary_rows(&root.to_string_lossy())
+        .iter()
+        .any(|row| row.0 == id)
+        .then_some(())?;
+    antigravity_export_path_for_project(app, id, &root)
+}
+
+fn antigravity_export_path_for_project<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    root: &Path,
+) -> Option<PathBuf> {
+    let source_dir = antigravity_data_dir()?
+        .join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs");
+    let regular = source_dir.join("transcript.jsonl");
+    let full = source_dir.join("transcript_full.jsonl");
+    // `transcript_full.jsonl` holds untruncated records and native JSON tool
+    // args; compact `transcript.jsonl` stringifies every arg, which often makes
+    // it slightly larger on disk despite truncating long steps.
+    let source = match (regular.metadata().ok(), full.metadata().ok()) {
+        (None, None) => return None,
+        (Some(_), None) => regular,
+        (None, Some(_)) => full,
+        (Some(_), Some(b)) if b.len() > 0 => full,
+        (Some(_), Some(_)) => regular,
+    };
+    let export = app
+        .path()
+        .app_cache_dir()
+        .ok()?
+        .join(ANTIGRAVITY_EXPORT_DIR)
+        .join(encode_path_for_filename(&strip_unc_prefix(
+            root.to_path_buf(),
+        )))
+        .join(format!("{id}.jsonl"));
+    if let Some(unknown) = antigravity_refresh_export(id, &source, &export).ok()? {
+        if !unknown.is_empty() && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "antigravity-sessions",
+                &format!(
+                    "op=unknown-records session={} count={} types={}",
+                    id,
+                    unknown.len(),
+                    format_unknown_antigravity_types(&unknown)
+                ),
+            );
+        }
+    }
+    Some(export)
+}
+
+// An export's change token is in milliseconds (OpenCode's and Antigravity's);
+// the row's date stays in seconds like every other session.
+fn search_row_date(provider: SessionProvider, mtime: i64) -> String {
+    if matches!(
+        provider,
+        SessionProvider::Opencode | SessionProvider::Antigravity
+    ) {
+        (mtime / 1000).to_string()
+    } else {
+        mtime.to_string()
+    }
+}
+
+fn discover_antigravity_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionRecord>, String> {
+    let root = project_root(Some(app))
+        .ok_or("could not resolve project root")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if let Ok(cache_dir) = app.path().app_cache_dir() {
+        let encoded = encode_path_for_filename(&strip_unc_prefix(root.clone()));
+        retire_stale_antigravity_exports(&cache_dir, &encoded);
+    }
+    let mut rows = antigravity_summary_rows(&root.to_string_lossy());
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
+    let mut sessions = Vec::new();
+    for (id, title, updated) in rows {
+        let Some(path) = antigravity_export_path_for_project(app, &id, &root) else {
+            continue;
+        };
+        let meta = std::fs::metadata(&path).ok();
+        sessions.push(SessionRecord {
+            provider: SessionProvider::Antigravity,
+            id,
+            path,
+            mtime: (updated.max(0) / 1000) as u64,
+            size: meta.map(|m| m.len()).unwrap_or(0),
+            title: Some(title).filter(|t| !t.trim().is_empty()),
+        });
+    }
+    Ok(sessions)
+}
+
+#[cfg(test)]
+mod antigravity_transcript_tests {
+    use super::{
+        antigravity_transcript_jsonl, antigravity_workspace_matches, st_parse_lines_to_turns,
+    };
+
+    #[test]
+    fn pinned_antigravity_records_project_user_assistant_and_tools() {
+        let source =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
+        let (jsonl, _) = antigravity_transcript_jsonl("fixture-id", source).unwrap();
+        let turns = st_parse_lines_to_turns(&jsonl);
+        let user_turns: Vec<&serde_json::Value> =
+            turns.iter().filter(|turn| turn["role"] == "user").collect();
+        assert!(!user_turns.is_empty());
+        let first_user = user_turns[0]["text"].as_str().unwrap_or("");
+        assert!(
+            first_user.starts_with("Create tool-probe.txt"),
+            "{first_user}"
+        );
+        assert!(!first_user.contains("USER_REQUEST"), "{first_user}");
+        assert!(!first_user.contains("ADDITIONAL_METADATA"), "{first_user}");
+        assert!(!first_user.contains("USER_SETTINGS_CHANGE"), "{first_user}");
+        assert!(turns.iter().any(|turn| turn["role"] == "assistant"));
+        assert!(turns
+            .iter()
+            .flat_map(|turn| turn["entries"].as_array().into_iter().flatten())
+            .any(|entry| entry["kind"] == "tool"));
+    }
+
+    // agy-session-export-and-search: the shape of a real response making
+    // several calls (session 3c7851eb), where the first call's output used to
+    // go to every call and the rest read as assistant speech.
+    #[test]
+    fn each_tool_call_gets_its_own_result_and_agy_text_is_nobodys_speech() {
+        let source = [
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\napproved: {\"items\":[]}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: x.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting.\n</USER_SETTINGS_CHANGE>"}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":1,"content":"Reading.","tool_calls":[{"name":"read_file","args":{"Path":"/a"}},{"name":"read_file","args":{"Path":"/b"}},{"name":"run_command","args":{"CommandLine":"gh x"}}]}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output of a"}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output of b"}"#,
+            r#"{"type":"GENERIC","status":"RUNNING","content":"YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS"}"#,
+            r#"{"type":"SYSTEM_MESSAGE","content":"The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] task finished: saw <SYSTEM_MESSAGE> in diff\n</SYSTEM_MESSAGE>"}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":6,"content":"Interrupted.","tool_calls":[{"name":"read_file","args":{"Path":"/c"}}]}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":7,"content":"Next.","tool_calls":[{"name":"read_file","args":{"Path":"/d"}}]}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output of d"}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output with no call"}"#,
+            r##"{"type":"CHECKPOINT","content":"# Resuming from a compaction\nlong summary"}"##,
+        ]
+        .join("\n");
+        let (jsonl, unknown) = antigravity_transcript_jsonl("x", &source).unwrap();
+        assert!(unknown.is_empty(), "these records are known: {unknown:?}");
+
+        let results: Vec<(String, String)> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter_map(|r| r["message"]["content"].as_array().cloned())
+            .flatten()
+            .filter(|c| c["type"] == "tool_result")
+            .map(|c| {
+                (
+                    c["tool_use_id"].as_str().unwrap().to_string(),
+                    c["content"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            results,
+            vec![
+                ("agy-x-100".to_string(), "output of a".to_string()),
+                ("agy-x-101".to_string(), "output of b".to_string()),
+                (
+                    "agy-x-102".to_string(),
+                    "YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS".to_string()
+                ),
+                ("agy-x-700".to_string(), "output of d".to_string()),
+            ]
+        );
+
+        let turns = st_parse_lines_to_turns(&jsonl);
+        let text_of = |role: &str| -> Vec<String> {
+            turns
+                .iter()
+                .filter(|t| t["role"] == role)
+                .map(|t| t["text"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+        let user = text_of("user");
+        assert_eq!(user.len(), 1, "{user:?}");
+        assert!(user[0].starts_with("approved:"), "{user:?}");
+        assert!(!user[0].contains("ADDITIONAL_METADATA"), "{user:?}");
+        for text in text_of("assistant") {
+            assert!(
+                !text.contains("output") && !text.contains("SYSTEM_MESSAGE"),
+                "{text}"
+            );
+        }
+        let notes = text_of("system").join(" | ");
+        assert!(notes.contains("[Message] task finished"), "{notes}");
+        assert!(!notes.contains("not actually sent"), "{notes}");
+        assert!(!notes.contains("[SYSTEM NOTIFICATION]"), "{notes}");
+        assert!(notes.contains("output with no call"), "{notes}");
+        assert!(notes.contains("compacted this conversation"), "{notes}");
+        assert!(!notes.contains("long summary"), "{notes}");
+    }
+
+    #[test]
+    fn an_export_is_fresh_by_time_whatever_its_size() {
+        use super::{antigravity_export_is_fresh, antigravity_refresh_export};
+        let dir = std::env::temp_dir().join(format!("bram-agy-fresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (source, export) = (dir.join("source.jsonl"), dir.join("export.jsonl"));
+        std::fs::write(
+            &source,
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\nhello\n</USER_REQUEST>"}"#,
+        )
+        .unwrap();
+        assert!(!antigravity_export_is_fresh(&export, &source), "no export");
+        let set = |path: &std::path::Path, secs: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+        set(&source, 1000);
+        // First export call writes the projected JSONL (different byte length from source).
+        let first = antigravity_refresh_export("s1", &source, &export).unwrap();
+        assert_eq!(first, Some(Vec::new()));
+        assert_ne!(
+            std::fs::metadata(&export).unwrap().len(),
+            std::fs::metadata(&source).unwrap().len()
+        );
+        // Pin a sentinel mtime >= source; a second export call must leave the file untouched.
+        set(&export, 2000);
+        assert!(antigravity_export_is_fresh(&export, &source));
+        let second = antigravity_refresh_export("s1", &source, &export).unwrap();
+        assert_eq!(second, None, "second call must not rewrite a fresh export");
+        assert_eq!(
+            std::fs::metadata(&export).unwrap().modified().unwrap(),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(2000)
+        );
+        // Once the source advances past the export, refresh rewrites it.
+        set(&source, 3000);
+        assert!(!antigravity_export_is_fresh(&export, &source));
+        assert!(antigravity_refresh_export("s1", &source, &export)
+            .unwrap()
+            .is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_providers_search_dates_are_seconds() {
+        use super::{search_row_date, SessionProvider};
+        let ms = 1_793_518_000_123;
+        for provider in [SessionProvider::Opencode, SessionProvider::Antigravity] {
+            assert_eq!(search_row_date(provider, ms), "1793518000");
+        }
+        assert_eq!(
+            search_row_date(SessionProvider::Claude, 1_793_518_000),
+            "1793518000"
+        );
+    }
+
+    #[test]
+    fn unknown_antigravity_record_gets_visible_stub() {
+        use super::format_unknown_antigravity_types;
+        let (jsonl, unknown) = antigravity_transcript_jsonl(
+            "fixture-id",
+            r#"{"type":"FUTURE_EVENT","content":"future detail"}"#,
+        )
+        .unwrap();
+        assert_eq!(unknown, vec!["FUTURE_EVENT".to_string()]);
+        assert_eq!(format_unknown_antigravity_types(&unknown), "FUTURE_EVENT:1");
+        let turns = st_parse_lines_to_turns(&jsonl);
+        assert!(
+            turns.iter().all(|turn| turn["role"] == "system"),
+            "{turns:?}"
+        );
+        assert!(turns.iter().any(|turn| turn["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Antigravity FUTURE_EVENT record")));
+    }
+
+    #[test]
+    fn antigravity_exports_resolve_provider_and_retire_v1_cache() {
+        use super::{
+            projected_turns_provider_label, retire_stale_antigravity_exports,
+            search_session_hit_provider_and_id, ANTIGRAVITY_EXPORT_DIR,
+        };
+        use std::path::Path;
+
+        let oc_dir = Path::new("/cache/opencode-sessions/-Users-me-bram");
+        let agy_dir = Path::new("/cache")
+            .join(ANTIGRAVITY_EXPORT_DIR)
+            .join("-Users-me-bram");
+        let agy_file = agy_dir.join("3c7851eb-302c-46d7-9da4-19880140bd99.jsonl");
+        assert_eq!(
+            search_session_hit_provider_and_id(
+                &agy_file.to_string_lossy(),
+                Some(oc_dir),
+                Some(&agy_dir)
+            ),
+            (
+                "antigravity".to_string(),
+                "3c7851eb-302c-46d7-9da4-19880140bd99".to_string()
+            )
+        );
+        assert_eq!(
+            search_session_hit_provider_and_id(
+                "/cache/opencode-sessions/-Users-me-bram/ses_1.jsonl",
+                Some(oc_dir),
+                Some(&agy_dir)
+            ),
+            ("opencode".to_string(), "ses_1".to_string())
+        );
+        assert_eq!(projected_turns_provider_label(&agy_file), "antigravity");
+
+        let tmp = std::env::temp_dir().join(format!("bram-agy-retire-{}", uuid::Uuid::new_v4()));
+        let v1_this = tmp.join("antigravity-sessions").join("-Users-me-bram");
+        let v1_other = tmp.join("antigravity-sessions").join("-Users-me-other");
+        let v2_this = tmp.join("antigravity-sessions-v2").join("-Users-me-bram");
+        let v2_other = tmp.join("antigravity-sessions-v2").join("-Users-me-other");
+        let v3_this = tmp.join(ANTIGRAVITY_EXPORT_DIR).join("-Users-me-bram");
+        std::fs::create_dir_all(&v1_this).unwrap();
+        std::fs::create_dir_all(&v1_other).unwrap();
+        std::fs::create_dir_all(&v2_this).unwrap();
+        std::fs::create_dir_all(&v2_other).unwrap();
+        std::fs::create_dir_all(&v3_this).unwrap();
+        std::fs::write(v1_this.join("old.jsonl"), "{}").unwrap();
+        std::fs::write(v1_other.join("keep.jsonl"), "{}").unwrap();
+        std::fs::write(v2_this.join("old2.jsonl"), "{}").unwrap();
+        std::fs::write(v2_other.join("keep2.jsonl"), "{}").unwrap();
+        std::fs::write(v3_this.join("new.jsonl"), "{}").unwrap();
+        retire_stale_antigravity_exports(&tmp, "-Users-me-bram");
+        assert!(
+            !v1_this.exists(),
+            "v1 dir for this project should be removed"
+        );
+        assert!(
+            !v2_this.exists(),
+            "v2 dir for this project should be removed"
+        );
+        assert!(v1_other.exists(), "other project's v1 cache untouched");
+        assert!(v2_other.exists(), "other project's v2 cache untouched");
+        assert!(v3_this.join("new.jsonl").exists(), "v3 export untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn translated_tools_drive_transcript_summaries_diffs_and_current_turn_edits() {
+        use super::compute_current_turn_edits_from_text;
+        let specimen =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
+        let (specimen_jsonl, _) = antigravity_transcript_jsonl("spec", specimen).unwrap();
+        let specimen_turns = st_parse_lines_to_turns(&specimen_jsonl);
+        let spec_tools: Vec<&serde_json::Value> = specimen_turns
+            .iter()
+            .flat_map(|t| t["entries"].as_array().into_iter().flatten())
+            .filter(|e| e["kind"] == "tool")
+            .collect();
+        assert_eq!(spec_tools.len(), 4, "{spec_tools:?}");
+        assert_eq!(spec_tools[0]["name"], "Write");
+        assert_eq!(
+            spec_tools[0]["summary"],
+            "<workspace>/tool-probe.txt — wrote 1 line"
+        );
+        assert_eq!(spec_tools[0]["isError"], true);
+        assert_eq!(spec_tools[1]["name"], "Write");
+        assert_eq!(
+            spec_tools[1]["summary"],
+            "<workspace>/tool-probe.txt — wrote 1 line"
+        );
+        assert_eq!(spec_tools[2]["name"], "Edit");
+        assert_eq!(
+            spec_tools[2]["summary"],
+            "<workspace>/tool-probe.txt edited"
+        );
+        let edit_diff = spec_tools[2]["diff"].as_str().expect("Edit row diff");
+        assert!(edit_diff.contains("-FIRST-VALUE"), "{edit_diff}");
+        assert!(edit_diff.contains("+SECOND-VALUE"), "{edit_diff}");
+        assert_eq!(spec_tools[3]["name"], "Bash");
+        assert_eq!(spec_tools[3]["summary"], "echo RUN-COMMAND-7731");
+        assert_eq!(spec_tools[3]["description"], "Echo test command");
+
+        let turn_edits = compute_current_turn_edits_from_text(&specimen_jsonl);
+        let edited_paths: Vec<String> = turn_edits
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["filePath"].as_str().map(String::from))
+            .collect();
+        assert_eq!(edited_paths, vec!["<workspace>/tool-probe.txt".to_string()]);
+
+        // Read gets Claude's fields, and an untranslated tool keeps agy's.
+        let others = [
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\nrun tools\n</USER_REQUEST>"}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":2,"content":"Checking.","tool_calls":[{"name":"read_file","args":{"Path":"/repo/src/lib.rs","StartLine":10,"EndLine":20}},{"name":"send_message","args":{"Recipient":"a","Message":"hi"}}]}"#,
+        ]
+        .join("\n");
+        let (jsonl, _) = antigravity_transcript_jsonl("all", &others).unwrap();
+        let turns = st_parse_lines_to_turns(&jsonl);
+        let tools: Vec<&serde_json::Value> = turns
+            .iter()
+            .flat_map(|t| t["entries"].as_array().into_iter().flatten())
+            .filter(|e| e["kind"] == "tool")
+            .collect();
+        assert_eq!(tools.len(), 2, "{tools:?}");
+        assert_eq!(tools[0]["name"], "Read");
+        assert_eq!(tools[0]["summary"], "/repo/src/lib.rs:10-20");
+        assert_eq!(tools[1]["name"], "send_message");
+    }
+
+    #[test]
+    fn workspace_uris_match_canonical_project_paths() {
+        assert!(antigravity_workspace_matches(
+            "file:///work/project%20one",
+            "/work/project one"
+        ));
+        assert!(!antigravity_workspace_matches(
+            "file:///work/project-two",
+            "/work/project"
+        ));
+    }
+
+    #[test]
+    fn denied_tool_result_is_preserved_as_an_error() {
+        let source =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-denied.jsonl");
+        let (jsonl, _) = antigravity_transcript_jsonl("fixture-id", source).unwrap();
+        let turns = st_parse_lines_to_turns(&jsonl);
+        assert!(turns
+            .iter()
+            .flat_map(|turn| turn["entries"].as_array().into_iter().flatten())
+            .any(|entry| entry["kind"] == "tool" && entry["isError"] == true));
+    }
+
+    #[test]
+    fn summary_reader_handles_checkpointed_wal_database_without_sidecars() {
+        use super::antigravity_summary_rows_from_db;
+        use std::path::PathBuf;
+
+        let path = std::env::temp_dir().join(format!(
+            "bram-antigravity-summary-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id TEXT, title TEXT NOT NULL DEFAULT '',
+                    workspace_uris TEXT NOT NULL, last_modified_time TEXT NOT NULL
+                 );
+                 INSERT INTO conversation_summaries
+                 VALUES ('fixture-session', 'Fixture title', '[\"file:///fixture/project\"]',
+                         '2026-10-31 21:17:11.439086+00:00');",
+            )
+            .unwrap();
+        }
+        assert!(!PathBuf::from(format!("{}-wal", path.display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", path.display())).exists());
+        let rows = antigravity_summary_rows_from_db(&path, "/fixture/project");
+        assert_eq!(
+            rows,
+            vec![(
+                "fixture-session".into(),
+                "Fixture title".into(),
+                1_793_481_431_439
+            )]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn summary_timestamps_parse_space_and_rfc3339_forms() {
+        use super::antigravity_timestamp_ms;
+
+        assert_eq!(
+            antigravity_timestamp_ms("2026-10-31 21:17:11.439086+00:00"),
+            1_793_481_431_439
+        );
+        assert_eq!(
+            antigravity_timestamp_ms("2026-10-31T21:17:11.439086Z"),
+            1_793_481_431_439
+        );
+        assert_eq!(antigravity_timestamp_ms("not a timestamp"), 0);
+    }
+}
+
 #[cfg(test)]
 mod opencode_rename_tests {
     use super::opencode_set_session_title_in;
@@ -33372,6 +35124,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
             SessionProvider::Claude => discover_claude_sessions(app, limit)?,
             SessionProvider::Codex => discover_codex_sessions(app, limit)?,
             SessionProvider::Opencode => discover_opencode_sessions(app, limit)?,
+            SessionProvider::Antigravity => discover_antigravity_sessions(app, limit)?,
         };
         return Ok((provider, sessions));
     }
@@ -33382,6 +35135,7 @@ fn sessions_for_provider<R: tauri::Runtime>(
         SessionProvider::Claude => claude,
         SessionProvider::Codex => codex,
         SessionProvider::Opencode => Vec::new(),
+        SessionProvider::Antigravity => discover_antigravity_sessions(app, None)?,
     };
     Ok((provider, sessions))
 }
@@ -33448,6 +35202,7 @@ fn session_meta<R: tauri::Runtime>(
         SessionProvider::Claude => count_claude_sessions(app)?,
         SessionProvider::Codex => count_codex_sessions(app)?,
         SessionProvider::Opencode => discover_opencode_sessions(app, None)?.len(),
+        SessionProvider::Antigravity => discover_antigravity_sessions(app, None)?.len(),
     };
     let discovery_notes = if provider == SessionProvider::Claude && count == 0 {
         claude_sessions_dir_lookup(app)
@@ -35087,10 +36842,10 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // actually index, since claude_session_title reads the whole file
     // (issue-230-indexer-lazy-claude-titles).
     let discover_started = std::time::Instant::now();
-    let mut files_vec: Vec<(PathBuf, u64, u64, String, SessionProvider)> =
+    let mut files_vec: Vec<(PathBuf, u64, u64, String, Option<String>, SessionProvider)> =
         discover_claude_session_files(app)?
             .into_iter()
-            .map(|(path, mtime, size, id)| (path, mtime, size, id, SessionProvider::Claude))
+            .map(|(path, mtime, size, id)| (path, mtime, size, id, None, SessionProvider::Claude))
             .collect();
     // opencode-sessions-browser: OpenCode's exports are Claude-shaped, so the
     // same extraction indexes them; only the provider label differs.
@@ -35108,7 +36863,30 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             .into_iter()
             .map(|s| {
                 let token = opencode_export_change_token(&s.path).unwrap_or(s.mtime * 1000);
-                (s.path, token, s.size, s.id, SessionProvider::Opencode)
+                (
+                    s.path,
+                    token,
+                    s.size,
+                    s.id,
+                    s.title,
+                    SessionProvider::Opencode,
+                )
+            }),
+    );
+    files_vec.extend(
+        discover_antigravity_sessions(app, None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| {
+                let token = opencode_export_change_token(&s.path).unwrap_or(s.mtime * 1000);
+                (
+                    s.path,
+                    token,
+                    s.size,
+                    s.id,
+                    s.title,
+                    SessionProvider::Antigravity,
+                )
             }),
     );
     stats.discover_ms = discover_started.elapsed().as_millis();
@@ -35130,8 +36908,16 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // from the extract/write work below means `report_progress` reflects
     // actual pending work, not the size of the whole corpus, so an ordinary
     // warm pass over hundreds of untouched sessions stays quiet.
-    let mut pending: Vec<(PathBuf, i64, i64, String, bool, SessionProvider)> = Vec::new();
-    for (path, mtime_u, size_u, id, provider) in files_vec {
+    let mut pending: Vec<(
+        PathBuf,
+        i64,
+        i64,
+        String,
+        Option<String>,
+        bool,
+        SessionProvider,
+    )> = Vec::new();
+    for (path, mtime_u, size_u, id, known_title, provider) in files_vec {
         let path_str = path.to_string_lossy().to_string();
         let (mtime, size) = (mtime_u as i64, size_u as i64);
         let forced = force_all
@@ -35154,7 +36940,13 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         // a turn ends or the session is renamed (it is rewritten whole, never
         // appended), so withholding its small final change would leave it
         // stale with no later change to bring the pass back.
-        if needs_index && !forced && provider != SessionProvider::Opencode {
+        if needs_index
+            && !forced
+            && !matches!(
+                provider,
+                SessionProvider::Opencode | SessionProvider::Antigravity
+            )
+        {
             if let Ok(Some((prev_size, indexed_at))) = search_index::indexed_meta(&conn, &path_str)
             {
                 let age = (unix_now_ms() / 1000) - indexed_at;
@@ -35187,22 +36979,27 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             stats.skipped += 1;
             continue;
         }
-        pending.push((path, mtime, size, id, forced, provider));
+        pending.push((path, mtime, size, id, known_title, forced, provider));
     }
     let total_pending = pending.len();
     let report_progress = total_pending > SESSION_PROGRESS_REPORT_THRESHOLD;
     let mut done = 0usize;
-    for (path, mtime, size, id, forced, provider) in pending {
+    for (path, mtime, size, id, known_title, forced, provider) in pending {
         if forced {
             stats.forced += 1;
         }
         let path_str = path.to_string_lossy().to_string();
         let extract_started = std::time::Instant::now();
-        let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
+        let title = known_title
+            .or_else(|| claude_session_title(&path).ok().flatten())
+            .unwrap_or(id);
         // search-index-opencode-sessions: an export is rewritten whole, so
         // earlier records can change while the file grows; the incremental
         // (append-only) extractor would keep stale text. Parse it cold.
-        let extracted = if provider == SessionProvider::Opencode {
+        let extracted = if matches!(
+            provider,
+            SessionProvider::Opencode | SessionProvider::Antigravity
+        ) {
             opencode_session_search_data(&path)
         } else {
             claude_session_search_data(&path)
@@ -35232,11 +37029,7 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             // token is in milliseconds; the row's date stays in seconds like
             // every other session (a ms value read as seconds dated the
             // burndown hit 58793-02-18).
-            date: if provider == SessionProvider::Opencode {
-                (mtime / 1000).to_string()
-            } else {
-                mtime.to_string()
-            },
+            date: search_row_date(provider, mtime),
             // Internal tab route; exact-session deep-link is deferred. The
             // expander derives id from the doc key (file basename) for /__turns.
             link: "/sessions".to_string(),
@@ -37225,7 +39018,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     let claude_needs = status["claudeNeedsSetup"].as_bool().unwrap_or(false);
     let codex_needs = status["codexNeedsSetup"].as_bool().unwrap_or(false);
     let opencode_needs = status["opencodeNeedsSetup"].as_bool().unwrap_or(false);
-    if !claude_needs && !codex_needs && !opencode_needs {
+    let antigravity_needs = status["antigravityNeedsSetup"].as_bool().unwrap_or(false);
+    if !claude_needs && !codex_needs && !opencode_needs && !antigravity_needs {
         append_bram_trace_line(app, "auto-setup", "op=skip reason=current");
         return;
     }
@@ -37239,8 +39033,8 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
                 app,
                 "auto-setup",
                 &format!(
-                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} wrote={} skipped={}",
-                    first_run, claude_needs, codex_needs, opencode_needs, wrote, skipped
+                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} antigravityNeeded={} wrote={} skipped={}",
+                    first_run, claude_needs, codex_needs, opencode_needs, antigravity_needs, wrote, skipped
                 ),
             );
             if first_run && wrote > 0 {
@@ -37712,6 +39506,12 @@ fn live_session_id<R: tauri::Runtime>(
                     .flatten()
                     .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p))
             }),
+        // No live-session cache and no discovery for Antigravity yet
+        // (antigravity-sessions-browser).
+        SessionProvider::Antigravity => latest_session_path_for_provider(app, provider)
+            .ok()
+            .flatten()
+            .and_then(|p| session_id_for_path(provider, &p)),
     }
 }
 
@@ -37757,6 +39557,9 @@ fn delete_session<R: tauri::Runtime>(
         .into_iter()
         .find(|session| session.id == id)
         .ok_or("session not found")?;
+    if provider == SessionProvider::Antigravity {
+        return Err("Antigravity sessions can't be deleted yet".to_string());
+    }
     // delete-live-session-leaves-stub (2026-10-27 20:49Z): deleting the
     // session its CLI was running let the CLI rewrite the file at exit, a
     // 1 KB stub that its partner then resumed into "No conversation found".
@@ -38005,6 +39808,11 @@ fn rename_session<R: tauri::Runtime>(
             // database, so the rename is a single UPDATE there.
             opencode_set_session_title(app, &session.id, trimmed)?;
         }
+        // A title store for agy was not identified in the specimen pack, and
+        // its sessions aren't listed yet (antigravity-sessions-browser).
+        SessionProvider::Antigravity => {
+            return Err("Antigravity sessions can't be renamed yet".to_string());
+        }
     }
     Ok(b"{\"ok\":true}".to_vec())
 }
@@ -38211,6 +40019,8 @@ fn latest_session_path<R: tauri::Runtime>(
         SessionProvider::Claude => latest_claude_session_path(app)?,
         SessionProvider::Codex => latest_codex_session_path(app)?,
         SessionProvider::Opencode => current_opencode_session_path(app)?,
+        // No session files to compare against the agent hint yet.
+        SessionProvider::Antigravity => latest_session_path_for_provider(app, provider)?,
     };
     let Some(path) = path else {
         return Ok(None);
@@ -38236,6 +40046,10 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
         SessionProvider::Opencode => current_opencode_session_path(app),
+        SessionProvider::Antigravity => Ok(discover_antigravity_sessions(app, Some(1))?
+            .into_iter()
+            .next()
+            .map(|s| s.path)),
     }
 }
 
@@ -39349,6 +41163,7 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         None => "",
     };
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -39715,6 +41530,7 @@ fn read_conversation_state<R: tauri::Runtime>(
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         None => "",
     };
     let Some((path, mtime_ms, len)) = resolve_conversation_path_meta(app, preferred)? else {
@@ -42935,7 +44751,11 @@ fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
     let tn = text_joined.trim_start();
     let summary = st_tag_value(tn, "summary");
     let display = if summary.is_empty() {
-        st_cap_chars(tn, 300)
+        let stripped = tn
+            .strip_prefix("[SYSTEM NOTIFICATION]")
+            .map(str::trim_start)
+            .unwrap_or(tn);
+        st_cap_chars(stripped, 300)
     } else {
         summary.clone()
     };
@@ -44557,6 +46377,7 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Claude) => "claude",
         Some(SessionProvider::Opencode) => "opencode",
+        Some(SessionProvider::Antigravity) => "antigravity",
         None => "unknown",
     };
     // session-size-note-not-warning (Jon, 2026-10-04): size is information,
@@ -45151,6 +46972,13 @@ fn stale_terminal_input_clear_for_provider(
     match provider {
         Some(SessionProvider::Codex) => ("\x15", "ctrl-u"),
         Some(SessionProvider::Opencode) => (OPENCODE_INPUT_CLEAR, "select-delete"),
+        // Antigravity CLI 1.4.12, captured 2026-10-31 at 120x40: Ctrl-U empties
+        // a one-line box, and is the only key tried that does. Esc leaves the
+        // text in place. A lone Ctrl-C leaves the text AND swaps the footer for
+        // "press ctrl+c again to exit", so the next Ctrl-C — this caller's
+        // retry, or a user's — would quit agy. Sent once, unlike OpenCode's
+        // two-write form.
+        Some(SessionProvider::Antigravity) => ("\x15", "ctrl-u"),
         _ => ("\x03", "ctrl-c"),
     }
 }
@@ -45181,6 +47009,16 @@ mod stale_terminal_input_clear_tests {
         assert_eq!(clear(Some(SessionProvider::Claude)), ("\x03", "ctrl-c"));
         assert_eq!(clear(Some(SessionProvider::Codex)), ("\x15", "ctrl-u"));
         assert_eq!(clear(None), ("\x03", "ctrl-c"));
+    }
+
+    #[test]
+    fn antigravity_clears_with_ctrl_u_and_never_a_lone_ctrl_c() {
+        // Captured from agy 1.4.12 on 2026-10-31: Ctrl-U emptied the box, Esc
+        // left the text, and a lone Ctrl-C left the text while arming
+        // "press ctrl+c again to exit" — so a second one would quit agy.
+        let (bytes, key) = clear(Some(SessionProvider::Antigravity));
+        assert_eq!((bytes, key), ("\x15", "ctrl-u"));
+        assert!(!bytes.contains('\x03'), "{bytes:?}");
     }
 }
 
@@ -48051,6 +49889,8 @@ fn prompt_shape_for_provider(
             provider == Some(SessionProvider::Codex)
         } else if opencode_only_prompt_shape(shape) {
             provider == Some(SessionProvider::Opencode)
+        } else if shape.starts_with("antigravity-") {
+            provider == Some(SessionProvider::Antigravity)
         } else {
             true
         }
@@ -48084,7 +49924,22 @@ fn pane_input_blocking_prompt(
                 | "opencode-dialog"
                 | "opencode-permission"
                 | "opencode-question"
+                | "antigravity-login"
+                | "antigravity-folder-trust"
+                | "antigravity-resume-picker"
+                | "antigravity-permission"
         )
+    })
+}
+
+fn pane_input_blocking_prompt_or_osc(
+    stripped_tail: &str,
+    provider: Option<SessionProvider>,
+    agy_permission_blocked: bool,
+) -> Option<&'static str> {
+    pane_input_blocking_prompt(stripped_tail, provider).or_else(|| {
+        (provider == Some(SessionProvider::Antigravity) && agy_permission_blocked)
+            .then_some("antigravity-permission")
     })
 }
 
@@ -48717,9 +50572,11 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     // answers it: at hooks-trust it chose "Review hooks", at folder-trust
     // "Trust and continue", at codex-update "Update now". The pane-send guard
     // already refuses sends at these shapes; the nudge had no such check.
-    let prompt_shape = pane_input_blocking_prompt(
+    let live_provider = current_provider(app);
+    let prompt_shape = pane_input_blocking_prompt_or_osc(
         &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
-        current_provider(app),
+        live_provider,
+        antigravity_permission_blocked_since_launch(live_provider),
     );
     if agent_boot_hold_active()
         || prompt_shape.is_some()
@@ -51454,6 +53311,53 @@ fn projected_turns_body<R: tauri::Runtime>(
     serialized
 }
 
+fn projected_turns_provider_label(path: &Path) -> &'static str {
+    if path.components().any(|c| c.as_os_str() == ".codex") {
+        "codex"
+    } else if path
+        .components()
+        .any(|c| c.as_os_str() == "opencode-sessions")
+    {
+        // opencode-sessions-browser: Bram's export of an OpenCode session.
+        "opencode"
+    } else if path
+        .components()
+        .any(|c| c.as_os_str() == ANTIGRAVITY_EXPORT_DIR)
+    {
+        "antigravity"
+    } else {
+        "claude"
+    }
+}
+
+fn search_session_hit_provider_and_id(
+    key: &str,
+    opencode_dir: Option<&Path>,
+    antigravity_dir: Option<&Path>,
+) -> (String, String) {
+    let path = std::path::Path::new(key);
+    let stem_id = || {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    if opencode_dir.is_some_and(|dir| is_opencode_export_path(path, dir)) {
+        ("opencode".to_string(), stem_id())
+    } else if antigravity_dir.is_some_and(|dir| is_opencode_export_path(path, dir)) {
+        ("antigravity".to_string(), stem_id())
+    } else if key.contains("/.codex/") || path.components().any(|c| c.as_os_str() == ".codex") {
+        let id = codex_session_meta(path)
+            .ok()
+            .flatten()
+            .map(|(id, _)| id)
+            .unwrap_or_default();
+        ("codex".to_string(), id)
+    } else {
+        ("claude".to_string(), stem_id())
+    }
+}
+
 // /__turns[?provider=claude|codex][&id=<session-id>][&latest=N] — the
 // projection route. No id: freshest session (provider-scoped when
 // given). With id: that session, resolved the same way
@@ -51559,17 +53463,7 @@ fn read_projected_turns<R: tauri::Runtime>(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let provider_label = if path.components().any(|c| c.as_os_str() == ".codex") {
-        "codex"
-    } else if path
-        .components()
-        .any(|c| c.as_os_str() == "opencode-sessions")
-    {
-        // opencode-sessions-browser: Bram's export of an OpenCode session.
-        "opencode"
-    } else {
-        "claude"
-    };
+    let provider_label = projected_turns_provider_label(&path);
     let serialize_started = std::time::Instant::now();
     let bytes = projected_turns_body(
         app,
@@ -52155,6 +54049,15 @@ const ENHANCE_SIDECAR_REL: &str = ".claude/bram-conventions.md";
 // filename so projects that haven't re-run Setup still register as
 // Bram-managed during the transition.
 const ENHANCE_SIDECAR_LEGACY_REL: &str = ".claude/xmlui-desktop-conventions.md";
+// agents-md-block-agent-neutral: the `AGENTS.md` block and its template keep
+// their Codex names, but every AGENTS.md reader loads the block: Codex,
+// OpenCode, and Antigravity (an always-on rule). So the template addresses
+// them all, and labels Codex's own mechanics (the filesystem channel) as
+// Codex's. Renaming would churn paths with no change in behaviour. The
+// opening "This repo is driven through Bram. The canonical worklist gate" is
+// load-bearing: codex_startup_context_text and the transcript bootstrap
+// markers recognize Bram's text by it, and agents_md_has_worklist_gate_intro
+// keys on its first sentence and `resources/worklist.json`.
 const ENHANCE_CODEX_AGENTS_REL: &str = "AGENTS.md";
 const ENHANCE_CODEX_BUNDLE_REL: &str = "shell/codex-startup-instructions.md";
 const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";
@@ -53572,6 +55475,153 @@ fn collect_opencode_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<
     out
 }
 
+// antigravity-context-files: what agy 1.4.12 loads from a project, per the
+// rules spike (docs/agent-specimens/antigravity/rules-and-transport.md §1):
+// AGENTS.md and GEMINI.md at the root, .agents/AGENTS.md, and
+// .agents/rules/*.md, but a rule only with `trigger: always_on` frontmatter.
+// agy skips any other rule (it logs "Invalid rule trigger" and nothing else),
+// so those are listed with a note. Plus the hook config Bram seeds. Nothing
+// global: no per-user file under ~/.gemini was captured, so none is claimed.
+fn collect_antigravity_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<ContextFile> {
+    match project_root(Some(app)) {
+        Some(root) => antigravity_context_files_in(&root),
+        None => Vec::new(),
+    }
+}
+
+fn antigravity_context_files_in(proj_root: &Path) -> Vec<ContextFile> {
+    let mut out: Vec<ContextFile> = Vec::new();
+    let mut push = |category: &'static str, path: PathBuf, display: String| {
+        if path.is_file() {
+            out.push(ContextFile {
+                category,
+                path,
+                display,
+                kind: Some("antigravity"),
+            });
+        }
+    };
+    for rel in ["AGENTS.md", "GEMINI.md", ".agents/AGENTS.md"] {
+        push("project", proj_root.join(rel), rel.to_string());
+    }
+    let mut rules: Vec<PathBuf> = std::fs::read_dir(proj_root.join(".agents").join("rules"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    rules.sort();
+    for path in rules {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let loaded = std::fs::read_to_string(&path)
+            .map(|text| antigravity_rule_is_always_on(&text))
+            .unwrap_or(false);
+        let display = if loaded {
+            format!(".agents/rules/{name}")
+        } else {
+            format!(".agents/rules/{name} (not loaded: no always_on trigger)")
+        };
+        push("rules", path, display);
+    }
+    push(
+        "hooks",
+        proj_root.join(ENHANCE_ANTIGRAVITY_HOOKS_REL),
+        ENHANCE_ANTIGRAVITY_HOOKS_REL.to_string(),
+    );
+    out
+}
+
+// Whether agy loads a rule: a leading `---` frontmatter block holding
+// `trigger: always_on` (quoted or not).
+fn antigravity_rule_is_always_on(text: &str) -> bool {
+    let mut lines = text.trim_start_matches('\u{feff}').lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return false;
+    }
+    for line in lines {
+        let line = line.trim();
+        if line == "---" {
+            return false;
+        }
+        if let Some(value) = line.strip_prefix("trigger:") {
+            return value.trim().trim_matches(['"', '\'']) == "always_on";
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod antigravity_context_files_tests {
+    use super::{antigravity_context_files_in, antigravity_rule_is_always_on};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-agy-context-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lists_what_agy_loads_and_notes_skipped_rules() {
+        let dir = scratch("lists");
+        let root = dir.as_path();
+        std::fs::create_dir_all(root.join(".agents/rules")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "a").unwrap();
+        std::fs::write(root.join("GEMINI.md"), "g").unwrap();
+        std::fs::write(root.join(".agents/AGENTS.md"), "inner").unwrap();
+        std::fs::write(root.join(".agents/hooks.json"), "{}").unwrap();
+        let rules = root.join(".agents/rules");
+        std::fs::write(rules.join("b-on.md"), "---\ntrigger: always_on\n---\nbody").unwrap();
+        std::fs::write(rules.join("a-bare.md"), "no frontmatter").unwrap();
+        std::fs::write(rules.join("c-manual.md"), "---\ntrigger: manual\n---\n").unwrap();
+        std::fs::write(rules.join("notes.txt"), "not a rule").unwrap();
+        let got: Vec<(&str, String)> = antigravity_context_files_in(root)
+            .into_iter()
+            .map(|f| (f.category, f.display))
+            .collect();
+        let want = vec![
+            ("project", "AGENTS.md".to_string()),
+            ("project", "GEMINI.md".to_string()),
+            ("project", ".agents/AGENTS.md".to_string()),
+            (
+                "rules",
+                ".agents/rules/a-bare.md (not loaded: no always_on trigger)".to_string(),
+            ),
+            ("rules", ".agents/rules/b-on.md".to_string()),
+            (
+                "rules",
+                ".agents/rules/c-manual.md (not loaded: no always_on trigger)".to_string(),
+            ),
+            ("hooks", ".agents/hooks.json".to_string()),
+        ];
+        assert_eq!(got, want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_project_lists_nothing() {
+        let dir = scratch("empty");
+        assert!(antigravity_context_files_in(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn brams_own_rule_header_reads_as_always_on() {
+        assert!(antigravity_rule_is_always_on(
+            &super::antigravity_rule_header(1, 2)
+        ));
+        assert!(antigravity_rule_is_always_on(
+            "---\ndescription: x\ntrigger: \"always_on\"\n---\n"
+        ));
+        assert!(!antigravity_rule_is_always_on("trigger: always_on\n"));
+        assert!(!antigravity_rule_is_always_on(
+            "---\n---\ntrigger: always_on\n"
+        ));
+    }
+}
+
 fn collect_context_files<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -53580,6 +55630,7 @@ fn collect_context_files<R: tauri::Runtime>(
         SessionProvider::Claude => collect_claude_context_files(app),
         SessionProvider::Codex => collect_codex_context_files(app),
         SessionProvider::Opencode => collect_opencode_context_files(app),
+        SessionProvider::Antigravity => collect_antigravity_context_files(app),
     }
 }
 
@@ -53748,6 +55799,15 @@ fn context_list<R: tauri::Runtime>(
             vec![
                 json!({ "key": "project", "label": "Project", "items": project }),
                 json!({ "key": "settings", "label": "Settings", "items": settings }),
+            ],
+        ),
+        SessionProvider::Antigravity => (
+            "antigravity",
+            "Antigravity Context shows what `agy` loads from this project: `AGENTS.md`, `GEMINI.md` and `.agents/AGENTS.md`, the rules in `.agents/rules/` (only those with `trigger: always_on` load), and the `.agents/hooks.json` configuration. Per-user files under `~/.gemini` aren't listed.",
+            vec![
+                json!({ "key": "project", "label": "Project", "items": project }),
+                json!({ "key": "rules", "label": "Rules", "items": rules }),
+                json!({ "key": "hooks", "label": "Hooks", "items": hooks }),
             ],
         ),
     };
@@ -54825,6 +56885,9 @@ struct SetupReasonInputs {
     opencode_wanted: bool,
     opencode_plugin_ok: bool,
     opencode_instructions_current: bool,
+    antigravity_wanted: bool,
+    antigravity_hooks_ok: bool,
+    antigravity_rules_current: bool,
     is_source_repo: bool,
 }
 
@@ -54832,9 +56895,16 @@ fn setup_reasons(active: Option<SessionProvider>, i: SetupReasonInputs) -> Vec<&
     let claude = matches!(active, None | Some(SessionProvider::Claude));
     let codex = matches!(active, None | Some(SessionProvider::Codex));
     let opencode = matches!(active, None | Some(SessionProvider::Opencode));
+    let antigravity = matches!(active, None | Some(SessionProvider::Antigravity));
     let mut out = Vec::new();
-    // core_installed gates every provider's verdict (OpenCode only where wanted).
-    if !i.core_installed && (claude || codex || (opencode && i.opencode_wanted)) {
+    // core_installed gates every provider's verdict (OpenCode and Antigravity
+    // only where wanted).
+    if !i.core_installed
+        && (claude
+            || codex
+            || (opencode && i.opencode_wanted)
+            || (antigravity && i.antigravity_wanted))
+    {
         out.push("not-installed");
     }
     if claude {
@@ -54865,6 +56935,14 @@ fn setup_reasons(active: Option<SessionProvider>, i: SetupReasonInputs) -> Vec<&
         }
         if !i.opencode_instructions_current {
             out.push("opencode-instructions-missing");
+        }
+    }
+    if antigravity && i.antigravity_wanted {
+        if !i.antigravity_hooks_ok {
+            out.push("antigravity-hook-missing");
+        }
+        if !i.antigravity_rules_current {
+            out.push("antigravity-rules-stale");
         }
     }
     out
@@ -55027,11 +57105,30 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         && (!core_installed
             || !(opencode_plugin_current || opencode_plugin_custom)
             || !opencode_instructions_current);
+    // antigravity-worklist-guard: agy's install is Bram's group in
+    // .agents/hooks.json, wherever agy can run. A file that isn't JSON raises
+    // no banner: Setup leaves it alone, so no Setup run could clear it (the
+    // reasoning for OpenCode's unparseable config). The self-test still fails
+    // it, since agy then runs without the guard.
+    let antigravity_wanted = antigravity_hooks_wanted(app, &proj);
+    let antigravity_hooks = antigravity_hooks_state(&proj);
+    // antigravity-signature-and-conventions: and the conventions' rule
+    // slices, which Setup rewrites whenever the conventions change.
+    let antigravity_rules_current = seeded_conventions_bytes(app)
+        .map(|c| antigravity_rules_current(&proj, &c))
+        .unwrap_or(false);
+    let antigravity_hooks_ok = !matches!(
+        antigravity_hooks,
+        AntigravityHooksState::Missing | AntigravityHooksState::Stale
+    );
+    let antigravity_needs_setup = antigravity_wanted
+        && (!core_installed || !antigravity_rules_current || !antigravity_hooks_ok);
     let provider_needs_setup = provider_needs_setup_for(
         active_provider,
         claude_needs_setup,
         codex_needs_setup,
         opencode_needs_setup,
+        antigravity_needs_setup,
     );
     let setup_reasons_list = setup_reasons(
         active_provider,
@@ -55046,6 +57143,9 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
             opencode_wanted: opencode_plugin_wanted(app, &proj),
             opencode_plugin_ok: opencode_plugin_current || opencode_plugin_custom,
             opencode_instructions_current,
+            antigravity_wanted,
+            antigravity_hooks_ok,
+            antigravity_rules_current,
             is_source_repo,
         },
     );
@@ -55062,6 +57162,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
         Some(SessionProvider::Opencode) => json!("opencode"),
+        Some(SessionProvider::Antigravity) => json!("antigravity"),
         None => serde_json::Value::Null,
     };
     // Mis-launch signals. Bram manages whatever directory it is started from,
@@ -55158,6 +57259,10 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "opencodePluginCurrent": opencode_plugin_current,
         "opencodePluginCustom": opencode_plugin_custom,
         "opencodeInstructionsCurrent": opencode_instructions_current,
+        "antigravityNeedsSetup": antigravity_needs_setup,
+        "antigravityWanted": antigravity_wanted,
+        "antigravityHooks": antigravity_hooks.as_str(),
+        "antigravityRulesCurrent": antigravity_rules_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
         "claudeMd": claude_md_has_marker,
@@ -55892,6 +57997,21 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     if opencode_plugin_wanted(app, &proj) {
         seed_opencode_instructions(&proj, is_source_repo, &mut wrote, &mut skipped)?;
     }
+    // antigravity-worklist-guard: agy's guard registration, Bram's group in
+    // .agents/hooks.json. Runs on the source repo too, as OpenCode's plugin
+    // does. The link exists here: Setup refused above if it couldn't make it.
+    // antigravity-signature-and-conventions: the conventions as always-on
+    // rules, under the same "wanted" rule. The source repo gets them too, cut
+    // from app/__shell/conventions.md (its .gitignore covers them), as
+    // OpenCode's `instructions` there name that file.
+    if antigravity_hooks_wanted(app, &proj) {
+        if let Some(command) = expected_antigravity_guard_command() {
+            seed_antigravity_hooks(&proj, &command, &mut wrote, &mut skipped)?;
+        }
+        let conventions = seeded_conventions_bytes(app)
+            .ok_or_else(|| "conventions template not found".to_string())?;
+        seed_antigravity_rules(&proj, &conventions, &mut wrote, &mut skipped)?;
+    }
 
     // issue-227: surface stale legacy-hook references in user-global settings.
     // These block the #217 shim prune; Setup cannot fix them, only name them.
@@ -56239,6 +58359,727 @@ mod opencode_instructions_tests {
         assert_eq!(
             instructions(&dir),
             vec!["app/__shell/conventions.md", "docs/developing-bram.md"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// antigravity-worklist-guard: agy's guard registration is a named group in the
+// project's .agents/hooks.json, the workspace hooks file agy reads (as do the
+// Antigravity App and IDE). The file maps group names to their events, so
+// Bram owns one group and a user's own groups are kept. The global
+// ~/.gemini/config/hooks.json was rejected: it applies to every project, and
+// the guard must know which project a call belongs to. agy has no untracked
+// local hooks file, so in a project that tracks .agents/hooks.json, Setup's
+// group (an absolute path to the guard) changes a tracked file, as OpenCode's
+// `instructions` entry does.
+const ENHANCE_ANTIGRAVITY_HOOKS_REL: &str = ".agents/hooks.json";
+const ANTIGRAVITY_HOOKS_GROUP: &str = "bram-worklist-guard";
+// The tools that change files in agy 1.4.12 (PreToolUse.jsonl in the specimen
+// pack), plus `call_mcp_tool`, the tool name captured for MCP server calls on
+// both global and plugin MCP servers (agy-guard-mcp-coverage). `write_file`
+// also takes `Append` and `run_command` also takes `IsDaemon`. The other tools
+// `agy -p` listed on 2026-10-31 are manage_task, read_file, ask_question,
+// search_web, invoke_subagent, define_subagent, manage_subagents, send_message
+// and schedule. That list wasn't complete (it left out `call_mcp_tool`).
+// Subagents need no matcher of their own: their writes reach this hook as
+// `write_file` (docs/agent-specimens/antigravity/hooks/failure-posture/posture.md).
+const ANTIGRAVITY_GUARD_MATCHER: &str = "^(write_file|edit_file|run_command|call_mcp_tool)$";
+// agy kills a hook at its timeout and blocks the call (the 2026-10-31 spike),
+// so this only bounds a hung guard. Codex's registration uses 10 s too.
+const ANTIGRAVITY_GUARD_TIMEOUT_SECS: u64 = 10;
+
+fn expected_antigravity_guard_command() -> Option<String> {
+    guard_link_if_installed().map(|link| antigravity_guard_command(&link))
+}
+
+// What agy runs. agy lets a tool call through when its hook exits 0 with
+// empty output (the 2026-10-31 spike), and that is exactly what a guard that
+// doesn't know `antigravity-worklist` does: Bram 0.8.1's prints
+// "unknown hook" to stderr and exits 0. ~/.bram/bram-guard follows whichever
+// running Bram re-pointed it last, so with an older Bram running beside this
+// one, agy's writes would pass unchecked. The wrapper turns no decision into
+// a deny that says why, as OpenCode's plugin does with any non-decision.
+// agy runs hook commands through a shell (the spike's quoted `printf` hooks
+// worked). Windows keeps the bare command until a capture shows which shell
+// agy uses there.
+fn antigravity_guard_command(link: &Path) -> String {
+    let bare = guard::guard_hook_command(link, "antigravity-worklist");
+    if cfg!(windows) {
+        return bare;
+    }
+    format!(
+        "out=$({}); if [ -n \"$out\" ]; then printf '%s\\n' \"$out\"; else printf '%s\\n' '{}'; fi",
+        bare, ANTIGRAVITY_NO_DECISION_DENY
+    )
+}
+
+// Single-quoted in the shell, so no apostrophes.
+const ANTIGRAVITY_NO_DECISION_DENY: &str = r#"{"decision":"deny","reason":"Blocked: the Bram worklist guard gave no decision. The guard ~/.bram/bram-guard reaches is probably from an older Bram that predates Antigravity support. Update or relaunch every running Bram, then retry."}"#;
+
+fn antigravity_hooks_group(command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "PreToolUse": [{
+            "matcher": ANTIGRAVITY_GUARD_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": command,
+                "timeout": ANTIGRAVITY_GUARD_TIMEOUT_SECS,
+            }],
+        }],
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntigravityHooksState {
+    // No file, or no Bram group in it.
+    Missing,
+    Current,
+    // Bram's group differs from what Setup writes (an older command, or no
+    // guard link to compare with).
+    Stale,
+    // Not a JSON object. Setup leaves it alone and names it in `skipped`.
+    Unparseable,
+}
+
+impl AntigravityHooksState {
+    fn as_str(self) -> &'static str {
+        match self {
+            AntigravityHooksState::Missing => "missing",
+            AntigravityHooksState::Current => "current",
+            AntigravityHooksState::Stale => "stale",
+            AntigravityHooksState::Unparseable => "unparseable",
+        }
+    }
+}
+
+fn antigravity_hooks_state_of(text: Option<&str>, command: Option<&str>) -> AntigravityHooksState {
+    let Some(text) = text else {
+        return AntigravityHooksState::Missing;
+    };
+    let Some(value) = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .filter(|v| v.is_object())
+    else {
+        return AntigravityHooksState::Unparseable;
+    };
+    match (value.get(ANTIGRAVITY_HOOKS_GROUP), command) {
+        (None, _) => AntigravityHooksState::Missing,
+        (Some(group), Some(cmd)) if *group == antigravity_hooks_group(cmd) => {
+            AntigravityHooksState::Current
+        }
+        (Some(_), _) => AntigravityHooksState::Stale,
+    }
+}
+
+fn antigravity_hooks_state(proj: &Path) -> AntigravityHooksState {
+    let text = std::fs::read_to_string(proj.join(ENHANCE_ANTIGRAVITY_HOOKS_REL)).ok();
+    antigravity_hooks_state_of(
+        text.as_deref(),
+        expected_antigravity_guard_command().as_deref(),
+    )
+}
+
+// As for OpenCode's plugin: where agy can run (its CLI on the host's PATH) or
+// where Bram's group is already installed and so kept current. Projects whose
+// users never run agy get no .agents/hooks.json. The active agent counts too
+// (antigravity-provider-switch): the host PATH probe can miss a CLI the PTY's
+// login shell finds, and a user who picked Antigravity in the switcher has
+// asked for it by name.
+fn antigravity_hooks_wanted<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    matches!(
+        antigravity_hooks_state(proj),
+        AntigravityHooksState::Current | AntigravityHooksState::Stale
+    ) || agent_cli_on_path("agy")
+        || current_provider(app) == Some(SessionProvider::Antigravity)
+}
+
+// Writes Bram's group into .agents/hooks.json, creating the file when it is
+// absent and keeping every other group (keys may be re-sorted on rewrite, as
+// with .opencode/opencode.json). A file that isn't a JSON object is left
+// alone and reported in `skipped`. The caller decides whether agy is wanted.
+fn seed_antigravity_hooks(
+    proj: &Path,
+    command: &str,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let path = proj.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
+    let mut value = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) if v.is_object() => v,
+            _ => {
+                skipped.push(path.display().to_string());
+                return Ok(());
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+    };
+    let group = antigravity_hooks_group(command);
+    let Some(root) = value.as_object_mut() else {
+        return Ok(());
+    };
+    if root.get(ANTIGRAVITY_HOOKS_GROUP) == Some(&group) {
+        return Ok(());
+    }
+    root.insert(ANTIGRAVITY_HOOKS_GROUP.to_string(), group);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(&path, format!("{}\n", text))
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    wrote.push(path.display().to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+mod antigravity_hooks_tests {
+    use super::{
+        antigravity_guard_command, antigravity_hooks_group, antigravity_hooks_state_of,
+        seed_antigravity_hooks, AntigravityHooksState::*, ANTIGRAVITY_GUARD_MATCHER,
+        ANTIGRAVITY_HOOKS_GROUP, ENHANCE_ANTIGRAVITY_HOOKS_REL,
+    };
+
+    const CMD: &str = "\"/Users/example/.bram/bram-guard\" guard antigravity-worklist";
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-agy-hooks-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // The registered command, run the way agy runs it (a shell), against
+    // fake guards. The silent one is Bram 0.8.1's answer to a hook it
+    // doesn't know: "unknown hook" on stderr, exit 0, nothing on stdout.
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_turns_no_decision_into_a_deny() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let dir = scratch("wrapper");
+        let fake = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let run = |guard: &std::path::Path| -> serde_json::Value {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(antigravity_guard_command(guard))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(br#"{"toolCall":{"name":"write_file","args":{}}}"#)
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            serde_json::from_slice(&out.stdout).unwrap()
+        };
+        let silent = fake(
+            "silent",
+            "cat > /dev/null; echo \"bram guard: unknown hook 'antigravity-worklist'\" >&2",
+        );
+        let v = run(&silent);
+        assert_eq!(v["decision"], "deny");
+        assert!(v["reason"].as_str().unwrap().contains("older Bram"), "{v}");
+        // The payload reaches the guard, and a decision passes through as is.
+        let reader = fake(
+            "reader",
+            r#"grep -q write_file && echo '{"decision":"deny","reason":"saw write_file"}'"#,
+        );
+        assert_eq!(
+            run(&reader),
+            serde_json::json!({ "decision": "deny", "reason": "saw write_file" })
+        );
+        let allow = fake("allow", r#"cat > /dev/null; echo '{"decision":"allow"}'"#);
+        assert_eq!(run(&allow), serde_json::json!({ "decision": "allow" }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_reads_only_brams_group() {
+        let current = serde_json::json!({ ANTIGRAVITY_HOOKS_GROUP: antigravity_hooks_group(CMD) })
+            .to_string();
+        assert_eq!(antigravity_hooks_state_of(None, Some(CMD)), Missing);
+        assert_eq!(
+            antigravity_hooks_state_of(Some(r#"{"mine":{}}"#), Some(CMD)),
+            Missing
+        );
+        assert_eq!(
+            antigravity_hooks_state_of(Some(&current), Some(CMD)),
+            Current
+        );
+        let older = current.replace("antigravity-worklist", "antigravity-old");
+        assert_eq!(antigravity_hooks_state_of(Some(&older), Some(CMD)), Stale);
+        // No guard link: nothing to call Bram's group current against.
+        assert_eq!(antigravity_hooks_state_of(Some(&current), None), Stale);
+        assert_eq!(
+            antigravity_hooks_state_of(Some("not json"), Some(CMD)),
+            Unparseable
+        );
+        assert_eq!(
+            antigravity_hooks_state_of(Some("[]"), Some(CMD)),
+            Unparseable
+        );
+    }
+
+    #[test]
+    fn seed_merges_and_is_idempotent() {
+        let dir = scratch("merge");
+        let path = dir.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let users = serde_json::json!({
+            "my-logger": { "Stop": [{ "type": "command", "command": "echo done" }] }
+        });
+        std::fs::write(&path, users.to_string()).unwrap();
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(wrote.len(), 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["my-logger"], users["my-logger"],
+            "the user's group is kept"
+        );
+        assert_eq!(v[ANTIGRAVITY_HOOKS_GROUP], antigravity_hooks_group(CMD));
+        assert_eq!(antigravity_hooks_state_of(Some(&text), Some(CMD)), Current);
+        // A second run changes nothing.
+        let (mut wrote2, mut skipped2) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote2, &mut skipped2).unwrap();
+        assert!(wrote2.is_empty() && skipped2.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_creates_the_file_and_leaves_unparseable_alone() {
+        let dir = scratch("create");
+        let path = dir.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(wrote.len(), 1);
+        assert!(path.is_file());
+        std::fs::write(&path, "{ not json").unwrap();
+        let (mut wrote2, mut skipped2) = (Vec::new(), Vec::new());
+        seed_antigravity_hooks(&dir, CMD, &mut wrote2, &mut skipped2).unwrap();
+        assert!(wrote2.is_empty());
+        assert_eq!(skipped2.len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matcher_covers_every_pinned_pre_tool_use_specimen_and_marks_pre_mcp_stale() {
+        let alts: Vec<&str> = ANTIGRAVITY_GUARD_MATCHER
+            .strip_prefix("^(")
+            .and_then(|s| s.strip_suffix(")$"))
+            .expect("anchored alternation")
+            .split('|')
+            .collect();
+        assert!(alts.contains(&"call_mcp_tool"), "{alts:?}");
+        assert!(!alts.contains(&"read_file"), "{alts:?}");
+        let specimens =
+            include_str!("../../docs/agent-specimens/antigravity/hooks/payloads/PreToolUse.jsonl");
+        for line in specimens.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            let name = v["toolCall"]["name"].as_str().unwrap();
+            assert!(
+                alts.contains(&name),
+                "ANTIGRAVITY_GUARD_MATCHER missing specimen tool {name}"
+            );
+        }
+        let pre_mcp = serde_json::json!({
+            ANTIGRAVITY_HOOKS_GROUP: antigravity_hooks_group(CMD)
+        })
+        .to_string()
+        .replace(
+            ANTIGRAVITY_GUARD_MATCHER,
+            "^(write_file|edit_file|run_command)$",
+        );
+        assert_eq!(antigravity_hooks_state_of(Some(&pre_mcp), Some(CMD)), Stale);
+    }
+}
+
+// antigravity-signature-and-conventions: agy's always-on instruction channel.
+// agy 1.4.12 loads AGENTS.md, GEMINI.md and each `.agents/rules/*.md` whose
+// frontmatter says `trigger: always_on`; a rule without frontmatter is
+// rejected ("Invalid rule trigger"). It truncates a rule past 24,000 bytes of
+// what follows the frontmatter, silently but for a warning in its own log.
+// The seeded conventions are about 45 KB, so Setup cuts them at heading
+// boundaries into `.agents/rules/bram-conventions-<n>.md`. AGENTS.md's pointer
+// alone was rejected, as for OpenCode: following it is left to the model.
+// Evidence: docs/agent-specimens/antigravity/rules-and-transport.md.
+//
+// All always-on text shares a budget of about 60,000 bytes. Past it agy drops
+// the largest rule first, which is usually one of these slices; Bram's set
+// (the slices plus its AGENTS.md block) leaves about 8 KB for the user's own
+// always-on rules. Losing a slice costs guidance, not enforcement: the guard
+// in .agents/hooks.json still decides every write.
+const ENHANCE_ANTIGRAVITY_RULES_DIR_REL: &str = ".agents/rules";
+const ANTIGRAVITY_RULE_STEM: &str = "bram-conventions-";
+// Ownership, as for OpenCode's plugin: Setup rewrites or removes only slice
+// files carrying it, and a user's same-named rule is kept.
+const ANTIGRAVITY_RULE_MARKER: &str = "bram-managed";
+// agy's per-rule limit. Checked against the whole file, frontmatter included,
+// although agy counts only what follows the frontmatter. agy 1.4.12 expands
+// no `@` mention inside a rule (five forms tried), so a slice's size on disk
+// is the size agy loads.
+const ANTIGRAVITY_RULE_MAX_BYTES: usize = 24_000;
+// Two slices hold the conventions under their 45,000-character budget; more
+// are cut only if two can't each fit.
+const ANTIGRAVITY_RULE_MAX_SLICES: usize = 4;
+
+// Six lines: the frontmatter, a blank line, the marker, a blank line. The
+// setup harness strips them by count to reassemble the conventions.
+fn antigravity_rule_header(part: usize, parts: usize) -> String {
+    format!(
+        "---\ntrigger: always_on\n---\n\n<!-- {}: part {} of {} of Bram's conventions, cut to fit Antigravity's 24,000-byte rule limit. Setup rewrites this file; don't edit it. -->\n\n",
+        ANTIGRAVITY_RULE_MARKER, part, parts
+    )
+}
+
+// The rule files for the seeded conventions, whole (header and slice). Cuts
+// fall at the `##` / `###` heading nearest each equal share, never inside a
+// fenced block, so the slices concatenate back to `seeded` exactly. None when
+// no cut into ANTIGRAVITY_RULE_MAX_SLICES or fewer fits.
+fn antigravity_rule_slices(seeded: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if seeded.is_empty() {
+        return None;
+    }
+    let mut cuts: Vec<usize> = Vec::new();
+    let mut fenced = false;
+    let mut off = 0;
+    for line in seeded.split_inclusive(|b| *b == b'\n') {
+        if line.starts_with(b"```") {
+            fenced = !fenced;
+        } else if !fenced && off > 0 && (line.starts_with(b"## ") || line.starts_with(b"### ")) {
+            cuts.push(off);
+        }
+        off += line.len();
+    }
+    for n in 1..=ANTIGRAVITY_RULE_MAX_SLICES {
+        let mut bounds = vec![0usize];
+        for k in 1..n {
+            let target = seeded.len() * k / n;
+            let last = *bounds.last().unwrap_or(&0);
+            if let Some(&cut) = cuts
+                .iter()
+                .filter(|&&c| c > last)
+                .min_by_key(|&&c| c.abs_diff(target))
+            {
+                bounds.push(cut);
+            }
+        }
+        bounds.push(seeded.len());
+        let parts = bounds.len() - 1;
+        let slices: Vec<Vec<u8>> = bounds
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| {
+                let mut out = antigravity_rule_header(i + 1, parts).into_bytes();
+                out.extend_from_slice(&seeded[w[0]..w[1]]);
+                out
+            })
+            .collect();
+        if slices.iter().all(|s| s.len() <= ANTIGRAVITY_RULE_MAX_BYTES) {
+            return Some(slices);
+        }
+    }
+    None
+}
+
+fn antigravity_rule_path(proj: &Path, part: usize) -> PathBuf {
+    proj.join(ENHANCE_ANTIGRAVITY_RULES_DIR_REL)
+        .join(format!("{}{}.md", ANTIGRAVITY_RULE_STEM, part))
+}
+
+// The header's marker line, not a mention anywhere: the conventions' own text
+// names the skills' `bram-managed` marker, and so might a user's rule.
+fn antigravity_rule_is_bram_managed(bytes: &[u8]) -> bool {
+    let prefix = format!(
+        "---\ntrigger: always_on\n---\n\n<!-- {}:",
+        ANTIGRAVITY_RULE_MARKER
+    );
+    bytes.starts_with(prefix.as_bytes())
+}
+
+// Bram's slice files numbered past `parts`, left by a release that cut more.
+fn antigravity_stale_rule_files(proj: &Path, parts: usize) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(proj.join(ENHANCE_ANTIGRAVITY_RULES_DIR_REL)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.strip_prefix(ANTIGRAVITY_RULE_STEM)
+                .and_then(|r| r.strip_suffix(".md"))
+                .and_then(|d| d.parse::<usize>().ok())
+                .is_some_and(|k| {
+                    name == format!("{}{}.md", ANTIGRAVITY_RULE_STEM, k) && (k == 0 || k > parts)
+                })
+        })
+        .map(|e| e.path())
+        .filter(|p| {
+            std::fs::read(p)
+                .map(|b| antigravity_rule_is_bram_managed(&b))
+                .unwrap_or(false)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+// A user's rule under a slice's name counts as current, since Setup keeps it
+// and no Setup run could change it (the reasoning for OpenCode's custom
+// plugin). So does conventions text that can't be cut: Setup names it in
+// `skipped` instead.
+fn antigravity_rules_current(proj: &Path, seeded: &[u8]) -> bool {
+    let Some(slices) = antigravity_rule_slices(seeded) else {
+        return true;
+    };
+    slices.iter().enumerate().all(|(i, want)| {
+        match std::fs::read(antigravity_rule_path(proj, i + 1)) {
+            Ok(have) => have == *want || !antigravity_rule_is_bram_managed(&have),
+            Err(_) => false,
+        }
+    }) && antigravity_stale_rule_files(proj, slices.len()).is_empty()
+}
+
+// Writes each slice, refreshing Bram's own files and keeping a user's
+// same-named rule (reported in `skipped`), then removes Bram's slices
+// numbered past the current count. The caller decides whether agy is wanted.
+fn seed_antigravity_rules(
+    proj: &Path,
+    seeded: &[u8],
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let Some(slices) = antigravity_rule_slices(seeded) else {
+        skipped.push(format!(
+            "{}: the conventions can't be cut into {} or fewer rules of at most {} bytes, \
+             so Antigravity loads none of them",
+            ENHANCE_ANTIGRAVITY_RULES_DIR_REL,
+            ANTIGRAVITY_RULE_MAX_SLICES,
+            ANTIGRAVITY_RULE_MAX_BYTES
+        ));
+        return Ok(());
+    };
+    for (i, want) in slices.iter().enumerate() {
+        let path = antigravity_rule_path(proj, i + 1);
+        match std::fs::read(&path) {
+            Ok(have) if have == *want => continue,
+            Ok(have) if !antigravity_rule_is_bram_managed(&have) => {
+                skipped.push(path.display().to_string());
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        }
+        std::fs::write(&path, want).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        wrote.push(path.display().to_string());
+    }
+    for stale in antigravity_stale_rule_files(proj, slices.len()) {
+        std::fs::remove_file(&stale).map_err(|e| format!("remove {}: {}", stale.display(), e))?;
+        wrote.push(format!(
+            "deleted stale Antigravity rule {}",
+            stale.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod antigravity_rules_tests {
+    use super::{
+        antigravity_rule_header, antigravity_rule_path, antigravity_rule_slices,
+        antigravity_rules_current, seed_antigravity_rules, ANTIGRAVITY_RULE_MAX_BYTES,
+    };
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-agy-rules-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // What seeded_conventions_bytes produces: the version stamp, then the
+    // bundled conventions.
+    fn seeded_bundle() -> Vec<u8> {
+        let path: std::path::PathBuf = [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "app",
+            "__shell",
+            "conventions.md",
+        ]
+        .iter()
+        .collect();
+        let mut out = format!("<!-- bram v{} -->\n", env!("CARGO_PKG_VERSION")).into_bytes();
+        out.extend_from_slice(&std::fs::read(path).unwrap());
+        out
+    }
+
+    // A synthetic document: `sections` headed sections of `size` bytes each.
+    fn doc(sections: usize, size: usize) -> Vec<u8> {
+        let mut out = b"# Title\n\n".to_vec();
+        for s in 0..sections {
+            out.extend_from_slice(format!("## Section {}\n\n", s).as_bytes());
+            let line = format!("words for section {} that pad it out to size.\n", s);
+            let start = out.len();
+            while out.len() - start < size {
+                out.extend_from_slice(line.as_bytes());
+            }
+        }
+        out
+    }
+
+    fn body<'a>(slice: &'a [u8], part: usize, parts: usize) -> &'a [u8] {
+        let header = antigravity_rule_header(part, parts);
+        assert!(
+            slice.starts_with(header.as_bytes()),
+            "slice {} header",
+            part
+        );
+        &slice[header.len()..]
+    }
+
+    // The plan's checks, against the conventions Setup actually seeds: two
+    // always-on rules, each within agy's limit, cut at headings, and nothing
+    // dropped or added when the slices are put back together.
+    #[test]
+    fn bundled_conventions_cut_into_two_rules_that_reassemble() {
+        let seeded = seeded_bundle();
+        let slices = antigravity_rule_slices(&seeded).expect("the conventions cut");
+        assert_eq!(
+            slices.len(),
+            2,
+            "the docs and the setup harness expect bram-conventions-1.md and -2.md"
+        );
+        let mut joined: Vec<u8> = Vec::new();
+        for (i, s) in slices.iter().enumerate() {
+            assert!(
+                s.len() <= ANTIGRAVITY_RULE_MAX_BYTES,
+                "slice {} is {} bytes, over agy's {}-byte rule limit",
+                i + 1,
+                s.len(),
+                ANTIGRAVITY_RULE_MAX_BYTES
+            );
+            assert!(s.starts_with(b"---\ntrigger: always_on\n---\n"));
+            let b = body(s, i + 1, slices.len());
+            if i > 0 {
+                assert!(
+                    b.starts_with(b"## ") || b.starts_with(b"### "),
+                    "slice {} starts at a heading",
+                    i + 1
+                );
+            }
+            joined.extend_from_slice(b);
+        }
+        assert_eq!(joined, seeded, "the slices reassemble the conventions");
+    }
+
+    #[test]
+    fn cuts_balance_and_skip_fenced_headings() {
+        let small = doc(3, 100);
+        assert_eq!(antigravity_rule_slices(&small).unwrap().len(), 1);
+        // A heading-shaped line inside a fence, right at the midpoint, is
+        // never a cut.
+        let mut fenced = doc(4, 7_000);
+        let mid = fenced.len() / 2;
+        let at = mid + fenced[mid..].iter().position(|b| *b == b'\n').unwrap() + 1;
+        fenced.splice(at..at, b"```\n## not a heading\n```\n".iter().copied());
+        let slices = antigravity_rule_slices(&fenced).unwrap();
+        assert_eq!(slices.len(), 2);
+        assert!(body(&slices[1], 2, 2).starts_with(b"## Section 2\n"));
+        // Too big for two: three, each within the limit.
+        let big = doc(9, 5_500);
+        let slices = antigravity_rule_slices(&big).unwrap();
+        assert_eq!(slices.len(), 3);
+        assert!(slices.iter().all(|s| s.len() <= ANTIGRAVITY_RULE_MAX_BYTES));
+        // One section too big to fit any rule: no cut.
+        assert!(antigravity_rule_slices(&doc(1, 30_000)).is_none());
+    }
+
+    #[test]
+    fn seed_writes_then_is_idempotent() {
+        let dir = scratch("seed");
+        let seeded = doc(4, 7_000);
+        assert!(!antigravity_rules_current(&dir, &seeded));
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &seeded, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(wrote.len(), 2);
+        assert!(skipped.is_empty());
+        assert!(antigravity_rules_current(&dir, &seeded));
+        let first = std::fs::read(antigravity_rule_path(&dir, 1)).unwrap();
+        let (mut wrote2, mut skipped2) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &seeded, &mut wrote2, &mut skipped2).unwrap();
+        assert!(
+            wrote2.is_empty() && skipped2.is_empty(),
+            "second Setup writes nothing"
+        );
+        assert_eq!(
+            std::fs::read(antigravity_rule_path(&dir, 1)).unwrap(),
+            first
+        );
+        // New conventions make the slices stale until Setup runs.
+        let newer = doc(4, 7_100);
+        assert!(!antigravity_rules_current(&dir, &newer));
+        let (mut wrote3, mut skipped3) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &newer, &mut wrote3, &mut skipped3).unwrap();
+        assert_eq!(wrote3.len(), 2);
+        assert!(antigravity_rules_current(&dir, &newer));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_users_rule_is_kept_and_brams_extra_slices_go() {
+        let dir = scratch("owned");
+        let rules = dir.join(".agents/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        // Mentioning the marker in its body doesn't make a rule Bram's.
+        let mine = "---\ntrigger: always_on\n---\n\nmy own rule, about a bram-managed skill\n";
+        std::fs::write(rules.join("bram-conventions-2.md"), mine).unwrap();
+        // Left by a release that cut three: Bram's goes, a user's stays.
+        std::fs::write(
+            rules.join("bram-conventions-3.md"),
+            antigravity_rule_header(3, 3),
+        )
+        .unwrap();
+        std::fs::write(rules.join("bram-conventions-4.md"), mine).unwrap();
+        let seeded = doc(4, 7_000);
+        let (mut wrote, mut skipped) = (Vec::new(), Vec::new());
+        seed_antigravity_rules(&dir, &seeded, &mut wrote, &mut skipped).unwrap();
+        assert_eq!(skipped.len(), 1, "the user's -2 is reported, not rewritten");
+        assert_eq!(
+            std::fs::read_to_string(rules.join("bram-conventions-2.md")).unwrap(),
+            mine
+        );
+        assert!(!rules.join("bram-conventions-3.md").exists());
+        assert!(rules.join("bram-conventions-4.md").exists());
+        assert_eq!(wrote.len(), 2, "-1 written, -3 removed");
+        assert!(
+            antigravity_rules_current(&dir, &seeded),
+            "a kept user rule raises no banner"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -63772,6 +66613,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
             Some(SessionProvider::Claude) => "claude",
             Some(SessionProvider::Codex) => "codex",
             Some(SessionProvider::Opencode) => "opencode",
+            Some(SessionProvider::Antigravity) => "antigravity",
             None => "none",
         };
         if active != provider_label {
@@ -70990,20 +73832,24 @@ mod needs_you_tests {
     fn provider_needs_setup_none_falls_back_to_project_level() {
         // No provider active — the fresh/failure-path launch #320 is about.
         assert!(
-            provider_needs_setup_for(None, true, false, false),
+            provider_needs_setup_for(None, true, false, false, false),
             "claude needs → banner"
         );
         assert!(
-            provider_needs_setup_for(None, false, true, false),
+            provider_needs_setup_for(None, false, true, false, false),
             "codex needs → banner"
         );
         assert!(
-            provider_needs_setup_for(None, false, false, true),
+            provider_needs_setup_for(None, false, false, true, false),
             "opencode needs (only ever true where it's installed) → banner"
         );
-        assert!(provider_needs_setup_for(None, true, true, false));
         assert!(
-            !provider_needs_setup_for(None, false, false, false),
+            provider_needs_setup_for(None, false, false, false, true),
+            "antigravity needs (only ever true where agy can run) → banner"
+        );
+        assert!(provider_needs_setup_for(None, true, true, false, false));
+        assert!(
+            !provider_needs_setup_for(None, false, false, false, false),
             "none needs → no banner"
         );
         // Provider active — unchanged: exactly that provider's need.
@@ -71011,11 +73857,13 @@ mod needs_you_tests {
             Some(SessionProvider::Claude),
             true,
             false,
+            false,
             false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Claude),
             false,
+            true,
             true,
             true
         ));
@@ -71023,12 +73871,14 @@ mod needs_you_tests {
             Some(SessionProvider::Codex),
             false,
             true,
+            false,
             false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Codex),
             true,
             false,
+            true,
             true
         ));
         // opencode-worklist-guard: an OpenCode session answers for its plugin
@@ -71037,13 +73887,15 @@ mod needs_you_tests {
             Some(SessionProvider::Opencode),
             false,
             false,
-            true
+            true,
+            false
         ));
         assert!(!provider_needs_setup_for(
             Some(SessionProvider::Opencode),
             true,
             true,
-            false
+            false,
+            true
         ));
     }
 
@@ -72242,10 +75094,12 @@ fn iterate_feedback_draft_text<R: tauri::Runtime>(app: &AppHandle<R>, turn_text:
 fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
     // opencode-signature-and-conventions: OpenCode writes no transcript its
     // guard could read the phrase from either, so it takes Codex's
-    // host-side record.
+    // host-side record. antigravity-signature-and-conventions: so does agy,
+    // whose hook payload carries no Claude-shaped transcript_path; its guard
+    // reads the record through the same fresh_bypass().
     if !matches!(
         current_provider(app),
-        Some(SessionProvider::Codex | SessionProvider::Opencode)
+        Some(SessionProvider::Codex | SessionProvider::Opencode | SessionProvider::Antigravity)
     ) {
         return;
     }
@@ -76217,45 +79071,26 @@ fn route_request<R: tauri::Runtime>(
             .unwrap_or_default()
         };
         let enrich_started = std::time::Instant::now();
-        // search-index-opencode-sessions: OpenCode sessions are indexed from
-        // Bram's exports of them, which live in its cache, not under ~/.codex/,
-        // so they were labeled Claude (and their Switch went to Claude).
+        // search-index-opencode-sessions: OpenCode and Antigravity sessions are
+        // indexed from Bram's exports of them, which live in its cache, not
+        // under ~/.codex/, so without export-dir matching they fall through to
+        // Claude (breaking modal detail and Switch).
         let opencode_dir = opencode_export_dir(app).ok();
+        let antigravity_dir = antigravity_export_dir(app).ok();
         let enriched_hits = hits
             .iter()
             .map(|h| {
                 // Session doc key is the JSONL path. Recover the provider
-                // (Codex sessions live under ~/.codex/, OpenCode exports in
-                // Bram's cache) and the session id the expander needs:
-                // Claude's and OpenCode's is the file stem, but a Codex id
-                // lives inside the file (codex_session_meta).
+                // (Codex sessions live under ~/.codex/, OpenCode/Antigravity
+                // exports in Bram's cache) and the session id the expander
+                // needs: Claude's, OpenCode's and Antigravity's is the file
+                // stem, while a Codex id lives inside the file (codex_session_meta).
                 let (provider, id) = if h.kind == "session" {
-                    let path = std::path::Path::new(&h.key);
-                    if opencode_dir
-                        .as_deref()
-                        .is_some_and(|dir| is_opencode_export_path(path, dir))
-                    {
-                        let id = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("")
-                            .to_string();
-                        ("opencode".to_string(), id)
-                    } else if h.key.contains("/.codex/") {
-                        let id = codex_session_meta(path)
-                            .ok()
-                            .flatten()
-                            .map(|(id, _)| id)
-                            .unwrap_or_default();
-                        ("codex".to_string(), id)
-                    } else {
-                        let id = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("")
-                            .to_string();
-                        ("claude".to_string(), id)
-                    }
+                    search_session_hit_provider_and_id(
+                        &h.key,
+                        opencode_dir.as_deref(),
+                        antigravity_dir.as_deref(),
+                    )
                 } else {
                     (String::new(), String::new())
                 };
@@ -76391,20 +79226,28 @@ fn route_request<R: tauri::Runtime>(
         // (project CLAUDE.md + @-imports, ~/.claude memory/settings, project
         // .claude/hooks, ~/.codex files). Those live outside the project root,
         // so root containment doesn't fit — instead require the requested path
-        // to be a MEMBER of the enumerated set (union of both providers). This
+        // to be a MEMBER of the enumerated set (union of every provider's). This
         // preserves the read-home-config feature while blocking arbitrary reads
         // (~/.aws/credentials, /etc/passwd). Canonicalize both sides so symlinks
         // and `..` can't dodge the membership check.
+        // antigravity-context-files: the union was Claude's and Codex's only,
+        // written when they were the two providers, so a file only OpenCode's
+        // or Antigravity's list names (opencode.json, .agents/hooks.json, agy's
+        // rules) was listed in the tab but refused here.
         let requested = std::path::Path::new(&file_path)
             .canonicalize()
             .ok()
             .map(strip_unc_prefix);
-        let allowed: std::collections::HashSet<PathBuf> =
-            [SessionProvider::Claude, SessionProvider::Codex]
-                .into_iter()
-                .flat_map(|prov| collect_context_files(app, Some(prov)))
-                .filter_map(|cf| cf.path.canonicalize().ok().map(strip_unc_prefix))
-                .collect();
+        let allowed: std::collections::HashSet<PathBuf> = [
+            SessionProvider::Claude,
+            SessionProvider::Codex,
+            SessionProvider::Opencode,
+            SessionProvider::Antigravity,
+        ]
+        .into_iter()
+        .flat_map(|prov| collect_context_files(app, Some(prov)))
+        .filter_map(|cf| cf.path.canonicalize().ok().map(strip_unc_prefix))
+        .collect();
         let allowed_hit = requested
             .as_ref()
             .map(|r| allowed.contains(r))
@@ -79262,6 +82105,7 @@ fn guard_selftest_fixture() -> Result<PathBuf, String> {
         r#"{"kind":"","ids":[],"items":[]}"#,
     )?;
     w("src/covered.txt", "x\n")?;
+    std::fs::create_dir_all(dir.join(".agents")).map_err(|e| e.to_string())?;
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .current_dir(&dir)
@@ -79291,13 +82135,24 @@ fn guard_selftest_run_case(
 ) -> (String, String) {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = match std::process::Command::new(link)
-        .args(["guard", hook])
+    let mut cmd = std::process::Command::new(link);
+    cmd.args(["guard", hook])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // agy 1.4.12 spawns `.agents/hooks.json` hooks from `<workspace>/.agents`.
+    if hook.starts_with("antigravity") {
+        if let Some(ws) = payload
+            .pointer("/workspacePaths/0")
+            .and_then(|v| v.as_str())
+        {
+            let dot_agents = Path::new(ws).join(".agents");
+            if dot_agents.is_dir() {
+                cmd.current_dir(dot_agents);
+            }
+        }
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -79358,6 +82213,28 @@ fn guard_selftest_run_case(
             ),
         };
     }
+    // antigravity-worklist-guard: agy reads {"decision", "reason"} from
+    // stdout, exit 0. Empty output would let agy run the tool, so a missing
+    // decision fails here rather than passing as an allow.
+    if hook.starts_with("antigravity") {
+        if code != Some(0) {
+            return (
+                "error".to_string(),
+                format!("exit {:?}: {}", code, short(&stderr)),
+            );
+        }
+        let line = stdout.trim().lines().last().unwrap_or("");
+        let v: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
+        let reason = v.get("reason").and_then(|m| m.as_str()).unwrap_or("");
+        return match v.get("decision").and_then(|d| d.as_str()) {
+            Some("allow") => ("allow".to_string(), String::new()),
+            Some("deny") => ("deny".to_string(), short(reason)),
+            _ => (
+                "error".to_string(),
+                format!("no decision: {}", short(&stdout)),
+            ),
+        };
+    }
     match code {
         Some(0) => ("allow".to_string(), String::new()),
         Some(2) => ("deny".to_string(), short(&stderr)),
@@ -79397,6 +82274,11 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
             );
             let opencode_signed = format!(
                 "Bram's OpenCode (Bram {}, main thread, selftest, {}, selftest) speaking from the Selftest project (github.com/example/bram-guard-selftest):\n\nguard self-test",
+                env!("CARGO_PKG_VERSION"),
+                os
+            );
+            let antigravity_signed = format!(
+                "Bram's Antigravity (Bram {}, main thread, selftest, {}, selftest) speaking from the Selftest project (github.com/example/bram-guard-selftest):\n\nguard self-test",
                 env!("CARGO_PKG_VERSION"),
                 os
             );
@@ -79545,6 +82427,79 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
                     "mcp": {"server": "filesystem", "tool": "write_file"},
                     "input": {"path": file("src/covered.txt"), "content": "y"}}),
                 ),
+                // antigravity-worklist-guard: agy 1.4.12's PreToolUse payloads,
+                // shaped as the specimen pack captured them. The project is
+                // `workspacePaths[0]`; there is no `cwd`. The signed forge
+                // case signs as `Antigravity`
+                // (antigravity-signature-and-conventions).
+                (
+                    "antigravity-write-covered",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "write_file", "args": {"Path": file("src/covered.txt"), "Content": "y"}}}),
+                ),
+                (
+                    "antigravity-write-uncovered",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "write_file", "args": {"Path": file("src/uncovered.txt"), "Content": "y"}}}),
+                ),
+                (
+                    "antigravity-edit-uncovered",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "edit_file", "args": {"Path": file("src/uncovered.txt"), "Target": "a", "Replacement": "b"}}}),
+                ),
+                (
+                    "antigravity-command-harmless",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "WaitMsBeforeAsync": 5000}}}),
+                ),
+                (
+                    "antigravity-forge-unsigned",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "gh issue comment 5 --body \"guard self-test\"", "WaitMsBeforeAsync": 5000}}}),
+                ),
+                (
+                    "antigravity-forge-signed",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": format!("gh issue comment 5 --body {}", serde_json::json!(antigravity_signed)), "WaitMsBeforeAsync": 5000}}}),
+                ),
+                (
+                    "antigravity-mcp-write-uncovered",
+                    "antigravity-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "call_mcp_tool", "args": {
+                        "ServerName": "filesystem", "ToolName": "write_file",
+                        "Arguments": {"path": file("src/uncovered.txt"), "content": "y"}}}}),
+                ),
+                (
+                    "antigravity-mcp-write-covered",
+                    "antigravity-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "conversationId": "selftest", "stepIdx": 1, "workspacePaths": [root],
+                    "toolCall": {"name": "call_mcp_tool", "args": {
+                        "ServerName": "filesystem", "ToolName": "write_file",
+                        "Arguments": {"path": file("src/covered.txt"), "content": "y"}}}}),
+                ),
             ];
             for (id, hook, expect, payload) in specs {
                 let (got, reason) = guard_selftest_run_case(link, hook, &payload);
@@ -79623,6 +82578,23 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     if !opencode_ok {
         failed.push("opencode-registration".to_string());
     }
+    // antigravity-worklist-guard: agy's registration is Bram's group in the
+    // project's .agents/hooks.json, checked wherever agy is wanted
+    // (antigravity_hooks_wanted, the rule Setup and antigravityNeedsSetup use).
+    // An unparseable file fails here although it raises no banner: agy then
+    // runs without the guard, and only a hand edit can fix it.
+    let (antigravity_wanted, antigravity_hooks) = project_root(Some(app))
+        .map(|proj| {
+            (
+                antigravity_hooks_wanted(app, &proj),
+                antigravity_hooks_state(&proj),
+            )
+        })
+        .unwrap_or((false, AntigravityHooksState::Missing));
+    let antigravity_ok = !antigravity_wanted || antigravity_hooks == AntigravityHooksState::Current;
+    if !antigravity_ok {
+        failed.push("antigravity-registration".to_string());
+    }
     let ok = failed.is_empty();
     append_bram_trace_line(
         app,
@@ -79677,6 +82649,11 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
             },
             "codex": { "ok": codex_ok },
             "opencode": { "ok": opencode_ok, "wanted": opencode_wanted, "custom": opencode_custom },
+            "antigravity": {
+                "ok": antigravity_ok,
+                "wanted": antigravity_wanted,
+                "state": antigravity_hooks.as_str(),
+            },
         },
         "ranAtMs": unix_now_ms(),
     })
@@ -79747,6 +82724,52 @@ mod guard_selftest_tests {
         let silent = fake("silent", "exit 0");
         assert_eq!(
             guard_selftest_run_case(&silent, "opencode-worklist", &payload).0,
+            "error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // antigravity-worklist-guard: agy reads {"decision", "reason"}. A guard
+    // that exits 0 with no output is the one case agy lets through (the
+    // 2026-10-31 spike), so the self-test must fail it, not pass it as allow.
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_answer_needs_a_decision() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "bram-guard-selftest-antigravity-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{}\n", body)).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let payload = serde_json::json!({ "toolCall": { "name": "write_file", "args": {} } });
+        let deny = fake(
+            "deny",
+            r#"echo '{"decision":"deny","reason":"Blocked: uncovered"}'"#,
+        );
+        assert_eq!(
+            guard_selftest_run_case(&deny, "antigravity-worklist", &payload),
+            ("deny".to_string(), "Blocked: uncovered".to_string())
+        );
+        let allow = fake("allow", r#"echo '{"decision":"allow"}'"#);
+        assert_eq!(
+            guard_selftest_run_case(&allow, "antigravity-worklist", &payload).0,
+            "allow"
+        );
+        let silent = fake("silent", "exit 0");
+        assert_eq!(
+            guard_selftest_run_case(&silent, "antigravity-worklist", &payload).0,
+            "error"
+        );
+        let crashed = fake("crashed", "exit 1");
+        assert_eq!(
+            guard_selftest_run_case(&crashed, "antigravity-worklist", &payload).0,
             "error"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -86981,6 +90004,2458 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
     }
 }
 
+// --- antigravity-turn-lifecycle ---------------------------------------------
+// agy reports its state over OSC 7501 (`state=<s>:app=antigravity`) once Bram's
+// PTY sets AGY_CLI_OSC7501=on (pty_spawn). Its hooks can't carry a turn end: an
+// interrupted turn fires no Stop and no PostInvocation. A completed turn ends
+// with `done`, and an interrupted one with `idle` (the 2026-10-31 spike and a
+// demo-instance turn, docs/agent-specimens/antigravity/osc7501-turns.md);
+// `idle` also comes at launch and at exit. A background command's turn ends at
+// `done` too, and when the command finishes agy starts a new turn on its own
+// (`working`, then `done`). Every launch first reports `blocked:kind=auth`
+// ("Sign in required"): a fresh launch, not a blocked turn. A turn's start and
+// end drive what opencode_turn_started / opencode_turn_ended drive for
+// OpenCode.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntigravityMark {
+    Working,
+    // `done` (completed) or `idle` (interrupted, or between launches).
+    Ended,
+    // `blocked:kind=auth`, which every launch reports first.
+    Launch,
+    // Any other Antigravity state, such as a permission `blocked`.
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntigravityTurnEvent {
+    Start,
+    End,
+    // A launch arrived with a turn still open (agy exited mid-turn).
+    Reset,
+}
+
+// The bodies of the complete OSC 7501 state markers in `buf`, in order, and
+// where an incomplete trailing marker begins (`buf.len()` when none does).
+fn osc7501_state_bodies(buf: &[u8]) -> (Vec<String>, usize) {
+    const OSC: &[u8] = b"\x1b]7501;state=";
+    let mut bodies = Vec::new();
+    let mut i = 0;
+    while let Some(off) = buf[i..].windows(OSC.len()).position(|w| w == OSC) {
+        let start = i + off;
+        let rest = &buf[start + OSC.len()..];
+        let Some(end) = rest.iter().position(|b| *b == 0x07 || *b == 0x1b) else {
+            return (bodies, start);
+        };
+        bodies.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+        i = start + OSC.len() + end + 1;
+    }
+    // A marker whose introducer itself is split: the tail is a prefix of it.
+    let from = i.max(buf.len().saturating_sub(OSC.len() - 1));
+    let partial = (from..buf.len()).find(|&k| OSC.starts_with(&buf[k..]));
+    (bodies, partial.unwrap_or(buf.len()))
+}
+
+fn antigravity_mark(body: &str) -> Option<AntigravityMark> {
+    let mut fields = body.split(':');
+    let state = fields.next()?;
+    let rest: Vec<&str> = fields.collect();
+    if !rest.contains(&"app=antigravity") {
+        return None;
+    }
+    Some(match state {
+        "working" => AntigravityMark::Working,
+        "done" | "idle" => AntigravityMark::Ended,
+        "blocked" if rest.contains(&"kind=auth") => AntigravityMark::Launch,
+        _ => AntigravityMark::Other,
+    })
+}
+
+// One marker's effect on whether a turn is open.
+fn antigravity_turn_step(
+    open: bool,
+    mark: AntigravityMark,
+) -> (bool, Option<AntigravityTurnEvent>) {
+    match mark {
+        AntigravityMark::Working if !open => (true, Some(AntigravityTurnEvent::Start)),
+        AntigravityMark::Working => (true, None),
+        AntigravityMark::Ended if open => (false, Some(AntigravityTurnEvent::End)),
+        AntigravityMark::Ended => (false, None),
+        AntigravityMark::Launch if open => (false, Some(AntigravityTurnEvent::Reset)),
+        AntigravityMark::Launch => (false, None),
+        AntigravityMark::Other => (open, None),
+    }
+}
+
+// The open turn's start (ms), from its first `working` marker.
+fn antigravity_turn_cell() -> &'static Mutex<Option<i64>> {
+    static CELL: OnceLock<Mutex<Option<i64>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+// The start of a marker split across PTY chunks, held for the next chunk.
+fn antigravity_osc_carry_cell() -> &'static Mutex<Vec<u8>> {
+    static CELL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn antigravity_latest_state_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn antigravity_permission_menu_shown_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn antigravity_after_footer_is_live(after_footer: &str) -> bool {
+    let squashed: String = after_footer
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    !squashed.contains("?forshortcuts")
+        && !squashed.contains("────")
+        && squashed.chars().count() <= 120
+}
+
+fn antigravity_find_option_marker(text: &str, number: usize) -> Option<usize> {
+    let marker = format!("{number}. ");
+    let mut offset = 0;
+    while let Some(rel) = text[offset..].find(&marker) {
+        let at = offset + rel;
+        if at == 0 || matches!(text.as_bytes()[at - 1], b' ' | b'>') {
+            return Some(at);
+        }
+        offset = at + marker.len();
+    }
+    None
+}
+
+fn antigravity_rfind_option_marker(text: &str, number: usize) -> Option<usize> {
+    let marker = format!("{number}. ");
+    let mut end = text.len();
+    while let Some(at) = text[..end].rfind(&marker) {
+        if at == 0 || matches!(text.as_bytes()[at - 1], b' ' | b'>') {
+            return Some(at);
+        }
+        end = at;
+    }
+    None
+}
+
+fn antigravity_parse_options(option_text: &str) -> Vec<MenuOption> {
+    let mut options = Vec::new();
+    let mut offset = 0;
+    for number in 1..=9 {
+        let Some(rel) = antigravity_find_option_marker(&option_text[offset..], number) else {
+            if !options.is_empty() {
+                break;
+            }
+            continue;
+        };
+        let value_start = offset + rel + format!("{number}. ").len();
+        let after = &option_text[value_start..];
+        let next_rel = (number + 1..=9)
+            .filter_map(|n| antigravity_find_option_marker(after, n))
+            .min();
+        let raw_end = next_rel.unwrap_or(after.len());
+        let label = after[..raw_end]
+            .trim()
+            .trim_start_matches('>')
+            .trim_end_matches('>')
+            .trim();
+        let label = label.split("↑/↓").next().unwrap_or(label).trim();
+        if label.is_empty() {
+            break;
+        }
+        options.push(MenuOption {
+            key: number.to_string(),
+            label: label.to_string(),
+            answer_keys: Some(number.to_string()),
+            description: None,
+        });
+        offset = value_start + raw_end;
+    }
+    options
+}
+
+fn antigravity_permission_menu(
+    provider_is_antigravity: bool,
+    latest_state: Option<&str>,
+    tail: &str,
+) -> Option<PtyMenu> {
+    const TITLES: &[&str] = &[
+        "Run this command?",
+        "Allow creation of this file?",
+        "Accept this file edit?",
+        "Allow calling this tool?",
+    ];
+    const NAV_FOOTER: &str = "↑/↓ Navigate";
+
+    if !provider_is_antigravity || !latest_state.is_some_and(antigravity_permission_state) {
+        return None;
+    }
+    // agy draws backspaces before an option whose predecessor wrapped
+    // ("'jq' \x08\x083. Yes", permission-wrapped-options-44x67). collapse_tail
+    // keeps them, and an option number after one wouldn't be recognized, which
+    // lost options 3 and 4, "No, cancel" among them.
+    let tail: String = tail
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let tail = tail.as_str();
+    if matches!(
+        terminal_attention_prompt_shape(tail),
+        Some("antigravity-folder-trust" | "antigravity-login" | "antigravity-resume-picker")
+    ) {
+        return None;
+    }
+
+    // 1. Newest known title (`rfind`), provided that dialog is still the live
+    //    bottom of the screen (not an earlier answered dialog followed by
+    //    composer chrome or a later titleless dialog). Options end at the
+    //    "↑/↓ Navigate" footer or at "esc to cancel". Every capture draws one
+    //    of them, full and short screens included. With neither, the dialog
+    //    is still being painted (the state marker comes first, and the paint
+    //    spans chunks), so wait: a menu now would show partial options.
+    let latest_title = TITLES
+        .iter()
+        .filter_map(|&t| tail.rfind(t).map(|at| (t, at)))
+        .max_by_key(|(_, at)| *at);
+    if let Some((title, title_at)) = latest_title {
+        let after_title = &tail[title_at + title.len()..];
+        let option_slice = if let Some(nav_rel) = after_title.find(NAV_FOOTER) {
+            antigravity_after_footer_is_live(&after_title[nav_rel + NAV_FOOTER.len()..])
+                .then_some(&after_title[..nav_rel])
+        } else if let Some(esc_rel) = after_title.find("esc to cancel") {
+            antigravity_after_footer_is_live(&after_title[esc_rel + "esc to cancel".len()..])
+                .then_some(&after_title[..esc_rel])
+        } else {
+            None
+        };
+        if let Some(option_text) = option_slice {
+            let options = antigravity_parse_options(option_text);
+            if !options.is_empty() {
+                let before_title = &tail[..title_at];
+                let dialog_start = std::iter::once(NAV_FOOTER)
+                    .chain(TITLES.iter().copied())
+                    .filter_map(|m| before_title.rfind(m).map(|i| i + m.len()))
+                    .max()
+                    .unwrap_or(0);
+                let prefix = &before_title[dialog_start..];
+                // antigravity-live-check-fixes: the subject is informational
+                // and never gates the menu.
+                let (subject, reason) = if title == "Run this command?" {
+                    let subject = prefix
+                        .rsplit_once("Requesting permission for:")
+                        .map(|(_, s)| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let reason = prefix
+                        .rsplit_once("Reason:")
+                        .map(|(_, s)| {
+                            s.split("Requesting permission for:")
+                                .next()
+                                .unwrap_or(s)
+                                .trim()
+                                .to_string()
+                        })
+                        .filter(|s| !s.is_empty());
+                    (subject, reason)
+                } else if title == "Allow calling this tool?" {
+                    antigravity_mcp_subject_and_reason(prefix)
+                } else {
+                    (antigravity_file_subject(prefix), None)
+                };
+                let text = [Some(title.to_string()), subject, reason]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Some(PtyMenu {
+                    tool: "Antigravity permission".into(),
+                    text,
+                    options,
+                    prompt_id: None,
+                    tool_call_signature: None,
+                    tool_call_diff: None,
+                    tool_call_content: None,
+                    cache_source: None,
+                    at_host_ms: None,
+                    signature_source: None,
+                });
+            }
+        }
+    }
+
+    // 2. Titleless fallback (e.g. 46x12, where Ink clips the dialog's title
+    //    and top option off the screen): require the live permission footer
+    //    ("↑/↓ Navigate · tab Amend") so an OSC marker arriving a chunk before
+    //    the dialog paint cannot misread an assistant markdown list, then read
+    //    the contiguous numbered options leading into that footer.
+    let nav_at = tail.rfind(NAV_FOOTER)?;
+    if !antigravity_after_footer_is_live(&tail[nav_at + NAV_FOOTER.len()..]) {
+        return None;
+    }
+    let footer_sq: String = tail[nav_at..]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    if !footer_sq.starts_with("↑/↓navigate·tabamend") {
+        return None;
+    }
+    let before_nav = &tail[..nav_at];
+    let cut = [NAV_FOOTER, "esc to cancel", "────"]
+        .into_iter()
+        .chain(TITLES.iter().copied())
+        .filter_map(|sep| before_nav.rfind(sep).map(|i| i + sep.len()))
+        .max()
+        .unwrap_or(0);
+    let window = &before_nav[cut..];
+    const SPINNERS: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+    let mut rev_options: Vec<(usize, String)> = Vec::new();
+    let mut end = window.len();
+    for number in (1..=9).rev() {
+        let Some(at) = antigravity_rfind_option_marker(&window[..end], number) else {
+            if !rev_options.is_empty() {
+                break;
+            }
+            continue;
+        };
+        if let Some(&(prev_num, _)) = rev_options.last() {
+            if number + 1 != prev_num {
+                break;
+            }
+        }
+        let val_start = at + format!("{number}. ").len();
+        let label = window[val_start..end]
+            .trim()
+            .trim_start_matches('>')
+            .trim_end_matches('>')
+            .trim();
+        if label.is_empty() || label.chars().count() > 260 || label.contains(SPINNERS) {
+            if !rev_options.is_empty() {
+                break;
+            }
+            continue;
+        }
+        rev_options.push((number, label.to_string()));
+        end = at;
+    }
+    if rev_options.is_empty() {
+        return None;
+    }
+    rev_options.reverse();
+    let options = rev_options
+        .into_iter()
+        .map(|(number, label)| MenuOption {
+            key: number.to_string(),
+            label,
+            answer_keys: Some(number.to_string()),
+            description: None,
+        })
+        .collect();
+    Some(PtyMenu {
+        tool: "Antigravity permission".into(),
+        text: "Permission required (top of dialog scrolled off — check terminal for full details)"
+            .into(),
+        options,
+        prompt_id: None,
+        tool_call_signature: None,
+        tool_call_diff: None,
+        tool_call_content: None,
+        cache_source: None,
+        at_host_ms: None,
+        signature_source: None,
+    })
+}
+
+// The file a creation or edit approval names: after the "Create file" /
+// "Pending edit" header (and any rule run), up to the first of the diff stat
+// (" +1"), a diff line (" 1 + …", " 1 - …") or the title. agy 1.4.12 cuts a
+// long path off at the terminal width, and the stat with it, so a cut path is
+// returned as drawn.
+fn antigravity_file_subject(prefix: &str) -> Option<String> {
+    let (at, len) = ["Create file", "Pending edit"]
+        .into_iter()
+        .filter_map(|header| prefix.rfind(header).map(|at| (at, header.len())))
+        .max_by_key(|(at, _)| *at)?;
+    let body = prefix[at + len..].trim_start_matches(|c: char| c == '─' || c.is_whitespace());
+    let mut end = body.len();
+    for (i, c) in body.char_indices() {
+        if c != ' ' {
+            continue;
+        }
+        let rest = &body[i + 1..];
+        let stat = rest
+            .strip_prefix('+')
+            .is_some_and(|r| r.starts_with(|d: char| d.is_ascii_digit()));
+        let digits = rest.chars().take_while(|d| d.is_ascii_digit()).count();
+        let diff_line =
+            digits > 0 && (rest[digits..].starts_with(" + ") || rest[digits..].starts_with(" - "));
+        if stat || diff_line {
+            end = i;
+            break;
+        }
+    }
+    let subject = body[..end].trim();
+    (!subject.is_empty()).then(|| subject.to_string())
+}
+
+// The `<server>/<tool>` line immediately above "Allow calling this tool?", plus
+// any `Reason:` line inside the `MCP` header block (which may omit `─` when Ink
+// reuses the composer's horizontal rule row, `mcp-approval-reason.raw`).
+fn antigravity_mcp_subject_and_reason(prefix: &str) -> (Option<String>, Option<String>) {
+    let trimmed = prefix.trim();
+    let (before_subject, subject) = match trimmed.rsplit_once(char::is_whitespace) {
+        Some((before, tok)) if tok.contains('/') => (before.trim_end(), Some(tok.to_string())),
+        _ if trimmed.contains('/') && !trimmed.chars().any(char::is_whitespace) => {
+            ("", Some(trimmed.to_string()))
+        }
+        _ => (trimmed, None),
+    };
+    let header_after_mcp = ["MCP ─", "MCP Reason:"]
+        .into_iter()
+        .filter_map(|hdr| before_subject.rfind(hdr).map(|at| at + "MCP".len()))
+        .max()
+        .map(|after_mcp| &before_subject[after_mcp..]);
+    let reason = header_after_mcp
+        .map(|body| body.trim_start_matches(|c: char| c == '─' || c.is_whitespace()))
+        .and_then(|body| body.strip_prefix("Reason:"))
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    (subject, reason)
+}
+
+// Past this the transcript isn't the live session's.
+const ANTIGRAVITY_IN_FLIGHT_MAX_AGE_MS: u128 = 300_000;
+// Larger files get a path and no diff: this runs on the PTY reader thread.
+const ANTIGRAVITY_MAX_DIFF_FILE_BYTES: u64 = 512 * 1024;
+
+// What a file dialog was enriched with, computed once per dialog. The key is
+// the dialog's unenriched text. It's cleared when the menu clears, because two
+// dialogs in a row can have identical text.
+#[derive(Clone)]
+struct AntigravityMenuEnrichment {
+    key: String,
+    text: String,
+    signature: Option<String>,
+    diff: Option<String>,
+}
+
+fn antigravity_enrichment_cell() -> &'static Mutex<Option<AntigravityMenuEnrichment>> {
+    static CELL: OnceLock<Mutex<Option<AntigravityMenuEnrichment>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn clear_antigravity_enrichment() {
+    if let Ok(mut g) = antigravity_enrichment_cell().lock() {
+        *g = None;
+    }
+}
+
+// Antigravity flushes the `PLANNER_RESPONSE` record (carrying `tool_calls`) before painting the
+// permission prompt and appends one `GENERIC` record as each call finishes, so
+// `tool_calls[completed_generics]` is the call currently held at the prompt.
+fn antigravity_in_flight_tool_from_transcript_str(source: &str) -> Option<PendingToolCall> {
+    let mut in_flight: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut completed = 0usize;
+    for line in source.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match record.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "USER_INPUT" | "CHECKPOINT" => {
+                in_flight.clear();
+                completed = 0;
+            }
+            "PLANNER_RESPONSE" => {
+                in_flight.clear();
+                completed = 0;
+                if let Some(calls) = record.get("tool_calls").and_then(|v| v.as_array()) {
+                    for call in calls {
+                        let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let args = call
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        in_flight.push(antigravity_translate_tool_call(name, &args));
+                    }
+                }
+            }
+            "GENERIC" => {
+                completed += 1;
+            }
+            _ => {}
+        }
+    }
+    let (name, input) = in_flight.get(completed)?.clone();
+    matches!(name.as_str(), "Edit" | "Write").then_some(PendingToolCall {
+        name,
+        input,
+        id: String::new(),
+    })
+}
+
+fn antigravity_in_flight_tool_for_project(root: &Path) -> Option<PendingToolCall> {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let (id, _, _) = antigravity_summary_rows(&canonical.to_string_lossy())
+        .into_iter()
+        .next()?;
+    let logs = antigravity_data_dir()?
+        .join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs");
+    let full = logs.join("transcript_full.jsonl");
+    let regular = logs.join("transcript.jsonl");
+    let source = match (regular.metadata().ok(), full.metadata().ok()) {
+        (_, Some(b)) if b.len() > 0 => full,
+        (Some(_), _) => regular,
+        _ => return None,
+    };
+    let modified = std::fs::metadata(&source).ok()?.modified().ok()?;
+    if modified.elapsed().ok()?.as_millis() > ANTIGRAVITY_IN_FLIGHT_MAX_AGE_MS {
+        return None;
+    }
+    let text = std::fs::read_to_string(&source).ok()?;
+    antigravity_in_flight_tool_from_transcript_str(&text)
+}
+
+fn antigravity_subject_matches_path(subject: &str, file_path: &str) -> bool {
+    let s = subject.trim();
+    if s.is_empty() {
+        return true;
+    }
+    file_path == s || file_path.starts_with(s) || file_path.ends_with(s)
+}
+
+fn antigravity_tool_call_diff(
+    call: &PendingToolCall,
+    project_root: Option<&Path>,
+) -> Option<String> {
+    use similar::TextDiff;
+    let field = |k: &str| call.input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let file_path = field("file_path");
+    let display_path = if file_path.is_empty() {
+        String::new()
+    } else if let Some(root) = project_root {
+        match Path::new(file_path).strip_prefix(root) {
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => file_path.trim_start_matches('/').to_string(),
+        }
+    } else {
+        file_path.trim_start_matches('/').to_string()
+    };
+    let header_old_rel = if display_path.is_empty() {
+        "a".to_string()
+    } else {
+        format!("a/{display_path}")
+    };
+    let header_new_rel = if display_path.is_empty() {
+        "b".to_string()
+    } else {
+        format!("b/{display_path}")
+    };
+    match call.name.as_str() {
+        "Edit" => {
+            let old_string = field("old_string");
+            let new_string = field("new_string");
+            if old_string.is_empty() && new_string.is_empty() {
+                return None;
+            }
+            let diff = TextDiff::from_lines(old_string, new_string)
+                .unified_diff()
+                .context_radius(3)
+                .missing_newline_hint(false)
+                .header(&header_old_rel, &header_new_rel)
+                .to_string();
+            (!diff.is_empty()).then_some(diff)
+        }
+        "Write" => {
+            let content = field("content");
+            let append = call
+                .input
+                .get("append")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if std::fs::metadata(file_path).is_ok_and(|m| m.len() > ANTIGRAVITY_MAX_DIFF_FILE_BYTES)
+            {
+                return None;
+            }
+            let existing = (!file_path.is_empty())
+                .then(|| std::fs::read_to_string(file_path).ok())
+                .flatten();
+            let (old_text, new_text, h_old): (String, String, &str) = match (append, existing) {
+                (true, Some(ex)) => {
+                    let combined = format!("{ex}{content}");
+                    (ex, combined, header_old_rel.as_str())
+                }
+                (_, Some(ex)) => (ex, content.to_string(), header_old_rel.as_str()),
+                (_, None) => {
+                    if content.is_empty() {
+                        return None;
+                    }
+                    (String::new(), content.to_string(), "/dev/null")
+                }
+            };
+            let diff = TextDiff::from_lines(&old_text, &new_text)
+                .unified_diff()
+                .context_radius(3)
+                .missing_newline_hint(false)
+                .header(h_old, &header_new_rel)
+                .to_string();
+            (!diff.is_empty()).then_some(diff)
+        }
+        _ => None,
+    }
+}
+
+fn antigravity_enrich_permission_menu(
+    menu: &mut PtyMenu,
+    call: &PendingToolCall,
+    project_root: Option<&Path>,
+) -> bool {
+    let mut lines = menu.text.lines();
+    let first_line = lines.next().unwrap_or("");
+    let screen_subject = lines.next();
+    let title = match (first_line, call.name.as_str()) {
+        ("Accept this file edit?", "Edit") => "Accept this file edit?",
+        ("Allow creation of this file?", "Write") => "Allow creation of this file?",
+        (s, "Edit") if s.starts_with("Permission required (top of dialog scrolled off") => {
+            "Accept this file edit?"
+        }
+        (s, "Write") if s.starts_with("Permission required (top of dialog scrolled off") => {
+            "Allow creation of this file?"
+        }
+        _ => return false,
+    };
+    let file_path = call
+        .input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if file_path.is_empty() {
+        return false;
+    }
+    if let Some(subj) = screen_subject {
+        if !antigravity_subject_matches_path(subj, file_path) {
+            return false;
+        }
+    }
+    menu.text = format!("{title}\n{file_path}");
+    menu.tool_call_signature = Some(format_pending_tool_call(call));
+    menu.tool_call_diff = antigravity_tool_call_diff(call, project_root);
+    true
+}
+
+fn antigravity_may_be_file_dialog(text: &str) -> bool {
+    let first = text.lines().next().unwrap_or("");
+    first == "Accept this file edit?"
+        || first == "Allow creation of this file?"
+        || first.starts_with("Permission required (top of dialog scrolled off")
+}
+
+// Only file dialogs read the transcript, and each only until it has its call:
+// this runs for every chunk while a dialog is up.
+fn antigravity_enrich_file_dialog<R: tauri::Runtime>(app: &AppHandle<R>, menu: &mut PtyMenu) {
+    if !antigravity_may_be_file_dialog(&menu.text) {
+        return;
+    }
+    let key = menu.text.clone();
+    if let Ok(g) = antigravity_enrichment_cell().lock() {
+        if let Some(done) = g.as_ref().filter(|done| done.key == key) {
+            menu.text = done.text.clone();
+            menu.tool_call_signature = done.signature.clone();
+            menu.tool_call_diff = done.diff.clone();
+            return;
+        }
+    }
+    let root = project_root(Some(app));
+    let Some(call) = root
+        .as_deref()
+        .and_then(antigravity_in_flight_tool_for_project)
+    else {
+        return;
+    };
+    if antigravity_enrich_permission_menu(menu, &call, root.as_deref()) {
+        if let Ok(mut g) = antigravity_enrichment_cell().lock() {
+            *g = Some(AntigravityMenuEnrichment {
+                key,
+                text: menu.text.clone(),
+                signature: menu.tool_call_signature.clone(),
+                diff: menu.tool_call_diff.clone(),
+            });
+        }
+    }
+}
+
+// Called with every PTY chunk (pty_menu_update). Acts only while Antigravity
+// is the current provider.
+fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
+    let bodies = {
+        let Ok(mut carry) = antigravity_osc_carry_cell().lock() else {
+            return;
+        };
+        let joined;
+        let buf: &[u8] = if carry.is_empty() {
+            chunk
+        } else {
+            joined = [carry.as_slice(), chunk].concat();
+            &joined
+        };
+        let (bodies, leftover) = osc7501_state_bodies(buf);
+        let rest = &buf[leftover..];
+        // A real marker is well under 1 KB (`done` carries a base64 summary);
+        // anything longer is not one, and is dropped rather than carried.
+        *carry = if rest.len() <= 4096 {
+            rest.to_vec()
+        } else {
+            Vec::new()
+        };
+        bodies
+    };
+    let marks: Vec<(AntigravityMark, String)> = bodies
+        .iter()
+        .filter_map(|b| antigravity_mark(b).map(|m| (m, b.clone())))
+        .collect();
+    if marks.is_empty() || current_provider(app) != Some(SessionProvider::Antigravity) {
+        return;
+    }
+    for (mark, state) in marks {
+        let now = unix_now_ms();
+        ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.store(
+            if antigravity_permission_state(&state) {
+                now
+            } else {
+                0
+            },
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        if let Ok(mut latest) = antigravity_latest_state_cell().lock() {
+            *latest = Some(state.clone());
+        }
+        let started = antigravity_turn_cell().lock().ok().and_then(|g| *g);
+        let (open, event) = antigravity_turn_step(started.is_some(), mark);
+        if let Ok(mut g) = antigravity_turn_cell().lock() {
+            *g = if open { started.or(Some(now)) } else { None };
+        }
+        match event {
+            Some(AntigravityTurnEvent::Start) => antigravity_turn_started(app, now),
+            Some(AntigravityTurnEvent::End) => {
+                clear_antigravity_enrichment();
+                antigravity_turn_ended(
+                    app,
+                    started.unwrap_or(now),
+                    now,
+                    state.split(':').next().unwrap_or("ended"),
+                );
+            }
+            Some(AntigravityTurnEvent::Reset) => {
+                clear_antigravity_enrichment();
+                stop_antigravity_turn_watch();
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "antigravity-turn",
+                        &format!("op=reset reason=launch started={}", started.unwrap_or(0)),
+                    );
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+enum AntigravityMenuTransition {
+    Unchanged,
+    Show {
+        menu: PtyMenu,
+        superseded: Option<PromptResolvedEvent>,
+        shown: Option<PromptShownEvent>,
+    },
+    Clear {
+        resolved: Option<PromptResolvedEvent>,
+    },
+}
+
+fn antigravity_menu_identity(menu: &PtyMenu) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        menu.text,
+        menu.tool_call_signature.as_deref().unwrap_or(""),
+        menu.tool_call_diff.is_some(),
+        menu.options
+            .iter()
+            .map(|o| format!("{}:{}", o.key, o.label))
+            .collect::<Vec<_>>()
+            .join("|")
+    )
+}
+
+fn antigravity_apply_menu_detection(
+    current_shown: &mut Option<String>,
+    open_prompt: &mut Option<OpenPrompt>,
+    retain_shown: bool,
+    menu: Option<PtyMenu>,
+    now: i64,
+) -> AntigravityMenuTransition {
+    let identity = menu.as_ref().map(antigravity_menu_identity);
+    if identity == *current_shown {
+        return AntigravityMenuTransition::Unchanged;
+    }
+    if let Some(menu) = menu {
+        let labels = menu.options.iter().map(|o| o.label.clone()).collect();
+        let (superseded, shown) =
+            prompt_shown_in(open_prompt, &menu.tool, None, labels, "antigravity", now);
+        *current_shown = identity;
+        let mut bound = Some(menu);
+        bind_menu_prompt_id(
+            &mut bound,
+            open_prompt.as_ref().map(|p| p.prompt_id.as_str()),
+        );
+        AntigravityMenuTransition::Show {
+            menu: bound.unwrap(),
+            superseded,
+            shown,
+        }
+    } else if retain_shown
+        && current_shown.is_some()
+        && open_prompt
+            .as_ref()
+            .is_some_and(|p| p.source == "antigravity")
+    {
+        AntigravityMenuTransition::Unchanged
+    } else if current_shown.take().is_some() {
+        let resolved = prompt_resolved_in(
+            open_prompt,
+            Some("antigravity"),
+            "superseded",
+            "no-menu",
+            now,
+        );
+        AntigravityMenuTransition::Clear { resolved }
+    } else {
+        AntigravityMenuTransition::Unchanged
+    }
+}
+
+fn finish_antigravity_menu_answer_prompt(
+    open_prompt: &mut Option<OpenPrompt>,
+    now: i64,
+) -> Option<PromptResolvedEvent> {
+    prompt_resolved_in(
+        open_prompt,
+        Some("antigravity"),
+        "answered",
+        "antigravity-permission",
+        now,
+    )
+}
+
+fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tail: &str) {
+    let provider = current_provider(app) == Some(SessionProvider::Antigravity);
+    if !provider {
+        // Switched away with agy's dialog up: its last state is moot, and
+        // keeping it would send every later chunk of the new provider here.
+        // A relaunched agy reports fresh states.
+        ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut latest) = antigravity_latest_state_cell().lock() {
+            *latest = None;
+        }
+        clear_antigravity_enrichment();
+        stop_antigravity_turn_watch();
+    }
+    let state = antigravity_latest_state_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let mut menu = antigravity_permission_menu(provider, state.as_deref(), tail);
+    if let Some(m) = menu.as_mut() {
+        antigravity_enrich_file_dialog(app, m);
+    }
+    let retain_shown = provider
+        && state.as_deref().is_some_and(antigravity_permission_state)
+        && !matches!(
+            terminal_attention_prompt_shape(tail),
+            Some("antigravity-folder-trust" | "antigravity-login" | "antigravity-resume-picker")
+        );
+    let transition = {
+        let Ok(mut current) = antigravity_permission_menu_shown_cell().lock() else {
+            return;
+        };
+        let Ok(mut open) = prompt_open_cell().lock() else {
+            return;
+        };
+        antigravity_apply_menu_detection(&mut current, &mut open, retain_shown, menu, unix_now_ms())
+    };
+    match transition {
+        AntigravityMenuTransition::Unchanged => {}
+        AntigravityMenuTransition::Show {
+            menu,
+            superseded,
+            shown,
+        } => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-show");
+            }
+            if let Some(sup) = superseded {
+                let _ = record_prompt_resolved(app, sup);
+            }
+            if let Some(ev) = shown {
+                record_prompt_shown(app, ev);
+            }
+            turn_state_set_menu(app, Some(menu), "antigravity-permission", "detected");
+        }
+        AntigravityMenuTransition::Clear { resolved } => {
+            clear_antigravity_enrichment();
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-clear");
+            }
+            if let Some(ev) = resolved {
+                let _ = record_prompt_resolved(app, ev);
+            }
+            turn_state_set_menu(app, None, "antigravity-permission", "dismissed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod antigravity_permission_menu_tests {
+    use super::{antigravity_permission_menu, collapse_tail};
+    const STATE: &str = "blocked:kind=permission:app=antigravity";
+    fn raw(name: &str) -> String {
+        let bytes = match name {
+            "approval" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/approval.raw").as_slice()
+            }
+            "write" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/tool-write-approval.raw")
+                    .as_slice()
+            }
+            "edit" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/tool-edit-approval.raw")
+                    .as_slice()
+            }
+            "shell" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/tool-shell-approval.raw")
+                    .as_slice()
+            }
+            "command" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")
+                    .as_slice()
+            }
+            "mcp" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval.raw").as_slice()
+            }
+            "mcp_reason" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval-reason.raw")
+                    .as_slice()
+            }
+            "mcp_arrow_delta" => include_bytes!(
+                "../../docs/agent-specimens/antigravity/mcp-approval-arrow-down-delta.raw"
+            )
+            .as_slice(),
+            _ => unreachable!(),
+        };
+        collapse_tail(bytes, 1200)
+    }
+    #[test]
+    fn each_captured_dialog_builds_its_expected_menu_and_digit_answers() {
+        let mcp_labels = || {
+            vec![
+                "Yes, allow tool call",
+                "Yes, and always allow tool 'xmlui/xmlui_status' in this conversation",
+                "Yes, and always allow tool 'xmlui/xmlui_status' (Persist to settings.json)",
+                "No, deny tool call",
+                "No, and always deny tool 'xmlui/xmlui_status' in this conversation",
+                "No, and always deny tool 'xmlui/xmlui_status' (Persist to settings.json)",
+            ]
+        };
+        for (name, title, subject, labels) in [
+            ("approval", "Allow creation of this file?", "<workspace>/specimen.txt", vec!["Yes, allow creation", "No, deny creation"]),
+            ("write", "Allow creation of this file?", "<workspace>/tool-probe.txt", vec!["Yes, allow creation", "No, deny creation"]),
+            ("edit", "Allow creation of this file?", "<workspace>/tool-probe.txt", vec!["Yes, allow creation", "No, deny creation"]),
+            ("shell", "Accept this file edit?", "<workspace>/tool-probe.txt", vec!["Yes, accept this change", "No, reject this change"]),
+            ("command", "Run this command?", "echo APPROVAL-7731", vec!["Yes, run command", "Yes, and always allow in this conversation for commands that start with 'echo'", "Yes, and always allow for commands that start with 'echo' (Persist to settings.json)", "No, cancel"]),
+            ("mcp", "Allow calling this tool?", "xmlui/xmlui_status", mcp_labels()),
+            ("mcp_reason", "Allow calling this tool?", "xmlui/xmlui_status", mcp_labels()),
+        ] {
+            let menu = antigravity_permission_menu(true, Some(STATE), &raw(name)).unwrap_or_else(|| panic!("{name}"));
+            assert!(menu.text.contains(title), "{name}: {}", menu.text);
+            assert!(menu.text.contains(subject), "{name}: {}", menu.text);
+            if name == "command" {
+                assert!(menu.text.contains("Specimen command requires approval."), "{}", menu.text);
+            }
+            if name == "mcp" {
+                assert_eq!(menu.text, "Allow calling this tool?\nxmlui/xmlui_status");
+            }
+            if name == "mcp_reason" {
+                assert_eq!(
+                    menu.text,
+                    "Allow calling this tool?\nxmlui/xmlui_status\nSpecimen MCP call requires approval."
+                );
+            }
+            assert_eq!(menu.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), labels, "{name}");
+            assert!(
+                menu.options.iter().enumerate().all(|(i, o)| {
+                    let expected = (i + 1).to_string();
+                    o.answer_keys.as_deref() == Some(expected.as_str())
+                }),
+                "{name}"
+            );
+        }
+    }
+    #[test]
+    fn file_subjects_keep_real_paths_with_spaces() {
+        for (name, filename) in [
+            ("approval", "specimen.txt"),
+            ("write", "tool-probe.txt"),
+            ("edit", "tool-probe.txt"),
+            ("shell", "tool-probe.txt"),
+        ] {
+            let tail = raw(name).replace("<workspace>", "/Users/someone/my project");
+            let menu = antigravity_permission_menu(true, Some(STATE), &tail)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(
+                menu.text
+                    .contains(&format!("/Users/someone/my project/{filename}")),
+                "{name}: {}",
+                menu.text
+            );
+        }
+    }
+
+    // antigravity-live-check-fixes: the live 2026-10-31 tail (path shortened
+    // and redacted). The workspace path is cut off at the terminal width, so
+    // no "+1" diff stat is drawn. The first parser required one and showed
+    // no menu.
+    const LIVE_CUT_PATH: &str = "\u{25cf} Edited 1 file (live-...) (ctrl+o to expand) \
+        Create file /private/tmp/claude-501/-Users-someone-cod 1 + hello \
+        Allow creation of this file? > 1. Yes, allow creation 2. No, deny creation \
+        \u{2191}/\u{2193} Navigate \u{b7} tab Amend \u{b7} f full diff esc to cancel \
+        Gemini 3.8 Flash \u{b7} high";
+
+    #[test]
+    fn a_path_cut_at_the_terminal_width_still_gets_its_menu() {
+        let menu = antigravity_permission_menu(true, Some(STATE), LIVE_CUT_PATH)
+            .expect("menu for the live tail");
+        assert_eq!(
+            menu.text,
+            "Allow creation of this file?\n/private/tmp/claude-501/-Users-someone-cod"
+        );
+        let answers: Vec<_> = menu
+            .options
+            .iter()
+            .map(|o| (o.label.as_str(), o.answer_keys.as_deref()))
+            .collect();
+        assert_eq!(
+            answers,
+            vec![
+                ("Yes, allow creation", Some("1")),
+                ("No, deny creation", Some("2"))
+            ]
+        );
+    }
+
+    #[test]
+    fn each_file_specimen_with_its_stat_cut_off_keeps_its_menu() {
+        for name in ["approval", "write", "edit", "shell"] {
+            let tail = raw(name);
+            // The dialog's own path and stat: the last "<workspace>/…" and
+            // the " +1" (and " -1") after it.
+            let start = tail.rfind("<workspace>/").expect("path");
+            let stat = start + tail[start..].find(" +1").expect("stat");
+            let mut end = stat + " +1".len();
+            if tail[end..].starts_with(" -1") {
+                end += " -1".len();
+            }
+            let cut = format!(
+                "{}/Users/someone/a-very-long-workspa{}",
+                &tail[..start],
+                &tail[end..]
+            );
+            let menu = antigravity_permission_menu(true, Some(STATE), &cut)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(
+                menu.text.contains("/Users/someone/a-very-long-workspa"),
+                "{name}: {}",
+                menu.text
+            );
+        }
+    }
+
+    #[test]
+    fn a_subject_that_cannot_be_read_does_not_hide_the_menu() {
+        let no_header = LIVE_CUT_PATH.replace("Create file ", "");
+        let menu = antigravity_permission_menu(true, Some(STATE), &no_header).expect("menu");
+        assert_eq!(menu.text, "Allow creation of this file?");
+        assert_eq!(menu.options.len(), 2);
+    }
+
+    #[test]
+    fn no_menu_for_other_provider_state_shapes_or_quoted_dialog() {
+        let active = raw("command");
+        assert!(antigravity_permission_menu(false, Some(STATE), &active).is_none());
+        assert!(
+            antigravity_permission_menu(true, Some("working:app=antigravity"), &active).is_none()
+        );
+        for name in [
+            "first-run-trust.raw",
+            "idle-composer.raw",
+            "permission-prompt.raw",
+        ] {
+            let bytes = match name {
+                "first-run-trust.raw" => {
+                    include_bytes!("../../docs/agent-specimens/antigravity/first-run-trust.raw")
+                        .as_slice()
+                }
+                "idle-composer.raw" => {
+                    include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw")
+                        .as_slice()
+                }
+                _ => include_bytes!("../../docs/agent-specimens/antigravity/permission-prompt.raw")
+                    .as_slice(),
+            };
+            assert!(
+                antigravity_permission_menu(true, Some(STATE), &collapse_tail(bytes, 1200))
+                    .is_none(),
+                "{name}"
+            );
+        }
+        let dialog = include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw");
+        let composer = include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw");
+        let quoted_and_idle = [dialog.as_slice(), composer.as_slice()].concat();
+        let quoted_and_idle = collapse_tail(&quoted_and_idle, 1200);
+        assert!(antigravity_permission_menu(true, Some(STATE), &quoted_and_idle).is_none());
+    }
+
+    #[test]
+    fn full_screen_44x67_shows_menu_for_every_dialog_without_esc_footer() {
+        let stream = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-full-screen-44x67.raw"
+        );
+        // First dialog (`echo alpha`) ends right before the `working` marker
+        // emitted when the first digit answer ran; the stream as saved ends on
+        // the second dialog (`echo bravo`). Neither draws "esc to cancel".
+        let needle = b"\x1b]7501;state=blocked:kind=permission";
+        let first_perm = stream
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("first permission marker");
+        let first_working = first_perm
+            + stream[first_perm..]
+                .windows(b"\x1b]7501;state=working".len())
+                .position(|w| w == b"\x1b]7501;state=working")
+                .expect("working marker after first dialog");
+        let first_tail = collapse_tail(&stream[..first_working], 1200);
+        assert!(
+            !first_tail[first_tail.rfind("Run this command?").unwrap()..].contains("esc to cancel"),
+            "{first_tail}"
+        );
+        let first_menu =
+            antigravity_permission_menu(true, Some(STATE), &first_tail).expect("first dialog menu");
+        assert_eq!(first_menu.text, "Run this command?\necho alpha");
+        assert_eq!(first_menu.options.len(), 4);
+        assert_eq!(first_menu.options[0].label, "Yes, run command");
+        assert_eq!(first_menu.options[3].label, "No, cancel");
+
+        let second_tail = collapse_tail(stream, 1200);
+        assert!(
+            !second_tail[second_tail.rfind("Run this command?").unwrap()..]
+                .contains("esc to cancel"),
+            "{second_tail}"
+        );
+        let second_menu = antigravity_permission_menu(true, Some(STATE), &second_tail)
+            .expect("second dialog menu");
+        assert_eq!(second_menu.text, "Run this command?\necho bravo");
+        assert_eq!(second_menu.options.len(), 4);
+        assert_eq!(second_menu.options[0].label, "Yes, run command");
+        assert_eq!(second_menu.options[3].label, "No, cancel");
+    }
+
+    #[test]
+    fn short_46x26_and_scrolled_title_46x12_specimens_parse_and_hold() {
+        let short_raw =
+            include_bytes!("../../docs/agent-specimens/antigravity/permission-short-46x26.raw");
+        let short_tail = collapse_tail(short_raw, 1200);
+        let short_menu =
+            antigravity_permission_menu(true, Some(STATE), &short_tail).expect("46x26 menu");
+        assert!(short_menu
+            .text
+            .starts_with("Run this command?\ncurl -4 -sS"));
+        assert_eq!(short_menu.options.len(), 4);
+        assert_eq!(short_menu.options[0].answer_keys.as_deref(), Some("1"));
+        assert_eq!(short_menu.options[3].label, "No, cancel");
+
+        // 46x12: Ink clipped the dialog title and option 1 off the top of the
+        // screen, leaving options 2..4 and "↑/↓ Navigate · tab Amend".
+        let scrolled_raw = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-scrolled-title-46x12.raw"
+        );
+        let scrolled_tail = collapse_tail(scrolled_raw, 1200);
+        assert!(!scrolled_tail.contains("Run this command?"));
+        let fallback = antigravity_permission_menu(true, Some(STATE), &scrolled_tail)
+            .expect("46x12 fallback menu");
+        assert!(fallback.text.contains("scrolled off"));
+        let keys_and_labels: Vec<_> = fallback
+            .options
+            .iter()
+            .map(|o| (o.key.as_str(), o.answer_keys.as_deref(), o.label.as_str()))
+            .collect();
+        assert_eq!(keys_and_labels.len(), 3);
+        assert_eq!(keys_and_labels[0].0, "2");
+        assert_eq!(keys_and_labels[0].1, Some("2"));
+        assert!(keys_and_labels[0]
+            .2
+            .starts_with("Yes, and always allow in this conversation"));
+        assert_eq!(keys_and_labels[1].0, "3");
+        assert_eq!(keys_and_labels[2], ("4", Some("4"), "No, cancel"));
+    }
+
+    // A wrapped label makes agy draw backspaces before the next option. The
+    // parser once lost options 3 and 4 here, so a pipeline's approval had no
+    // "No, cancel", and option 2's label ran on through option 3's text.
+    #[test]
+    fn backspaces_before_a_wrapped_option_keep_every_option() {
+        let raw = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-wrapped-options-44x67.raw"
+        );
+        let tail = collapse_tail(raw, 1200);
+        assert!(tail.contains('\u{8}'), "the specimen shows the backspaces");
+        let menu = antigravity_permission_menu(true, Some(STATE), &tail).expect("menu");
+        let labels: Vec<_> = menu.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels.len(), 4, "{labels:?}");
+        assert!(labels[1].ends_with("start with 'jq'"), "{labels:?}");
+        assert!(
+            labels[2].ends_with("(Persist to settings.json)"),
+            "{labels:?}"
+        );
+        assert_eq!(labels[3], "No, cancel");
+    }
+
+    #[test]
+    fn newest_dialog_wins_when_command_and_file_dialogs_share_the_tail() {
+        let combined = "\
+            Command Reason: Specimen command requires approval. \
+            Requesting permission for: echo OLD \
+            Run this command? > 1. Yes, run command 2. Yes, and always allow \
+            3. Yes, and always allow (Persist) 4. No, cancel \
+            ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command \
+            Create file <workspace>/next.txt +1 1 + NEW \
+            Allow creation of this file? > 1. Yes, allow creation 2. No, deny creation \
+            ↑/↓ Navigate · tab Amend · f full diff";
+        let menu = antigravity_permission_menu(true, Some(STATE), combined).expect("newest menu");
+        assert_eq!(
+            menu.text,
+            "Allow creation of this file?\n<workspace>/next.txt"
+        );
+        let labels: Vec<_> = menu.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, vec!["Yes, allow creation", "No, deny creation"]);
+    }
+
+    #[test]
+    fn only_file_dialogs_read_the_transcript() {
+        use super::antigravity_may_be_file_dialog;
+        assert!(antigravity_may_be_file_dialog("Accept this file edit?"));
+        assert!(antigravity_may_be_file_dialog(
+            "Allow creation of this file?\n/p/a.txt"
+        ));
+        assert!(antigravity_may_be_file_dialog(
+            "Permission required (top of dialog scrolled off — check terminal for full details)"
+        ));
+        assert!(!antigravity_may_be_file_dialog(
+            "Run this command?\necho hi"
+        ));
+        assert!(!antigravity_may_be_file_dialog(
+            "Allow calling this tool?\nxmlui/xmlui_status"
+        ));
+    }
+
+    #[test]
+    fn a_write_over_a_large_file_gets_no_diff() {
+        use super::{antigravity_tool_call_diff, PendingToolCall, ANTIGRAVITY_MAX_DIFF_FILE_BYTES};
+        let dir = std::env::temp_dir().join(format!("bram-agy-big-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.txt");
+        std::fs::write(&big, "x\n".repeat(ANTIGRAVITY_MAX_DIFF_FILE_BYTES as usize)).unwrap();
+        let small = dir.join("small.txt");
+        std::fs::write(&small, "old\n").unwrap();
+        let call = |path: &std::path::Path| PendingToolCall {
+            name: "Write".into(),
+            input: serde_json::json!({ "file_path": path, "content": "new\n" }),
+            id: String::new(),
+        };
+        assert_eq!(antigravity_tool_call_diff(&call(&big), None), None);
+        assert!(antigravity_tool_call_diff(&call(&small), None)
+            .unwrap()
+            .contains("+new"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_second_call_of_a_response_is_in_flight_once_the_first_has_its_result() {
+        use super::antigravity_in_flight_tool_from_transcript_str;
+        let planner = r#"{"type":"PLANNER_RESPONSE","step_index":1,"content":"x","tool_calls":[{"name":"edit_file","args":{"Path":"/a","Target":"1","Replacement":"2"}},{"name":"edit_file","args":{"Path":"/b","Target":"3","Replacement":"4"}}]}"#;
+        let path = |source: &str| {
+            antigravity_in_flight_tool_from_transcript_str(source)
+                .map(|c| c.input["file_path"].as_str().unwrap().to_string())
+        };
+        assert_eq!(path(planner).as_deref(), Some("/a"));
+        let one_done = format!("{planner}\n{}", r#"{"type":"GENERIC","content":"done"}"#);
+        assert_eq!(path(&one_done).as_deref(), Some("/b"));
+    }
+
+    #[test]
+    fn file_edit_and_creation_menus_get_full_path_and_unified_diff() {
+        use super::{
+            antigravity_enrich_permission_menu, antigravity_in_flight_tool_from_transcript_str,
+            PendingToolCall,
+        };
+        use std::path::Path;
+
+        // 1. Live edit specimen (`raw("shell")` has "Accept this file edit?" on
+        //    `<workspace>/tool-probe.txt`) + transcript fallback up to line 6
+        //    (step 5's `PLANNER_RESPONSE` for `edit_file`, before its `GENERIC`).
+        let transcript =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
+        let until_edit_prompt = transcript.lines().take(6).collect::<Vec<_>>().join("\n");
+        let in_flight = antigravity_in_flight_tool_from_transcript_str(&until_edit_prompt)
+            .expect("in-flight edit call");
+        assert_eq!(in_flight.name, "Edit");
+
+        let mut edit_menu =
+            antigravity_permission_menu(true, Some(STATE), &raw("shell")).expect("edit menu");
+        let root = Path::new("<workspace>");
+        assert!(antigravity_enrich_permission_menu(
+            &mut edit_menu,
+            &in_flight,
+            Some(root)
+        ));
+        assert_eq!(
+            edit_menu.tool_call_signature.as_deref(),
+            Some("Edit(<workspace>/tool-probe.txt)")
+        );
+        let diff = edit_menu.tool_call_diff.as_deref().expect("edit diff");
+        assert!(diff.contains("--- a/tool-probe.txt"), "{diff}");
+        assert!(diff.contains("+++ b/tool-probe.txt"), "{diff}");
+        assert!(diff.contains("-FIRST-VALUE"), "{diff}");
+        assert!(diff.contains("+SECOND-VALUE"), "{diff}");
+
+        // 1b. Long diff pushed "Pending edit <path>" out of the 1200-char tail,
+        //     leaving `menu.text == "Accept this file edit?"` with no subject:
+        //     enrichment restores both the full path and the unified diff.
+        let header_scrolled_tail = raw("shell").replace("Pending edit ", "");
+        let mut subjectless_edit_menu =
+            antigravity_permission_menu(true, Some(STATE), &header_scrolled_tail)
+                .expect("subjectless edit menu");
+        assert_eq!(subjectless_edit_menu.text, "Accept this file edit?");
+        assert!(antigravity_enrich_permission_menu(
+            &mut subjectless_edit_menu,
+            &in_flight,
+            Some(root)
+        ));
+        assert_eq!(
+            subjectless_edit_menu.text,
+            "Accept this file edit?\n<workspace>/tool-probe.txt"
+        );
+        assert!(subjectless_edit_menu.tool_call_diff.is_some());
+
+        // 2. Narrow terminal (`LIVE_CUT_PATH`, clipped at column 46) recovers the full path
+        //    and gets a unified diff for file creation, while rejecting an unrelated path.
+        let mut cut_menu =
+            antigravity_permission_menu(true, Some(STATE), LIVE_CUT_PATH).expect("cut menu");
+        let unrelated = PendingToolCall {
+            name: "Write".into(),
+            input: serde_json::json!({
+                "file_path": "/completely/different/path.txt",
+                "content": "hello\n",
+            }),
+            id: String::new(),
+        };
+        assert!(!antigravity_enrich_permission_menu(
+            &mut cut_menu,
+            &unrelated,
+            None
+        ));
+        let full_path = "/private/tmp/claude-501/-Users-someone-code-project/src/new_module.rs";
+        let matching_write = PendingToolCall {
+            name: "Write".into(),
+            input: serde_json::json!({
+                "file_path": full_path,
+                "content": "pub fn greet() {}\n",
+            }),
+            id: String::new(),
+        };
+        assert!(antigravity_enrich_permission_menu(
+            &mut cut_menu,
+            &matching_write,
+            Some(Path::new(
+                "/private/tmp/claude-501/-Users-someone-code-project"
+            ))
+        ));
+        assert_eq!(
+            cut_menu.text,
+            format!("Allow creation of this file?\n{full_path}")
+        );
+        assert!(cut_menu
+            .tool_call_signature
+            .as_deref()
+            .unwrap_or("")
+            .starts_with(&format!("Write({full_path})\n")));
+        let write_diff = cut_menu.tool_call_diff.as_deref().expect("write diff");
+        assert!(write_diff.contains("--- /dev/null"), "{write_diff}");
+        assert!(
+            write_diff.contains("+++ b/src/new_module.rs"),
+            "{write_diff}"
+        );
+        assert!(write_diff.contains("+pub fn greet() {}"), "{write_diff}");
+
+        // 3. 46x12 scrolled-off title upgrades from generic placeholder to title + path + diff.
+        let scrolled_raw = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-scrolled-title-46x12.raw"
+        );
+        let mut scrolled_menu =
+            antigravity_permission_menu(true, Some(STATE), &collapse_tail(scrolled_raw, 1200))
+                .expect("scrolled menu");
+        assert!(antigravity_enrich_permission_menu(
+            &mut scrolled_menu,
+            &in_flight,
+            Some(root)
+        ));
+        assert!(scrolled_menu.text.starts_with("Accept this file edit?\n"));
+        assert!(scrolled_menu.tool_call_diff.is_some());
+    }
+
+    #[test]
+    fn a_dialog_still_painting_shows_no_menu_and_osc_holds_unreadable() {
+        // The state marker comes first, and the paint spans chunks: options
+        // so far, no footer yet. A menu here would show a partial list.
+        let painting = "Requesting permission for: echo hi \
+            Run this command? > 1. Yes, run command 2. Yes, and always allow";
+        assert!(antigravity_permission_menu(true, Some(STATE), painting).is_none());
+        let painted =
+            format!("{painting} in this conversation 3. No, cancel ↑/↓ Navigate · tab Amend");
+        let menu = antigravity_permission_menu(true, Some(STATE), &painted).expect("painted");
+        assert_eq!(menu.options.len(), 3);
+        assert_eq!(menu.options[2].label, "No, cancel");
+
+        // Pre-paint / completely clipped screen: no menu, no fake options from
+        // assistant prose, and OSC state still blocks pane sends and fires the
+        // terminal-attention hold.
+        let prose_before_paint = "Plan: 1. Read lib.rs 2. Run cargo test";
+        assert!(antigravity_permission_menu(true, Some(STATE), prose_before_paint).is_none());
+        assert_eq!(
+            super::pane_input_blocking_prompt_or_osc(
+                prose_before_paint,
+                Some(super::SessionProvider::Antigravity),
+                true,
+            ),
+            Some("antigravity-permission")
+        );
+        assert_eq!(
+            super::pane_input_blocking_prompt_or_osc(
+                prose_before_paint,
+                Some(super::SessionProvider::Claude),
+                true,
+            ),
+            None
+        );
+        let mut tracker = super::TerminalAttentionTracker::new();
+        assert_eq!(
+            tracker.step_with_permission_block_shape(
+                true,
+                false,
+                64,
+                Some("antigravity-permission"),
+                || panic!("explicit OSC permission block needs no silence wait"),
+            ),
+            vec![super::TerminalAttentionTransition::Fire {
+                shape: "antigravity-permission",
+            }]
+        );
+        assert_eq!(
+            tracker.step_with_permission_block_shape(true, false, 0, None, || panic!("unblocked")),
+            vec![super::TerminalAttentionTransition::Clear {
+                reason: "permission-unblocked",
+            }]
+        );
+    }
+
+    #[test]
+    fn menu_clear_after_escape_idle_keeps_turn_finished_without_rearming_claim() {
+        use super::{
+            antigravity_mark, antigravity_turn_step, apply_menu_turn_state, osc7501_state_bodies,
+            turn_state_transition_rearms_claim, AntigravityTurnEvent, TurnState,
+        };
+
+        let stream = include_bytes!("../../docs/agent-specimens/antigravity/permission-escape.raw");
+        let perm_needle = b"\x1b]7501;state=blocked:kind=permission";
+        let perm_at = stream
+            .windows(perm_needle.len())
+            .position(|w| w == perm_needle)
+            .expect("permission marker");
+        let idle_needle = b"\x1b]7501;state=idle:app=antigravity";
+        let esc_idle_at = perm_at
+            + stream[perm_at..]
+                .windows(idle_needle.len())
+                .position(|w| w == idle_needle)
+                .expect("idle marker on Esc");
+
+        struct Driver {
+            turn_open: bool,
+            latest_state: Option<String>,
+            shown: bool,
+            screen: Vec<u8>,
+            turn_state: TurnState,
+        }
+        impl Driver {
+            fn new() -> Self {
+                Self {
+                    turn_open: false,
+                    latest_state: None,
+                    shown: false,
+                    screen: Vec::new(),
+                    turn_state: TurnState::idle(),
+                }
+            }
+            fn drive(&mut self, chunk: &[u8]) -> bool {
+                let mut rearmed = false;
+                let (bodies, _) = osc7501_state_bodies(chunk);
+                for body in bodies {
+                    let Some(mark) = antigravity_mark(&body) else {
+                        continue;
+                    };
+                    self.latest_state = Some(body);
+                    let (open, event) = antigravity_turn_step(self.turn_open, mark);
+                    self.turn_open = open;
+                    match event {
+                        Some(AntigravityTurnEvent::Start) => {
+                            let prev = self.turn_state.clone();
+                            self.turn_state.provider = Some("antigravity".into());
+                            if self.turn_state.pending_menu.is_none() {
+                                self.turn_state.phase = "working".into();
+                            }
+                            rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                        }
+                        Some(AntigravityTurnEvent::End) => {
+                            let prev = self.turn_state.clone();
+                            self.turn_state.phase = "finished".into();
+                            rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                        }
+                        Some(AntigravityTurnEvent::Reset) | None => {}
+                    }
+                }
+                self.screen.extend_from_slice(chunk);
+                let tail = collapse_tail(&self.screen, 1200);
+                let menu = antigravity_permission_menu(true, self.latest_state.as_deref(), &tail);
+                if let Some(m) = menu {
+                    let prev = self.turn_state.clone();
+                    apply_menu_turn_state(
+                        &mut self.turn_state,
+                        Some("antigravity".into()),
+                        Some(m),
+                        "antigravity-permission",
+                        self.turn_open,
+                    );
+                    rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                    self.shown = true;
+                } else if self.shown {
+                    self.shown = false;
+                    let prev = self.turn_state.clone();
+                    apply_menu_turn_state(
+                        &mut self.turn_state,
+                        Some("antigravity".into()),
+                        None,
+                        "antigravity-permission",
+                        self.turn_open,
+                    );
+                    rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                }
+                rearmed
+            }
+        }
+
+        // 1. Up to the dialog: turn opens (`working`), then blocks on the menu.
+        let mut d = Driver::new();
+        assert!(d.drive(&stream[..esc_idle_at]));
+        assert!(d.turn_open);
+        assert_eq!(d.turn_state.phase, "waiting-for-permission");
+        assert_eq!(
+            d.turn_state.pending_menu.as_ref().map(|m| m.text.as_str()),
+            Some("Run this command?\necho ESC-DIALOG-7731")
+        );
+
+        // 2. Esc response (`idle` + composer redraw in one chunk): turn closes,
+        //    menu clears, phase stays `finished`, and no claim re-arms.
+        assert!(!d.drive(&stream[esc_idle_at..]));
+        assert!(!d.turn_open);
+        assert_eq!(d.turn_state.phase, "finished");
+        assert!(d.turn_state.pending_menu.is_none());
+
+        // 3. `blocked` then `idle` landing together in one chunk (while an earlier
+        //    dialog menu was shown): turn closes, menu clears, phase stays `finished`,
+        //    and no claim re-arms.
+        let mut coalesced = Driver::new();
+        assert!(coalesced.drive(&stream[..perm_at]));
+        coalesced.shown = true;
+        coalesced.turn_state.phase = "waiting-for-permission".into();
+        assert!(!coalesced.drive(&stream[perm_at..]));
+        assert!(!coalesced.turn_open);
+        assert_eq!(coalesced.turn_state.phase, "finished");
+        assert!(coalesced.turn_state.pending_menu.is_none());
+
+        // 4. Open-turn Antigravity clears and other providers' clears still enter `working`.
+        d.turn_state.phase = "waiting-for-permission".into();
+        apply_menu_turn_state(
+            &mut d.turn_state,
+            Some("antigravity".into()),
+            None,
+            "antigravity-permission",
+            true,
+        );
+        assert_eq!(d.turn_state.phase, "working");
+
+        d.turn_state.phase = "finished".into();
+        apply_menu_turn_state(
+            &mut d.turn_state,
+            Some("claude".into()),
+            None,
+            "pty-menu",
+            false,
+        );
+        assert_eq!(d.turn_state.phase, "working");
+    }
+
+    // agy-menu-resolve-open-prompt: identical back-to-back Antigravity file-edit
+    // menus have the same `tool` ("Antigravity permission") and option `labels`.
+    // Answering through `menuAnswer` or clearing the menu on `working` must
+    // resolve `OpenPrompt` so the next menu mints a fresh `promptId`, while
+    // in-place enrichment of the same still-open menu keeps its `promptId`.
+    #[test]
+    fn consecutive_identical_antigravity_prompts_mint_distinct_ids_after_answer_or_clear() {
+        use super::{
+            antigravity_apply_menu_detection, finish_antigravity_menu_answer_prompt,
+            menu_answer_identity_verdict, AntigravityMenuTransition, MenuAnswerIdentityVerdict,
+            OpenPrompt,
+        };
+
+        let edit_menu_for = |file: &str| {
+            let mut m = antigravity_permission_menu(
+                true,
+                Some(STATE),
+                &collapse_tail(raw("write").as_bytes(), 1200),
+            )
+            .expect("file write menu");
+            m.text = format!("Allow creation of this file?\n{file}");
+            m
+        };
+
+        let mut shown: Option<String> = None;
+        let mut open: Option<OpenPrompt> = None;
+
+        // 1. First file menu shows and mints prompt_id p1.
+        let p1 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(edit_menu_for("src/a.rs")),
+            1_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected initial Show"),
+        };
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p1),
+            MenuAnswerIdentityVerdict::Accept
+        );
+
+        // 1b. Transcript enrichment of the SAME open menu updates identity
+        //     without minting a new prompt_id.
+        let mut enriched = edit_menu_for("src/a.rs");
+        enriched.tool_call_signature = Some("write_file src/a.rs".into());
+        let p1_after_enrich = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(enriched),
+            1_050,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: None,
+                superseded: None,
+            } => menu.prompt_id.expect("preserved prompt_id"),
+            _ => panic!("expected in-place Show without new shown event"),
+        };
+        assert_eq!(p1_after_enrich, p1);
+
+        // 2. Answering via `menuAnswer` resolves p1 immediately (`outcome=answered`),
+        //    and the subsequent `working` clear is a no-op (1:1 shown/resolved).
+        let answered = finish_antigravity_menu_answer_prompt(&mut open, 1_100)
+            .expect("menuAnswer must resolve open Antigravity prompt");
+        assert_eq!(answered.open.prompt_id, p1);
+        assert_eq!(answered.outcome, "answered");
+        assert_eq!(answered.detail, "antigravity-permission");
+        assert!(open.is_none());
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p1),
+            MenuAnswerIdentityVerdict::NoOpenPrompt
+        );
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 1_120) {
+            AntigravityMenuTransition::Clear { resolved: None } => {}
+            _ => panic!("clear after menuAnswer should not emit a second resolved event"),
+        }
+
+        // 3. Second identical file-edit menu mints a distinct prompt_id p2 != p1.
+        let p2 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(edit_menu_for("src/b.rs")),
+            2_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected fresh Show for second file"),
+        };
+        assert_ne!(p2, p1, "second menu must not reuse resolved prompt_id");
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p2),
+            MenuAnswerIdentityVerdict::Accept
+        );
+
+        // 4. Answering directly in the terminal skips `menuAnswer`; the clear
+        //    branch resolves p2 (`superseded` / `no-menu`), so a third identical
+        //    menu still mints a distinct prompt_id p3.
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 2_500) {
+            AntigravityMenuTransition::Clear { resolved: Some(ev) } => {
+                assert_eq!(ev.open.prompt_id, p2);
+                assert_eq!(ev.outcome, "superseded");
+                assert_eq!(ev.detail, "no-menu");
+            }
+            _ => panic!("clear after terminal answer must resolve open Antigravity prompt"),
+        }
+        let p3 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(edit_menu_for("src/c.rs")),
+            3_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected fresh Show for third file"),
+        };
+        assert_ne!(p3, p2);
+        assert_ne!(p3, p1);
+
+        // 5. Provider-switch safety: clearing Antigravity's shown marker never
+        //    clobbers another source's OpenPrompt.
+        open = Some(OpenPrompt {
+            prompt_id: "p-claude-hook".into(),
+            tool: "Edit".into(),
+            tool_use_id: Some("toolu_1".into()),
+            labels: vec!["Yes".into(), "No".into()],
+            source: "hook",
+            shown_at_ms: 3_100,
+        });
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 3_200) {
+            AntigravityMenuTransition::Clear { resolved: None } => {}
+            _ => panic!("must not resolve a non-antigravity OpenPrompt"),
+        }
+        assert_eq!(
+            open.as_ref().map(|p| p.prompt_id.as_str()),
+            Some("p-claude-hook")
+        );
+    }
+
+    #[test]
+    fn arrow_key_redraw_retains_shown_menu_until_osc_state_leaves_permission() {
+        use super::{
+            antigravity_apply_menu_detection, finish_antigravity_menu_answer_prompt,
+            menu_answer_identity_verdict, AntigravityMenuTransition, MenuAnswerIdentityVerdict,
+            OpenPrompt,
+        };
+
+        let initial_menu =
+            antigravity_permission_menu(true, Some(STATE), &raw("command")).expect("command menu");
+        // After pty_menu_clear empties PTY_TAIL on `\x1b[B`, agy emits only the
+        // two-option highlight redraw with no title, no footer, and no OSC 7501
+        // state transition (`STATE` stays `blocked:kind=permission:app=antigravity`).
+        let delta_tail = raw("mcp_arrow_delta");
+        assert!(
+            antigravity_permission_menu(true, Some(STATE), &delta_tail).is_none(),
+            "partial arrow-key redraw has neither title nor footer"
+        );
+
+        let mut shown: Option<String> = None;
+        let mut open: Option<OpenPrompt> = None;
+
+        // 1. Initial menu shows and mints p1.
+        let p1 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(initial_menu.clone()),
+            1_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected initial Show"),
+        };
+
+        // 2. Arrow-key redraw (`menu == None`, `retain_shown == true`) keeps the
+        //    pane card and `p1` alive.
+        match antigravity_apply_menu_detection(&mut shown, &mut open, true, None, 1_050) {
+            AntigravityMenuTransition::Unchanged => {}
+            _ => panic!("expected Unchanged on arrow-key redraw"),
+        }
+        assert!(shown.is_some(), "shown marker must remain set");
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p1),
+            MenuAnswerIdentityVerdict::Accept
+        );
+
+        // 3. Terminal Esc (`state=idle`) or Enter/digit (`state=working`) flips
+        //    `retain_shown` to false and clears + resolves `p1`.
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 1_200) {
+            AntigravityMenuTransition::Clear { resolved: Some(ev) } => {
+                assert_eq!(ev.open.prompt_id, p1);
+                assert_eq!(ev.outcome, "superseded");
+                assert_eq!(ev.detail, "no-menu");
+            }
+            _ => panic!("expected Clear with resolved prompt once OSC state leaves permission"),
+        }
+        assert!(shown.is_none());
+        assert!(open.is_none());
+
+        // 4. Clicking a pane button after terminal arrow-key navigation resolves
+        //    `open` via `finish_antigravity_menu_answer_prompt`, so the next chunk
+        //    clears `shown` even before OSC 7501 flips out of permission.
+        let p2 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(initial_menu),
+            2_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected second Show"),
+        };
+        assert_ne!(p2, p1);
+        match antigravity_apply_menu_detection(&mut shown, &mut open, true, None, 2_050) {
+            AntigravityMenuTransition::Unchanged => {}
+            _ => panic!("expected Unchanged on arrow-key redraw"),
+        }
+        let answered = finish_antigravity_menu_answer_prompt(&mut open, 2_100)
+            .expect("pane click resolves open prompt");
+        assert_eq!(answered.open.prompt_id, p2);
+        match antigravity_apply_menu_detection(&mut shown, &mut open, true, None, 2_120) {
+            AntigravityMenuTransition::Clear { resolved: None } => {}
+            _ => panic!("expected Clear after pane click resolved open prompt"),
+        }
+    }
+}
+
+const ANTIGRAVITY_LIVE_COALESCE_MS: u64 = 400;
+const ANTIGRAVITY_LIVE_MIN_INTERVAL_MS: u64 = 1500;
+
+#[derive(Default, Debug, PartialEq, Eq)]
+struct AntigravityLiveRefreshGate {
+    last_emitted_len: Option<u64>,
+    last_emit_ms: Option<u64>,
+    pending_len: Option<u64>,
+    first_pending_ms: Option<u64>,
+    last_event_ms: Option<u64>,
+}
+
+impl AntigravityLiveRefreshGate {
+    fn seeded(initial_len: Option<u64>) -> Self {
+        Self {
+            last_emitted_len: initial_len,
+            ..Self::default()
+        }
+    }
+
+    fn note_change(&mut self, now_ms: u64, current_len: Option<u64>) {
+        let Some(len) = current_len else {
+            return;
+        };
+        if self.last_emitted_len == Some(len) {
+            return;
+        }
+        self.pending_len = Some(len);
+        self.last_event_ms = Some(now_ms);
+        if self.first_pending_ms.is_none() {
+            self.first_pending_ms = Some(now_ms);
+        }
+    }
+
+    fn poll_ready(&mut self, now_ms: u64, current_len: Option<u64>) -> Option<u64> {
+        if let Some(len) = current_len {
+            if self.last_emitted_len == Some(len) {
+                self.pending_len = None;
+                self.first_pending_ms = None;
+                self.last_event_ms = None;
+                return None;
+            }
+            if self.pending_len.is_some() {
+                self.pending_len = Some(len);
+            }
+        }
+        let len = self.pending_len?;
+        if self
+            .last_emit_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < ANTIGRAVITY_LIVE_MIN_INTERVAL_MS)
+        {
+            return None;
+        }
+        let quiet_enough = self
+            .last_event_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) >= ANTIGRAVITY_LIVE_COALESCE_MS);
+        let waited_cap = self
+            .first_pending_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) >= ANTIGRAVITY_LIVE_MIN_INTERVAL_MS);
+        if quiet_enough || waited_cap {
+            self.last_emitted_len = Some(len);
+            self.last_emit_ms = Some(now_ms);
+            self.pending_len = None;
+            self.first_pending_ms = None;
+            self.last_event_ms = None;
+            Some(len)
+        } else {
+            None
+        }
+    }
+}
+
+static ANTIGRAVITY_TURN_WATCH_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn antigravity_turn_watch_stop_cell() -> &'static Mutex<Option<std::sync::mpsc::Sender<()>>> {
+    static CELL: OnceLock<Mutex<Option<std::sync::mpsc::Sender<()>>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn stop_antigravity_turn_watch() {
+    ANTIGRAVITY_TURN_WATCH_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut guard) = antigravity_turn_watch_stop_cell().lock() {
+        *guard = None;
+    }
+}
+
+fn current_antigravity_session_id<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    if let Ok(last) = last_talk_session_sid_cell().lock() {
+        if let Some(sid) = last.get("antigravity").filter(|s| session_id_is_safe(s)) {
+            return Some(sid.clone());
+        }
+    }
+    read_last_active_session(app)
+        .filter(|r| r.provider == "antigravity" && session_id_is_safe(&r.session_id))
+        .map(|r| r.session_id)
+}
+
+fn antigravity_source_transcript_file_and_len(logs_dir: &Path) -> Option<(PathBuf, u64)> {
+    let full = logs_dir.join("transcript_full.jsonl");
+    let regular = logs_dir.join("transcript.jsonl");
+    match (regular.metadata().ok(), full.metadata().ok()) {
+        (_, Some(b)) if b.len() > 0 => Some((full, b.len())),
+        (Some(a), _) => Some((regular, a.len())),
+        _ => None,
+    }
+}
+
+fn emit_antigravity_live_transcript_tick<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sid: &str,
+    root: &Path,
+) {
+    let Some(export_path) = antigravity_export_path_for_project(app, sid, root) else {
+        return;
+    };
+    let len = std::fs::metadata(&export_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "correlation_id": next_talk_session_correlation_id(),
+        "at_host_ms": unix_now_ms(),
+        "sid": sid,
+        "len": len,
+        "provider": "antigravity",
+        "source": "push",
+    });
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "antigravity-turn",
+            &format!("op=live-transcript-push session={sid} bytes={len}"),
+        );
+    }
+    emit_replayable_payload(app, "talk-session-changed", payload);
+    emit_conversation_state_changed(app);
+}
+
+fn start_antigravity_turn_watch<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let gen = ANTIGRAVITY_TURN_WATCH_GEN
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    if let Ok(mut guard) = antigravity_turn_watch_stop_cell().lock() {
+        *guard = Some(stop_tx);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc::{channel, RecvTimeoutError, TryRecvError};
+        use std::time::{Duration, Instant};
+
+        if ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) != gen {
+            return;
+        }
+        let Some(sid) = current_antigravity_session_id(&app) else {
+            return;
+        };
+        let Some(root) = project_root(Some(&app)).and_then(|p| p.canonicalize().ok()) else {
+            return;
+        };
+        let Some(logs_dir) = antigravity_data_dir().map(|d| {
+            d.join("brain")
+                .join(&sid)
+                .join(".system_generated")
+                .join("logs")
+        }) else {
+            return;
+        };
+        if !logs_dir.is_dir() {
+            return;
+        }
+        let Ok(cache_dir) = app.path().app_cache_dir() else {
+            return;
+        };
+        let export_path = cache_dir
+            .join(ANTIGRAVITY_EXPORT_DIR)
+            .join(encode_path_for_filename(&strip_unc_prefix(root.clone())))
+            .join(format!("{sid}.jsonl"));
+
+        let (ev_tx, ev_rx) = channel::<notify::Result<Event>>();
+        let Ok(mut watcher) = recommended_watcher(ev_tx) else {
+            return;
+        };
+        if watcher
+            .watch(&logs_dir, RecursiveMode::NonRecursive)
+            .is_err()
+        {
+            return;
+        }
+        if ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) != gen {
+            return;
+        }
+
+        let origin = Instant::now();
+        let initial = antigravity_source_transcript_file_and_len(&logs_dir);
+        let mut gate = match initial {
+            Some((ref src, len)) if !antigravity_export_is_fresh(&export_path, src) => {
+                let mut g = AntigravityLiveRefreshGate::default();
+                g.note_change(0, Some(len));
+                g
+            }
+            Some((_, len)) => AntigravityLiveRefreshGate::seeded(Some(len)),
+            None => AntigravityLiveRefreshGate::default(),
+        };
+
+        let is_transcript_event = |ev: &Event| {
+            ev.paths.iter().any(|p| {
+                matches!(
+                    p.file_name().and_then(|n| n.to_str()),
+                    Some("transcript_full.jsonl" | "transcript.jsonl")
+                )
+            })
+        };
+
+        loop {
+            let wake = ev_rx.recv_timeout(Duration::from_millis(200));
+            if ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            match stop_rx.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            if current_provider(&app) != Some(SessionProvider::Antigravity) {
+                break;
+            }
+            let now_ms = origin.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let mut saw_transcript_event = false;
+            match wake {
+                Ok(Ok(ev)) => {
+                    if is_transcript_event(&ev) {
+                        saw_transcript_event = true;
+                    }
+                }
+                Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            while let Ok(res) = ev_rx.try_recv() {
+                if let Ok(ev) = res {
+                    if is_transcript_event(&ev) {
+                        saw_transcript_event = true;
+                    }
+                }
+            }
+            let cur_len = antigravity_source_transcript_file_and_len(&logs_dir).map(|(_, len)| len);
+            if saw_transcript_event {
+                gate.note_change(now_ms, cur_len);
+            }
+            if gate.poll_ready(now_ms, cur_len).is_some() {
+                emit_antigravity_live_transcript_tick(&app, &sid, &root);
+            }
+        }
+    });
+}
+
+fn antigravity_turn_started<R: tauri::Runtime>(app: &AppHandle<R>, at_ms: i64) {
+    let next = AgentStatus {
+        provider: Some("antigravity".to_string()),
+        state: "working".to_string(),
+        verb: Some("working".to_string()),
+        elapsed_text: None,
+        substate: None,
+        output_tokens_text: None,
+        updated_at_ms: unix_now_ms(),
+        source: Some("osc7501".to_string()),
+    };
+    let mut emit_payload: Option<AgentStatus> = None;
+    if let Ok(mut cur) = agent_status_cell().lock() {
+        if cur.state != next.state || cur.provider != next.provider || cur.verb != next.verb {
+            *cur = next.clone();
+            emit_payload = Some(next);
+        }
+    }
+    if let Some(payload) = emit_payload {
+        maybe_emit_agent_status(app, &payload);
+    }
+    update_turn_state(app, "osc7501", "antigravity-working", |s| {
+        s.provider = Some("antigravity".to_string());
+        s.turn_stamp = Some(at_ms.to_string());
+        if s.pending_menu.is_none() {
+            s.phase = "working".to_string();
+        }
+    });
+    // A later turn of a multi-turn apply: the first turn's end retired the
+    // claim and the authorization is still live (no-op otherwise).
+    if inflight_claim_ids_and_claimed_at(app).is_none() {
+        rearm_claim_for_live_authorization(app);
+    }
+    start_antigravity_turn_watch(app);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "antigravity-turn",
+            &format!("op=start via=osc7501 at={}", at_ms),
+        );
+    }
+}
+
+// antigravity-live-check-fixes: Bram hears that a session changed from the
+// session-file watcher (Claude's and Codex's directories) or from OpenCode's
+// plugin events. agy's sessions live in a database under ~/.gemini, so nothing
+// signalled them: live (2026-10-31), a fresh agy partner's queued name never
+// bound to the conversation agy started, and no group formed. A turn's end is
+// when agy has written its conversation row. Not at the start: a fresh
+// partner's row may not exist yet, and the newest one would be the previous
+// conversation. Off the PTY reader thread, since the pass reads agy's
+// database and re-projects its transcript.
+fn antigravity_session_changed<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        emit_talk_session_changed_for_provider(&app, Some(SessionProvider::Antigravity));
+    });
+}
+
+fn antigravity_turn_ended<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    started_at: i64,
+    at_ms: i64,
+    state: &str,
+) {
+    stop_antigravity_turn_watch();
+    agent_status_emit_finished(app, "antigravity", None, None, "osc7501");
+    // The finished conversation's transcript has changed; a sessions pass
+    // re-projects and indexes it (antigravity-sessions-browser).
+    search_index_request(IndexBucket::Sessions);
+    antigravity_session_changed(app);
+    clear_proposing_flag(app, "turn-finished");
+    end_turn_context_unless_fresh(app, "antigravity-turn-end");
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "antigravity-turn",
+            &format!(
+                "op=end via=osc7501 state={} started={} ms={}",
+                state,
+                started_at,
+                at_ms.saturating_sub(started_at)
+            ),
+        );
+    }
+    let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
+        return;
+    };
+    if claimed_ids.is_empty() {
+        return;
+    }
+    let ids_json = serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string());
+    // The turn's start is its input time: a turn that began before the claim
+    // belongs to earlier work, and the claim waits for its own turn's end.
+    match opencode_end_retires_claim(claimed_at, Some(started_at), at_ms, unix_now_ms()) {
+        Ok(()) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=clear-at-turn-end source=osc7501 provider=antigravity kind={} ids={}",
+                        inflight_claim_kind(app).as_deref().unwrap_or(""),
+                        ids_json
+                    ),
+                );
+            }
+            clear_inflight_claim_sentinel(app, &claimed_ids);
+        }
+        Err(reason) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=skip-clear source=osc7501 provider=antigravity reason={} claimed={} started={} ids={}",
+                        reason, claimed_at, started_at, ids_json
+                    ),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod antigravity_turn_tests {
+    use super::{
+        antigravity_mark, antigravity_turn_step, osc7501_state_bodies, AntigravityMark,
+        AntigravityTurnEvent,
+    };
+
+    fn marker(body: &str) -> Vec<u8> {
+        [b"\x1b]7501;state=".as_slice(), body.as_bytes(), b"\x07"].concat()
+    }
+
+    // The three runs of the 2026-10-31 spike, as agy 1.4.12 emitted them
+    // (docs/agent-specimens/antigravity/osc7501-turns.md), through the parser
+    // and the step function together.
+    fn events(states: &[&str]) -> Vec<AntigravityTurnEvent> {
+        let stream: Vec<u8> = states
+            .iter()
+            .flat_map(|s| [b"screen ".to_vec(), marker(s)].concat())
+            .collect();
+        let (bodies, rest) = osc7501_state_bodies(&stream);
+        assert_eq!(rest, stream.len());
+        let mut open = false;
+        let mut out = Vec::new();
+        for mark in bodies.iter().filter_map(|b| antigravity_mark(b)) {
+            let (next, event) = antigravity_turn_step(open, mark);
+            open = next;
+            out.extend(event);
+        }
+        out
+    }
+
+    #[test]
+    fn spike_runs_end_at_done_or_idle() {
+        use AntigravityTurnEvent::*;
+        let auth = "blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA==";
+        // A completed turn ends at `done`; the snapshot 14 s after the reply
+        // still ended there. The two trailing `idle`s came from the
+        // capture's closing Ctrl-C, with no turn open.
+        assert_eq!(
+            events(&[
+                auth,
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "done:app=antigravity:msg=VFVSTi1PSy03NzMx",
+                "idle:app=antigravity",
+                "idle:app=antigravity",
+            ]),
+            vec![Start, End]
+        );
+        // Esc during a command, then Esc while streaming: two turns, each
+        // ended by `idle`, although agy fired no Stop hook for either.
+        assert_eq!(
+            events(&[
+                auth,
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "idle:app=antigravity",
+                "idle:app=antigravity",
+            ]),
+            vec![Start, End, Start, End]
+        );
+        // A background command: its turn ends at `done` while the command
+        // runs, and agy's own follow-up when it finishes is a second turn.
+        assert_eq!(
+            events(&[
+                auth,
+                "idle:app=antigravity",
+                "working:app=antigravity",
+                "done:app=antigravity:msg=U1RBUlRFRA==",
+                "working:app=antigravity",
+                "done:app=antigravity:msg=ZG9uZQ==",
+                "idle:app=antigravity",
+            ]),
+            vec![Start, End, Start, End]
+        );
+        // The demo-instance turn (2026-10-31): working, then done, and no
+        // idle afterwards. Its end must not wait for one.
+        assert_eq!(
+            events(&[
+                "working:app=antigravity:msg=RWRpdA==",
+                "done:app=antigravity:msg=REVNTy1UVVJOLTc3MzE=",
+            ]),
+            vec![Start, End]
+        );
+    }
+
+    #[test]
+    fn a_launch_with_a_turn_open_resets_it() {
+        assert_eq!(
+            antigravity_turn_step(true, AntigravityMark::Launch),
+            (false, Some(AntigravityTurnEvent::Reset))
+        );
+        assert_eq!(
+            antigravity_turn_step(true, AntigravityMark::Other),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn marks_belong_to_antigravity_only() {
+        assert_eq!(
+            antigravity_mark("working:app=antigravity"),
+            Some(AntigravityMark::Working)
+        );
+        assert_eq!(
+            antigravity_mark("done:app=antigravity:msg=eA=="),
+            Some(AntigravityMark::Ended)
+        );
+        assert_eq!(
+            antigravity_mark("idle:app=antigravity"),
+            Some(AntigravityMark::Ended)
+        );
+        // The folder-trust dialog reports this; it is not a turn boundary.
+        assert_eq!(
+            antigravity_mark("blocked:kind=permission:app=antigravity:msg=VHJ1c3Q="),
+            Some(AntigravityMark::Other)
+        );
+        assert_eq!(antigravity_mark("idle:app=opencode"), None);
+        assert_eq!(antigravity_mark("idle:id=x:app=codex"), None);
+    }
+
+    #[test]
+    fn markers_end_at_bel_or_st_and_split_ones_are_carried() {
+        let st = b"a\x1b]7501;state=idle:app=antigravity\x1b\\b";
+        assert_eq!(
+            osc7501_state_bodies(st),
+            (vec!["idle:app=antigravity".to_string()], st.len())
+        );
+        // Split inside the body: nothing yet, and the marker's start is kept.
+        let body_split = b"xx\x1b]7501;state=work";
+        assert_eq!(osc7501_state_bodies(body_split), (vec![], 2));
+        // Split inside the introducer.
+        let intro_split = b"xx\x1b]75";
+        assert_eq!(osc7501_state_bodies(intro_split), (vec![], 2));
+        // The carried start plus the next chunk completes it.
+        let joined = [&body_split[2..], b"ing:app=antigravity\x07".as_slice()].concat();
+        assert_eq!(
+            osc7501_state_bodies(&joined),
+            (vec!["working:app=antigravity".to_string()], joined.len())
+        );
+        // A plain ESC sequence at the end is not a marker start.
+        let other = b"text\x1b[0m";
+        assert_eq!(osc7501_state_bodies(other), (vec![], other.len()));
+    }
+
+    #[test]
+    fn live_refresh_gate_coalesces_bursts_and_caps_sustained_streams() {
+        use super::{
+            antigravity_turn_watch_stop_cell, stop_antigravity_turn_watch,
+            AntigravityLiveRefreshGate, ANTIGRAVITY_TURN_WATCH_GEN,
+        };
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc::TryRecvError;
+
+        // Seeded fresh state emits nothing until byte length grows.
+        let mut gate = AntigravityLiveRefreshGate::seeded(Some(100));
+        gate.note_change(0, Some(100));
+        assert_eq!(gate.poll_ready(500, Some(100)), None);
+
+        // A 3-write burst (t = 100, 200, 350) coalesces into one emit at 350 + 400 = 750ms.
+        gate.note_change(100, Some(150));
+        assert_eq!(gate.poll_ready(200, Some(150)), None);
+        gate.note_change(200, Some(220));
+        gate.note_change(350, Some(300));
+        assert_eq!(gate.poll_ready(700, Some(300)), None);
+        assert_eq!(gate.poll_ready(750, Some(300)), Some(300));
+        // Duplicate event with unchanged byte length is suppressed.
+        gate.note_change(800, Some(300));
+        assert_eq!(gate.poll_ready(1300, Some(300)), None);
+
+        // Continuous writes every 200ms (never quiet for 400ms) still flush at
+        // the 1500ms interval cap rather than starving for minutes.
+        let mut t = 1000u64;
+        let mut size = 400u64;
+        let mut fired_at = Vec::new();
+        while t <= 4500 {
+            size += 50;
+            gate.note_change(t, Some(size));
+            if gate.poll_ready(t, Some(size)).is_some() {
+                fired_at.push(t);
+            }
+            t += 200;
+        }
+        assert_eq!(fired_at, vec![2600, 4400]);
+
+        // Stopping a turn watch advances generation and disconnects its stop channel.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        *antigravity_turn_watch_stop_cell().lock().unwrap() = Some(tx);
+        let before = ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst);
+        stop_antigravity_turn_watch();
+        assert!(ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) > before);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+    }
+}
+
 // opencode-permission-menu: OpenCode asks in its own prompt, and Bram's plugin
 // reports it as permission.asked, then permission.replied once it is answered
 // (in the terminal, or by the pane's keys). Each request becomes a claim in the
@@ -92449,6 +97924,9 @@ mod setup_reason_tests {
             opencode_wanted: true,
             opencode_plugin_ok: true,
             opencode_instructions_current: true,
+            antigravity_wanted: true,
+            antigravity_hooks_ok: true,
+            antigravity_rules_current: true,
             is_source_repo: false,
         }
     }
@@ -92519,6 +97997,82 @@ mod setup_reason_tests {
             ..i
         };
         assert!(setup_reasons(None, i).is_empty());
+    }
+
+    #[test]
+    fn antigravity_reasons_match_verdict_and_scope() {
+        use super::provider_needs_setup_for;
+
+        let missing_hook = SetupReasonInputs {
+            antigravity_hooks_ok: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Antigravity), missing_hook),
+            vec!["antigravity-hook-missing"]
+        );
+        assert_eq!(
+            setup_reasons(None, missing_hook),
+            vec!["antigravity-hook-missing"]
+        );
+        assert!(setup_reasons(Some(SessionProvider::Claude), missing_hook).is_empty());
+
+        let stale_rules = SetupReasonInputs {
+            antigravity_rules_current: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Antigravity), stale_rules),
+            vec!["antigravity-rules-stale"]
+        );
+
+        let both = SetupReasonInputs {
+            antigravity_hooks_ok: false,
+            antigravity_rules_current: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Antigravity), both),
+            vec!["antigravity-hook-missing", "antigravity-rules-stale"]
+        );
+        assert!(setup_reasons(
+            None,
+            SetupReasonInputs {
+                antigravity_wanted: false,
+                ..both
+            }
+        )
+        .is_empty());
+
+        for wanted in [false, true] {
+            for core in [false, true] {
+                for hooks_ok in [false, true] {
+                    for rules_ok in [false, true] {
+                        let i = SetupReasonInputs {
+                            core_installed: core,
+                            antigravity_wanted: wanted,
+                            antigravity_hooks_ok: hooks_ok,
+                            antigravity_rules_current: rules_ok,
+                            ..healthy()
+                        };
+                        let antigravity_needs = wanted && (!core || !rules_ok || !hooks_ok);
+                        let verdict = provider_needs_setup_for(
+                            Some(SessionProvider::Antigravity),
+                            false,
+                            false,
+                            false,
+                            antigravity_needs,
+                        );
+                        let reasons = setup_reasons(Some(SessionProvider::Antigravity), i);
+                        assert_eq!(
+                            !reasons.is_empty(),
+                            verdict,
+                            "wanted={wanted} core={core} hooks_ok={hooks_ok} rules_ok={rules_ok}: {reasons:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

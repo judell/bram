@@ -13528,6 +13528,28 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             tail.drain(..=nl_pos);
         }
     }
+    // antigravity-permission-menu: two in-memory checks first, because this
+    // runs for every chunk of every provider. The latest-state cell is only
+    // written while Antigravity is current (note_antigravity_state_markers),
+    // and the update reads the provider itself (a file read) and clears a
+    // shown menu once Antigravity isn't current.
+    let state_is_permission = antigravity_latest_state_cell()
+        .lock()
+        .ok()
+        .and_then(|state| {
+            state.as_deref().map(|state| {
+                state.starts_with("blocked:kind=permission") && state.contains("app=antigravity")
+            })
+        })
+        .unwrap_or(false);
+    let menu_is_shown = antigravity_permission_menu_shown_cell()
+        .lock()
+        .map(|shown| shown.is_some())
+        .unwrap_or(false);
+    if state_is_permission || menu_is_shown {
+        let collapsed = collapse_tail(&tail, TERMINAL_ATTENTION_TAIL_CHARS);
+        antigravity_permission_menu_update(app, &collapsed);
+    }
     // menus.parseAndDisplay off (the default): the rolling pty_tail is kept up
     // to date above -- pty_agent_status_update reads it to scrape the status
     // verb, so the append must NOT be skipped -- but skip menu detection
@@ -88837,6 +88859,128 @@ fn antigravity_osc_carry_cell() -> &'static Mutex<Vec<u8>> {
     CELL.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+fn antigravity_latest_state_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn antigravity_permission_menu_shown_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn antigravity_permission_menu(
+    provider_is_antigravity: bool,
+    latest_state: Option<&str>,
+    tail: &str,
+) -> Option<PtyMenu> {
+    if !provider_is_antigravity
+        || !latest_state.is_some_and(|s| {
+            s.starts_with("blocked:kind=permission") && s.contains("app=antigravity")
+        })
+    {
+        return None;
+    }
+    let title = [
+        "Run this command?",
+        "Allow creation of this file?",
+        "Accept this file edit?",
+    ]
+    .into_iter()
+    .find(|title| tail.contains(title))?;
+    let title_at = tail.rfind(title)?;
+    if terminal_attention_prompt_shape(tail) != Some("antigravity-permission") {
+        return None;
+    }
+    let subject = if title == "Run this command?" {
+        let requested = tail[..title_at]
+            .rsplit_once("Requesting permission for:")?
+            .1
+            .trim();
+        requested.to_string()
+    } else {
+        let prefix = &tail[..title_at];
+        let (header_at, header_len) = ["Create file", "Pending edit"]
+            .into_iter()
+            .filter_map(|header| prefix.rfind(header).map(|at| (at, header.len())))
+            .max_by_key(|(at, _)| *at)?;
+        let body = &prefix[header_at + header_len..];
+        let from = body.find("<workspace>/").or_else(|| body.find('/'))?;
+        let path_and_diff = &body[from..];
+        let mut stat_at = None;
+        for (i, _) in path_and_diff.match_indices(" +") {
+            let digits = path_and_diff[i + 2..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
+            if digits > 0 {
+                stat_at = Some(i);
+                break;
+            }
+        }
+        path_and_diff[..stat_at?].trim().to_string()
+    };
+    let reason = tail[..title_at].rsplit_once("Reason:").map(|(_, s)| {
+        s.split("Requesting permission for:")
+            .next()
+            .unwrap_or(s)
+            .trim()
+            .to_string()
+    });
+    let mut options = Vec::new();
+    let footer = tail[title_at + title.len()..]
+        .find("esc to cancel")
+        .map(|n| title_at + title.len() + n)?;
+    let option_text = &tail[title_at + title.len()..footer];
+    for number in 1..=9 {
+        let marker = format!("{}. ", number);
+        let Some(at) = option_text.find(&marker) else {
+            if !options.is_empty() {
+                break;
+            } else {
+                continue;
+            }
+        };
+        let value_start = at + marker.len();
+        let next_at = (number + 1..=9)
+            .filter_map(|n| option_text.find(&format!(" {}. ", n)))
+            .min();
+        let label_end = next_at.unwrap_or(option_text.len());
+        let label = option_text[value_start..label_end]
+            .trim()
+            .trim_start_matches('>')
+            .trim();
+        let label = label.split("↑/↓").next().unwrap_or(label).trim();
+        if label.is_empty() {
+            break;
+        }
+        options.push(MenuOption {
+            key: number.to_string(),
+            label: label.to_string(),
+            answer_keys: Some(number.to_string()),
+            description: None,
+        });
+    }
+    if options.is_empty() {
+        return None;
+    }
+    let text = reason
+        .map(|r| format!("{}\n{}\n{}", title, subject, r))
+        .unwrap_or_else(|| format!("{}\n{}", title, subject));
+    Some(PtyMenu {
+        tool: "Antigravity permission".into(),
+        text,
+        options,
+        prompt_id: None,
+        tool_call_signature: None,
+        tool_call_diff: None,
+        tool_call_content: None,
+        cache_source: None,
+        at_host_ms: None,
+        signature_source: None,
+    })
+}
+
 // Called with every PTY chunk (pty_menu_update). Acts only while Antigravity
 // is the current provider.
 fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
@@ -88864,15 +89008,15 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
     };
     let marks: Vec<(AntigravityMark, String)> = bodies
         .iter()
-        .filter_map(|b| {
-            let state = b.split(':').next().unwrap_or("").to_string();
-            antigravity_mark(b).map(|m| (m, state))
-        })
+        .filter_map(|b| antigravity_mark(b).map(|m| (m, b.clone())))
         .collect();
     if marks.is_empty() || current_provider(app) != Some(SessionProvider::Antigravity) {
         return;
     }
     for (mark, state) in marks {
+        if let Ok(mut latest) = antigravity_latest_state_cell().lock() {
+            *latest = Some(state.clone());
+        }
         let now = unix_now_ms();
         let started = antigravity_turn_cell().lock().ok().and_then(|g| *g);
         let (open, event) = antigravity_turn_step(started.is_some(), mark);
@@ -88881,9 +89025,12 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
         }
         match event {
             Some(AntigravityTurnEvent::Start) => antigravity_turn_started(app, now),
-            Some(AntigravityTurnEvent::End) => {
-                antigravity_turn_ended(app, started.unwrap_or(now), now, &state)
-            }
+            Some(AntigravityTurnEvent::End) => antigravity_turn_ended(
+                app,
+                started.unwrap_or(now),
+                now,
+                state.split(':').next().unwrap_or("ended"),
+            ),
             Some(AntigravityTurnEvent::Reset) => {
                 if bram_trace_enabled() {
                     append_bram_trace_line(
@@ -88895,6 +89042,165 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
             }
             None => {}
         }
+    }
+}
+
+fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tail: &str) {
+    let provider = current_provider(app) == Some(SessionProvider::Antigravity);
+    if !provider {
+        // Switched away with agy's dialog up: its last state is moot, and
+        // keeping it would send every later chunk of the new provider here.
+        // A relaunched agy reports fresh states.
+        if let Ok(mut latest) = antigravity_latest_state_cell().lock() {
+            *latest = None;
+        }
+    }
+    let state = antigravity_latest_state_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let menu = antigravity_permission_menu(provider, state.as_deref(), tail);
+    let shown = antigravity_permission_menu_shown_cell();
+    let identity = menu.as_ref().map(|m| {
+        format!(
+            "{}|{}",
+            m.text,
+            m.options
+                .iter()
+                .map(|o| format!("{}:{}", o.key, o.label))
+                .collect::<Vec<_>>()
+                .join("|")
+        )
+    });
+    let Ok(mut current) = shown.lock() else {
+        return;
+    };
+    if identity == *current {
+        return;
+    }
+    if let Some(menu) = menu {
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-show");
+        }
+        prompt_shown(
+            app,
+            &menu.tool,
+            None,
+            menu.options.iter().map(|o| o.label.clone()).collect(),
+            "antigravity",
+        );
+        turn_state_set_menu(app, Some(menu), "antigravity-permission", "detected");
+        *current = identity;
+    } else if current.take().is_some() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "pty-menu", "op=antigravity-permission-clear");
+        }
+        turn_state_set_menu(app, None, "antigravity-permission", "dismissed");
+    }
+}
+
+#[cfg(test)]
+mod antigravity_permission_menu_tests {
+    use super::{antigravity_permission_menu, collapse_tail};
+    const STATE: &str = "blocked:kind=permission:app=antigravity";
+    fn raw(name: &str) -> String {
+        let bytes = match name {
+            "approval" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/approval.raw").as_slice()
+            }
+            "write" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/tool-write-approval.raw")
+                    .as_slice()
+            }
+            "edit" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/tool-edit-approval.raw")
+                    .as_slice()
+            }
+            "shell" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/tool-shell-approval.raw")
+                    .as_slice()
+            }
+            "command" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")
+                    .as_slice()
+            }
+            _ => unreachable!(),
+        };
+        collapse_tail(bytes, 1200)
+    }
+    #[test]
+    fn each_captured_dialog_builds_its_expected_menu_and_digit_answers() {
+        for (name, title, subject, labels) in [
+            ("approval", "Allow creation of this file?", "<workspace>/specimen.txt", vec!["Yes, allow creation", "No, deny creation"]),
+            ("write", "Allow creation of this file?", "<workspace>/tool-probe.txt", vec!["Yes, allow creation", "No, deny creation"]),
+            ("edit", "Allow creation of this file?", "<workspace>/tool-probe.txt", vec!["Yes, allow creation", "No, deny creation"]),
+            ("shell", "Accept this file edit?", "<workspace>/tool-probe.txt", vec!["Yes, accept this change", "No, reject this change"]),
+            ("command", "Run this command?", "echo APPROVAL-7731", vec!["Yes, run command", "Yes, and always allow in this conversation for commands that start with 'echo'", "Yes, and always allow for commands that start with 'echo' (Persist to settings.json)", "No, cancel"]),
+        ] {
+            let menu = antigravity_permission_menu(true, Some(STATE), &raw(name)).unwrap_or_else(|| panic!("{name}"));
+            assert!(menu.text.contains(title), "{name}: {}", menu.text);
+            assert!(menu.text.contains(subject), "{name}: {}", menu.text);
+            if name == "command" {
+                assert!(menu.text.contains("Specimen command requires approval."), "{}", menu.text);
+            }
+            assert_eq!(menu.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), labels, "{name}");
+            assert!(menu.options.iter().enumerate().all(|(i, o)| o.answer_keys.as_deref() == Some(if i == 0 { "1" } else if i == 1 { "2" } else if i == 2 { "3" } else { "4" })), "{name}");
+        }
+    }
+    #[test]
+    fn file_subjects_keep_real_paths_with_spaces() {
+        for (name, filename) in [
+            ("approval", "specimen.txt"),
+            ("write", "tool-probe.txt"),
+            ("edit", "tool-probe.txt"),
+            ("shell", "tool-probe.txt"),
+        ] {
+            let tail = raw(name).replace("<workspace>", "/Users/someone/my project");
+            let menu = antigravity_permission_menu(true, Some(STATE), &tail)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(
+                menu.text
+                    .contains(&format!("/Users/someone/my project/{filename}")),
+                "{name}: {}",
+                menu.text
+            );
+        }
+    }
+    #[test]
+    fn no_menu_for_other_provider_state_shapes_or_quoted_dialog() {
+        let active = raw("command");
+        assert!(antigravity_permission_menu(false, Some(STATE), &active).is_none());
+        assert!(
+            antigravity_permission_menu(true, Some("working:app=antigravity"), &active).is_none()
+        );
+        for name in [
+            "first-run-trust.raw",
+            "idle-composer.raw",
+            "permission-prompt.raw",
+        ] {
+            let bytes = match name {
+                "first-run-trust.raw" => {
+                    include_bytes!("../../docs/agent-specimens/antigravity/first-run-trust.raw")
+                        .as_slice()
+                }
+                "idle-composer.raw" => {
+                    include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw")
+                        .as_slice()
+                }
+                _ => include_bytes!("../../docs/agent-specimens/antigravity/permission-prompt.raw")
+                    .as_slice(),
+            };
+            assert!(
+                antigravity_permission_menu(true, Some(STATE), &collapse_tail(bytes, 1200))
+                    .is_none(),
+                "{name}"
+            );
+        }
+        let dialog = include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw");
+        let composer = include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw");
+        let quoted_and_idle = [dialog.as_slice(), composer.as_slice()].concat();
+        let quoted_and_idle = collapse_tail(&quoted_and_idle, 1200);
+        assert!(antigravity_permission_menu(true, Some(STATE), &quoted_and_idle).is_none());
     }
 }
 

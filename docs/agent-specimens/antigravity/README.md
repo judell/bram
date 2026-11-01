@@ -28,7 +28,9 @@ files are rendered from those redacted streams.
 | `permission-prompt.raw`, `permission-prompt.txt` | Snapshot of an ordinary working screen (`⢿ Working...`); the approval dialog had not appeared before capture ended |
 | `approval.raw`, `approval.txt`, `tool-write-approval.raw`, `tool-write-approval.txt`, `tool-edit-approval.raw`, `tool-edit-approval.txt`, `tool-shell-approval.raw`, `tool-shell-approval.txt` | File creation/edit approval dialogs with numbered choices |
 | `command-approval.raw`, `command-approval.txt` | `force_ask` shell-command approval with four numbered choices (captured 2026-10-31) |
+| `permission-digit.raw`, `permission-digit.txt` | Digit-only answer to a forced command approval; the command ran without Enter (captured 2026-10-31) |
 | `capture/schedules/command-approval.json` | Schedule that requests a command and captures its forced approval dialog (2026-10-31) |
+| `capture/schedules/permission-digit.json` | Schedule that selects a forced command approval with the digit alone (2026-10-31) |
 | `permission-declined.raw`, `permission-declined.txt` | Choosing option 4 reports `User declined the tool call` |
 | `hook-deny.raw`, `hook-deny.txt` | `PreToolUse` deny reason displayed to the model |
 | `hook-deny-result.raw`, `hook-deny-result.txt` | Replay of the denied-write response |
@@ -181,12 +183,15 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `approval.txt` | agy 1.4.12 |
 | `command-approval.raw` | agy 1.4.12 (2026-10-31) |
 | `command-approval.txt` | agy 1.4.12 (2026-10-31) |
+| `permission-digit.raw` | agy 1.4.12 (2026-10-31) |
+| `permission-digit.txt` | agy 1.4.12 (2026-10-31) |
 | `capture/README.md` | capture instructions and schedules |
 | `capture/drive.py` | copied capture utility |
 | `capture/redact.py` | pack redaction utility |
 | `capture/render.py` | copied capture utility |
 | `capture/rule-probes.py` | probe layout utility (2026-10-31) |
 | `capture/schedules/command-approval.json` | agy 1.4.12 (2026-10-31) |
+| `capture/schedules/permission-digit.json` | agy 1.4.12 (2026-10-31) |
 | `capture/schedules/exit-double-ctrl-c.json` | agy 1.4.12 |
 | `capture/schedules/exit-idle-settled.json` | agy 1.4.12 |
 | `capture/schedules/exit-idle.json` | agy 1.4.12 |

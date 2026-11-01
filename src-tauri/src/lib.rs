@@ -52841,6 +52841,15 @@ const ENHANCE_SIDECAR_REL: &str = ".claude/bram-conventions.md";
 // filename so projects that haven't re-run Setup still register as
 // Bram-managed during the transition.
 const ENHANCE_SIDECAR_LEGACY_REL: &str = ".claude/xmlui-desktop-conventions.md";
+// agents-md-block-agent-neutral: the `AGENTS.md` block and its template keep
+// their Codex names, but every AGENTS.md reader loads the block: Codex,
+// OpenCode, and Antigravity (an always-on rule). So the template addresses
+// them all, and labels Codex's own mechanics (the filesystem channel) as
+// Codex's. Renaming would churn paths with no change in behaviour. The
+// opening "This repo is driven through Bram. The canonical worklist gate" is
+// load-bearing: codex_startup_context_text and the transcript bootstrap
+// markers recognize Bram's text by it, and agents_md_has_worklist_gate_intro
+// keys on its first sentence and `resources/worklist.json`.
 const ENHANCE_CODEX_AGENTS_REL: &str = "AGENTS.md";
 const ENHANCE_CODEX_BUNDLE_REL: &str = "shell/codex-startup-instructions.md";
 const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";

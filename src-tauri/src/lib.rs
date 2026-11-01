@@ -6162,6 +6162,31 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     const CLAUDE_LOGIN_WINDOW: usize = 60;
     const CODEX_LOGIN_MARKERS: &[&str] = &["sign in with chatgpt", "provide your own api key"];
     const CODEX_LOGIN_FOOTER: &str = "press enter to continue";
+    // Antigravity CLI 1.4.12, captured in docs/agent-specimens/antigravity.
+    // The login chooser has its own footer. Trust/resume and approval screens
+    // need their captured menu footer to be almost the last thing drawn: in
+    // every capture only the "esc to cancel" hint and agy's model line follow
+    // it (19 to 55 squashed chars, the model line 19 of them). The model line
+    // ("Gemini 3.8 Flash · high") is the user's model and thinking level, so
+    // it is not matched (antigravity-login-and-startup-choice review). A reply
+    // quoting a dialog is followed by agy's composer, two full-width rules
+    // and "? for shortcuts", which puts the quoted footer past the bound.
+    const AGY_LOGIN_MARKER: &str = "you are currently not signed in";
+    const AGY_LOGIN_FOOTER: &str = "↑/↓ navigate · enter select";
+    const AGY_TRUST_MARKER: &str = "do you trust the contents of this project?";
+    const AGY_TRUST_FOOTER: &str = "↑/↓ navigate · enter confirm";
+    const AGY_RESUME_MARKERS: &[&str] = &["conversations", "type to search conversations"];
+    const AGY_RESUME_FOOTER: &str = "f2 rename f4 delete tab switch tab esc go back / clear search";
+    const AGY_PERMISSION_MARKERS: &[&str] = &[
+        "allow creation of this file?",
+        "accept this file edit?",
+        "run this command?",
+    ];
+    const AGY_PERMISSION_OPTION_MARKERS: &[&str] = &["1. yes", "2."];
+    const AGY_PERMISSION_FOOTER: &str = "↑/↓ navigate · tab amend";
+    // Squashed chars allowed after a dialog footer: the captures' 36 of fixed
+    // hints plus room for a model line up to 64 chars.
+    const AGY_AFTER_FOOTER_MAX: usize = 100;
     // v080-codex-session-lock: resuming a session that another Codex process
     // (an old shared server) still owns draws "This conversation is open in
     // another app … r retry f fork esc/ctrl+c/q exit". Its keys are bare
@@ -6277,6 +6302,26 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     }
     if CODEX_LOGIN_MARKERS.iter().any(|m| has(m)) && ends_with_footer(CODEX_LOGIN_FOOTER) {
         return Some("codex-login");
+    }
+    if has(AGY_LOGIN_MARKER) && ends_with_footer(AGY_LOGIN_FOOTER) {
+        return Some("antigravity-login");
+    }
+    let agy_footer_last = |marker: &str| {
+        let m = squash(marker);
+        tail.rfind(&m)
+            .is_some_and(|i| tail[i + m.len()..].chars().count() <= AGY_AFTER_FOOTER_MAX)
+    };
+    if has(AGY_TRUST_MARKER) && agy_footer_last(AGY_TRUST_FOOTER) {
+        return Some("antigravity-folder-trust");
+    }
+    if AGY_RESUME_MARKERS.iter().all(|m| has(m)) && agy_footer_last(AGY_RESUME_FOOTER) {
+        return Some("antigravity-resume-picker");
+    }
+    if AGY_PERMISSION_MARKERS.iter().any(|m| has(m))
+        && AGY_PERMISSION_OPTION_MARKERS.iter().all(|m| has(m))
+        && agy_footer_last(AGY_PERMISSION_FOOTER)
+    {
+        return Some("antigravity-permission");
     }
     if CODEX_SESSION_LOCK_MARKERS.iter().any(|m| has(m))
         && ends_with_footer(CODEX_SESSION_LOCK_FOOTER)
@@ -6574,36 +6619,37 @@ fn emit_terminal_attention<R: tauri::Runtime>(
     );
 }
 
-// Three agents, one slot order: Claude, Codex, OpenCode. Index into every
+// Four agents, one slot order: Claude, Codex, OpenCode, Antigravity. Index into every
 // per-agent flag array here, so the picker, the login offer and their tests
 // can't drift apart. issue-448's picker and terminal-attention-login-screen's
 // offer were written for two agents; catch-up-with-main-after-v0.7.8 widened
 // both.
-const STARTUP_AGENTS: [SessionProvider; 3] = [
+const STARTUP_AGENTS: [SessionProvider; 4] = [
     SessionProvider::Claude,
     SessionProvider::Codex,
     SessionProvider::Opencode,
+    SessionProvider::Antigravity,
 ];
 
 // The login offer's preference order when no installed agent has sessions in
 // this project: Codex, Claude, OpenCode. Codex first keeps the two-agent
 // behaviour — a logged-out Claude was always traded for Codex.
-const LOGIN_SWITCH_ORDER: [SessionProvider; 3] = [
+const LOGIN_SWITCH_ORDER: [SessionProvider; 4] = [
     SessionProvider::Codex,
     SessionProvider::Claude,
     SessionProvider::Opencode,
+    SessionProvider::Antigravity,
 ];
 
 // The provider's slot in the fixed-size STARTUP_AGENTS arrays (`installed`,
 // `has_sessions`). Derived from the list rather than hand-numbered, so a
-// provider that isn't in it has no slot: Antigravity joins STARTUP_AGENTS in
-// antigravity-login-and-startup-choice, and until then the startup ladder
-// cannot pick it (antigravity-provider-switch).
+// provider that isn't in it has no slot; Antigravity is explicitly the final
+// slot so the established three-agent order remains intact.
 fn provider_slot(provider: SessionProvider) -> Option<usize> {
     STARTUP_AGENTS.iter().position(|p| *p == provider)
 }
 
-fn installed_agent_flags() -> [bool; 3] {
+fn installed_agent_flags() -> [bool; 4] {
     STARTUP_AGENTS.map(|provider| agent_cli_on_path(provider_cli_name(provider)))
 }
 
@@ -6624,12 +6670,12 @@ fn provider_has_sessions<R: tauri::Runtime>(app: &AppHandle<R>, provider: Sessio
         .is_some()
 }
 
-fn session_flags<R: tauri::Runtime>(app: &AppHandle<R>) -> [bool; 3] {
+fn session_flags<R: tauri::Runtime>(app: &AppHandle<R>) -> [bool; 4] {
     STARTUP_AGENTS.map(|provider| provider_has_sessions(app, provider))
 }
 
 // terminal-attention-login-screen (#448): the pane offers one other agent, but
-// only when its CLI is on PATH. With three agents "the other one" isn't
+// only when its CLI is on PATH. With multiple agents "the other one" isn't
 // defined, so the offer is the installed agent with sessions in this project,
 // else the first installed one in LOGIN_SWITCH_ORDER — never the agent that
 // isn't logged in.
@@ -6640,17 +6686,18 @@ fn login_switch_target<R: tauri::Runtime>(
     let blocked = match shape {
         Some("claude-login") => SessionProvider::Claude,
         Some("codex-login") => SessionProvider::Codex,
+        Some("antigravity-login") => SessionProvider::Antigravity,
         _ => return None,
     };
     login_switch_choice(blocked, installed_agent_flags(), session_flags(app))
         .map(session_provider_label)
 }
 
-// The pure half, so the three-agent rule is testable without an AppHandle.
+// The pure half, so the four-agent rule is testable without an AppHandle.
 fn login_switch_choice(
     blocked: SessionProvider,
-    installed: [bool; 3],
-    has_sessions: [bool; 3],
+    installed: [bool; 4],
+    has_sessions: [bool; 4],
 ) -> Option<SessionProvider> {
     let eligible = |provider: SessionProvider| {
         provider != blocked && provider_slot(provider).is_some_and(|slot| installed[slot])
@@ -6672,9 +6719,9 @@ fn login_switch_choice(
 mod login_switch_offer_tests {
     use super::{login_switch_choice, SessionProvider};
 
-    // Slots: Claude, Codex, OpenCode.
-    const ALL_INSTALLED: [bool; 3] = [true, true, true];
-    const NO_SESSIONS: [bool; 3] = [false, false, false];
+    // Slots: Claude, Codex, OpenCode, Antigravity.
+    const ALL_INSTALLED: [bool; 4] = [true, true, true, true];
+    const NO_SESSIONS: [bool; 4] = [false, false, false, false];
 
     #[test]
     fn a_logged_out_claude_is_traded_for_codex_as_before() {
@@ -6689,14 +6736,38 @@ mod login_switch_offer_tests {
     }
 
     #[test]
+    fn antigravity_is_eligible_last_in_the_fallback_order() {
+        assert_eq!(
+            login_switch_choice(
+                SessionProvider::Claude,
+                [false, false, false, true],
+                NO_SESSIONS
+            ),
+            Some(SessionProvider::Antigravity)
+        );
+        assert_eq!(
+            login_switch_choice(SessionProvider::Antigravity, ALL_INSTALLED, NO_SESSIONS),
+            Some(SessionProvider::Codex)
+        );
+    }
+
+    #[test]
     fn opencode_is_offered_when_it_is_the_installed_alternative() {
         // The only other CLI on this machine.
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, [true, false, true], NO_SESSIONS),
+            login_switch_choice(
+                SessionProvider::Claude,
+                [true, false, true, false],
+                NO_SESSIONS
+            ),
             Some(SessionProvider::Opencode)
         );
         assert_eq!(
-            login_switch_choice(SessionProvider::Codex, [false, true, true], NO_SESSIONS),
+            login_switch_choice(
+                SessionProvider::Codex,
+                [false, true, true, false],
+                NO_SESSIONS
+            ),
             Some(SessionProvider::Opencode)
         );
     }
@@ -6706,7 +6777,11 @@ mod login_switch_offer_tests {
         // Codex is installed, but this project has only ever run OpenCode:
         // offer the agent that already has context here.
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [false, false, true]),
+            login_switch_choice(
+                SessionProvider::Claude,
+                ALL_INSTALLED,
+                [false, false, true, false]
+            ),
             Some(SessionProvider::Opencode)
         );
     }
@@ -6715,11 +6790,19 @@ mod login_switch_offer_tests {
     fn the_logged_out_agent_is_never_offered() {
         // Codex has sessions here, but Codex is the one that isn't logged in.
         assert_eq!(
-            login_switch_choice(SessionProvider::Codex, ALL_INSTALLED, [false, true, false]),
+            login_switch_choice(
+                SessionProvider::Codex,
+                ALL_INSTALLED,
+                [false, true, false, false]
+            ),
             Some(SessionProvider::Claude)
         );
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, ALL_INSTALLED, [true, false, false]),
+            login_switch_choice(
+                SessionProvider::Claude,
+                ALL_INSTALLED,
+                [true, false, false, false]
+            ),
             Some(SessionProvider::Codex)
         );
     }
@@ -6727,15 +6810,19 @@ mod login_switch_offer_tests {
     #[test]
     fn no_installed_alternative_offers_nothing() {
         assert_eq!(
-            login_switch_choice(SessionProvider::Claude, [true, false, false], NO_SESSIONS),
+            login_switch_choice(
+                SessionProvider::Claude,
+                [true, false, false, false],
+                NO_SESSIONS
+            ),
             None
         );
         // Sessions of an uninstalled agent don't make it offerable.
         assert_eq!(
             login_switch_choice(
                 SessionProvider::Claude,
-                [true, false, false],
-                [false, false, true]
+                [true, false, false, false],
+                [false, false, true, false]
             ),
             None
         );
@@ -6761,6 +6848,8 @@ mod terminal_attention_login_tests {
         Business, and Enterprise plans 2. Sign in with Device Code Sign in from another \
         device with a one-time code 3. Provide your own API key Pay for what you use \
         Press enter to continue";
+    const AGY_LOGGED_OUT: &str =
+        include_str!("../../docs/agent-specimens/antigravity/logged-out.txt");
 
     #[test]
     fn specimens_classify() {
@@ -6771,6 +6860,10 @@ mod terminal_attention_login_tests {
         assert_eq!(
             terminal_attention_prompt_shape(CODEX_SIGN_IN),
             Some("codex-login")
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape(AGY_LOGGED_OUT),
+            Some("antigravity-login")
         );
     }
 
@@ -6786,6 +6879,10 @@ mod terminal_attention_login_tests {
         let codex_quoting = "Codex says Sign in with ChatGPT then Press enter to continue. \
             › Ask Codex to do anything ? for shortcuts";
         assert_eq!(terminal_attention_prompt_shape(codex_quoting), None);
+        let agy_quoting = format!(
+            "Antigravity may show this login screen: {AGY_LOGGED_OUT}\n────────────────────────\n> composer text"
+        );
+        assert_eq!(terminal_attention_prompt_shape(&agy_quoting), None);
     }
 
     #[test]
@@ -6801,6 +6898,14 @@ mod terminal_attention_login_tests {
         // Codex's screen counts only while Codex is the live agent.
         assert_eq!(
             pane_input_blocking_prompt(CODEX_SIGN_IN, Some(SessionProvider::Claude)),
+            None
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(AGY_LOGGED_OUT, Some(SessionProvider::Antigravity)),
+            Some("antigravity-login")
+        );
+        assert_eq!(
+            pane_input_blocking_prompt(AGY_LOGGED_OUT, Some(SessionProvider::Claude)),
             None
         );
     }
@@ -7063,6 +7168,167 @@ mod terminal_attention_tests {
     #[test]
     fn empty_tail_is_none() {
         assert_eq!(terminal_attention_prompt_shape(""), None);
+    }
+}
+
+#[cfg(test)]
+mod antigravity_prompt_specimen_tests {
+    use super::{pane_input_blocking_prompt, terminal_attention_prompt_shape, SessionProvider};
+
+    // Whole Antigravity CLI 1.4.12 captures; pinned with the original text in
+    // docs/agent-specimens/antigravity so markers stay specimen-derived.
+    const TRUST: &str = include_str!("../../docs/agent-specimens/antigravity/first-run-trust.txt");
+    const RESUME: &str = include_str!("../../docs/agent-specimens/antigravity/resume-picker.txt");
+    const APPROVAL: &str = include_str!("../../docs/agent-specimens/antigravity/approval.txt");
+    const TOOL_WRITE_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/tool-write-approval.txt");
+    const TOOL_EDIT_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/tool-edit-approval.txt");
+    const TOOL_SHELL_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/tool-shell-approval.txt");
+    const COMMAND_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/command-approval.txt");
+    const WORKING_PROMPT: &str =
+        include_str!("../../docs/agent-specimens/antigravity/permission-prompt.txt");
+    const WORKING_LIFECYCLE: &str =
+        include_str!("../../docs/agent-specimens/antigravity/lifecycle-working.txt");
+
+    #[test]
+    fn captured_dialogs_classify_and_hold_only_antigravity() {
+        for (screen, shape) in [
+            (TRUST, "antigravity-folder-trust"),
+            (RESUME, "antigravity-resume-picker"),
+            (APPROVAL, "antigravity-permission"),
+            (TOOL_WRITE_APPROVAL, "antigravity-permission"),
+            (TOOL_EDIT_APPROVAL, "antigravity-permission"),
+            (TOOL_SHELL_APPROVAL, "antigravity-permission"),
+            (COMMAND_APPROVAL, "antigravity-permission"),
+        ] {
+            assert_eq!(terminal_attention_prompt_shape(screen), Some(shape));
+            assert_eq!(
+                pane_input_blocking_prompt(screen, Some(SessionProvider::Antigravity)),
+                Some(shape)
+            );
+            assert_eq!(
+                pane_input_blocking_prompt(screen, Some(SessionProvider::Claude)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_dialog_text_followed_by_composer_is_a_near_miss() {
+        for screen in [TRUST, RESUME] {
+            let quoted = format!(
+                "I saw this Antigravity screen: {screen}\n────────────────────────────────────────\n> {}\n────────────────────────────────────────\nGemini 3.8 Flash · high",
+                "ordinary composer text ".repeat(30)
+            );
+            assert_eq!(terminal_attention_prompt_shape(&quoted), None);
+            assert_eq!(
+                pane_input_blocking_prompt(&quoted, Some(SessionProvider::Antigravity)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_working_screens_do_not_classify_as_permission_prompts() {
+        for screen in [WORKING_PROMPT, WORKING_LIFECYCLE] {
+            assert_ne!(
+                terminal_attention_prompt_shape(screen),
+                Some("antigravity-permission")
+            );
+            assert_eq!(
+                pane_input_blocking_prompt(screen, Some(SessionProvider::Antigravity)),
+                None
+            );
+        }
+    }
+
+    // The tail Bram really classifies: the raw PTY stream, ANSI-stripped,
+    // whitespace collapsed to single spaces, last 1200 chars, as
+    // pty_tail_snippet builds it.
+    fn collapsed_tail(raw: &[u8]) -> String {
+        let stripped = super::strip_ansi(raw);
+        let text = String::from_utf8_lossy(&stripped);
+        let collapsed = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace('"', "'");
+        let n = collapsed.chars().count();
+        collapsed.chars().skip(n.saturating_sub(1200)).collect()
+    }
+
+    #[test]
+    fn collapsed_raw_streams_classify() {
+        for (raw, shape) in [
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/first-run-trust.raw")[..],
+                "antigravity-folder-trust",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/resume-picker.raw")[..],
+                "antigravity-resume-picker",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/approval.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")[..],
+                "antigravity-permission",
+            ),
+        ] {
+            let tail = collapsed_tail(raw);
+            assert_eq!(
+                terminal_attention_prompt_shape(&tail),
+                Some(shape),
+                "{tail}"
+            );
+        }
+        for raw in [
+            &include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw")[..],
+            &include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-working.raw")[..],
+        ] {
+            assert_eq!(terminal_attention_prompt_shape(&collapsed_tail(raw)), None);
+        }
+    }
+
+    // The model line is the user's model and thinking level: a dialog drawn
+    // under another model, with a longer line, still holds.
+    #[test]
+    fn dialogs_classify_whatever_the_model_line_says() {
+        for (screen, shape) in [
+            (TRUST, "antigravity-folder-trust"),
+            (RESUME, "antigravity-resume-picker"),
+            (APPROVAL, "antigravity-permission"),
+            (COMMAND_APPROVAL, "antigravity-permission"),
+        ] {
+            assert!(screen.contains("Gemini 3.8 Flash · high"));
+            let other = screen.replace(
+                "Gemini 3.8 Flash · high",
+                "Claude Sonnet 4.6 (Thinking) · low",
+            );
+            assert_eq!(terminal_attention_prompt_shape(&other), Some(shape));
+            assert_eq!(
+                pane_input_blocking_prompt(&other, Some(SessionProvider::Antigravity)),
+                Some(shape)
+            );
+        }
+    }
+
+    // What the model-line check used to catch: agy's own reply quoting a
+    // dialog, followed by its idle composer. The composer's rules push the
+    // quoted footer past the bound.
+    #[test]
+    fn quoted_dialog_followed_by_agys_idle_composer_is_a_near_miss() {
+        let rule = "─".repeat(120);
+        for screen in [TRUST, RESUME, APPROVAL, COMMAND_APPROVAL] {
+            let quoted =
+                format!("{screen}\n{rule}\n>\n{rule}\n? for shortcuts    Gemini 3.8 Pro · low");
+            assert_eq!(terminal_attention_prompt_shape(&quoted), None);
+        }
     }
 }
 
@@ -20700,8 +20966,8 @@ enum StartupAgentPick {
 
 fn startup_agent_pick(
     agent_configured: bool,
-    installed: [bool; 3],
-    has_sessions: [bool; 3],
+    installed: [bool; 4],
+    has_sessions: [bool; 4],
 ) -> StartupAgentPick {
     // The launch ladder already decides when the project named an agent, and
     // its sole-CLI rung covers a machine with one agent installed. With two or
@@ -20856,17 +21122,14 @@ fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> 
 mod startup_agent_pick_tests {
     use super::{provider_slot, startup_agent_pick, SessionProvider, StartupAgentPick};
 
-    // Slots: Claude, Codex, OpenCode.
-    const ALL_INSTALLED: [bool; 3] = [true, true, true];
-    const NO_SESSIONS: [bool; 3] = [false, false, false];
+    // Slots: Claude, Codex, OpenCode, Antigravity.
+    const ALL_INSTALLED: [bool; 4] = [true, true, true, true];
+    const NO_SESSIONS: [bool; 4] = [false, false, false, false];
 
-    // antigravity-provider-switch: Antigravity is selectable in the switcher,
-    // but it is not a startup fallback or a login-switch target until
-    // antigravity-login-and-startup-choice. Its slot is what keeps it out of
-    // both fixed-size lists, so pin the absence rather than an index.
+    // Antigravity is now the fourth startup slot, after the established trio.
     #[test]
-    fn antigravity_has_no_startup_slot_yet() {
-        assert_eq!(provider_slot(SessionProvider::Antigravity), None);
+    fn antigravity_is_last_in_startup_slots() {
+        assert_eq!(provider_slot(SessionProvider::Antigravity), Some(3));
         assert_eq!(provider_slot(SessionProvider::Claude), Some(0));
         assert_eq!(provider_slot(SessionProvider::Opencode), Some(2));
     }
@@ -20878,7 +21141,7 @@ mod startup_agent_pick_tests {
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(true, ALL_INSTALLED, [true, true, true]),
+            startup_agent_pick(true, ALL_INSTALLED, [true, true, true, true]),
             StartupAgentPick::Configured
         );
     }
@@ -20886,15 +21149,19 @@ mod startup_agent_pick_tests {
     #[test]
     fn one_cli_leaves_it_to_the_sole_cli_rung() {
         assert_eq!(
-            startup_agent_pick(false, [true, false, false], NO_SESSIONS),
+            startup_agent_pick(false, [true, false, false, false], NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(false, [false, true, false], NO_SESSIONS),
+            startup_agent_pick(false, [false, true, false, false], NO_SESSIONS),
             StartupAgentPick::Configured
         );
         assert_eq!(
-            startup_agent_pick(false, [false, false, true], NO_SESSIONS),
+            startup_agent_pick(false, [false, false, true, false], NO_SESSIONS),
+            StartupAgentPick::Configured
+        );
+        assert_eq!(
+            startup_agent_pick(false, [false, false, false, true], NO_SESSIONS),
             StartupAgentPick::Configured
         );
     }
@@ -20902,16 +21169,20 @@ mod startup_agent_pick_tests {
     #[test]
     fn sessions_for_one_agent_pick_it() {
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [false, true, false]),
+            startup_agent_pick(false, ALL_INSTALLED, [false, true, false, false]),
             StartupAgentPick::Evidence(SessionProvider::Codex)
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [true, false, false]),
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, false, false]),
             StartupAgentPick::Evidence(SessionProvider::Claude)
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [false, false, true]),
+            startup_agent_pick(false, ALL_INSTALLED, [false, false, true, false]),
             StartupAgentPick::Evidence(SessionProvider::Opencode)
+        );
+        assert_eq!(
+            startup_agent_pick(false, ALL_INSTALLED, [false, false, false, true]),
+            StartupAgentPick::Evidence(SessionProvider::Antigravity)
         );
     }
 
@@ -20919,12 +21190,16 @@ mod startup_agent_pick_tests {
     fn two_installed_agents_can_still_use_evidence() {
         // Claude and OpenCode installed, OpenCode the only one with sessions.
         assert_eq!(
-            startup_agent_pick(false, [true, false, true], [false, false, true]),
+            startup_agent_pick(
+                false,
+                [true, false, true, false],
+                [false, false, true, false]
+            ),
             StartupAgentPick::Evidence(SessionProvider::Opencode)
         );
         // ... and with no sessions anywhere, the card asks.
         assert_eq!(
-            startup_agent_pick(false, [true, false, true], NO_SESSIONS),
+            startup_agent_pick(false, [true, false, true, false], NO_SESSIONS),
             StartupAgentPick::Ask
         );
     }
@@ -20933,7 +21208,11 @@ mod startup_agent_pick_tests {
     fn sessions_for_an_uninstalled_agent_do_not_pick_it() {
         // OpenCode ran here once but its CLI is gone: starting it would fail.
         assert_eq!(
-            startup_agent_pick(false, [true, true, false], [false, false, true]),
+            startup_agent_pick(
+                false,
+                [true, true, false, false],
+                [false, false, true, false]
+            ),
             StartupAgentPick::Ask
         );
     }
@@ -20945,11 +21224,11 @@ mod startup_agent_pick_tests {
             StartupAgentPick::Ask
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [true, true, true]),
+            startup_agent_pick(false, ALL_INSTALLED, [true, true, true, true]),
             StartupAgentPick::Ask
         );
         assert_eq!(
-            startup_agent_pick(false, ALL_INSTALLED, [true, false, true]),
+            startup_agent_pick(false, ALL_INSTALLED, [true, false, true, false]),
             StartupAgentPick::Ask
         );
     }
@@ -48737,6 +49016,8 @@ fn prompt_shape_for_provider(
             provider == Some(SessionProvider::Codex)
         } else if opencode_only_prompt_shape(shape) {
             provider == Some(SessionProvider::Opencode)
+        } else if shape.starts_with("antigravity-") {
+            provider == Some(SessionProvider::Antigravity)
         } else {
             true
         }
@@ -48770,6 +49051,10 @@ fn pane_input_blocking_prompt(
                 | "opencode-dialog"
                 | "opencode-permission"
                 | "opencode-question"
+                | "antigravity-login"
+                | "antigravity-folder-trust"
+                | "antigravity-resume-picker"
+                | "antigravity-permission"
         )
     })
 }

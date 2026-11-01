@@ -1124,7 +1124,7 @@ window.__bramSwitchAgent = function (provider) {
     if (!p || !p.pending) return null;
     if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
     // The host names the agents installed on this machine, so the card offers
-    // every one of them — three, since OpenCode joined Claude and Codex. An
+    // every one of them — now including Antigravity. An
     // older host sends no list; the two-agent pair is then the honest answer.
     var installed = Array.isArray(p.installed) && p.installed.length
       ? p.installed.filter(function (key) { return window.__bramProviderKey(key); })
@@ -9917,6 +9917,18 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     if (value && value.shape === "codex-login") {
       return "Codex is asking you to sign in. Open the terminal to sign in.";
     }
+    if (value && value.shape === "antigravity-login") {
+      return "Antigravity is asking you to sign in. Open the terminal to sign in.";
+    }
+    if (value && value.shape === "antigravity-folder-trust") {
+      return "Antigravity is asking you to trust this folder. Open the terminal to review it.";
+    }
+    if (value && value.shape === "antigravity-resume-picker") {
+      return "Antigravity has its conversation picker open. Open the terminal to choose a conversation.";
+    }
+    if (value && value.shape === "antigravity-permission") {
+      return "Antigravity is asking permission in the terminal. Answer it there.";
+    }
     // v080-codex-session-lock: Bram never picks retry or fork for the user.
     if (value && value.shape === "codex-session-lock") {
       return "Codex says this conversation is open in another app. Open the terminal to retry, fork or exit.";
@@ -9935,7 +9947,7 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
     return "The terminal is waiting at a prompt Bram can't answer.";
   };
   // The host names the alternative only when its CLI is on PATH, and with
-  // three agents it is never simply "the other one" — so the label comes from
+  // several agents it is never simply "the other one" — so the label comes from
   // the provider key, never a two-way ternary.
   window.__bramTerminalAttentionSwitchLabel = function (value) {
     var to = value && value.switchTo;

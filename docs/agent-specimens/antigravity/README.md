@@ -25,7 +25,10 @@ files are rendered from those redacted streams.
 | `logged-out.raw`, `logged-out.txt` | Login-method chooser from a throwaway `HOME` with no account state |
 | `hooks-view.raw`, `hooks-view.txt` | `/hooks` lists five hook types and one handler for each |
 | `startup.raw`, `startup.txt`, `first-tool.raw`, `first-tool.txt`, `second-tool.raw`, `second-tool.txt`, `approval.raw`, `approval.txt` | Intermediate snapshots from the hook experiment; the requested tool sequence did not complete |
-| `permission-prompt.raw`, `permission-prompt.txt` | `force_ask` prompt with four numbered choices |
+| `permission-prompt.raw`, `permission-prompt.txt` | Snapshot of an ordinary working screen (`⢿ Working...`); the approval dialog had not appeared before capture ended |
+| `approval.raw`, `approval.txt`, `tool-write-approval.raw`, `tool-write-approval.txt`, `tool-edit-approval.raw`, `tool-edit-approval.txt`, `tool-shell-approval.raw`, `tool-shell-approval.txt` | File creation/edit approval dialogs with numbered choices |
+| `command-approval.raw`, `command-approval.txt` | `force_ask` shell-command approval with four numbered choices (captured 2026-10-31) |
+| `capture/schedules/command-approval.json` | Schedule that requests a command and captures its forced approval dialog (2026-10-31) |
 | `permission-declined.raw`, `permission-declined.txt` | Choosing option 4 reports `User declined the tool call` |
 | `hook-deny.raw`, `hook-deny.txt` | `PreToolUse` deny reason displayed to the model |
 | `hook-deny-result.raw`, `hook-deny-result.txt` | Replay of the denied-write response |
@@ -65,6 +68,7 @@ files are rendered from those redacted streams.
 | `capture/schedules/tool-payloads.json`, `capture/schedules/tool-payloads-approved.json`, `capture/schedules/tool-payloads-full.json` | File write/edit and shell tool payload probe at different approval timings |
 | `capture/schedules/resume-shell-permission.json` | Resume the pending harmless shell approval and run it |
 | `capture/schedules/permission-prompt.json` | Force a shell approval prompt; Escape interrupts the turn |
+| `capture/schedules/command-approval.json` | Force a shell-command approval prompt with a `PreToolUse` `force_ask` hook (2026-10-31) |
 | `capture/schedules/permission-decline-number.json` | Select option 4 to explicitly decline |
 | `capture/schedules/exit-double-ctrl-c.json`, `capture/schedules/exit-idle-settled.json` | Attempts to exit with a second Ctrl-C |
 | `capture/schedules/resume-then-exit.json` | Resume by conversation id, then interrupt the replayed turn |
@@ -156,7 +160,7 @@ findings above are limited to the artifacts actually captured.
 | Tool payload | `write_file` (`Content`, `Overwrite`, `Path`), `edit_file` (`Path`, `Replacement`, `Target`), and `run_command` (`CommandLine`, `WaitMsBeforeAsync`, `toolSummary`) | `hooks/payloads/PreToolUse.jsonl`, `hooks/payloads/PreToolUse-denied.jsonl` |
 | Turn hooks | `PreInvocation`, `PostInvocation` and `Stop` on a completed turn. An interrupted turn fires **no** `Stop` or `PostInvocation`. A background command gets `Stop` with `fullyIdle: false`, then `true` after agy's own follow-up | `hooks/payloads/Stop.jsonl`, `hooks/payloads/Stop-background.jsonl`, `osc7501-turns.md` |
 | Turn state (OSC 7501) | With `AGY_CLI_OSC7501=on`: `state=working\|done\|idle:app=antigravity`. A completed turn ends at `done`, an interrupted one at `idle`. Launch reports `blocked:kind=auth` first, and the folder-trust dialog `blocked:kind=permission`. Without the variable, only the `7501;?` query | `osc7501-turns.md` |
-| Menus | `/hooks`, `/resume` conversation list, four-choice command approval | `hooks-view.txt`, `renamed-session-list.txt`, `permission-prompt.txt` |
+| Menus | `/hooks`, `/resume` conversation list, file approvals, four-choice command approval | `hooks-view.txt`, `renamed-session-list.txt`, `approval.txt`, `tool-write-approval.txt`, `tool-edit-approval.txt`, `tool-shell-approval.txt`, `command-approval.txt` (`permission-prompt.txt` is a working screen) |
 | Screen states | Trust prompt, idle composer, generating, first Ctrl-C hint | corresponding `.txt` screens |
 | Model and version | Gemini 3.8 Flash (High), agy 1.4.12 | `idle-composer.txt`, `version.txt`, `hooks/payloads/SessionStart.jsonl` |
 | ACP | No ACP subcommand in help; not independently probed | `help.txt` |
@@ -175,11 +179,14 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 |---|---|
 | `approval.raw` | agy 1.4.12 |
 | `approval.txt` | agy 1.4.12 |
+| `command-approval.raw` | agy 1.4.12 (2026-10-31) |
+| `command-approval.txt` | agy 1.4.12 (2026-10-31) |
 | `capture/README.md` | capture instructions and schedules |
 | `capture/drive.py` | copied capture utility |
 | `capture/redact.py` | pack redaction utility |
 | `capture/render.py` | copied capture utility |
 | `capture/rule-probes.py` | probe layout utility (2026-10-31) |
+| `capture/schedules/command-approval.json` | agy 1.4.12 (2026-10-31) |
 | `capture/schedules/exit-double-ctrl-c.json` | agy 1.4.12 |
 | `capture/schedules/exit-idle-settled.json` | agy 1.4.12 |
 | `capture/schedules/exit-idle.json` | agy 1.4.12 |
@@ -252,8 +259,8 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `osc7501-turns.md` | agy 1.4.12 (2026-10-31) |
 | `permission-declined.raw` | agy 1.4.12 |
 | `permission-declined.txt` | agy 1.4.12 |
-| `permission-prompt.raw` | agy 1.4.12 |
-| `permission-prompt.txt` | agy 1.4.12 |
+| `permission-prompt.raw` | agy 1.4.12 (working-screen snapshot; approval dialog not captured) |
+| `permission-prompt.txt` | agy 1.4.12 (working-screen snapshot; approval dialog not captured) |
 | `rename-idle.raw` | agy 1.4.12 |
 | `rename-idle.txt` | agy 1.4.12 |
 | `rename-result.raw` | agy 1.4.12 |

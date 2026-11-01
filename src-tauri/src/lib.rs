@@ -54600,27 +54600,151 @@ fn collect_opencode_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<
     out
 }
 
-// antigravity-provider-switch: the Context tab needs an arm for every provider
-// (collect_context_files matches exhaustively). The specimen pack captured one
-// file agy reads from the project — the hook config Bram itself seeds — and
-// left agy's instructions-file chain uncaptured. So this lists what is
-// evidenced and claims nothing else; a larger list waits on a capture of
-// what agy actually loads.
+// antigravity-context-files: what agy 1.4.12 loads from a project, per the
+// rules spike (docs/agent-specimens/antigravity/rules-and-transport.md §1):
+// AGENTS.md and GEMINI.md at the root, .agents/AGENTS.md, and
+// .agents/rules/*.md, but a rule only with `trigger: always_on` frontmatter.
+// agy skips any other rule (it logs "Invalid rule trigger" and nothing else),
+// so those are listed with a note. Plus the hook config Bram seeds. Nothing
+// global: no per-user file under ~/.gemini was captured, so none is claimed.
 fn collect_antigravity_context_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<ContextFile> {
-    let mut out: Vec<ContextFile> = Vec::new();
-    let Some(proj_root) = project_root(Some(app)) else {
-        return out;
-    };
-    let hooks = proj_root.join(ENHANCE_ANTIGRAVITY_HOOKS_REL);
-    if hooks.is_file() {
-        out.push(ContextFile {
-            category: "hooks",
-            path: hooks,
-            display: ENHANCE_ANTIGRAVITY_HOOKS_REL.to_string(),
-            kind: Some("antigravity"),
-        });
+    match project_root(Some(app)) {
+        Some(root) => antigravity_context_files_in(&root),
+        None => Vec::new(),
     }
+}
+
+fn antigravity_context_files_in(proj_root: &Path) -> Vec<ContextFile> {
+    let mut out: Vec<ContextFile> = Vec::new();
+    let mut push = |category: &'static str, path: PathBuf, display: String| {
+        if path.is_file() {
+            out.push(ContextFile {
+                category,
+                path,
+                display,
+                kind: Some("antigravity"),
+            });
+        }
+    };
+    for rel in ["AGENTS.md", "GEMINI.md", ".agents/AGENTS.md"] {
+        push("project", proj_root.join(rel), rel.to_string());
+    }
+    let mut rules: Vec<PathBuf> = std::fs::read_dir(proj_root.join(".agents").join("rules"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    rules.sort();
+    for path in rules {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let loaded = std::fs::read_to_string(&path)
+            .map(|text| antigravity_rule_is_always_on(&text))
+            .unwrap_or(false);
+        let display = if loaded {
+            format!(".agents/rules/{name}")
+        } else {
+            format!(".agents/rules/{name} (not loaded: no always_on trigger)")
+        };
+        push("rules", path, display);
+    }
+    push(
+        "hooks",
+        proj_root.join(ENHANCE_ANTIGRAVITY_HOOKS_REL),
+        ENHANCE_ANTIGRAVITY_HOOKS_REL.to_string(),
+    );
     out
+}
+
+// Whether agy loads a rule: a leading `---` frontmatter block holding
+// `trigger: always_on` (quoted or not).
+fn antigravity_rule_is_always_on(text: &str) -> bool {
+    let mut lines = text.trim_start_matches('\u{feff}').lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return false;
+    }
+    for line in lines {
+        let line = line.trim();
+        if line == "---" {
+            return false;
+        }
+        if let Some(value) = line.strip_prefix("trigger:") {
+            return value.trim().trim_matches(['"', '\'']) == "always_on";
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod antigravity_context_files_tests {
+    use super::{antigravity_context_files_in, antigravity_rule_is_always_on};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-agy-context-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lists_what_agy_loads_and_notes_skipped_rules() {
+        let dir = scratch("lists");
+        let root = dir.as_path();
+        std::fs::create_dir_all(root.join(".agents/rules")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "a").unwrap();
+        std::fs::write(root.join("GEMINI.md"), "g").unwrap();
+        std::fs::write(root.join(".agents/AGENTS.md"), "inner").unwrap();
+        std::fs::write(root.join(".agents/hooks.json"), "{}").unwrap();
+        let rules = root.join(".agents/rules");
+        std::fs::write(rules.join("b-on.md"), "---\ntrigger: always_on\n---\nbody").unwrap();
+        std::fs::write(rules.join("a-bare.md"), "no frontmatter").unwrap();
+        std::fs::write(rules.join("c-manual.md"), "---\ntrigger: manual\n---\n").unwrap();
+        std::fs::write(rules.join("notes.txt"), "not a rule").unwrap();
+        let got: Vec<(&str, String)> = antigravity_context_files_in(root)
+            .into_iter()
+            .map(|f| (f.category, f.display))
+            .collect();
+        let want = vec![
+            ("project", "AGENTS.md".to_string()),
+            ("project", "GEMINI.md".to_string()),
+            ("project", ".agents/AGENTS.md".to_string()),
+            (
+                "rules",
+                ".agents/rules/a-bare.md (not loaded: no always_on trigger)".to_string(),
+            ),
+            ("rules", ".agents/rules/b-on.md".to_string()),
+            (
+                "rules",
+                ".agents/rules/c-manual.md (not loaded: no always_on trigger)".to_string(),
+            ),
+            ("hooks", ".agents/hooks.json".to_string()),
+        ];
+        assert_eq!(got, want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_project_lists_nothing() {
+        let dir = scratch("empty");
+        assert!(antigravity_context_files_in(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn brams_own_rule_header_reads_as_always_on() {
+        assert!(antigravity_rule_is_always_on(
+            &super::antigravity_rule_header(1, 2)
+        ));
+        assert!(antigravity_rule_is_always_on(
+            "---\ndescription: x\ntrigger: \"always_on\"\n---\n"
+        ));
+        assert!(!antigravity_rule_is_always_on("trigger: always_on\n"));
+        assert!(!antigravity_rule_is_always_on(
+            "---\n---\ntrigger: always_on\n"
+        ));
+    }
 }
 
 fn collect_context_files<R: tauri::Runtime>(
@@ -54804,8 +54928,12 @@ fn context_list<R: tauri::Runtime>(
         ),
         SessionProvider::Antigravity => (
             "antigravity",
-            "Antigravity Context shows the `.agents/hooks.json` configuration `agy` reads from this project. The instructions files `agy` loads have not been captured yet, so they are not listed rather than guessed at.",
-            vec![json!({ "key": "hooks", "label": "Hooks", "items": hooks })],
+            "Antigravity Context shows what `agy` loads from this project: `AGENTS.md`, `GEMINI.md` and `.agents/AGENTS.md`, the rules in `.agents/rules/` (only those with `trigger: always_on` load), and the `.agents/hooks.json` configuration. Per-user files under `~/.gemini` aren't listed.",
+            vec![
+                json!({ "key": "project", "label": "Project", "items": project }),
+                json!({ "key": "rules", "label": "Rules", "items": rules }),
+                json!({ "key": "hooks", "label": "Hooks", "items": hooks }),
+            ],
         ),
     };
     json!({ "provider": provider_name, "summary": summary, "sections": sections })
@@ -77867,20 +77995,28 @@ fn route_request<R: tauri::Runtime>(
         // (project CLAUDE.md + @-imports, ~/.claude memory/settings, project
         // .claude/hooks, ~/.codex files). Those live outside the project root,
         // so root containment doesn't fit — instead require the requested path
-        // to be a MEMBER of the enumerated set (union of both providers). This
+        // to be a MEMBER of the enumerated set (union of every provider's). This
         // preserves the read-home-config feature while blocking arbitrary reads
         // (~/.aws/credentials, /etc/passwd). Canonicalize both sides so symlinks
         // and `..` can't dodge the membership check.
+        // antigravity-context-files: the union was Claude's and Codex's only,
+        // written when they were the two providers, so a file only OpenCode's
+        // or Antigravity's list names (opencode.json, .agents/hooks.json, agy's
+        // rules) was listed in the tab but refused here.
         let requested = std::path::Path::new(&file_path)
             .canonicalize()
             .ok()
             .map(strip_unc_prefix);
-        let allowed: std::collections::HashSet<PathBuf> =
-            [SessionProvider::Claude, SessionProvider::Codex]
-                .into_iter()
-                .flat_map(|prov| collect_context_files(app, Some(prov)))
-                .filter_map(|cf| cf.path.canonicalize().ok().map(strip_unc_prefix))
-                .collect();
+        let allowed: std::collections::HashSet<PathBuf> = [
+            SessionProvider::Claude,
+            SessionProvider::Codex,
+            SessionProvider::Opencode,
+            SessionProvider::Antigravity,
+        ]
+        .into_iter()
+        .flat_map(|prov| collect_context_files(app, Some(prov)))
+        .filter_map(|cf| cf.path.canonicalize().ok().map(strip_unc_prefix))
+        .collect();
         let allowed_hit = requested
             .as_ref()
             .map(|r| allowed.contains(r))

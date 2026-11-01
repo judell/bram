@@ -443,6 +443,52 @@ scenario_stale_instructions() {
   shutdown_bram
 }
 
+scenario_antigravity_reasons() {
+  # agy-setup-reasons: with Antigravity active, removing Bram's group from
+  # .agents/hooks.json or staling .agents/rules/ must report its own code in
+  # setupReasons rather than leaving setupReasons empty.
+  local dir="$WORK_ROOT/antigravity_reasons"; mkdir -p "$dir"
+  git -C "$dir" init -q
+  printf '# scratch\n' > "$dir/README.md"
+  printf '{"shell":{"agent":"antigravity","startupPolicy":"none"}}\n' > "$dir/.bram.json"
+  launch "$dir" || return
+  run_setup; sleep 1
+  assert_field activeProvider antigravity
+  assert_field antigravityNeedsSetup false
+  assert_field providerNeedsSetup false
+  local reasons; reasons="$(api __enhance/status | jq -c '.setupReasons')"
+  if [ "$reasons" = '[]' ]; then
+    ok "setupReasons empty when Antigravity setup is current"
+  else
+    bad "setupReasons empty when Antigravity setup is current" "got: $reasons"
+  fi
+  jq 'del(.["bram-worklist-guard"])' "$dir/.agents/hooks.json" > "$dir/.agents/hooks.json.tmp" \
+    && mv "$dir/.agents/hooks.json.tmp" "$dir/.agents/hooks.json"
+  sleep 1
+  assert_field antigravityNeedsSetup true
+  assert_field providerNeedsSetup true
+  assert_field antigravityHooks missing
+  reasons="$(api __enhance/status | jq -c '.setupReasons')"
+  if [ "$reasons" = '["antigravity-hook-missing"]' ]; then
+    ok "setupReasons names missing Antigravity hook group"
+  else
+    bad "setupReasons names missing Antigravity hook group" "got: $reasons"
+  fi
+  rm -f "$dir/.agents/rules/bram-conventions-1.md"
+  sleep 1
+  assert_field antigravityRulesCurrent false
+  reasons="$(api __enhance/status | jq -c '.setupReasons')"
+  if [ "$reasons" = '["antigravity-hook-missing","antigravity-rules-stale"]' ]; then
+    ok "setupReasons names missing hook group and stale rules"
+  else
+    bad "setupReasons names missing hook group and stale rules" "got: $reasons"
+  fi
+  run_setup; sleep 1
+  assert_field antigravityNeedsSetup false
+  assert_field providerNeedsSetup false
+  shutdown_bram
+}
+
 scenario_legacy_hooks() {
   # #173: a project carrying the retired generic hook names.
   local dir="$WORK_ROOT/legacy_hooks"; mkdir -p "$dir/.claude/hooks"
@@ -493,7 +539,7 @@ require_bin
 command -v jq >/dev/null || { echo "jq required"; exit 127; }
 printf 'workdir: %s\n' "$WORK_ROOT"
 
-SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions legacy_hooks nested)
+SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested)
 [ $# -gt 0 ] && SCENARIOS=("$@")
 
 for s in "${SCENARIOS[@]}"; do

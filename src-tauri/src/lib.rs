@@ -56716,6 +56716,9 @@ struct SetupReasonInputs {
     opencode_wanted: bool,
     opencode_plugin_ok: bool,
     opencode_instructions_current: bool,
+    antigravity_wanted: bool,
+    antigravity_hooks_ok: bool,
+    antigravity_rules_current: bool,
     is_source_repo: bool,
 }
 
@@ -56723,9 +56726,16 @@ fn setup_reasons(active: Option<SessionProvider>, i: SetupReasonInputs) -> Vec<&
     let claude = matches!(active, None | Some(SessionProvider::Claude));
     let codex = matches!(active, None | Some(SessionProvider::Codex));
     let opencode = matches!(active, None | Some(SessionProvider::Opencode));
+    let antigravity = matches!(active, None | Some(SessionProvider::Antigravity));
     let mut out = Vec::new();
-    // core_installed gates every provider's verdict (OpenCode only where wanted).
-    if !i.core_installed && (claude || codex || (opencode && i.opencode_wanted)) {
+    // core_installed gates every provider's verdict (OpenCode and Antigravity
+    // only where wanted).
+    if !i.core_installed
+        && (claude
+            || codex
+            || (opencode && i.opencode_wanted)
+            || (antigravity && i.antigravity_wanted))
+    {
         out.push("not-installed");
     }
     if claude {
@@ -56756,6 +56766,14 @@ fn setup_reasons(active: Option<SessionProvider>, i: SetupReasonInputs) -> Vec<&
         }
         if !i.opencode_instructions_current {
             out.push("opencode-instructions-missing");
+        }
+    }
+    if antigravity && i.antigravity_wanted {
+        if !i.antigravity_hooks_ok {
+            out.push("antigravity-hook-missing");
+        }
+        if !i.antigravity_rules_current {
+            out.push("antigravity-rules-stale");
         }
     }
     out
@@ -56930,13 +56948,12 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let antigravity_rules_current = seeded_conventions_bytes(app)
         .map(|c| antigravity_rules_current(&proj, &c))
         .unwrap_or(false);
+    let antigravity_hooks_ok = !matches!(
+        antigravity_hooks,
+        AntigravityHooksState::Missing | AntigravityHooksState::Stale
+    );
     let antigravity_needs_setup = antigravity_wanted
-        && (!core_installed
-            || !antigravity_rules_current
-            || matches!(
-                antigravity_hooks,
-                AntigravityHooksState::Missing | AntigravityHooksState::Stale
-            ));
+        && (!core_installed || !antigravity_rules_current || !antigravity_hooks_ok);
     let provider_needs_setup = provider_needs_setup_for(
         active_provider,
         claude_needs_setup,
@@ -56957,6 +56974,9 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
             opencode_wanted: opencode_plugin_wanted(app, &proj),
             opencode_plugin_ok: opencode_plugin_current || opencode_plugin_custom,
             opencode_instructions_current,
+            antigravity_wanted,
+            antigravity_hooks_ok,
+            antigravity_rules_current,
             is_source_repo,
         },
     );
@@ -97274,6 +97294,9 @@ mod setup_reason_tests {
             opencode_wanted: true,
             opencode_plugin_ok: true,
             opencode_instructions_current: true,
+            antigravity_wanted: true,
+            antigravity_hooks_ok: true,
+            antigravity_rules_current: true,
             is_source_repo: false,
         }
     }
@@ -97344,6 +97367,82 @@ mod setup_reason_tests {
             ..i
         };
         assert!(setup_reasons(None, i).is_empty());
+    }
+
+    #[test]
+    fn antigravity_reasons_match_verdict_and_scope() {
+        use super::provider_needs_setup_for;
+
+        let missing_hook = SetupReasonInputs {
+            antigravity_hooks_ok: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Antigravity), missing_hook),
+            vec!["antigravity-hook-missing"]
+        );
+        assert_eq!(
+            setup_reasons(None, missing_hook),
+            vec!["antigravity-hook-missing"]
+        );
+        assert!(setup_reasons(Some(SessionProvider::Claude), missing_hook).is_empty());
+
+        let stale_rules = SetupReasonInputs {
+            antigravity_rules_current: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Antigravity), stale_rules),
+            vec!["antigravity-rules-stale"]
+        );
+
+        let both = SetupReasonInputs {
+            antigravity_hooks_ok: false,
+            antigravity_rules_current: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Antigravity), both),
+            vec!["antigravity-hook-missing", "antigravity-rules-stale"]
+        );
+        assert!(setup_reasons(
+            None,
+            SetupReasonInputs {
+                antigravity_wanted: false,
+                ..both
+            }
+        )
+        .is_empty());
+
+        for wanted in [false, true] {
+            for core in [false, true] {
+                for hooks_ok in [false, true] {
+                    for rules_ok in [false, true] {
+                        let i = SetupReasonInputs {
+                            core_installed: core,
+                            antigravity_wanted: wanted,
+                            antigravity_hooks_ok: hooks_ok,
+                            antigravity_rules_current: rules_ok,
+                            ..healthy()
+                        };
+                        let antigravity_needs = wanted && (!core || !rules_ok || !hooks_ok);
+                        let verdict = provider_needs_setup_for(
+                            Some(SessionProvider::Antigravity),
+                            false,
+                            false,
+                            false,
+                            antigravity_needs,
+                        );
+                        let reasons = setup_reasons(Some(SessionProvider::Antigravity), i);
+                        assert_eq!(
+                            !reasons.is_empty(),
+                            verdict,
+                            "wanted={wanted} core={core} hooks_ok={hooks_ok} rules_ok={rules_ok}: {reasons:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

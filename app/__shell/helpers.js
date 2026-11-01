@@ -7024,6 +7024,8 @@ window.__bramSetupReasonText = function (code) {
     "codex-instructions-stale": "This project's AGENTS.md instructions for Codex are out of date",
     "opencode-plugin-missing": "The OpenCode guard plugin is missing or out of date",
     "opencode-instructions-missing": "OpenCode isn't configured to load the Bram instructions",
+    "antigravity-hook-missing": "Antigravity's Bram hooks are missing or out of date",
+    "antigravity-rules-stale": "Antigravity's Bram rule files are missing or out of date",
   };
   return m[code] || code;
 };
@@ -7039,6 +7041,8 @@ window.__bramSetupReasonCost = function (code) {
     "codex-instructions-stale": "Until then Codex works from older instructions.",
     "opencode-plugin-missing": "Until then the Worklist isn't enforced for OpenCode.",
     "opencode-instructions-missing": "Until then OpenCode works without Bram's instructions.",
+    "antigravity-hook-missing": "Until then the Worklist isn't enforced for Antigravity.",
+    "antigravity-rules-stale": "Until then Antigravity works without current Bram instructions.",
   };
   return m[code] || "";
 };
@@ -7068,6 +7072,7 @@ window.__bramSetupInfoMarkdown = function () {
     "- **Claude:** an import in `CLAUDE.md`, and the worklist-guard and permission hooks.",
     "- **Codex:** a block in `AGENTS.md`, plus `developer_instructions` and hooks in `~/.codex/config.toml`.",
     "- **OpenCode, where installed:** the guard plugin in `.opencode/plugins/`, and the conventions entry in `.opencode/opencode.json`.",
+    "- **Antigravity, where installed:** the guard group in `.agents/hooks.json`, and the conventions rules in `.agents/rules/`.",
     "",
     "**After Setup runs**",
     "",

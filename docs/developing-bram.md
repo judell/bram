@@ -723,7 +723,7 @@ The status says *which* check failed, not only that one did (#465):
 | field | meaning |
 |---|---|
 | `claudeDocsCurrent`, `menuHookRegistered` | the two halves of `claudeNeedsSetup` that were once invisible (`hookRegistered` and `coreInstalled` are the others) |
-| `setupReasons` | stable codes, computed beside the verdict for the providers `providerNeedsSetup` consults: `not-installed`, `claude-hook-missing`, `claude-menu-hook-missing`, `claude-instructions-stale`, `codex-hook-missing`, `codex-developer-instructions-missing`, `codex-instructions-stale`, `opencode-plugin-missing`, `opencode-instructions-missing`. The banner and an agent read this one list |
+| `setupReasons` | stable codes, computed beside the verdict for the providers `providerNeedsSetup` consults: `not-installed`, `claude-hook-missing`, `claude-menu-hook-missing`, `claude-instructions-stale`, `codex-hook-missing`, `codex-developer-instructions-missing`, `codex-instructions-stale`, `opencode-plugin-missing`, `opencode-instructions-missing`, `antigravity-hook-missing`, `antigravity-rules-stale`. The banner and an agent read this one list |
 | `runningVersion`, `checkoutVersion`, `processOlderThanCheckout` | the process's `CARGO_PKG_VERSION` against `src-tauri/Cargo.toml` beside the on-disk `app/` root; `checkoutVersion` is null when serving the embedded tree. Compared numerically |
 | `providerSetupKind` | `repo-setup`, `codex-hook-refresh`, or `restart-older-process` (the banner offers no Run Setup button there) |
 

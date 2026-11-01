@@ -981,10 +981,9 @@
          agent restart is the one real requirement — and only on this manual
          fallback path; the automatic path runs Setup before the agent
          launches (first-run-sequence-greeting-vs-setup). -->
-    <Text fontSize="$fontSize-sm">
-      Setup complete. Restart the agent in the terminal (exit Claude or Codex, then start it again) to pick up the new coordination files.
+    <Text fontSize="$fontSize-sm" width="*" overflowMode="flow">
+      Setup complete. Restart the agent in the terminal (exit it, then start it again) to pick up the new coordination files.
     </Text>
-    <SpaceFiller />
     <Button
       label="✕"
       variant="ghost"

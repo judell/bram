@@ -74,13 +74,7 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
         "opencode-after" => opencode_after_hook(&opencode_policy_payload(&payload), started),
         // antigravity-worklist-guard: registered by Setup in the project's
         // .agents/hooks.json as agy's PreToolUse hook.
-        "antigravity-worklist" => authority_guarded_dispatch(
-            "antigravity-rs",
-            &antigravity_policy_payload(&payload),
-            stdin_error,
-            started,
-            authority_worklist_hook,
-        ),
+        "antigravity-worklist" => antigravity_worklist_hook(&payload, stdin_error, started),
         other => {
             // Misregistration surfaces in stderr, never in the exit code: a
             // nonzero exit from a PreToolUse-shaped hook could block a tool
@@ -372,10 +366,10 @@ fn opencode_policy_payload(payload: &serde_json::Value) -> serde_json::Value {
 
 // antigravity-worklist-guard: agy's PreToolUse payload in the vocabulary the
 // policy already judges, as OpenCode's is. The three tools that change files
-// take Claude's shapes; any other name passes through, which the policy
-// allows (agy 1.4.12's other tools read, search, ask, schedule or manage
-// subagents). Field names are from docs/agent-specimens/antigravity/hooks/
-// payloads/PreToolUse.jsonl.
+// take Claude's shapes. A payload that doesn't have the captured shape never
+// gets here: antigravity_worklist_hook refuses it first, because this mapping
+// would turn it into an empty tool name, which the policy allows. Field names
+// are from docs/agent-specimens/antigravity/hooks/payloads/PreToolUse.jsonl.
 //
 // The payload has no `cwd`, and the hook runner's working directory isn't the
 // workspace (the specimen pack's relative logger path failed there), so the
@@ -428,6 +422,72 @@ fn antigravity_policy_payload(payload: &serde_json::Value) -> serde_json::Value 
         "tool_input": tool_input,
         "cwd": cwd,
     })
+}
+
+// agy-guard-fail-closed-on-drift: what's wrong with a payload that doesn't
+// have the captured shape, or None when it does. The hook's matcher admits
+// only these three tools, so anything else means agy's payload changed, and
+// agy updates itself without a Bram release. Run on the raw payload, because
+// translating erases the difference: renaming `toolCall`, `name` or `Path`
+// comes out as a tool or path the policy has nothing to refuse.
+fn antigravity_payload_fault(payload: &serde_json::Value) -> Option<String> {
+    if antigravity_workspace(payload).is_none() {
+        return Some("no workspacePaths".to_string());
+    }
+    let Some(call) = payload.get("toolCall") else {
+        return Some("no toolCall".to_string());
+    };
+    let name = str_field(call, "name");
+    let required = match name.as_str() {
+        "write_file" | "edit_file" => "Path",
+        "run_command" => "CommandLine",
+        "" => return Some("no tool name".to_string()),
+        other => return Some(format!("unexpected tool {}", other)),
+    };
+    let present = call
+        .get("args")
+        .and_then(|args| args.get(required))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    if present {
+        None
+    } else {
+        Some(format!("{} has no {}", name, required))
+    }
+}
+
+// Unparseable stdin keeps its own fault in the dispatch; the shape check is
+// for a payload that parsed.
+fn antigravity_worklist_hook(
+    payload: &serde_json::Value,
+    stdin_error: Option<String>,
+    started: std::time::Instant,
+) -> i32 {
+    let fault = if stdin_error.is_none() {
+        antigravity_payload_fault(payload)
+    } else {
+        None
+    };
+    if let Some(detail) = fault {
+        let tool = payload
+            .get("toolCall")
+            .map(|call| str_field(call, "name"))
+            .unwrap_or_default();
+        return authority_fail_closed(
+            &resolve_project_root("antigravity-rs", payload),
+            "antigravity-rs",
+            &tool,
+            GuardFault::UnrecognizedPayload(detail),
+            started,
+        );
+    }
+    authority_guarded_dispatch(
+        "antigravity-rs",
+        &antigravity_policy_payload(payload),
+        stdin_error,
+        started,
+        authority_worklist_hook,
+    )
 }
 
 fn antigravity_workspace(payload: &serde_json::Value) -> Option<String> {
@@ -625,12 +685,15 @@ fn authority_worklist_hook(
 
 enum GuardFault {
     UnparseableStdin(String),
+    // agy-guard-fail-closed-on-drift: parsed, but not the captured shape.
+    UnrecognizedPayload(String),
     Panic(String),
 }
 
 fn fault_summary(fault: &GuardFault) -> String {
     match fault {
         GuardFault::UnparseableStdin(detail) => format!("unparseable stdin: {}", detail),
+        GuardFault::UnrecognizedPayload(detail) => format!("unrecognized payload: {}", detail),
         GuardFault::Panic(detail) => format!("guard panic: {}", detail),
     }
 }
@@ -658,7 +721,7 @@ fn codex_fault_message(fault: &GuardFault) -> String {
             "Blocked: the Bram worklist guard could not parse its hook payload (unparseable stdin: {}). This is a guard/runtime issue, not a policy decision; please report it.",
             truncate_chars(detail, 200)
         ),
-        GuardFault::Panic(_) => format!(
+        GuardFault::UnrecognizedPayload(_) | GuardFault::Panic(_) => format!(
             "Blocked: the Bram worklist guard failed and denied by default. {}. This is a guard bug, not a policy decision; please report it.",
             truncate_chars(&fault_summary(fault), 500)
         ),
@@ -1800,6 +1863,79 @@ mod guard_mode_tests {
         let log = read_crumbs(&root);
         assert!(log.contains("antigravity-rs PreToolUse ?"), "log: {log}");
         assert!(log.contains("decided=error target=- ms="), "log: {log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // agy-guard-fail-closed-on-drift: each of these was answered with an
+    // explicit allow on a project that denies the correct payload.
+    #[test]
+    fn antigravity_payload_drift_is_a_fault() {
+        let path = |p: &str| serde_json::json!({ "Path": p, "Content": "x" });
+        let drifted = [
+            serde_json::json!({ "workspacePaths": ["/p"], "tool_call": { "name": "write_file", "args": path("/p/a") } }),
+            serde_json::json!({ "workspacePaths": ["/p"], "toolCall": { "tool": "write_file", "args": path("/p/a") } }),
+            serde_json::json!({ "workspacePaths": ["/p"], "toolCall": { "name": "write_file", "args": { "FilePath": "/p/a" } } }),
+            serde_json::json!({ "workspacePaths": ["/p"], "toolCall": { "name": "edit_file", "args": { "Target": "a" } } }),
+            serde_json::json!({ "workspacePaths": ["/p"], "toolCall": { "name": "write_file", "args": path("  ") } }),
+            serde_json::json!({ "workspacePaths": ["/p"], "toolCall": { "name": "write_file" } }),
+            serde_json::json!({ "workspacePaths": ["/p"], "toolCall": { "name": "run_command", "args": { "Command": "echo x > a" } } }),
+            serde_json::json!({ "workspacePaths": ["/p"], "toolCall": { "name": "delete_file", "args": path("/p/a") } }),
+            serde_json::json!({ "toolCall": { "name": "write_file", "args": path("/p/a") } }),
+            serde_json::json!({ "workspacePaths": [], "toolCall": { "name": "write_file", "args": path("/p/a") } }),
+            serde_json::json!({ "workspacePaths": [""], "toolCall": { "name": "write_file", "args": path("/p/a") } }),
+            serde_json::json!({}),
+        ];
+        for payload in &drifted {
+            assert!(antigravity_payload_fault(payload).is_some(), "{payload}");
+        }
+        // The captured shapes still reach the policy.
+        for call in [
+            serde_json::json!({ "name": "write_file", "args": path("/p/a") }),
+            serde_json::json!({ "name": "edit_file", "args": { "Path": "/p/a", "Target": "a", "Replacement": "b" } }),
+            serde_json::json!({ "name": "run_command", "args": { "CommandLine": "git status" } }),
+        ] {
+            let payload = serde_json::json!({ "workspacePaths": ["/p"], "toolCall": call });
+            assert_eq!(antigravity_payload_fault(&payload), None, "{payload}");
+        }
+    }
+
+    // Through the hook itself: drift is the guard breaking (decided=error),
+    // never a decision, even in a project with nothing else to refuse it.
+    #[test]
+    fn antigravity_hook_fails_closed_on_drift_and_decides_the_captured_shape() {
+        let root = scratch("antigravity-drift");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("resources/worklist.json"),
+            r#"{"version":1,"items":[]}"#,
+        )
+        .unwrap();
+        let file = root.join("a.txt").to_string_lossy().into_owned();
+        let workspace = root.to_string_lossy().into_owned();
+        let drifted = serde_json::json!({
+            "workspacePaths": [workspace],
+            "toolCall": { "name": "write_file", "args": { "FilePath": file, "Content": "x" } }
+        });
+        let code = antigravity_worklist_hook(&drifted, None, std::time::Instant::now());
+        assert_eq!(code, 0, "agy denies via its stdout JSON line, exit 0");
+        let log = read_crumbs(&root);
+        assert!(log.contains("decided=error"), "log: {log}");
+        assert!(
+            log.contains("unrecognized payload: write_file has no Path"),
+            "log: {log}"
+        );
+        assert!(!log.contains("decided=allow"), "log: {log}");
+
+        let captured = serde_json::json!({
+            "workspacePaths": [workspace],
+            "toolCall": { "name": "write_file", "args": { "Path": file, "Content": "x" } }
+        });
+        antigravity_worklist_hook(&captured, None, std::time::Instant::now());
+        assert!(
+            read_crumbs(&root).contains("PreToolUse Write decided=deny"),
+            "the captured shape still reaches the policy"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

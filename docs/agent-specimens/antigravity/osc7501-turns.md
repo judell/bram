@@ -16,6 +16,7 @@ Captured 2026-10-31 for `antigravity-turn-lifecycle`, on macOS, agy 1.4.12.
 | completed (`Reply with only TURN-OK-7731`) | `PreInvocation` 0.0, `PostInvocation` 1.8, `Stop` 1.9 (`terminationReason: NO_TOOL_CALL`, `fullyIdle: true`) | `blocked:kind=auth`, `idle`, `working`, `done`, `idle`, `idle` |
 | Esc while `sleep 25` ran, then Esc while a 60-line reply streamed | `PreInvocation` 0.0, `PreToolUse` (`run_command`) 6.1, then nothing for that turn; `PreInvocation` 18.1 for the second, then nothing | `blocked:kind=auth`, `idle`, `working`, `idle`, `working`, `idle`, `idle` |
 | `sleep 40` started in the background | `PreInvocation` 0.0, `PreToolUse` 5.2, `PostInvocation` 5.7, `PreInvocation` 5.7, `PostInvocation` 7.8, `Stop` 7.8 (`fullyIdle: false`); when `sleep` ended, `PostToolUse` 45.2, then a `PreInvocation` agy started on its own at 45.2, `PostInvocation` 47.6, `Stop` 47.6 (`fullyIdle: true`) | `blocked:kind=auth`, `idle`, `working`, `done`, `working`, `done`, `idle`, `idle` |
+| Esc at a `Run this command?` dialog (`permission-escape.raw`, 2026-11-01, snapshot taken before closing Ctrl-C) | — | `blocked:kind=auth`, `idle`, `working`, `blocked:kind=permission`, `idle` |
 
 Every marker carries `app=antigravity`, for example `ESC ] 7501 ; state=working:app=antigravity BEL`. `done` adds `msg=` with the reply text in base64 (`VFVSTi1PSy03NzMx` is `TURN-OK-7731`). The launch marker is `state=blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA==` ("Sign in required").
 
@@ -26,7 +27,7 @@ The two `Stop` payloads of the background run, redacted: [`hooks/payloads/Stop-b
 ## What follows
 
 - **An interrupted turn fires no turn-end hook:** no `Stop`, and no `PostInvocation`.
-- **A completed turn ends at `done`, an interrupted one at `idle`.** `idle` also comes at launch and at exit. Bram ends a turn on either (`note_antigravity_state_markers` in `src-tauri/src/lib.rs`).
+- **A completed turn ends at `done`, an interrupted one at `idle`.** `idle` also comes at launch and at exit. Pressing Esc at a `Run this command?` dialog goes straight from `blocked:kind=permission` to `idle` with no `working` marker in between, in the same output burst that redraws `Interrupted · What should Antigravity CLI do instead?` (`permission-escape.raw`). An `Accept this file edit?` dialog behaves differently: on agy 1.4.12 at 44×67, Esc there produced no output and no state change (2026-11-01, live, not pinned as a specimen), though its footer says "esc to cancel". Bram ends a turn on either (`note_antigravity_state_markers` in `src-tauri/src/lib.rs`).
 - **A background command's turn ends at `done` too.** When the command finishes, agy starts a new turn on its own (`working`, then `done`), so Bram's spinner goes off while the command runs and comes back for the follow-up.
 - **agy only reports when asked.** Without `AGY_CLI_OSC7501=on`, agy sends the query `ESC ] 7501 ; ?` at launch and emits no states when the terminal doesn't answer, which is what every earlier capture in this pack shows. The variable is documented in agy's 1.4.0 release note (in the binary): "Set `AGY_CLI_OSC7501=on` for a terminal that supports it but doesn't answer the check." Bram sets it when it spawns its PTY.
 - **Every launch reports `blocked:kind=auth` first,** then `idle` once signed in. It's not a blocked turn and not a login screen.

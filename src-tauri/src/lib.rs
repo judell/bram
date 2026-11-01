@@ -9040,7 +9040,7 @@ fn update_turn_state<R: tauri::Runtime, F>(
         // attributed (each turn gets its own window and capture boundary)
         // and the gate is locked exactly while something is running — never
         // between turns, which is where the wedge used to live.
-        if prev.phase != "working" && next.phase == "working" {
+        if turn_state_transition_rearms_claim(&prev, &next) {
             rearm_claim_for_live_authorization(app);
         }
         trace_turn_state_transition(app, &prev, &next, emitted);
@@ -9048,6 +9048,10 @@ fn update_turn_state<R: tauri::Runtime, F>(
     if let Some(payload) = emit_payload {
         emit_replayable_payload(app, "turn-state-changed", &payload);
     }
+}
+
+fn turn_state_transition_rearms_claim(prev: &TurnState, next: &TurnState) -> bool {
+    prev.phase != "working" && next.phase == "working"
 }
 
 // separate-authorization-from-claim: re-establish the execution claim at the
@@ -9154,16 +9158,46 @@ fn turn_state_set_menu<R: tauri::Runtime>(
         );
         m.at_host_ms = Some(unix_now_ms());
     }
-    let phase = if menu.is_some() {
-        "waiting-for-permission"
-    } else {
-        "working"
-    };
+    let antigravity_turn_open = source == "antigravity-permission"
+        && antigravity_turn_cell()
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some();
     update_turn_state(app, source, reason, |s| {
-        s.provider = current_provider(app).map(|p| session_provider_label(p).to_string());
-        s.phase = phase.to_string();
-        s.pending_menu = menu;
+        apply_menu_turn_state(
+            s,
+            current_provider(app).map(|p| session_provider_label(p).to_string()),
+            menu,
+            source,
+            antigravity_turn_open,
+        );
     });
+}
+
+fn apply_menu_turn_state(
+    s: &mut TurnState,
+    provider: Option<String>,
+    menu: Option<PtyMenu>,
+    source: &str,
+    antigravity_turn_open: bool,
+) {
+    s.provider = provider;
+    if let Some(phase) = if menu.is_some() {
+        Some("waiting-for-permission")
+    } else if source == "antigravity-permission" && !antigravity_turn_open {
+        // agy-menu-clear-keeps-turn-closed: note_antigravity_state_markers runs
+        // before antigravity_permission_menu_update on the same chunk. When Esc
+        // (permission-escape.raw) or shutdown ends the turn on `idle`, the turn
+        // is already closed (`finished`); clearing the menu must not put phase
+        // back to `working` or re-arm a live authorization's claim.
+        None
+    } else {
+        Some("working")
+    } {
+        s.phase = phase.to_string();
+    }
+    s.pending_menu = menu;
 }
 
 fn stamp_pty_menu_payload(
@@ -91046,6 +91080,151 @@ mod antigravity_permission_menu_tests {
                 reason: "permission-unblocked",
             }]
         );
+    }
+
+    #[test]
+    fn menu_clear_after_escape_idle_keeps_turn_finished_without_rearming_claim() {
+        use super::{
+            antigravity_mark, antigravity_turn_step, apply_menu_turn_state, osc7501_state_bodies,
+            turn_state_transition_rearms_claim, AntigravityTurnEvent, TurnState,
+        };
+
+        let stream = include_bytes!("../../docs/agent-specimens/antigravity/permission-escape.raw");
+        let perm_needle = b"\x1b]7501;state=blocked:kind=permission";
+        let perm_at = stream
+            .windows(perm_needle.len())
+            .position(|w| w == perm_needle)
+            .expect("permission marker");
+        let idle_needle = b"\x1b]7501;state=idle:app=antigravity";
+        let esc_idle_at = perm_at
+            + stream[perm_at..]
+                .windows(idle_needle.len())
+                .position(|w| w == idle_needle)
+                .expect("idle marker on Esc");
+
+        struct Driver {
+            turn_open: bool,
+            latest_state: Option<String>,
+            shown: bool,
+            screen: Vec<u8>,
+            turn_state: TurnState,
+        }
+        impl Driver {
+            fn new() -> Self {
+                Self {
+                    turn_open: false,
+                    latest_state: None,
+                    shown: false,
+                    screen: Vec::new(),
+                    turn_state: TurnState::idle(),
+                }
+            }
+            fn drive(&mut self, chunk: &[u8]) -> bool {
+                let mut rearmed = false;
+                let (bodies, _) = osc7501_state_bodies(chunk);
+                for body in bodies {
+                    let Some(mark) = antigravity_mark(&body) else {
+                        continue;
+                    };
+                    self.latest_state = Some(body);
+                    let (open, event) = antigravity_turn_step(self.turn_open, mark);
+                    self.turn_open = open;
+                    match event {
+                        Some(AntigravityTurnEvent::Start) => {
+                            let prev = self.turn_state.clone();
+                            self.turn_state.provider = Some("antigravity".into());
+                            if self.turn_state.pending_menu.is_none() {
+                                self.turn_state.phase = "working".into();
+                            }
+                            rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                        }
+                        Some(AntigravityTurnEvent::End) => {
+                            let prev = self.turn_state.clone();
+                            self.turn_state.phase = "finished".into();
+                            rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                        }
+                        Some(AntigravityTurnEvent::Reset) | None => {}
+                    }
+                }
+                self.screen.extend_from_slice(chunk);
+                let tail = collapse_tail(&self.screen, 1200);
+                let menu = antigravity_permission_menu(true, self.latest_state.as_deref(), &tail);
+                if let Some(m) = menu {
+                    let prev = self.turn_state.clone();
+                    apply_menu_turn_state(
+                        &mut self.turn_state,
+                        Some("antigravity".into()),
+                        Some(m),
+                        "antigravity-permission",
+                        self.turn_open,
+                    );
+                    rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                    self.shown = true;
+                } else if self.shown {
+                    self.shown = false;
+                    let prev = self.turn_state.clone();
+                    apply_menu_turn_state(
+                        &mut self.turn_state,
+                        Some("antigravity".into()),
+                        None,
+                        "antigravity-permission",
+                        self.turn_open,
+                    );
+                    rearmed |= turn_state_transition_rearms_claim(&prev, &self.turn_state);
+                }
+                rearmed
+            }
+        }
+
+        // 1. Up to the dialog: turn opens (`working`), then blocks on the menu.
+        let mut d = Driver::new();
+        assert!(d.drive(&stream[..esc_idle_at]));
+        assert!(d.turn_open);
+        assert_eq!(d.turn_state.phase, "waiting-for-permission");
+        assert_eq!(
+            d.turn_state.pending_menu.as_ref().map(|m| m.text.as_str()),
+            Some("Run this command?\necho ESC-DIALOG-7731")
+        );
+
+        // 2. Esc response (`idle` + composer redraw in one chunk): turn closes,
+        //    menu clears, phase stays `finished`, and no claim re-arms.
+        assert!(!d.drive(&stream[esc_idle_at..]));
+        assert!(!d.turn_open);
+        assert_eq!(d.turn_state.phase, "finished");
+        assert!(d.turn_state.pending_menu.is_none());
+
+        // 3. `blocked` then `idle` landing together in one chunk (while an earlier
+        //    dialog menu was shown): turn closes, menu clears, phase stays `finished`,
+        //    and no claim re-arms.
+        let mut coalesced = Driver::new();
+        assert!(coalesced.drive(&stream[..perm_at]));
+        coalesced.shown = true;
+        coalesced.turn_state.phase = "waiting-for-permission".into();
+        assert!(!coalesced.drive(&stream[perm_at..]));
+        assert!(!coalesced.turn_open);
+        assert_eq!(coalesced.turn_state.phase, "finished");
+        assert!(coalesced.turn_state.pending_menu.is_none());
+
+        // 4. Open-turn Antigravity clears and other providers' clears still enter `working`.
+        d.turn_state.phase = "waiting-for-permission".into();
+        apply_menu_turn_state(
+            &mut d.turn_state,
+            Some("antigravity".into()),
+            None,
+            "antigravity-permission",
+            true,
+        );
+        assert_eq!(d.turn_state.phase, "working");
+
+        d.turn_state.phase = "finished".into();
+        apply_menu_turn_state(
+            &mut d.turn_state,
+            Some("claude".into()),
+            None,
+            "pty-menu",
+            false,
+        );
+        assert_eq!(d.turn_state.phase, "working");
     }
 }
 

@@ -212,6 +212,7 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `capture/schedules/logged-out.json` | agy 1.4.12 |
 | `capture/schedules/permission-decline-number.json` | agy 1.4.12 |
 | `capture/schedules/permission-decline.json` | agy 1.4.12 |
+| `capture/schedules/permission-escape.json` | agy 1.4.12 (2026-11-01) |
 | `capture/schedules/permission-prompt.json` | agy 1.4.12 |
 | `capture/schedules/rename-and-resume.json` | agy 1.4.12 |
 | `capture/schedules/rename-by-id.json` | agy 1.4.12 |
@@ -273,6 +274,8 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `osc7501-turns.md` | agy 1.4.12 (2026-10-31) |
 | `permission-declined.raw` | agy 1.4.12 |
 | `permission-declined.txt` | agy 1.4.12 |
+| `permission-escape.raw` | agy 1.4.12 (2026-11-01) |
+| `permission-escape.txt` | agy 1.4.12 (2026-11-01) |
 | `permission-prompt.raw` | agy 1.4.12 (working-screen snapshot; approval dialog not captured) |
 | `permission-prompt.txt` | agy 1.4.12 (working-screen snapshot; approval dialog not captured) |
 | `rename-idle.raw` | agy 1.4.12 |

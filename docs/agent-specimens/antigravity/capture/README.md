@@ -32,6 +32,7 @@ configurations and path-resolution finding.
 | `schedules/permission-short-46x26.json` | Wrapped `curl` command approval on a 46×26 screen (`ANTIGRAVITY_CAPTURE_COLS=46 ANTIGRAVITY_CAPTURE_ROWS=26 AGY_CLI_OSC7501=on`); `"esc to cancel"` omitted |
 | `schedules/permission-scrolled-title-46x12.json` | Same `curl` command approval on a 46×12 screen (`ANTIGRAVITY_CAPTURE_COLS=46 ANTIGRAVITY_CAPTURE_ROWS=12 AGY_CLI_OSC7501=on`); dialog title and option 1 clipped off top |
 | `permission-wrapped-options-44x67.raw` (from `scripts/capture-terminal-specimen.py --cols 44 --rows 67`, `AGY_CLI_OSC7501=on`, not a schedule) | Approval of `gh api … \| jq -s add \| tail -5`: a wrapped option label makes agy draw backspaces before option 3 |
+| `schedules/permission-escape.json` | Esc at a `Run this command?` dialog with `AGY_CLI_OSC7501=on` (`permission-escape.{raw,txt}`); `blocked:kind=permission` goes straight to `idle` |
 
 `logged-out.json` was replayed after capture. Rendering that stream produced
 the committed `../logged-out.txt` exactly.

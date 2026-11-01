@@ -1,0 +1,162 @@
+[>q[c]11;?[?25l[?5W[?2004h[>4;2m[>1u[?u]7501;state=blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA==[J
+[5C    
+[6D        
+[8D        
+[8D        
+             
+
+ Welcome to the Antigravity CLI. You are currently not signed in.
+
+ ⣷  Signing in...[0 q]7501;state=idle:app=antigravity[8A[12D             Antigravity CLI 1.4.12
+                  <user-email>
+                  <workspace>
+            
+              
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts[2A[2C[?25h[?25l[5A		  Gemini 4 Argon (Medium)[K
+[23D<workspace>
+
+
+
+
+
+[4DGemini 4 Argon · medium[2A[2C[?25h[?25l[6A[32C (Google AI Pro)
+
+
+
+
+
+[48D[?25h[?25lR[?25h[?25lun the shell command: echo ESC-
+
+[62C[1K G[2A[64D[?25h[?25lDIALOG-7731 . Report its outpu[?25h[?25lt.[?25h[?25l[64D[K[?25h[?25l]7501;state=working:app=antigravityM[58C[K
+> Run the shell command: echo ESC-DIALOG-7731 . Report its output.
+⣷  Generating...[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                    Gemini 4 Argon · medium[2A[2C[?25h[?25l[2A⣯  Generating
+
+[11D[?25h[?25l[2A⣟  Generating..
+
+[13D[?25h[?25l[2A⡿  Generating...
+
+[14D[?25h[?25l[2A⢿ 
+
+[?25h[?25l[2A⣻ 
+
+[?25h[?25l[2A⣽ 
+
+[?25h[?25l[2A⣾ 
+
+[?25h[?25l[2A⣷ 
+
+[?25h[?25l[2A⣯  G
+
+[?25h[?25l[2A⣟  Gen
+
+[4D[?25h[?25l[2A⡿  Gene
+
+[5D[?25h[?25l[2A⢿  Gener
+
+[6D[?25h[?25l[2A⣻  Genera
+
+[7D[?25h[?25l[2A⣽  Generati
+
+[9D[?25h[?25l[2A⣾  Generatin
+
+[10D[?25h[?25l[2A⣷  Generating
+
+[11D[?25h[?25l[2A⣯  Generating.
+
+[12D[?25h[?25l[2A⣟  Generating...
+
+[14D[?25h[?25l[2A⡿  Generatin
+
+[10D[?25h[?25l[2A⢿  Generating
+
+[11D[?25h[?25l[2A⣻  Generating.
+
+[12D[?25h[?25l[2A⣽  Generating...
+
+[14D[?25h[?25l[2A⣾ 
+
+[?25h[?25l[2A⣷ 
+
+[?25h[?25l[2A⣯ 
+
+[?25h[?25l[2A⣟ 
+
+[?25h[?25l[2A⡿ 
+
+[?25h[?25l[2A⢿  G
+
+[?25h[?25l[2A⣻  Ge
+
+[?25h[?25l[2A⣽  Gene
+
+[5D[?25h[?25l[2A⣾  Gener
+
+[6D[?25h[?25l[2A⣷  Genera
+
+[7D[?25h[?25l[2A⣯  Generat
+
+[8D[?25h[?25l[2A⣟  Generatin
+
+[10D[?25h[?25l[2A⡿  Generating
+
+[11D[?25h[?25l[2A⢿  Generating.
+
+[12D[?25h[?25l[2A⣻  Generating..
+
+[13D[?25h[?25l[2A⣽  Generating...
+
+[14D[?25h[?25l[2A⣾  Generating
+
+[11D[?25h[?25l[2A⣷  Generating.
+
+[12D[?25h[?25l[2A⣯  Generating..
+
+[13D[?25h[?25l[2A⣟  Generating...
+
+[14D[?25h[?25l[2A⡿ 
+
+[?25h[?25l[2A⢿ 
+
+[?25h[?25l[2A⣻ 
+
+[?25h[?25l[2A⣽ 
+
+[?25h[?25l[2A⣾  G
+
+[?25h[?25l[2A⣷  Ge
+
+[?25h[?25l[2A⣯  Gen
+
+[4D[?25h[?25l[2A⣟  Gener
+
+[6D[?25h[?25l[0 q]7501;state=blocked:kind=permission:app=antigravity:msg=QXBwcm92ZSBSdW5Db21tYW5kOiBlY2hvIEVTQy1ESUFMT0ctNzczMQ==[2A[K
+● Ran (echo ESC-DIALOG-7731) (ctrl+o to expand)[K
+[K
+Command[K
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Requesting permission for:
+   echo ESC-DIALOG-7731
+
+Run this command?
+> 1. Yes, run command[K
+  2. Yes, and always allow in this conversation for commands that start with 'echo'
+  3. Yes, and always allow for commands that start with 'echo' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel                                                                                    Gemini 4 Argon · medium[0 q]7501;state=idle:app=antigravity[8A[J[7A● 
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                  Gemini 4 Argon · medium[2A[2C[?25h

@@ -46,6 +46,7 @@ files are rendered from those redacted streams.
 | `hooks/permission-hooks.json` | Hook configuration that forced the captured approval prompt |
 | `hooks/deny-hooks.json`, `hooks/deny-hook.py` | Hook configuration and recorder that produced the captured deny payload |
 | `hooks/log-hook.sh` | Logger used by the probe; it records input JSON and returns `allow` for `PreToolUse` |
+| `hooks/failure-posture/posture.md` | What agy does when its `PreToolUse` guard breaks: crash, exit 2, invalid JSON and timeout block; empty output runs (2026-10-31, from the #462 spike) |
 | `hooks/payloads/SessionStart.jsonl` | Session id, workspace, transcript and model fields from the first prompted session |
 | `hooks/payloads/PreToolUse.jsonl` | Observed `write_file` call and its `Content`, `Overwrite`, and `Path` arguments |
 | `hooks/payloads/PreToolUse-denied.jsonl` | Denied `write_file` input, including the same argument fields |
@@ -123,8 +124,10 @@ throwaway `HOME` on 2026-10-30. Rendering its terminal stream reproduced
   and `Path`. A relative logger command failed from the hook runner's working
   directory and blocked later calls; the model saw that failure. A separate
   deterministic `deny` hook showed its `reason` to the model and recorded the
-  incoming tool call. Hook crash, timeout, invalid JSON, and shell-command
-  `PostToolUse` remain uncaptured.
+  incoming tool call. Hook crash, timeout and invalid JSON were run later
+  (2026-10-31) and all block the call; only exit 0 with empty output lets it
+  run ([`hooks/failure-posture/posture.md`](hooks/failure-posture/posture.md)).
+  Shell-command `PostToolUse` remains uncaptured.
 - A `PreToolUse` hook returning `force_ask` produced a four-choice command
   approval menu. Pressing Escape interrupted the turn; selecting option 4
   produced `User declined the tool call`. These are separate captures.
@@ -159,6 +162,7 @@ findings above are limited to the artifacts actually captured.
 | Session store | Transcript JSONL under `brain/<id>/.system_generated/logs/`; `SessionStart` carries `workspacePaths`, durable project mapping not identified | `transcript-record.jsonl`, `hooks/payloads/SessionStart.jsonl` |
 | Session metadata and naming | `/rename` changes the title shown by `/resume`; durable title store not identified | `rename-result.txt`, `renamed-session-list.txt` |
 | Guard hook | Workspace `.agents/hooks.json`; failed command stopped later calls, and `deny.reason` reached the model | `hooks/hooks.json`, `hooks/deny-hooks.json`, `hook-deny.txt` |
+| Guard failure posture | Fails closed except exit 0 with empty output, which runs the call | `hooks/failure-posture/posture.md` |
 | Tool payload | `write_file` (`Content`, `Overwrite`, `Path`), `edit_file` (`Path`, `Replacement`, `Target`), and `run_command` (`CommandLine`, `WaitMsBeforeAsync`, `toolSummary`) | `hooks/payloads/PreToolUse.jsonl`, `hooks/payloads/PreToolUse-denied.jsonl` |
 | Turn hooks | `PreInvocation`, `PostInvocation` and `Stop` on a completed turn. An interrupted turn fires **no** `Stop` or `PostInvocation`. A background command gets `Stop` with `fullyIdle: false`, then `true` after agy's own follow-up | `hooks/payloads/Stop.jsonl`, `hooks/payloads/Stop-background.jsonl`, `osc7501-turns.md` |
 | Turn state (OSC 7501) | With `AGY_CLI_OSC7501=on`: `state=working\|done\|idle:app=antigravity`. A completed turn ends at `done`, an interrupted one at `idle`. Launch reports `blocked:kind=auth` first, and the folder-trust dialog `blocked:kind=permission`. Without the variable, only the `7501;?` query | `osc7501-turns.md` |
@@ -237,6 +241,7 @@ All terminal screens, transcripts, hook payloads, and schedules below are from `
 | `hooks-view.txt` | agy 1.4.12 |
 | `hooks/deny-hook.py` | agy 1.4.12 |
 | `hooks/deny-hooks.json` | agy 1.4.12 |
+| `hooks/failure-posture/posture.md` | agy 1.4.12 (2026-10-31) |
 | `hooks/hooks.json` | agy 1.4.12 |
 | `hooks/lifecycle-hooks.json` | agy 1.4.12 |
 | `hooks/log-hook.sh` | agy 1.4.12 |

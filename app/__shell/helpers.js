@@ -11528,8 +11528,26 @@ window.__bramShapePrecedingIntent = function (prose) {
   if (!prose) return "";
   var flat = String(prose).replace(/\s+/g, " ").trim();
   if (!flat) return "";
-  var m = flat.match(/[^.!?]*[.!?:]?\s*$/);
-  var tail = ((m && m[0]) || flat).trim();
+  // row-intent-splits-at-a-filename-dot: a sentence ends at . ! or ? only
+  // when whitespace follows, so `lib.rs`, 0.8.2 and URLs stay whole, and
+  // never inside a closed inline code span. An unpaired backtick opens no
+  // span. A colon still doesn't end a sentence, as before.
+  var ticks = [];
+  for (var t = 0; t < flat.length; t++) if (flat.charAt(t) === "`") ticks.push(t);
+  var inCode = function (i) {
+    for (var p = 0; p + 1 < ticks.length; p += 2) {
+      if (i > ticks[p] && i < ticks[p + 1]) return true;
+    }
+    return false;
+  };
+  var start = 0;
+  for (var i = 0; i < flat.length - 1; i++) {
+    var c = flat.charAt(i);
+    if ((c === "." || c === "!" || c === "?") && flat.charAt(i + 1) === " " && !inCode(i)) {
+      start = i + 1;
+    }
+  }
+  var tail = flat.slice(start).trim();
   if (!tail) tail = flat;
   if (tail.length > 90) tail = tail.slice(0, 89).trim() + "…";
   if (tail.length < 12) return "";

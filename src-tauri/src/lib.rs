@@ -3896,19 +3896,7 @@ fn pty_tail_snippet_or_drained(max_chars: usize) -> String {
         Ok(g) => g.clone(),
         Err(e) => e.into_inner().clone(),
     };
-    let stripped = strip_ansi(&raw);
-    let text = String::from_utf8_lossy(&stripped);
-    let collapsed = text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace('"', "'");
-    let n = collapsed.chars().count();
-    if n <= max_chars {
-        collapsed
-    } else {
-        collapsed.chars().skip(n - max_chars).collect()
-    }
+    collapse_tail(&raw, max_chars)
 }
 
 fn pty_tail_snippet(max_chars: usize) -> String {
@@ -3916,7 +3904,11 @@ fn pty_tail_snippet(max_chars: usize) -> String {
         Ok(g) => g.clone(),
         Err(e) => e.into_inner().clone(),
     };
-    let stripped = strip_ansi(&raw);
+    collapse_tail(&raw, max_chars)
+}
+
+fn collapse_tail(raw: &[u8], max_chars: usize) -> String {
+    let stripped = strip_ansi(raw);
     let text = String::from_utf8_lossy(&stripped);
     let collapsed = text
         .split_whitespace()
@@ -7245,19 +7237,10 @@ mod antigravity_prompt_specimen_tests {
         }
     }
 
-    // The tail Bram really classifies: the raw PTY stream, ANSI-stripped,
-    // whitespace collapsed to single spaces, last 1200 chars, as
-    // pty_tail_snippet builds it.
+    // The tail Bram really classifies: the raw PTY stream, ANSI-stripped and
+    // whitespace-collapsed by the same collapse_tail pty_tail_snippet uses.
     fn collapsed_tail(raw: &[u8]) -> String {
-        let stripped = super::strip_ansi(raw);
-        let text = String::from_utf8_lossy(&stripped);
-        let collapsed = text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .replace('"', "'");
-        let n = collapsed.chars().count();
-        collapsed.chars().skip(n.saturating_sub(1200)).collect()
+        super::collapse_tail(raw, super::TERMINAL_ATTENTION_TAIL_CHARS)
     }
 
     #[test]
@@ -23881,14 +23864,6 @@ fn switch_agent(
         if partner.is_some() {
             return None;
         }
-        // antigravity-provider-switch: a fresh partner carries a queued name
-        // that binds when the new session's file surfaces, and agy's sessions
-        // are not visible to Bram yet (antigravity-sessions-browser). The
-        // switch still launches agy; it just doesn't start a partner. Partners
-        // arrive with antigravity-partner-handoff.
-        if target_provider == SessionProvider::Antigravity {
-            return None;
-        }
         // session-groups: the group has no session on this agent (or its
         // member's file is gone), so it gets a new one.
         if leaving_group.is_some() {
@@ -24254,7 +24229,9 @@ fn switch_agent(
                     // show its prompt, so it is waited on like Codex.
                     if matches!(
                         target_provider,
-                        SessionProvider::Codex | SessionProvider::Opencode
+                        SessionProvider::Codex
+                            | SessionProvider::Opencode
+                            | SessionProvider::Antigravity
                     ) {
                         let app2 = app.clone();
                         std::thread::spawn(move || {
@@ -24381,8 +24358,7 @@ type PairSide = (SessionProvider, String);
 // disk.
 fn parse_pair_sessions_query(query: &str) -> Result<(PairSide, PairSide), String> {
     // opencode-partner-handoff: the two sides arrive as `<provider>=<id>`,
-    // any two of claude / codex / opencode (the pane always sent claude and
-    // codex before).
+    // any two known session providers.
     let mut sides: Vec<PairSide> = Vec::new();
     // provider-session-digest-for-codex: the side the offer was about (the
     // session you switched away from), whose digest the other side reads.
@@ -24920,6 +24896,81 @@ fn opencode_composer_ready(tail: &str) -> bool {
     squashed.contains("ctrl+pcommands") || squashed.contains("askanything\u{2026}")
 }
 
+// Antigravity's idle composer has a `>` row between horizontal rules and a
+// shortcuts footer. Anchor the footer at the end; the account-specific model
+// text after the footer marker is intentionally not part of this signal.
+fn antigravity_composer_ready(tail: &str) -> bool {
+    let squashed: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    let Some(footer) = squashed.rfind("?forshortcuts") else {
+        return false;
+    };
+    if squashed[footer + "?forshortcuts".len()..].chars().count() > 100 {
+        return false;
+    }
+    let Some(prompt) = squashed[..footer].rfind('>') else {
+        return false;
+    };
+    squashed[..prompt].ends_with('─') && squashed[prompt + 1..footer].contains('─')
+}
+
+#[cfg(test)]
+mod antigravity_composer_ready_tests {
+    use super::{antigravity_composer_ready, collapse_tail};
+
+    #[test]
+    fn raw_idle_composer_captures_are_ready() {
+        for raw in [
+            include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/tool-idle.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-idle.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/resume-by-id.raw").as_slice(),
+        ] {
+            assert!(antigravity_composer_ready(&collapse_tail(raw, 1200)));
+        }
+    }
+
+    #[test]
+    fn raw_working_and_dialog_captures_are_not_ready() {
+        for raw in [
+            include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-working.raw")
+                .as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/lifecycle-complete.raw")
+                .as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/completed.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/first-run-trust.raw").as_slice(),
+            include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")
+                .as_slice(),
+        ] {
+            assert!(!antigravity_composer_ready(&collapse_tail(raw, 1200)));
+        }
+    }
+
+    #[test]
+    fn startup_prefix_before_composer_is_not_ready() {
+        let raw = include_bytes!("../../docs/agent-specimens/antigravity/startup.raw");
+        let composer_start = raw
+            .windows(b"\r\n>\r\n".len())
+            .position(|window| window == b"\r\n>\r\n")
+            .expect("startup capture contains its composer row");
+        assert!(!antigravity_composer_ready(&collapse_tail(
+            &raw[..composer_start],
+            1200
+        )));
+    }
+
+    #[test]
+    fn model_label_is_not_part_of_the_ready_signal() {
+        let raw = include_bytes!("../../docs/agent-specimens/antigravity/idle-composer.raw");
+        let collapsed =
+            collapse_tail(raw, 1200).replace("Gemini 3.8 Flash · high", "Gemini 3.8 Pro · low");
+        assert!(antigravity_composer_ready(&collapsed));
+    }
+}
+
 #[cfg(test)]
 mod opencode_composer_ready_tests {
     use super::opencode_composer_ready;
@@ -25013,10 +25064,7 @@ fn composer_ready(provider: SessionProvider, tail: &str) -> bool {
         SessionProvider::Codex => codex_catch_up_composer_ready(tail),
         SessionProvider::Opencode => opencode_composer_ready(tail),
         SessionProvider::Claude => true,
-        // No catch-up or fresh-partner path reaches an Antigravity session yet
-        // (antigravity-turn-lifecycle, antigravity-partner-handoff), so there
-        // is no composer marker to wait for.
-        SessionProvider::Antigravity => true,
+        SessionProvider::Antigravity => antigravity_composer_ready(tail),
     }
 }
 

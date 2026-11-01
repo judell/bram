@@ -1287,8 +1287,8 @@ window.__bramSwitchAgent = function (provider) {
     notify(reason);
   };
   window.__bramPairOfferDismiss = function (value) { dismiss(value, "dismiss-click"); };
-  // opencode-partner-handoff: the two sides as `<provider>=<id>`, any two of
-  // claude / codex / opencode.
+  // opencode-partner-handoff, antigravity-partner-handoff: the two sides as
+  // `<provider>=<id>`, any two of the session providers.
   window.__bramPairOfferKeep = function (value, toastApi) {
     if (!value) return;
     var from = window.__bramProviderKey(value.fromProvider);
@@ -1369,7 +1369,7 @@ window.__bramSessionEditTooltip = function (item, action, pendingDeletes, pendin
 
 // session-groups: the Sessions row's group line. Members share the group's
 // name (Jon, 2026-10-28), so only the agents are listed: "In a group with
-// Claude, Codex".
+// Claude, Antigravity".
 window.__bramSessionGroupLabel = function (item) {
   var g = item && item.group;
   if (!g) return "";

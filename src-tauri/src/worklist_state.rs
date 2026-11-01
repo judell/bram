@@ -249,7 +249,7 @@ pub fn record_item_session(
 // pairs still holding when it first runs, and `session_never_paired` still
 // reads them.
 
-const PAIR_PROVIDERS: [&str; 3] = ["claude", "codex", "opencode"];
+const PAIR_PROVIDERS: [&str; 4] = ["claude", "codex", "opencode", "antigravity"];
 
 fn is_pair_provider(p: &str) -> bool {
     PAIR_PROVIDERS.contains(&p)
@@ -2306,6 +2306,86 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("x2")
+        );
+    }
+
+    #[test]
+    fn antigravity_joins_and_four_member_group_resolves_each_member() {
+        let conn = open_in_memory().unwrap();
+        assert!(join_group(&conn, ("claude", "c1"), ("antigravity", "a1"), 1, "t").unwrap());
+        join_group(&conn, ("codex", "x1"), ("claude", "c1"), 2, "t").unwrap();
+        join_group(&conn, ("opencode", "o1"), ("claude", "c1"), 3, "t").unwrap();
+        let expected = vec![
+            ("claude".to_string(), "c1".to_string()),
+            ("codex".to_string(), "x1".to_string()),
+            ("opencode".to_string(), "o1".to_string()),
+            ("antigravity".to_string(), "a1".to_string()),
+        ];
+        assert_eq!(
+            session_group(&conn, "antigravity", "a1")
+                .unwrap()
+                .unwrap()
+                .members,
+            expected
+        );
+        for (provider, id) in &expected {
+            let others = session_partners(&conn, provider, id).unwrap();
+            assert_eq!(others.len(), 3);
+            for (other_provider, other_id) in &others {
+                assert_eq!(
+                    session_partner(&conn, provider, id, other_provider)
+                        .unwrap()
+                        .as_deref(),
+                    Some(other_id.as_str())
+                );
+            }
+        }
+        leave_group(&conn, "antigravity", "a1", 4, "t").unwrap();
+        assert_eq!(session_group(&conn, "antigravity", "a1").unwrap(), None);
+        assert_eq!(
+            session_group(&conn, "claude", "c1")
+                .unwrap()
+                .unwrap()
+                .members
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn groups_written_before_antigravity_keep_their_members_and_order() {
+        let conn = open_in_memory().unwrap();
+        append_group_row(
+            &conn,
+            serde_json::json!({"op":"join","group":"old","provider":"claude","id":"c1"}),
+            1,
+            "old",
+        )
+        .unwrap();
+        append_group_row(
+            &conn,
+            serde_json::json!({"op":"join","group":"old","provider":"codex","id":"x1"}),
+            2,
+            "old",
+        )
+        .unwrap();
+        append_group_row(
+            &conn,
+            serde_json::json!({"op":"join","group":"old","provider":"opencode","id":"o1"}),
+            3,
+            "old",
+        )
+        .unwrap();
+        assert_eq!(
+            session_group(&conn, "codex", "x1")
+                .unwrap()
+                .unwrap()
+                .members,
+            vec![
+                ("claude".to_string(), "c1".to_string()),
+                ("codex".to_string(), "x1".to_string()),
+                ("opencode".to_string(), "o1".to_string()),
+            ]
         );
     }
 

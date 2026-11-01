@@ -9,7 +9,7 @@
        selected buckets by rank. Clicking a title inline-expands that row
        (single-open) and fetches the real per-type source. -->
   <variable name="typeColors"
-    value="{{ session: 'blue', claude: 'blue', codex: 'blue', opencode: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
+    value="{{ session: 'blue', claude: 'blue', codex: 'blue', opencode: 'blue', antigravity: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
   <variable name="facetColors"
     value="{{ Sessions: 'blue', Commits: 'green', Issues: '#c2410c', History: 'purple' }}" />
   <!-- selectedTypes (the facet pills) and mode seed from the URL so an

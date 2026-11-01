@@ -33791,10 +33791,52 @@ fn antigravity_summary_rows_for_id<R: tauri::Runtime>(
         .find(|row| row.0 == id)
 }
 
-fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, usize), String> {
+// agy-session-export-and-search: agy wraps what the user typed. Every USER_INPUT
+// record reads `<USER_REQUEST>…</USER_REQUEST>`, followed by metadata blocks
+// the user never wrote. Only the request is a user turn: anything that reads
+// the export expects a turn to start with what was sent (`approved:`, `iterate:`).
+fn antigravity_user_text(content: &str) -> &str {
+    const OPEN: &str = "<USER_REQUEST>";
+    const CLOSE: &str = "</USER_REQUEST>";
+    match (content.find(OPEN), content.rfind(CLOSE)) {
+        (Some(start), Some(end)) if start + OPEN.len() <= end => {
+            content[start + OPEN.len()..end].trim()
+        }
+        _ => content,
+    }
+}
+
+// agy's own text, as a quiet note rather than anyone's speech: the prefix is
+// the notification shape st_notification_turn renders.
+fn antigravity_note(text: &str, stamp: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"type":"user","message":{"role":"user","content":format!("[SYSTEM NOTIFICATION] {text}")},"timestamp":stamp})
+}
+
+// A SYSTEM_MESSAGE opens with a sentence for the model, which names the tag
+// itself, followed by `\n\n<SYSTEM_MESSAGE>\n`. Match the standalone line
+// opener first so `<SYSTEM_MESSAGE>` inside a background task's output cannot
+// cut the note mid-stream.
+fn antigravity_system_message(content: &str) -> &str {
+    const LINE_OPEN: &str = "\n<SYSTEM_MESSAGE>";
+    const OPEN: &str = "<SYSTEM_MESSAGE>";
+    const CLOSE: &str = "</SYSTEM_MESSAGE>";
+    let open_end = if content.starts_with(OPEN) {
+        Some(OPEN.len())
+    } else {
+        content.find(LINE_OPEN).map(|i| i + LINE_OPEN.len())
+    }
+    .or_else(|| content.rfind(OPEN).map(|i| i + OPEN.len()));
+    match (open_end, content.rfind(CLOSE)) {
+        (Some(start), Some(end)) if start <= end => content[start..end].trim(),
+        _ => content,
+    }
+}
+
+fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, Vec<String>), String> {
     let mut output = String::new();
-    let mut unknown = 0usize;
-    let mut pending_tool_results = Vec::new();
+    let mut unknown = Vec::new();
+    // One GENERIC record follows each call of a response, in order.
+    let mut pending_tool_results = std::collections::VecDeque::new();
     let mut emit = |record: serde_json::Value| -> Result<(), String> {
         output.push_str(&serde_json::to_string(&record).map_err(|e| e.to_string())?);
         output.push('\n');
@@ -33814,11 +33856,18 @@ fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, usize
             .unwrap_or(serde_json::Value::Null);
         match kind {
             "USER_INPUT" => {
+                pending_tool_results.clear();
+                let text = antigravity_user_text(
+                    record.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                );
                 emit(
-                    serde_json::json!({"type":"user","message":{"role":"user","content":record.get("content").and_then(|v|v.as_str()).unwrap_or("")},"timestamp":stamp}),
+                    serde_json::json!({"type":"user","message":{"role":"user","content":text},"timestamp":stamp}),
                 )?;
             }
             "PLANNER_RESPONSE" => {
+                // A call with no result (an interrupted turn) must not take
+                // the next response's.
+                pending_tool_results.clear();
                 let mut content = Vec::new();
                 if let Some(text) = record
                     .get("content")
@@ -33855,7 +33904,7 @@ fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, usize
                                 + i as u64
                         );
                         content.push(serde_json::json!({"type":"tool_use","id":tool_id,"name":name,"input":args}));
-                        pending_tool_results.push(tool_id);
+                        pending_tool_results.push_back(tool_id);
                     }
                 }
                 if content.is_empty() {
@@ -33866,38 +33915,116 @@ fn antigravity_transcript_jsonl(id: &str, source: &str) -> Result<(String, usize
                 )?;
             }
             "GENERIC" => {
-                let mut results = Vec::new();
-                for tool_id in pending_tool_results.drain(..) {
-                    let text = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    results.push(serde_json::json!({"type":"tool_result","tool_use_id":tool_id,"content":text,"is_error":record.get("status").and_then(|v|v.as_str()) == Some("ERROR")}));
-                }
-                if !results.is_empty() {
+                let text = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tool_id) = pending_tool_results.pop_front() {
+                    let result = serde_json::json!({"type":"tool_result","tool_use_id":tool_id,"content":text,"is_error":record.get("status").and_then(|v|v.as_str()) == Some("ERROR")});
                     emit(
-                        serde_json::json!({"type":"user","message":{"role":"user","content":results},"timestamp":stamp}),
+                        serde_json::json!({"type":"user","message":{"role":"user","content":[result]},"timestamp":stamp}),
                     )?;
-                } else if let Some(text) = record
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    emit(
-                        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":text}]},"timestamp":stamp}),
-                    )?;
+                } else if !text.is_empty() {
+                    emit(antigravity_note(text, &stamp))?;
                 }
             }
+            "SYSTEM_MESSAGE" => {
+                let text = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                emit(antigravity_note(antigravity_system_message(text), &stamp))?;
+            }
+            // Its content is agy's summary for the model, which can run to
+            // pages. The Transcript above it already holds what it summarizes.
+            "CHECKPOINT" => emit(antigravity_note(
+                "Antigravity compacted this conversation.",
+                &stamp,
+            ))?,
             other => {
-                unknown += 1;
-                let label = format!(
-                    "[Antigravity {other} record] {}",
-                    record.get("content").and_then(|v| v.as_str()).unwrap_or("")
-                );
-                emit(
-                    serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":label}]},"timestamp":stamp}),
-                )?;
+                unknown.push(other.to_string());
+                let content = record.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                emit(antigravity_note(
+                    &format!("[Antigravity {other} record] {content}"),
+                    &stamp,
+                ))?;
             }
         }
     }
     Ok((output, unknown))
+}
+
+// Raise the suffix when the projection changes. A session that has finished
+// never changes again, so without a new directory its old export would stay
+// fresh forever. v2: tool results paired, agy's own text as notes.
+const ANTIGRAVITY_EXPORT_DIR: &str = "antigravity-sessions-v2";
+const ANTIGRAVITY_RETIRED_EXPORT_DIRS: &[&str] = &["antigravity-sessions"];
+
+fn retire_stale_antigravity_exports(cache_dir: &Path, encoded_project: &str) {
+    for dir in ANTIGRAVITY_RETIRED_EXPORT_DIRS {
+        let stale = cache_dir.join(dir).join(encoded_project);
+        if stale.exists() {
+            let _ = std::fs::remove_dir_all(&stale);
+        }
+    }
+}
+
+fn antigravity_export_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join(ANTIGRAVITY_EXPORT_DIR)
+        .join(encode_path_for_filename(&abs)))
+}
+
+fn format_unknown_antigravity_types(unknown: &[String]) -> String {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for raw in unknown {
+        let safe: String = raw
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .collect();
+        let key = if safe.is_empty() {
+            "empty".to_string()
+        } else {
+            safe
+        };
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(k, n)| format!("{k}:{n}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+// The export and its source are different formats, so only their times compare.
+fn antigravity_export_is_fresh(export: &Path, source: &Path) -> bool {
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    match (modified(export), modified(source)) {
+        (Some(exported), Some(written)) => exported >= written,
+        _ => false,
+    }
+}
+
+// Returns Ok(Some(unknown_types)) when `export` was written, or Ok(None) when
+// `export` was already fresh and left untouched on disk.
+fn antigravity_refresh_export(
+    id: &str,
+    source: &Path,
+    export: &Path,
+) -> Result<Option<Vec<String>>, String> {
+    std::fs::metadata(source).map_err(|e| e.to_string())?;
+    if antigravity_export_is_fresh(export, source) {
+        return Ok(None);
+    }
+    let input = std::fs::read_to_string(source).map_err(|e| e.to_string())?;
+    let (text, unknown) = antigravity_transcript_jsonl(id, &input)?;
+    let parent = export.parent().ok_or("export path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    atomic_write_text(export, &text)?;
+    Ok(Some(unknown))
 }
 
 fn antigravity_export_path<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Option<PathBuf> {
@@ -33935,29 +34062,39 @@ fn antigravity_export_path_for_project<R: tauri::Runtime>(
         .path()
         .app_cache_dir()
         .ok()?
-        .join("antigravity-sessions")
+        .join(ANTIGRAVITY_EXPORT_DIR)
         .join(encode_path_for_filename(&strip_unc_prefix(
             root.to_path_buf(),
         )))
         .join(format!("{id}.jsonl"));
-    let source_meta = std::fs::metadata(&source).ok()?;
-    let fresh = std::fs::metadata(&export).ok().is_some_and(|m| {
-        m.len() == source_meta.len() && m.modified().ok() >= source_meta.modified().ok()
-    });
-    if !fresh {
-        let input = std::fs::read_to_string(&source).ok()?;
-        let (text, unknown) = antigravity_transcript_jsonl(id, &input).ok()?;
-        std::fs::create_dir_all(export.parent()?).ok()?;
-        atomic_write_text(&export, &text).ok()?;
-        if unknown > 0 && bram_trace_enabled() {
+    if let Some(unknown) = antigravity_refresh_export(id, &source, &export).ok()? {
+        if !unknown.is_empty() && bram_trace_enabled() {
             append_bram_trace_line(
                 app,
                 "antigravity-sessions",
-                &format!("op=unknown-records session={} count={}", id, unknown),
+                &format!(
+                    "op=unknown-records session={} count={} types={}",
+                    id,
+                    unknown.len(),
+                    format_unknown_antigravity_types(&unknown)
+                ),
             );
         }
     }
     Some(export)
+}
+
+// An export's change token is in milliseconds (OpenCode's and Antigravity's);
+// the row's date stays in seconds like every other session.
+fn search_row_date(provider: SessionProvider, mtime: i64) -> String {
+    if matches!(
+        provider,
+        SessionProvider::Opencode | SessionProvider::Antigravity
+    ) {
+        (mtime / 1000).to_string()
+    } else {
+        mtime.to_string()
+    }
 }
 
 fn discover_antigravity_sessions<R: tauri::Runtime>(
@@ -33968,6 +34105,10 @@ fn discover_antigravity_sessions<R: tauri::Runtime>(
         .ok_or("could not resolve project root")?
         .canonicalize()
         .map_err(|e| e.to_string())?;
+    if let Ok(cache_dir) = app.path().app_cache_dir() {
+        let encoded = encode_path_for_filename(&strip_unc_prefix(root.clone()));
+        retire_stale_antigravity_exports(&cache_dir, &encoded);
+    }
     let mut rows = antigravity_summary_rows(&root.to_string_lossy());
     if let Some(limit) = limit {
         rows.truncate(limit);
@@ -34002,7 +34143,17 @@ mod antigravity_transcript_tests {
             include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
         let (jsonl, _) = antigravity_transcript_jsonl("fixture-id", source).unwrap();
         let turns = st_parse_lines_to_turns(&jsonl);
-        assert!(turns.iter().any(|turn| turn["role"] == "user"));
+        let user_turns: Vec<&serde_json::Value> =
+            turns.iter().filter(|turn| turn["role"] == "user").collect();
+        assert!(!user_turns.is_empty());
+        let first_user = user_turns[0]["text"].as_str().unwrap_or("");
+        assert!(
+            first_user.starts_with("Create tool-probe.txt"),
+            "{first_user}"
+        );
+        assert!(!first_user.contains("USER_REQUEST"), "{first_user}");
+        assert!(!first_user.contains("ADDITIONAL_METADATA"), "{first_user}");
+        assert!(!first_user.contains("USER_SETTINGS_CHANGE"), "{first_user}");
         assert!(turns.iter().any(|turn| turn["role"] == "assistant"));
         assert!(turns
             .iter()
@@ -34010,19 +34161,213 @@ mod antigravity_transcript_tests {
             .any(|entry| entry["kind"] == "tool"));
     }
 
+    // agy-session-export-and-search: the shape of a real response making
+    // several calls (session 3c7851eb), where the first call's output used to
+    // go to every call and the rest read as assistant speech.
+    #[test]
+    fn each_tool_call_gets_its_own_result_and_agy_text_is_nobodys_speech() {
+        let source = [
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\napproved: {\"items\":[]}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: x.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting.\n</USER_SETTINGS_CHANGE>"}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":1,"content":"Reading.","tool_calls":[{"name":"read_file","args":{"Path":"/a"}},{"name":"read_file","args":{"Path":"/b"}},{"name":"run_command","args":{"CommandLine":"gh x"}}]}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output of a"}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output of b"}"#,
+            r#"{"type":"GENERIC","status":"RUNNING","content":"YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS"}"#,
+            r#"{"type":"SYSTEM_MESSAGE","content":"The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] task finished: saw <SYSTEM_MESSAGE> in diff\n</SYSTEM_MESSAGE>"}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":6,"content":"Interrupted.","tool_calls":[{"name":"read_file","args":{"Path":"/c"}}]}"#,
+            r#"{"type":"PLANNER_RESPONSE","step_index":7,"content":"Next.","tool_calls":[{"name":"read_file","args":{"Path":"/d"}}]}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output of d"}"#,
+            r#"{"type":"GENERIC","status":"DONE","content":"output with no call"}"#,
+            r##"{"type":"CHECKPOINT","content":"# Resuming from a compaction\nlong summary"}"##,
+        ]
+        .join("\n");
+        let (jsonl, unknown) = antigravity_transcript_jsonl("x", &source).unwrap();
+        assert!(unknown.is_empty(), "these records are known: {unknown:?}");
+
+        let results: Vec<(String, String)> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter_map(|r| r["message"]["content"].as_array().cloned())
+            .flatten()
+            .filter(|c| c["type"] == "tool_result")
+            .map(|c| {
+                (
+                    c["tool_use_id"].as_str().unwrap().to_string(),
+                    c["content"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            results,
+            vec![
+                ("agy-x-100".to_string(), "output of a".to_string()),
+                ("agy-x-101".to_string(), "output of b".to_string()),
+                (
+                    "agy-x-102".to_string(),
+                    "YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS".to_string()
+                ),
+                ("agy-x-700".to_string(), "output of d".to_string()),
+            ]
+        );
+
+        let turns = st_parse_lines_to_turns(&jsonl);
+        let text_of = |role: &str| -> Vec<String> {
+            turns
+                .iter()
+                .filter(|t| t["role"] == role)
+                .map(|t| t["text"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+        let user = text_of("user");
+        assert_eq!(user.len(), 1, "{user:?}");
+        assert!(user[0].starts_with("approved:"), "{user:?}");
+        assert!(!user[0].contains("ADDITIONAL_METADATA"), "{user:?}");
+        for text in text_of("assistant") {
+            assert!(
+                !text.contains("output") && !text.contains("SYSTEM_MESSAGE"),
+                "{text}"
+            );
+        }
+        let notes = text_of("system").join(" | ");
+        assert!(notes.contains("[Message] task finished"), "{notes}");
+        assert!(!notes.contains("not actually sent"), "{notes}");
+        assert!(!notes.contains("[SYSTEM NOTIFICATION]"), "{notes}");
+        assert!(notes.contains("output with no call"), "{notes}");
+        assert!(notes.contains("compacted this conversation"), "{notes}");
+        assert!(!notes.contains("long summary"), "{notes}");
+    }
+
+    #[test]
+    fn an_export_is_fresh_by_time_whatever_its_size() {
+        use super::{antigravity_export_is_fresh, antigravity_refresh_export};
+        let dir = std::env::temp_dir().join(format!("bram-agy-fresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (source, export) = (dir.join("source.jsonl"), dir.join("export.jsonl"));
+        std::fs::write(
+            &source,
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\nhello\n</USER_REQUEST>"}"#,
+        )
+        .unwrap();
+        assert!(!antigravity_export_is_fresh(&export, &source), "no export");
+        let set = |path: &std::path::Path, secs: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+        set(&source, 1000);
+        // First export call writes the projected JSONL (different byte length from source).
+        let first = antigravity_refresh_export("s1", &source, &export).unwrap();
+        assert_eq!(first, Some(Vec::new()));
+        assert_ne!(
+            std::fs::metadata(&export).unwrap().len(),
+            std::fs::metadata(&source).unwrap().len()
+        );
+        // Pin a sentinel mtime >= source; a second export call must leave the file untouched.
+        set(&export, 2000);
+        assert!(antigravity_export_is_fresh(&export, &source));
+        let second = antigravity_refresh_export("s1", &source, &export).unwrap();
+        assert_eq!(second, None, "second call must not rewrite a fresh export");
+        assert_eq!(
+            std::fs::metadata(&export).unwrap().modified().unwrap(),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(2000)
+        );
+        // Once the source advances past the export, refresh rewrites it.
+        set(&source, 3000);
+        assert!(!antigravity_export_is_fresh(&export, &source));
+        assert!(antigravity_refresh_export("s1", &source, &export)
+            .unwrap()
+            .is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_providers_search_dates_are_seconds() {
+        use super::{search_row_date, SessionProvider};
+        let ms = 1_793_518_000_123;
+        for provider in [SessionProvider::Opencode, SessionProvider::Antigravity] {
+            assert_eq!(search_row_date(provider, ms), "1793518000");
+        }
+        assert_eq!(
+            search_row_date(SessionProvider::Claude, 1_793_518_000),
+            "1793518000"
+        );
+    }
+
     #[test]
     fn unknown_antigravity_record_gets_visible_stub() {
+        use super::format_unknown_antigravity_types;
         let (jsonl, unknown) = antigravity_transcript_jsonl(
             "fixture-id",
             r#"{"type":"FUTURE_EVENT","content":"future detail"}"#,
         )
         .unwrap();
-        assert_eq!(unknown, 1);
+        assert_eq!(unknown, vec!["FUTURE_EVENT".to_string()]);
+        assert_eq!(format_unknown_antigravity_types(&unknown), "FUTURE_EVENT:1");
         let turns = st_parse_lines_to_turns(&jsonl);
+        assert!(
+            turns.iter().all(|turn| turn["role"] == "system"),
+            "{turns:?}"
+        );
         assert!(turns.iter().any(|turn| turn["text"]
             .as_str()
             .unwrap_or("")
             .contains("Antigravity FUTURE_EVENT record")));
+    }
+
+    #[test]
+    fn antigravity_exports_resolve_provider_and_retire_v1_cache() {
+        use super::{
+            projected_turns_provider_label, retire_stale_antigravity_exports,
+            search_session_hit_provider_and_id, ANTIGRAVITY_EXPORT_DIR,
+        };
+        use std::path::Path;
+
+        let oc_dir = Path::new("/cache/opencode-sessions/-Users-me-bram");
+        let agy_dir = Path::new("/cache")
+            .join(ANTIGRAVITY_EXPORT_DIR)
+            .join("-Users-me-bram");
+        let agy_file = agy_dir.join("3c7851eb-302c-46d7-9da4-19880140bd99.jsonl");
+        assert_eq!(
+            search_session_hit_provider_and_id(
+                &agy_file.to_string_lossy(),
+                Some(oc_dir),
+                Some(&agy_dir)
+            ),
+            (
+                "antigravity".to_string(),
+                "3c7851eb-302c-46d7-9da4-19880140bd99".to_string()
+            )
+        );
+        assert_eq!(
+            search_session_hit_provider_and_id(
+                "/cache/opencode-sessions/-Users-me-bram/ses_1.jsonl",
+                Some(oc_dir),
+                Some(&agy_dir)
+            ),
+            ("opencode".to_string(), "ses_1".to_string())
+        );
+        assert_eq!(projected_turns_provider_label(&agy_file), "antigravity");
+
+        let tmp = std::env::temp_dir().join(format!("bram-agy-retire-{}", uuid::Uuid::new_v4()));
+        let v1_this = tmp.join("antigravity-sessions").join("-Users-me-bram");
+        let v1_other = tmp.join("antigravity-sessions").join("-Users-me-other");
+        let v2_this = tmp.join(ANTIGRAVITY_EXPORT_DIR).join("-Users-me-bram");
+        std::fs::create_dir_all(&v1_this).unwrap();
+        std::fs::create_dir_all(&v1_other).unwrap();
+        std::fs::create_dir_all(&v2_this).unwrap();
+        std::fs::write(v1_this.join("old.jsonl"), "{}").unwrap();
+        std::fs::write(v1_other.join("keep.jsonl"), "{}").unwrap();
+        std::fs::write(v2_this.join("new.jsonl"), "{}").unwrap();
+        retire_stale_antigravity_exports(&tmp, "-Users-me-bram");
+        assert!(
+            !v1_this.exists(),
+            "v1 dir for this project should be removed"
+        );
+        assert!(v1_other.exists(), "other project's cache untouched");
+        assert!(v2_this.join("new.jsonl").exists(), "v2 export untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -36141,10 +36486,10 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // actually index, since claude_session_title reads the whole file
     // (issue-230-indexer-lazy-claude-titles).
     let discover_started = std::time::Instant::now();
-    let mut files_vec: Vec<(PathBuf, u64, u64, String, SessionProvider)> =
+    let mut files_vec: Vec<(PathBuf, u64, u64, String, Option<String>, SessionProvider)> =
         discover_claude_session_files(app)?
             .into_iter()
-            .map(|(path, mtime, size, id)| (path, mtime, size, id, SessionProvider::Claude))
+            .map(|(path, mtime, size, id)| (path, mtime, size, id, None, SessionProvider::Claude))
             .collect();
     // opencode-sessions-browser: OpenCode's exports are Claude-shaped, so the
     // same extraction indexes them; only the provider label differs.
@@ -36162,7 +36507,14 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             .into_iter()
             .map(|s| {
                 let token = opencode_export_change_token(&s.path).unwrap_or(s.mtime * 1000);
-                (s.path, token, s.size, s.id, SessionProvider::Opencode)
+                (
+                    s.path,
+                    token,
+                    s.size,
+                    s.id,
+                    s.title,
+                    SessionProvider::Opencode,
+                )
             }),
     );
     files_vec.extend(
@@ -36171,7 +36523,14 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             .into_iter()
             .map(|s| {
                 let token = opencode_export_change_token(&s.path).unwrap_or(s.mtime * 1000);
-                (s.path, token, s.size, s.id, SessionProvider::Antigravity)
+                (
+                    s.path,
+                    token,
+                    s.size,
+                    s.id,
+                    s.title,
+                    SessionProvider::Antigravity,
+                )
             }),
     );
     stats.discover_ms = discover_started.elapsed().as_millis();
@@ -36193,8 +36552,16 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     // from the extract/write work below means `report_progress` reflects
     // actual pending work, not the size of the whole corpus, so an ordinary
     // warm pass over hundreds of untouched sessions stays quiet.
-    let mut pending: Vec<(PathBuf, i64, i64, String, bool, SessionProvider)> = Vec::new();
-    for (path, mtime_u, size_u, id, provider) in files_vec {
+    let mut pending: Vec<(
+        PathBuf,
+        i64,
+        i64,
+        String,
+        Option<String>,
+        bool,
+        SessionProvider,
+    )> = Vec::new();
+    for (path, mtime_u, size_u, id, known_title, provider) in files_vec {
         let path_str = path.to_string_lossy().to_string();
         let (mtime, size) = (mtime_u as i64, size_u as i64);
         let forced = force_all
@@ -36256,18 +36623,20 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             stats.skipped += 1;
             continue;
         }
-        pending.push((path, mtime, size, id, forced, provider));
+        pending.push((path, mtime, size, id, known_title, forced, provider));
     }
     let total_pending = pending.len();
     let report_progress = total_pending > SESSION_PROGRESS_REPORT_THRESHOLD;
     let mut done = 0usize;
-    for (path, mtime, size, id, forced, provider) in pending {
+    for (path, mtime, size, id, known_title, forced, provider) in pending {
         if forced {
             stats.forced += 1;
         }
         let path_str = path.to_string_lossy().to_string();
         let extract_started = std::time::Instant::now();
-        let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
+        let title = known_title
+            .or_else(|| claude_session_title(&path).ok().flatten())
+            .unwrap_or(id);
         // search-index-opencode-sessions: an export is rewritten whole, so
         // earlier records can change while the file grows; the incremental
         // (append-only) extractor would keep stale text. Parse it cold.
@@ -36304,11 +36673,7 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             // token is in milliseconds; the row's date stays in seconds like
             // every other session (a ms value read as seconds dated the
             // burndown hit 58793-02-18).
-            date: if provider == SessionProvider::Opencode {
-                (mtime / 1000).to_string()
-            } else {
-                mtime.to_string()
-            },
+            date: search_row_date(provider, mtime),
             // Internal tab route; exact-session deep-link is deferred. The
             // expander derives id from the doc key (file basename) for /__turns.
             link: "/sessions".to_string(),
@@ -44030,7 +44395,11 @@ fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
     let tn = text_joined.trim_start();
     let summary = st_tag_value(tn, "summary");
     let display = if summary.is_empty() {
-        st_cap_chars(tn, 300)
+        let stripped = tn
+            .strip_prefix("[SYSTEM NOTIFICATION]")
+            .map(str::trim_start)
+            .unwrap_or(tn);
+        st_cap_chars(stripped, 300)
     } else {
         summary.clone()
     };
@@ -52586,6 +52955,53 @@ fn projected_turns_body<R: tauri::Runtime>(
     serialized
 }
 
+fn projected_turns_provider_label(path: &Path) -> &'static str {
+    if path.components().any(|c| c.as_os_str() == ".codex") {
+        "codex"
+    } else if path
+        .components()
+        .any(|c| c.as_os_str() == "opencode-sessions")
+    {
+        // opencode-sessions-browser: Bram's export of an OpenCode session.
+        "opencode"
+    } else if path
+        .components()
+        .any(|c| c.as_os_str() == ANTIGRAVITY_EXPORT_DIR)
+    {
+        "antigravity"
+    } else {
+        "claude"
+    }
+}
+
+fn search_session_hit_provider_and_id(
+    key: &str,
+    opencode_dir: Option<&Path>,
+    antigravity_dir: Option<&Path>,
+) -> (String, String) {
+    let path = std::path::Path::new(key);
+    let stem_id = || {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    if opencode_dir.is_some_and(|dir| is_opencode_export_path(path, dir)) {
+        ("opencode".to_string(), stem_id())
+    } else if antigravity_dir.is_some_and(|dir| is_opencode_export_path(path, dir)) {
+        ("antigravity".to_string(), stem_id())
+    } else if key.contains("/.codex/") || path.components().any(|c| c.as_os_str() == ".codex") {
+        let id = codex_session_meta(path)
+            .ok()
+            .flatten()
+            .map(|(id, _)| id)
+            .unwrap_or_default();
+        ("codex".to_string(), id)
+    } else {
+        ("claude".to_string(), stem_id())
+    }
+}
+
 // /__turns[?provider=claude|codex][&id=<session-id>][&latest=N] — the
 // projection route. No id: freshest session (provider-scoped when
 // given). With id: that session, resolved the same way
@@ -52691,17 +53107,7 @@ fn read_projected_turns<R: tauri::Runtime>(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let provider_label = if path.components().any(|c| c.as_os_str() == ".codex") {
-        "codex"
-    } else if path
-        .components()
-        .any(|c| c.as_os_str() == "opencode-sessions")
-    {
-        // opencode-sessions-browser: Bram's export of an OpenCode session.
-        "opencode"
-    } else {
-        "claude"
-    };
+    let provider_label = projected_turns_provider_label(&path);
     let serialize_started = std::time::Instant::now();
     let bytes = projected_turns_body(
         app,
@@ -78253,45 +78659,26 @@ fn route_request<R: tauri::Runtime>(
             .unwrap_or_default()
         };
         let enrich_started = std::time::Instant::now();
-        // search-index-opencode-sessions: OpenCode sessions are indexed from
-        // Bram's exports of them, which live in its cache, not under ~/.codex/,
-        // so they were labeled Claude (and their Switch went to Claude).
+        // search-index-opencode-sessions: OpenCode and Antigravity sessions are
+        // indexed from Bram's exports of them, which live in its cache, not
+        // under ~/.codex/, so without export-dir matching they fall through to
+        // Claude (breaking modal detail and Switch).
         let opencode_dir = opencode_export_dir(app).ok();
+        let antigravity_dir = antigravity_export_dir(app).ok();
         let enriched_hits = hits
             .iter()
             .map(|h| {
                 // Session doc key is the JSONL path. Recover the provider
-                // (Codex sessions live under ~/.codex/, OpenCode exports in
-                // Bram's cache) and the session id the expander needs:
-                // Claude's and OpenCode's is the file stem, but a Codex id
-                // lives inside the file (codex_session_meta).
+                // (Codex sessions live under ~/.codex/, OpenCode/Antigravity
+                // exports in Bram's cache) and the session id the expander
+                // needs: Claude's, OpenCode's and Antigravity's is the file
+                // stem, while a Codex id lives inside the file (codex_session_meta).
                 let (provider, id) = if h.kind == "session" {
-                    let path = std::path::Path::new(&h.key);
-                    if opencode_dir
-                        .as_deref()
-                        .is_some_and(|dir| is_opencode_export_path(path, dir))
-                    {
-                        let id = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("")
-                            .to_string();
-                        ("opencode".to_string(), id)
-                    } else if h.key.contains("/.codex/") {
-                        let id = codex_session_meta(path)
-                            .ok()
-                            .flatten()
-                            .map(|(id, _)| id)
-                            .unwrap_or_default();
-                        ("codex".to_string(), id)
-                    } else {
-                        let id = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("")
-                            .to_string();
-                        ("claude".to_string(), id)
-                    }
+                    search_session_hit_provider_and_id(
+                        &h.key,
+                        opencode_dir.as_deref(),
+                        antigravity_dir.as_deref(),
+                    )
                 } else {
                     (String::new(), String::new())
                 };

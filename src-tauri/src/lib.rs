@@ -90451,6 +90451,7 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
             }
             Some(AntigravityTurnEvent::Reset) => {
                 clear_antigravity_enrichment();
+                stop_antigravity_turn_watch();
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         app,
@@ -90475,6 +90476,7 @@ fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tai
             *latest = None;
         }
         clear_antigravity_enrichment();
+        stop_antigravity_turn_watch();
     }
     let state = antigravity_latest_state_cell()
         .lock()
@@ -91047,6 +91049,263 @@ mod antigravity_permission_menu_tests {
     }
 }
 
+const ANTIGRAVITY_LIVE_COALESCE_MS: u64 = 400;
+const ANTIGRAVITY_LIVE_MIN_INTERVAL_MS: u64 = 1500;
+
+#[derive(Default, Debug, PartialEq, Eq)]
+struct AntigravityLiveRefreshGate {
+    last_emitted_len: Option<u64>,
+    last_emit_ms: Option<u64>,
+    pending_len: Option<u64>,
+    first_pending_ms: Option<u64>,
+    last_event_ms: Option<u64>,
+}
+
+impl AntigravityLiveRefreshGate {
+    fn seeded(initial_len: Option<u64>) -> Self {
+        Self {
+            last_emitted_len: initial_len,
+            ..Self::default()
+        }
+    }
+
+    fn note_change(&mut self, now_ms: u64, current_len: Option<u64>) {
+        let Some(len) = current_len else {
+            return;
+        };
+        if self.last_emitted_len == Some(len) {
+            return;
+        }
+        self.pending_len = Some(len);
+        self.last_event_ms = Some(now_ms);
+        if self.first_pending_ms.is_none() {
+            self.first_pending_ms = Some(now_ms);
+        }
+    }
+
+    fn poll_ready(&mut self, now_ms: u64, current_len: Option<u64>) -> Option<u64> {
+        if let Some(len) = current_len {
+            if self.last_emitted_len == Some(len) {
+                self.pending_len = None;
+                self.first_pending_ms = None;
+                self.last_event_ms = None;
+                return None;
+            }
+            if self.pending_len.is_some() {
+                self.pending_len = Some(len);
+            }
+        }
+        let len = self.pending_len?;
+        if self
+            .last_emit_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < ANTIGRAVITY_LIVE_MIN_INTERVAL_MS)
+        {
+            return None;
+        }
+        let quiet_enough = self
+            .last_event_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) >= ANTIGRAVITY_LIVE_COALESCE_MS);
+        let waited_cap = self
+            .first_pending_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) >= ANTIGRAVITY_LIVE_MIN_INTERVAL_MS);
+        if quiet_enough || waited_cap {
+            self.last_emitted_len = Some(len);
+            self.last_emit_ms = Some(now_ms);
+            self.pending_len = None;
+            self.first_pending_ms = None;
+            self.last_event_ms = None;
+            Some(len)
+        } else {
+            None
+        }
+    }
+}
+
+static ANTIGRAVITY_TURN_WATCH_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn antigravity_turn_watch_stop_cell() -> &'static Mutex<Option<std::sync::mpsc::Sender<()>>> {
+    static CELL: OnceLock<Mutex<Option<std::sync::mpsc::Sender<()>>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn stop_antigravity_turn_watch() {
+    ANTIGRAVITY_TURN_WATCH_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut guard) = antigravity_turn_watch_stop_cell().lock() {
+        *guard = None;
+    }
+}
+
+fn current_antigravity_session_id<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    if let Ok(last) = last_talk_session_sid_cell().lock() {
+        if let Some(sid) = last.get("antigravity").filter(|s| session_id_is_safe(s)) {
+            return Some(sid.clone());
+        }
+    }
+    read_last_active_session(app)
+        .filter(|r| r.provider == "antigravity" && session_id_is_safe(&r.session_id))
+        .map(|r| r.session_id)
+}
+
+fn antigravity_source_transcript_file_and_len(logs_dir: &Path) -> Option<(PathBuf, u64)> {
+    let full = logs_dir.join("transcript_full.jsonl");
+    let regular = logs_dir.join("transcript.jsonl");
+    match (regular.metadata().ok(), full.metadata().ok()) {
+        (_, Some(b)) if b.len() > 0 => Some((full, b.len())),
+        (Some(a), _) => Some((regular, a.len())),
+        _ => None,
+    }
+}
+
+fn emit_antigravity_live_transcript_tick<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sid: &str,
+    root: &Path,
+) {
+    let Some(export_path) = antigravity_export_path_for_project(app, sid, root) else {
+        return;
+    };
+    let len = std::fs::metadata(&export_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "correlation_id": next_talk_session_correlation_id(),
+        "at_host_ms": unix_now_ms(),
+        "sid": sid,
+        "len": len,
+        "provider": "antigravity",
+        "source": "push",
+    });
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "antigravity-turn",
+            &format!("op=live-transcript-push session={sid} bytes={len}"),
+        );
+    }
+    emit_replayable_payload(app, "talk-session-changed", payload);
+    emit_conversation_state_changed(app);
+}
+
+fn start_antigravity_turn_watch<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let gen = ANTIGRAVITY_TURN_WATCH_GEN
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    if let Ok(mut guard) = antigravity_turn_watch_stop_cell().lock() {
+        *guard = Some(stop_tx);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc::{channel, RecvTimeoutError, TryRecvError};
+        use std::time::{Duration, Instant};
+
+        if ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) != gen {
+            return;
+        }
+        let Some(sid) = current_antigravity_session_id(&app) else {
+            return;
+        };
+        let Some(root) = project_root(Some(&app)).and_then(|p| p.canonicalize().ok()) else {
+            return;
+        };
+        let Some(logs_dir) = antigravity_data_dir().map(|d| {
+            d.join("brain")
+                .join(&sid)
+                .join(".system_generated")
+                .join("logs")
+        }) else {
+            return;
+        };
+        if !logs_dir.is_dir() {
+            return;
+        }
+        let Ok(cache_dir) = app.path().app_cache_dir() else {
+            return;
+        };
+        let export_path = cache_dir
+            .join(ANTIGRAVITY_EXPORT_DIR)
+            .join(encode_path_for_filename(&strip_unc_prefix(root.clone())))
+            .join(format!("{sid}.jsonl"));
+
+        let (ev_tx, ev_rx) = channel::<notify::Result<Event>>();
+        let Ok(mut watcher) = recommended_watcher(ev_tx) else {
+            return;
+        };
+        if watcher
+            .watch(&logs_dir, RecursiveMode::NonRecursive)
+            .is_err()
+        {
+            return;
+        }
+        if ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) != gen {
+            return;
+        }
+
+        let origin = Instant::now();
+        let initial = antigravity_source_transcript_file_and_len(&logs_dir);
+        let mut gate = match initial {
+            Some((ref src, len)) if !antigravity_export_is_fresh(&export_path, src) => {
+                let mut g = AntigravityLiveRefreshGate::default();
+                g.note_change(0, Some(len));
+                g
+            }
+            Some((_, len)) => AntigravityLiveRefreshGate::seeded(Some(len)),
+            None => AntigravityLiveRefreshGate::default(),
+        };
+
+        let is_transcript_event = |ev: &Event| {
+            ev.paths.iter().any(|p| {
+                matches!(
+                    p.file_name().and_then(|n| n.to_str()),
+                    Some("transcript_full.jsonl" | "transcript.jsonl")
+                )
+            })
+        };
+
+        loop {
+            let wake = ev_rx.recv_timeout(Duration::from_millis(200));
+            if ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            match stop_rx.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            if current_provider(&app) != Some(SessionProvider::Antigravity) {
+                break;
+            }
+            let now_ms = origin.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let mut saw_transcript_event = false;
+            match wake {
+                Ok(Ok(ev)) => {
+                    if is_transcript_event(&ev) {
+                        saw_transcript_event = true;
+                    }
+                }
+                Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            while let Ok(res) = ev_rx.try_recv() {
+                if let Ok(ev) = res {
+                    if is_transcript_event(&ev) {
+                        saw_transcript_event = true;
+                    }
+                }
+            }
+            let cur_len = antigravity_source_transcript_file_and_len(&logs_dir).map(|(_, len)| len);
+            if saw_transcript_event {
+                gate.note_change(now_ms, cur_len);
+            }
+            if gate.poll_ready(now_ms, cur_len).is_some() {
+                emit_antigravity_live_transcript_tick(&app, &sid, &root);
+            }
+        }
+    });
+}
+
 fn antigravity_turn_started<R: tauri::Runtime>(app: &AppHandle<R>, at_ms: i64) {
     let next = AgentStatus {
         provider: Some("antigravity".to_string()),
@@ -91080,6 +91339,7 @@ fn antigravity_turn_started<R: tauri::Runtime>(app: &AppHandle<R>, at_ms: i64) {
     if inflight_claim_ids_and_claimed_at(app).is_none() {
         rearm_claim_for_live_authorization(app);
     }
+    start_antigravity_turn_watch(app);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -91111,6 +91371,7 @@ fn antigravity_turn_ended<R: tauri::Runtime>(
     at_ms: i64,
     state: &str,
 ) {
+    stop_antigravity_turn_watch();
     agent_status_emit_finished(app, "antigravity", None, None, "osc7501");
     // The finished conversation's transcript has changed; a sessions pass
     // re-projects and indexes it (antigravity-sessions-browser).
@@ -91314,6 +91575,55 @@ mod antigravity_turn_tests {
         // A plain ESC sequence at the end is not a marker start.
         let other = b"text\x1b[0m";
         assert_eq!(osc7501_state_bodies(other), (vec![], other.len()));
+    }
+
+    #[test]
+    fn live_refresh_gate_coalesces_bursts_and_caps_sustained_streams() {
+        use super::{
+            antigravity_turn_watch_stop_cell, stop_antigravity_turn_watch,
+            AntigravityLiveRefreshGate, ANTIGRAVITY_TURN_WATCH_GEN,
+        };
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc::TryRecvError;
+
+        // Seeded fresh state emits nothing until byte length grows.
+        let mut gate = AntigravityLiveRefreshGate::seeded(Some(100));
+        gate.note_change(0, Some(100));
+        assert_eq!(gate.poll_ready(500, Some(100)), None);
+
+        // A 3-write burst (t = 100, 200, 350) coalesces into one emit at 350 + 400 = 750ms.
+        gate.note_change(100, Some(150));
+        assert_eq!(gate.poll_ready(200, Some(150)), None);
+        gate.note_change(200, Some(220));
+        gate.note_change(350, Some(300));
+        assert_eq!(gate.poll_ready(700, Some(300)), None);
+        assert_eq!(gate.poll_ready(750, Some(300)), Some(300));
+        // Duplicate event with unchanged byte length is suppressed.
+        gate.note_change(800, Some(300));
+        assert_eq!(gate.poll_ready(1300, Some(300)), None);
+
+        // Continuous writes every 200ms (never quiet for 400ms) still flush at
+        // the 1500ms interval cap rather than starving for minutes.
+        let mut t = 1000u64;
+        let mut size = 400u64;
+        let mut fired_at = Vec::new();
+        while t <= 4500 {
+            size += 50;
+            gate.note_change(t, Some(size));
+            if gate.poll_ready(t, Some(size)).is_some() {
+                fired_at.push(t);
+            }
+            t += 200;
+        }
+        assert_eq!(fired_at, vec![2600, 4400]);
+
+        // Stopping a turn watch advances generation and disconnects its stop channel.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        *antigravity_turn_watch_stop_cell().lock().unwrap() = Some(tx);
+        let before = ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst);
+        stop_antigravity_turn_watch();
+        assert!(ANTIGRAVITY_TURN_WATCH_GEN.load(Ordering::SeqCst) > before);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
     }
 }
 

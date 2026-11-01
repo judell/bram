@@ -55,10 +55,12 @@ Then stop and wait for **Start**.
    the repo calls for others.
 4. For each diagram, write `orientation/architecture/0N-<slug>.mmd` and its
    companion `0N-<slug>.md`, replacing the example `01-system` pair:
-   - a Mermaid `flowchart`, with labels short enough to read at a glance;
+   - a Mermaid `flowchart`, top-down (`flowchart TD`) by default, with
+     labels short enough to read at a glance (long ones wrap, which is fine);
    - `%% tip: <label> :: <text>` lines for hover text;
    - in the `.md`, one `## <label>` section per box **and** per arrow
-     label, headed by the label exactly as drawn.
+     label, headed by the label as drawn. Every box and arrow opens its
+     detail, so none is left without a section.
 
 ### 4. Evidence rules
 
@@ -82,9 +84,11 @@ Then stop and wait for **Start**.
 
 All three, before you call it done:
 
-- **Structure.** Serve the site and open the Architecture tab. Under each
-  diagram, the template lists every label with no section and every section
-  matching nothing drawn. There must be none.
+- **Structure.** Serve the site, open the Architecture tab in a real
+  browser, and look at what the page draws. Under each diagram, the template
+  lists every label with no section and every section matching nothing
+  drawn. There must be none. Comparing the source files doesn't count: that
+  check once passed while the page was wrong.
 - **Citations.** For each cited range, `git show <sha>:<path> | wc -l` is at
   least the range's last line, and the lines say what you claim.
 - **Rendering.** Every diagram renders. A red error under a diagram is

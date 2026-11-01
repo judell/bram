@@ -5,7 +5,8 @@
 //
 // Each diagram is a Mermaid file in architecture/*.mmd. Two optional layers
 // ride along with it:
-//   - hover text, as Mermaid comments keyed by a label exactly as drawn:
+//   - hover text, as Mermaid comments keyed by a label as drawn (a wrapped
+//     or <br/> label is one line of text, single-spaced):
 //       %% tip: <label> :: <short text>
 //   - click-through detail, in a companion .md file (01-system.md beside
 //     01-system.mmd), one "## <label>" section per box or arrow.
@@ -64,6 +65,10 @@
     return out;
   }
 
+  // Labels are compared as whitespace-collapsed text, so line breaks, whether
+  // wrapped by Mermaid or written as <br/>, can't change a key.
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+
   // Click-through detail: {label: markdown} from the companion .md file.
   // Missing file = no clickable items; the mismatch check reports every
   // label. Text above the first "## " heading is ignored.
@@ -75,7 +80,7 @@
     const parts = (await response.text()).split(/^##\s+/m).slice(1);
     for (const part of parts) {
       const nl = part.indexOf("\n");
-      const key = (nl < 0 ? part : part.slice(0, nl)).trim();
+      const key = norm(nl < 0 ? part : part.slice(0, nl));
       out[key] = nl < 0 ? "" : part.slice(nl + 1).trim();
     }
     return out;
@@ -89,7 +94,7 @@
 
   function parseTips(source) {
     const tips = {};
-    for (const m of source.matchAll(/^\s*%%\s*tip:\s*(.+?)\s*::\s*(.+?)\s*$/gm)) tips[m[1]] = m[2];
+    for (const m of source.matchAll(/^\s*%%\s*tip:\s*(.+?)\s*::\s*(.+?)\s*$/gm)) tips[norm(m[1])] = m[2];
     return tips;
   }
 
@@ -105,7 +110,16 @@
     const svgRoot = doc.documentElement;
     const num = "(-?[\\d.]+)";
     const translate = new RegExp("translate\\(\\s*" + num + "[ ,]+" + num + "\\s*\\)");
-    const labelText = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
+    // Mermaid puts each wrapped or <br/> line of an SVG label in its own tspan
+    // with no space between lines, so textContent alone would glue "in" and
+    // "~/.codex". Boxes may be HTML in a foreignObject, where <br> adds none.
+    const labelText = (el) => {
+      const lines = [...el.querySelectorAll("tspan.text-outer-tspan")].map((l) => l.textContent);
+      if (lines.length) return norm(lines.join(" "));
+      const copy = el.cloneNode(true);
+      for (const br of copy.querySelectorAll("br")) br.replaceWith(" ");
+      return norm(copy.textContent);
+    };
     const annotate = (el, text) => {
       labels.add(text);
       if (tips[text]) {

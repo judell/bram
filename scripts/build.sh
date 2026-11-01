@@ -114,4 +114,11 @@ if deps_files is not None and deps_files > limit:
         "Run: cargo clean --manifest-path src-tauri/Cargo.toml --profile dev\n" % deps_files
     )
 PY
+
+# The documented launch is the ./bram symlink at the repo root, and nothing
+# else creates it (docs/developing-bram.md, Build vs. reload boundary).
+binary="$ROOT/src-tauri/target/debug/bram"
+if [ "$status" -eq 0 ] && [ -x "$binary" ]; then
+  ln -sfn "$binary" "$ROOT/bram"
+fi
 exit "$status"

@@ -89,3 +89,12 @@ writes at the same time.
    frames.
 7. Remove client raw-JSONL parsing from primary UI paths.
 
+**Status, read from the code on 2026-10-31:**
+
+- Steps 1–3: shipped (`edcfe3c3`).
+- Step 4: half. `SessionDetail.xmlui` reads `/__turns`, but the search indexer
+  has its own Rust passes and doesn't call the route.
+- Step 5: not done as written. The Worklist's preview is gone, and the
+  projected-turns machinery is "dormant here" (`Worklist.xmlui`).
+- Steps 6 and 7: shipped (`69f027bd`, `b773098a`).
+

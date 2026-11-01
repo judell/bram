@@ -32,13 +32,9 @@ the xmlui_rules, and follow them.
 
 **Reference files.** Detail you need only in a recognizable situation
 lives beside this file in `.claude/bram-reference/`:
-`worklist-mechanics.md` (transports, entangled commits, delegation,
-enforcement), `diagnostics.md` (stuck spinners, traces, logs, evidence,
-Bram's guards), `environment.md` (target-app helpers, `/query`, forge
-CLI, test suites, Windows, voice input setup, cross-project work,
-fresh-session suggestions) and `orientation.md` (orienting in a new
-repo). Each section below says
-when to read which. Setup refreshes these files and Bram-bundled skills
+`worklist-mechanics.md`, `diagnostics.md`, `environment.md` and
+`orientation.md` (orienting in a new repo). Each section below says when
+to read which. Setup refreshes these files and Bram-bundled skills
 (`.claude/skills/<name>/SKILL.md` carrying a `<!-- bram-managed` marker);
 don't make functional edits to installed copies, since the next Setup
 overwrites them.
@@ -551,8 +547,6 @@ shows the code; chat is for what those can't show.
 
 ### Narrate as you reach for tools
 
-Codex local launches use `--no-daemon` when supported.
-
 Before a tool call (or batch), say in a sentence what you're about to
 do and why. When a result changes your plan, say so before acting on
 it. Long-running work (builds, test suites, background tasks) gets a
@@ -571,6 +565,10 @@ index and worklist history are scoped by working directory and record
 work where it *runs*. If the user proceeds from here anyway, make any
 artifact left in the target project (issue, doc, commit message)
 self-contained, carrying the evidence inline.
+
+**Sessions coordinate on the record.** Don't message another agent
+session directly unless the user says to for that case. Post on a forge
+issue, or tell the user what to relay.
 
 - **Two sessions coordinating across a boundary (upstream, another machine, another agent)** → read `.claude/bram-reference/environment.md` (§Working across project boundaries).
 

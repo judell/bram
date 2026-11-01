@@ -31698,9 +31698,9 @@ struct SessionEntry {
 enum SessionProvider {
     Claude,
     Codex,
-    // opencode-provider-switch: launch, resume and the header switcher only.
-    // Its sessions live in SQLite, not transcript files, so every
-    // file-discovery site answers "none" for it until opencode-sessions-browser.
+    // Its sessions live in SQLite, not transcript files. Bram exports each one
+    // to a Claude-shaped JSONL, which file discovery then reads
+    // (opencode-sessions-browser).
     Opencode,
     // antigravity-provider-switch: launch, resume and the header switcher only,
     // as OpenCode did. Its transcript lives under
@@ -45671,10 +45671,8 @@ fn session_size_status_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json:
 
 // Outbound turn envelope — the persistence contract (schema v1). One JSON
 // file per Bram-authored user turn under resources/outbound-turns/. The
-// send path starts WRITING these in a later phase (doc step 6); the
-// projection resolves them now so history authored by the archived
-// 2026-07-02 attempt renders correctly and the write switch needs no
-// reader changes.
+// send path writes these (doc step 6, 69f027bd); the projection also
+// resolves history authored by the archived 2026-07-02 attempt.
 //
 //   {
 //     "schema": 1,
@@ -56031,6 +56029,120 @@ fn trace_codex_hooks_untrusted<R: tauri::Runtime>(app: &AppHandle<R>, events: &[
     }
 }
 
+// issue-465: why the Setup banner is up, as stable codes computed beside the
+// verdict so the banner and an agent read the same answer. One entry per
+// check that feeds a provider's needs-setup flag, scoped to the providers
+// provider_needs_setup_for consults (the active one, or all when none is).
+#[derive(Clone, Copy, Default)]
+struct SetupReasonInputs {
+    core_installed: bool,
+    claude_hook_registered: bool,
+    claude_menu_hook_registered: bool,
+    claude_docs_current: bool,
+    codex_hook_block_current: bool,
+    codex_instr_current: bool,
+    codex_docs_current: bool,
+    opencode_wanted: bool,
+    opencode_plugin_ok: bool,
+    opencode_instructions_current: bool,
+    is_source_repo: bool,
+}
+
+fn setup_reasons(active: Option<SessionProvider>, i: SetupReasonInputs) -> Vec<&'static str> {
+    let claude = matches!(active, None | Some(SessionProvider::Claude));
+    let codex = matches!(active, None | Some(SessionProvider::Codex));
+    let opencode = matches!(active, None | Some(SessionProvider::Opencode));
+    let mut out = Vec::new();
+    // core_installed gates every provider's verdict (OpenCode only where wanted).
+    if !i.core_installed && (claude || codex || (opencode && i.opencode_wanted)) {
+        out.push("not-installed");
+    }
+    if claude {
+        if !i.claude_hook_registered {
+            out.push("claude-hook-missing");
+        }
+        if !i.claude_menu_hook_registered {
+            out.push("claude-menu-hook-missing");
+        }
+        if !i.is_source_repo && !i.claude_docs_current {
+            out.push("claude-instructions-stale");
+        }
+    }
+    if codex {
+        if !i.codex_hook_block_current {
+            out.push("codex-hook-missing");
+        }
+        if !i.codex_instr_current {
+            out.push("codex-developer-instructions-missing");
+        }
+        if !i.is_source_repo && !i.codex_docs_current {
+            out.push("codex-instructions-stale");
+        }
+    }
+    if opencode && i.opencode_wanted {
+        if !i.opencode_plugin_ok {
+            out.push("opencode-plugin-missing");
+        }
+        if !i.opencode_instructions_current {
+            out.push("opencode-instructions-missing");
+        }
+    }
+    out
+}
+
+// Numeric dotted-version compare ("0.10.0" > "0.9.9"); a pre-release or
+// build suffix on a component is ignored. None when either side is unparsable.
+fn parse_version_parts(v: &str) -> Option<Vec<u64>> {
+    let core = v.trim().trim_start_matches('v');
+    let core = core.split(['-', '+']).next()?;
+    let parts: Option<Vec<u64>> = core.split('.').map(|p| p.parse::<u64>().ok()).collect();
+    parts.filter(|p| !p.is_empty())
+}
+
+fn version_is_older(running: &str, other: &str) -> bool {
+    let (Some(mut a), Some(mut b)) = (parse_version_parts(running), parse_version_parts(other))
+    else {
+        return false;
+    };
+    let n = a.len().max(b.len());
+    a.resize(n, 0);
+    b.resize(n, 0);
+    a < b
+}
+
+// The `version` of the [package] table in a Cargo.toml's text.
+fn parse_cargo_package_version(text: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_package = t == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = t.strip_prefix("version") {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let v = rest.trim().trim_matches('"');
+                    if !v.is_empty() && !rest.contains("workspace") {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// The checkout's version: src-tauri/Cargo.toml beside the on-disk app/ root
+// serve_app_file resolves. None when serving the embedded tree (an installed
+// bundle), which cannot disagree with its own version.
+fn checkout_version<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let root = resolve_app_root(Some(app))?;
+    let text = std::fs::read_to_string(root.parent()?.join("src-tauri/Cargo.toml")).ok()?;
+    parse_cargo_package_version(&text)
+}
+
 fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     use serde_json::json;
     let proj = project_root(Some(app)).ok_or("no project root")?;
@@ -56161,6 +56273,31 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         opencode_needs_setup,
         antigravity_needs_setup,
     );
+    let setup_reasons_list = setup_reasons(
+        active_provider,
+        SetupReasonInputs {
+            core_installed,
+            claude_hook_registered: hook_registered,
+            claude_menu_hook_registered: menu_hook_registered,
+            claude_docs_current,
+            codex_hook_block_current,
+            codex_instr_current,
+            codex_docs_current,
+            opencode_wanted: opencode_plugin_wanted(app, &proj),
+            opencode_plugin_ok: opencode_plugin_current || opencode_plugin_custom,
+            opencode_instructions_current,
+            is_source_repo,
+        },
+    );
+    // issue-465: a process older than the checkout it reads cannot match the
+    // checkout's seeded text; Setup there would stamp the old version on the
+    // new text, so the remedy is a restart, not Setup.
+    let running_version = env!("CARGO_PKG_VERSION");
+    let checkout_version_str = checkout_version(app);
+    let process_older_than_checkout = checkout_version_str
+        .as_deref()
+        .map(|c| version_is_older(running_version, c))
+        .unwrap_or(false);
     let active_provider_json = match active_provider {
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
@@ -56268,11 +56405,6 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "antigravityRulesCurrent": antigravity_rules_current,
         "providerNeedsSetup": provider_needs_setup,
         "codexInstallStaleOnly": codex_install_stale_only,
-        "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
-            "codex-hook-refresh"
-        } else {
-            "repo-setup"
-        },
         "claudeMd": claude_md_has_marker,
         "codexAgents": codex_agents_has_marker,
         "sidecar": sidecar_exists,
@@ -56288,6 +56420,22 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "settingsPath": settings.display().to_string(),
         "worklistAuthPath": worklist_auth.display().to_string(),
     });
+    // issue-465: inserted after the literal -- the json! macro above is at
+    // its recursion limit.
+    let mut body = body;
+    body["claudeDocsCurrent"] = json!(claude_docs_current);
+    body["menuHookRegistered"] = json!(menu_hook_registered);
+    body["setupReasons"] = json!(setup_reasons_list);
+    body["runningVersion"] = json!(running_version);
+    body["checkoutVersion"] = json!(checkout_version_str);
+    body["processOlderThanCheckout"] = json!(process_older_than_checkout);
+    body["providerSetupKind"] = if process_older_than_checkout && provider_needs_setup {
+        json!("restart-older-process")
+    } else if matches!(active_provider, Some(SessionProvider::Codex)) && codex_install_stale_only {
+        json!("codex-hook-refresh")
+    } else {
+        json!("repo-setup")
+    };
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
@@ -70888,6 +71036,117 @@ fn needs_you_replier_phrase(author: &str, first_line: &str) -> Option<String> {
     Some(format!("{} replied", author))
 }
 
+// alerts-show-whats-new-and-what-was-said: the comment's own words, for the
+// row to show under its title. The first line of real content: a Bram forge
+// signature line (agent or worklist-mirror form), blank lines, and bare
+// Markdown marks are skipped; leading heading/quote/emphasis marks are
+// stripped from the line kept. Whitespace is collapsed and the length capped
+// (in chars, with an ellipsis). Untrusted text: the pane renders it as plain
+// Text, never Markdown. Empty when the comment holds nothing but a signature.
+const NEEDS_YOU_EXCERPT_MAX_CHARS: usize = 160;
+
+fn needs_you_excerpt(body: &str) -> String {
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let bare =
+            line.trim_start_matches(|ch: char| matches!(ch, '_' | '*' | '>' | '#' | '-' | ' '));
+        if guard_policy::parse_agent_signature(bare).is_some()
+            || worklist_mirror_signature_speaker(bare).is_some()
+        {
+            continue;
+        }
+        let text = line
+            .trim_start_matches(|ch: char| matches!(ch, '#' | '>' | ' '))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.is_empty()
+            || text
+                .chars()
+                .all(|ch| matches!(ch, '-' | '*' | '_' | '=' | '`'))
+        {
+            continue;
+        }
+        let text = strip_markdown_escapes(&text);
+        if text.chars().count() > NEEDS_YOU_EXCERPT_MAX_CHARS {
+            let cut: String = text.chars().take(NEEDS_YOU_EXCERPT_MAX_CHARS).collect();
+            return format!("{}\u{2026}", cut.trim_end());
+        }
+        return text;
+    }
+    String::new()
+}
+
+// The excerpt renders as plain text, so a Markdown escape ("10\. Cool") would
+// show its backslash.
+fn strip_markdown_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|next| next.is_ascii_punctuation()) {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod needs_you_excerpt_tests {
+    use super::{needs_you_excerpt, NEEDS_YOU_EXCERPT_MAX_CHARS};
+
+    const SIG: &str = "Jon's Claude (Bram 0.6.6, main thread, Fable 5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+
+    #[test]
+    fn markdown_escapes_do_not_show() {
+        assert_eq!(needs_you_excerpt(r"10\. Cool, thanks"), "10. Cool, thanks");
+        assert_eq!(needs_you_excerpt(r"a \\ b"), r"a \ b");
+        assert_eq!(needs_you_excerpt(r"C:\temp"), r"C:\temp");
+    }
+
+    #[test]
+    fn plain_comment_is_its_first_line() {
+        assert_eq!(
+            needs_you_excerpt("The gate toggle settles it.\nSecond line."),
+            "The gate toggle settles it."
+        );
+    }
+
+    #[test]
+    fn signature_only_comment_is_empty() {
+        assert_eq!(needs_you_excerpt(SIG), "");
+        assert_eq!(needs_you_excerpt(&format!("{}\n\n", SIG)), "");
+    }
+
+    #[test]
+    fn signature_then_heading_yields_the_heading_text() {
+        let body = format!("{}\n\n## Findings on the gate\nmore", SIG);
+        assert_eq!(needs_you_excerpt(&body), "Findings on the gate");
+    }
+
+    #[test]
+    fn emphasized_signature_is_still_skipped() {
+        let body = format!("_{}_\nReal content", SIG);
+        assert_eq!(needs_you_excerpt(&body), "Real content");
+    }
+
+    #[test]
+    fn long_line_is_capped_with_ellipsis() {
+        let out = needs_you_excerpt(&"word ".repeat(100));
+        assert!(out.chars().count() <= NEEDS_YOU_EXCERPT_MAX_CHARS);
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn empty_body_is_empty() {
+        assert_eq!(needs_you_excerpt(""), "");
+        assert_eq!(needs_you_excerpt("\n  \n---\n"), "");
+    }
+}
+
 // worklist-mirror-comments-signed: the mirror signs as "<owner>'s Bram (Bram
 // <version>, posted automatically, …)". Comments posted before that wording
 // say "worklist mirror, host" instead (Bram-internal jargon a reader can't
@@ -71600,6 +71859,7 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
         // pre-change detail was reason-only — "I need to know who replied
         // in order to judge what to do"). One call, one extra jq field.
         let mut replier: Option<String> = None;
+        let mut excerpt = String::new();
         let comments_url = format!(
             "{}/comments?per_page=100",
             subj_url.replace("/pulls/", "/issues/")
@@ -71611,21 +71871,27 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                     "api",
                     comments_url.as_str(),
                     "--jq",
-                    ".[-1] | ((.user.login // \"\") + \"\\n\" + ((.body // \"\") | split(\"\\n\")[0]))",
+                    ".[-1] | ((.user.login // \"\") + \"\\n\" + ((.body // \"\")[0:4000]))",
                 ],
                 "gh last comment author",
             ) {
                 let raw = String::from_utf8_lossy(&cout).to_string();
-                let (author, first_line) = match raw.split_once('\n') {
-                    Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
+                // alerts-show-whats-new-and-what-was-said: the same call now
+                // returns the body's head (not just its first line); the
+                // first line still names the replier, and the excerpt skips
+                // a signature to reach the content.
+                let (author, comment_body) = match raw.split_once('\n') {
+                    Some((a, b)) => (a.trim().to_string(), b.to_string()),
                     None => (raw.trim().to_string(), String::new()),
                 };
+                let first_line = comment_body.lines().next().unwrap_or("").trim().to_string();
                 if !author.is_empty() {
                     if author.eq_ignore_ascii_case(login.as_str()) {
                         continue;
                     }
                     verified = true;
                     replier = needs_you_replier_phrase(&author, &first_line);
+                    excerpt = needs_you_excerpt(&comment_body);
                 }
             }
         }
@@ -71694,6 +71960,7 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                     Some(who) => format!("{} · GitHub notification ({}).", who, reason),
                     None => format!("GitHub notification (reason: {}).", reason),
                 },
+                "excerpt": excerpt,
                 "link": "/issues",
                 // The thread's web page: replying is the act that clears the
                 // item, and GitHub is where replying happens — so Open goes
@@ -72233,6 +72500,23 @@ mod needs_you_checking_tests {
     }
 }
 
+// Does a begun item have anything on disk to commit? One `git status` over its
+// declared files. An item with no files, or a git failure, counts as having
+// changes: when unsure, the row stays where the user will see it.
+fn begun_item_has_changes<R: tauri::Runtime>(app: &AppHandle<R>, item: &serde_json::Value) -> bool {
+    let files = worklist_item_files(item);
+    if files.is_empty() {
+        return true;
+    }
+    let mut args = vec!["status", "--porcelain", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git_status_reports_changes(git_run(app, &args).ok().as_deref())
+}
+
+fn git_status_reports_changes(porcelain: Option<&str>) -> bool {
+    porcelain.map(|out| !out.trim().is_empty()).unwrap_or(true)
+}
+
 fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -72283,6 +72567,29 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
         let begun = item.get("begunAtMs").is_some();
         let waiting = status == "applied" || (status == "proposed" && begun);
         if !waiting || claimed.contains(&id) {
+            continue;
+        }
+        // alerts-begun-item-not-ready-to-commit: a begun item with nothing on
+        // disk isn't ready to commit. Its work may be running elsewhere, such
+        // as with a subagent, so it's a quiet row, not a blocking one.
+        if status == "proposed" && !begun_item_has_changes(app, &item) {
+            classified.push((
+                owner_state_lane(false, false, false),
+                serde_json::json!({
+                    "source": "bram-local",
+                    "id": id,
+                    "title": format!("Worklist item \u{201c}{}\u{201d} has no changes yet", id),
+                    "detail": "Started, with nothing on disk. If no agent is working on it, Resume or Drop it.",
+                    "activityAt": item
+                        .get("begunAtMs")
+                        .and_then(|v| v.as_i64())
+                        .map(format_iso_utc_ms),
+                    "link": format!("/worklist2?expand={}", id),
+                    "court": "agent",
+                    "blocking": false,
+                    "verified": true,
+                }),
+            ));
             continue;
         }
         let closes: Vec<String> = item
@@ -72694,6 +73001,16 @@ mod needs_you_tests {
             false,
             true
         ));
+    }
+
+    #[test]
+    fn begun_item_with_no_changes_is_not_ready_to_commit() {
+        assert!(!super::git_status_reports_changes(Some("")));
+        assert!(!super::git_status_reports_changes(Some("\n")));
+        assert!(super::git_status_reports_changes(Some(" M src/a.rs\n")));
+        assert!(super::git_status_reports_changes(Some("?? new.txt\n")));
+        // A git failure keeps the row visible, not silently gone.
+        assert!(super::git_status_reports_changes(None));
     }
 
     #[test]
@@ -90420,8 +90737,44 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         .find(|h| h.field.equiv("Origin"))
         .map(|h| h.value.as_str().to_string());
 
+    // issue-465: one gate for state-changing requests and for any Host that
+    // isn't this instance's loopback address (DNS rebinding). Refusals are
+    // traced so a false refusal shows up in the log.
+    let request_host: Option<String> = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Host"))
+        .map(|h| h.value.as_str().to_string());
+    let gate_refusal = loopback_gate_refusal(
+        &method,
+        path,
+        request_origin.as_deref(),
+        request_host.as_deref(),
+        LOOPBACK_PORT.get().copied(),
+    );
+    if let Some(reason) = gate_refusal {
+        append_bram_trace_line(
+            app,
+            "loopback-refusal",
+            &format!(
+                "op=refuse reason={} method={} path=/{} origin={} host={}",
+                reason,
+                method,
+                path,
+                request_origin.as_deref().unwrap_or("(none)"),
+                request_host.as_deref().unwrap_or("(none)")
+            ),
+        );
+    }
+
     // POST-only routes (route_request is GET-only).
-    let (status, content_type, body) = if path == "__self-update" {
+    let (status, content_type, body) = if gate_refusal.is_some() {
+        (
+            403,
+            "text/plain; charset=utf-8",
+            b"forbidden: cross-origin caller".to_vec(),
+        )
+    } else if path == "__self-update" {
         // clickable-update-from-banner: start the install flow (idempotent
         // guard: 409 while one runs). Progress rides /__self-update/status +
         // the self-update-changed event.
@@ -90436,20 +90789,6 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         } else {
             handle_self_update_relaunch(app)
         }
-    } else if path == "__issue/comment" && !issue_comment_origin_allowed(request_origin.as_deref())
-    {
-        // M7 (docs/security.md): /__issue/comment is a forge WRITE posting as
-        // the user; a browser page that learned the port must not drive it.
-        // Refuse when a FOREIGN Origin is present — no-Origin callers (the
-        // pane's own fetches, which the H6 soak showed send no Origin, and
-        // curl) and the shell origin itself pass. This is exactly H6's
-        // accepted-residual boundary, enforced with its soaked platform-aware
-        // SHELL_ORIGIN rather than a fresh predicate.
-        (
-            403,
-            "text/plain; charset=utf-8",
-            b"forbidden: cross-origin caller".to_vec(),
-        )
     } else if path == "query" {
         // issue-355: the dataType="sql" receiving end. Unprefixed on
         // purpose — target markup calls it with a relative URL, matching
@@ -90741,32 +91080,153 @@ fn cors_allowed_origin(request_origin: Option<&str>) -> Option<&'static str> {
     }
 }
 
-// M7 (docs/security.md): the write-route screen built on the same boundary.
-// CORS stops a foreign page READING responses; it does not stop the request
-// itself, and /__issue/comment has an external side effect. So the request is
-// refused outright when a foreign Origin is present. No-Origin callers pass —
-// the pane's own fetches send no Origin (H6 soak receipt) and a same-user
-// local process is the accepted residual. Pure for unit testing.
-fn issue_comment_origin_allowed(request_origin: Option<&str>) -> bool {
+// issue-465 (docs/security.md H6 send half, M7): the Origin rule for
+// state-changing requests. CORS stops a foreign page READING responses; it does
+// not stop the request, so a foreign Origin is refused outright. No-Origin
+// callers pass (the pane's own fetches, hooks, guards, scripts and curl send
+// none; a same-user local process is H6's accepted residual). The shell origin
+// passes. `Origin: null` (sandboxed iframes, file:// pages) is foreign. The
+// display-only target pane (`bramapp://localhost`) is foreign here too.
+// Pure for unit testing.
+fn state_change_origin_allowed(request_origin: Option<&str>) -> bool {
     match request_origin {
         None => true,
         Some(o) => o == SHELL_ORIGIN,
     }
 }
 
+// GET routes that change state or have side effects beyond reading. Origin
+// rule applies to them as to non-GET methods. Keep in step with route_request.
+const STATE_CHANGING_GET_PATHS: &[&str] = &[
+    "__issue/comment",    // forge write
+    "__enhance/run",      // runs Setup (writes files, hooks)
+    "__restart-server",   // restarts the spawned project server
+    "__worklist/init",    // creates worklist.json
+    "__worklist/resolve", // consumes the recorded approval
+    "__startup-ready",    // emits startup events
+];
+
+fn request_changes_state(method: &str, path: &str) -> bool {
+    !matches!(method, "GET" | "HEAD" | "OPTIONS") || STATE_CHANGING_GET_PATHS.contains(&path)
+}
+
+// Host must be 127.0.0.1 or localhost at this instance's port; anything else
+// is a DNS-rebinding attempt. A missing Host passes: HTTP/1.1 requires one, so
+// only a hand-rolled HTTP/1.0 client omits it, and a browser (the rebinding
+// vector) always sends it. Pure for unit testing.
+fn loopback_host_allowed(host: Option<&str>, port: Option<u16>) -> bool {
+    let Some(host) = host else { return true };
+    let Some(port) = port else { return true };
+    let host = host.trim().to_ascii_lowercase();
+    host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}")
+}
+
+// The gate: Some(reason) when the request must be refused with 403.
+fn loopback_gate_refusal(
+    method: &str,
+    path: &str,
+    request_origin: Option<&str>,
+    request_host: Option<&str>,
+    port: Option<u16>,
+) -> Option<&'static str> {
+    if !loopback_host_allowed(request_host, port) {
+        return Some("bad-host");
+    }
+    if request_changes_state(method, path) && !state_change_origin_allowed(request_origin) {
+        return Some("foreign-origin");
+    }
+    None
+}
+
 #[cfg(test)]
 mod cors_origin_tests {
-    use super::{cors_allowed_origin, issue_comment_origin_allowed, SHELL_ORIGIN};
+    use super::{
+        cors_allowed_origin, loopback_gate_refusal, loopback_host_allowed,
+        state_change_origin_allowed, SHELL_ORIGIN,
+    };
 
     #[test]
-    fn issue_comment_screen_passes_no_origin_and_shell_only() {
-        // M7: no-Origin (pane fetches, curl) and the shell origin pass; any
-        // foreign Origin — another page, the display-only target pane — is
-        // refused before the forge write runs.
-        assert!(issue_comment_origin_allowed(None));
-        assert!(issue_comment_origin_allowed(Some(SHELL_ORIGIN)));
-        assert!(!issue_comment_origin_allowed(Some("https://evil.example")));
-        assert!(!issue_comment_origin_allowed(Some("bramapp://localhost")));
+    fn state_change_rule_passes_no_origin_and_shell_only() {
+        assert!(state_change_origin_allowed(None));
+        assert!(state_change_origin_allowed(Some(SHELL_ORIGIN)));
+        assert!(!state_change_origin_allowed(Some("https://evil.example")));
+        assert!(!state_change_origin_allowed(Some("bramapp://localhost")));
+        assert!(!state_change_origin_allowed(Some(
+            "http://bramapp.localhost"
+        )));
+        assert!(!state_change_origin_allowed(Some("null")));
+        assert!(!state_change_origin_allowed(Some("")));
+    }
+
+    #[test]
+    fn host_must_be_loopback_at_our_port() {
+        let p = Some(5000u16);
+        assert!(loopback_host_allowed(Some("127.0.0.1:5000"), p));
+        assert!(loopback_host_allowed(Some("localhost:5000"), p));
+        assert!(loopback_host_allowed(Some("LocalHost:5000"), p));
+        assert!(loopback_host_allowed(None, p));
+        assert!(!loopback_host_allowed(Some("127.0.0.1:5001"), p));
+        assert!(!loopback_host_allowed(Some("127.0.0.1"), p));
+        assert!(!loopback_host_allowed(Some("evil.example:5000"), p));
+        assert!(!loopback_host_allowed(
+            Some("127.0.0.1.evil.example:5000"),
+            p
+        ));
+        assert!(!loopback_host_allowed(Some(""), p));
+    }
+
+    #[test]
+    fn gate_refuses_foreign_origin_on_state_changes_only() {
+        let h = Some("127.0.0.1:5000");
+        let p = Some(5000u16);
+        let evil = Some("https://evil.example");
+        // state-changing: POST, and the GET routes with side effects
+        assert_eq!(
+            loopback_gate_refusal("POST", "__worklist/reorder", evil, h, p),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal(
+                "POST",
+                "__worklist/reorder",
+                Some("bramapp://localhost"),
+                h,
+                p
+            ),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal("GET", "__enhance/run", evil, h, p),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal("GET", "__issue/comment", evil, h, p),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal("POST", "__self-update", evil, h, p),
+            Some("foreign-origin")
+        );
+        // legitimate
+        assert_eq!(
+            loopback_gate_refusal("POST", "__worklist/reorder", None, h, p),
+            None
+        );
+        assert_eq!(
+            loopback_gate_refusal("POST", "__worklist/reorder", Some(SHELL_ORIGIN), h, p),
+            None
+        );
+        // reads from a foreign origin still reach the handler (CORS governs reading)
+        assert_eq!(loopback_gate_refusal("GET", "__worklist", evil, h, p), None);
+        assert_eq!(
+            loopback_gate_refusal("OPTIONS", "__worklist", evil, h, p),
+            None
+        );
+        // bad Host refused even for a read
+        assert_eq!(
+            loopback_gate_refusal("GET", "__worklist", None, Some("evil.example:5000"), p),
+            Some("bad-host")
+        );
     }
 
     #[test]
@@ -94877,5 +95337,123 @@ mod pair_sessions_query_tests {
             parse_pair_sessions_query(&format!("claude={CLAUDE}")),
             Err("two sessions of different providers required".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod setup_reason_tests {
+    use super::{
+        parse_cargo_package_version, setup_reasons, version_is_older, SessionProvider,
+        SetupReasonInputs,
+    };
+
+    fn healthy() -> SetupReasonInputs {
+        SetupReasonInputs {
+            core_installed: true,
+            claude_hook_registered: true,
+            claude_menu_hook_registered: true,
+            claude_docs_current: true,
+            codex_hook_block_current: true,
+            codex_instr_current: true,
+            codex_docs_current: true,
+            opencode_wanted: true,
+            opencode_plugin_ok: true,
+            opencode_instructions_current: true,
+            is_source_repo: false,
+        }
+    }
+
+    #[test]
+    fn healthy_project_has_no_reasons() {
+        assert!(setup_reasons(None, healthy()).is_empty());
+    }
+
+    #[test]
+    fn stale_claude_instructions_alone_is_named() {
+        // #465: claudeNeedsSetup true with every hook present.
+        let i = SetupReasonInputs {
+            claude_docs_current: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Claude), i),
+            vec!["claude-instructions-stale"]
+        );
+    }
+
+    #[test]
+    fn missing_menu_hook_is_distinguished_from_stale_docs() {
+        let i = SetupReasonInputs {
+            claude_menu_hook_registered: false,
+            ..healthy()
+        };
+        assert_eq!(setup_reasons(None, i), vec!["claude-menu-hook-missing"]);
+    }
+
+    #[test]
+    fn source_repo_exempts_doc_currency_only() {
+        let i = SetupReasonInputs {
+            is_source_repo: true,
+            claude_docs_current: false,
+            claude_hook_registered: false,
+            ..healthy()
+        };
+        assert_eq!(setup_reasons(None, i), vec!["claude-hook-missing"]);
+    }
+
+    #[test]
+    fn reasons_follow_the_active_provider() {
+        let i = SetupReasonInputs {
+            codex_hook_block_current: false,
+            ..healthy()
+        };
+        assert!(setup_reasons(Some(SessionProvider::Claude), i).is_empty());
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Codex), i),
+            vec!["codex-hook-missing"]
+        );
+    }
+
+    #[test]
+    fn opencode_reasons_only_where_wanted() {
+        let i = SetupReasonInputs {
+            opencode_plugin_ok: false,
+            ..healthy()
+        };
+        assert_eq!(
+            setup_reasons(Some(SessionProvider::Opencode), i),
+            vec!["opencode-plugin-missing"]
+        );
+        let i = SetupReasonInputs {
+            opencode_wanted: false,
+            ..i
+        };
+        assert!(setup_reasons(None, i).is_empty());
+    }
+
+    #[test]
+    fn not_installed_is_named_once() {
+        let i = SetupReasonInputs {
+            core_installed: false,
+            ..healthy()
+        };
+        assert_eq!(setup_reasons(None, i), vec!["not-installed"]);
+    }
+
+    #[test]
+    fn versions_compare_numerically_not_as_strings() {
+        assert!(version_is_older("0.7.8", "0.8.1"));
+        assert!(version_is_older("0.9.9", "0.10.0"));
+        assert!(!version_is_older("0.10.0", "0.9.9"));
+        assert!(!version_is_older("0.8.1", "0.8.1"));
+        assert!(version_is_older("0.8", "0.8.1"));
+        assert!(!version_is_older("0.8.1", "garbage"));
+    }
+
+    #[test]
+    fn cargo_version_comes_from_the_package_table() {
+        let t = "[dependencies]\nversion = \"9.9.9\"\n[package]\nname = \"bram\"\nversion = \"0.8.2\"\n";
+        assert_eq!(parse_cargo_package_version(t).as_deref(), Some("0.8.2"));
+        assert_eq!(parse_cargo_package_version("[package]\nname=\"x\"\n"), None);
     }
 }

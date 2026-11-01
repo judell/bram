@@ -130,18 +130,27 @@ that silently disappears.
 
 Which verbs are *enabled* is derived from the selection, not from a mode:
 
-- **Start N** — `__bramSelectionAllUnstarted`: every ticked item is unbegun.
-- **Start & commit N** — `__bramSelectionAllUnstarted` **and**
-  `__bramSelectionAllPlans` **and** exactly one item ticked (the
-  `worklist.oneClickApproveCommit` setting that once gated this was retired
-  in the 0.5.3 run). Single-item only for now — a
-  multi-item selection used to fuse every ticked item into one commit with no
-  path to N commits; see #272.
-- **Commit N** — `__bramSelectionAllCommittable`: every ticked item is begun
-  and has *exclusive* changes of its own (not every changed path shared with
-  another begun item).
-- **Refine N** — any non-empty message.
-- **Drop N** — always enabled while no claim is in flight.
+- **Start** (reads **Resume** on a begun item) —
+  `__bramSelectionAllNeedStart`: every ticked item is unapplied, not running,
+  and either not committable or still under a live approval, which means its
+  work was never declared finished.
+- **Start & commit** (reads **Resume & commit**) —
+  `__bramSelectionAllNeedStart` **and** exactly one item ticked **and** not
+  `__bramSelectionAllCommittable`. Single-item only for now — a multi-item
+  selection used to fuse every ticked item into one commit with no path to N
+  commits; see #272.
+- **Commit** — `__bramSelectionAllCommittable`: every ticked item is begun and
+  has changes of its own to commit, with the exceptions that predicate names.
+  On a `proposed` item it sends `apply-and-commit`, as Start & commit does, so
+  the agent may finish remaining edits first.
+- **Drop** — always enabled while no claim is in flight.
+
+The row offers one way to continue and one way to finish. On a begun item with
+a live approval and changes on disk, that is Resume and Commit; Resume & commit
+dims because it would repeat Commit.
+
+Follow-up messages aren't a gate verb: the composer sends them to the ticked
+items.
 
 A row's tickbox stays ticked and frozen while its action is in flight, because
 the tick is part of the sentence just submitted.

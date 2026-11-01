@@ -1,5 +1,6 @@
 <Component
   name="Inbox"
+  var.newKeys="{window.__bramAlertsSnapshot(inbox.value, $pathname)}"
   var.lanesReady="{!!(inbox.value &amp;&amp; inbox.value.lanes)}"
   var.emptyAll="{lanesReady &amp;&amp;
     !inbox.value.checking &amp;&amp;
@@ -107,11 +108,15 @@
     <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.needsYouNow.length > 0}">
       <Heading level="h4" value="🔴 Needs you now" />
       <Items data="{inbox.value.lanes.needsYouNow}">
-        <Card>
+        <Card borderLeft="{window.__bramAlertsAccent(newKeys, $item)}">
           <VStack gap="$space-1">
-            <Text>{$item.title}</Text>
+            <HStack verticalAlignment="center" gap="$space-2">
+              <Badge when="{window.__bramAlertsIsNew(newKeys, $item)}" variant="pill" value="New" />
+              <Text>{$item.title}</Text>
+            </HStack>
             <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
-            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{window.__bramAlertsDetail($item)}</Text>
+            <Text when="{$item.excerpt}" fontSize="$fontSize-sm">{$item.excerpt}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
               <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />
@@ -126,11 +131,15 @@
     <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.yourDecision.length > 0}">
       <Heading level="h4" value="🟡 Your decision, when you're ready" />
       <Items data="{inbox.value.lanes.yourDecision}">
-        <Card>
+        <Card borderLeft="{window.__bramAlertsAccent(newKeys, $item)}">
           <VStack gap="$space-1">
-            <Text>{$item.title}</Text>
+            <HStack verticalAlignment="center" gap="$space-2">
+              <Badge when="{window.__bramAlertsIsNew(newKeys, $item)}" variant="pill" value="New" />
+              <Text>{$item.title}</Text>
+            </HStack>
             <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
-            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{window.__bramAlertsDetail($item)}</Text>
+            <Text when="{$item.excerpt}" fontSize="$fontSize-sm">{$item.excerpt}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
               <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />
@@ -145,11 +154,15 @@
     <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.othersHands.length > 0}">
       <Heading level="h4" value="🟢 In someone else's hands" />
       <Items data="{inbox.value.lanes.othersHands}">
-        <Card>
+        <Card borderLeft="{window.__bramAlertsAccent(newKeys, $item)}">
           <VStack gap="$space-1">
-            <Text>{$item.title}</Text>
+            <HStack verticalAlignment="center" gap="$space-2">
+              <Badge when="{window.__bramAlertsIsNew(newKeys, $item)}" variant="pill" value="New" />
+              <Text>{$item.title}</Text>
+            </HStack>
             <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
-            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{window.__bramAlertsDetail($item)}</Text>
+            <Text when="{$item.excerpt}" fontSize="$fontSize-sm">{$item.excerpt}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
               <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />
@@ -164,11 +177,15 @@
     <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.looseEnds.length > 0}">
       <Heading level="h4" value="⚪ Loose ends" />
       <Items data="{inbox.value.lanes.looseEnds}">
-        <Card>
+        <Card borderLeft="{window.__bramAlertsAccent(newKeys, $item)}">
           <VStack gap="$space-1">
-            <Text>{$item.title}</Text>
+            <HStack verticalAlignment="center" gap="$space-2">
+              <Badge when="{window.__bramAlertsIsNew(newKeys, $item)}" variant="pill" value="New" />
+              <Text>{$item.title}</Text>
+            </HStack>
             <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
-            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{window.__bramAlertsDetail($item)}</Text>
+            <Text when="{$item.excerpt}" fontSize="$fontSize-sm">{$item.excerpt}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
               <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />

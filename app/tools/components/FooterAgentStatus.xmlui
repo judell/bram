@@ -36,8 +36,13 @@
     <ChangeListener
       listenTo="{agentStatus.value &amp;&amp; agentStatus.value.verb}"
       onDidChange="(c) => { if (c.newValue) { lastSeenVerb = c.newValue; } }" />
+    <!-- footer-silence-banner-overflow-jitter: the banner is a sibling of the
+         star-width status rows, so it is capped at 60% of the row (the rows
+         take the rest) and its sentence ellipsizes; the button stays whole.
+         Without the cap the banner + a 100% row overflowed the pane. -->
     <HStack
       when="{suspiciousSilence.value &amp;&amp; suspiciousSilence.value.active}"
+      maxWidth="60%"
       gap="$space-2"
       verticalAlignment="center"
       paddingHorizontal="$space-2"
@@ -46,8 +51,12 @@
       border="1px solid $color-warn-200"
       borderRadius="$borderRadius">
       <Text
+        width="*"
         fontSize="$fontSize-sm"
         color="$color-warn-700"
+        maxLines="1"
+        overflowMode="ellipsis"
+        tooltip="The terminal is suspiciously silent and might need attention."
         value="The terminal is suspiciously silent and might need attention." />
       <Button
         label="Open terminal"
@@ -66,7 +75,7 @@
       value="{window.providerDisplayName(agentStatus.value, $props.enhanceStatus)}" />
     <HStack
       when="{agentStatus.value &amp;&amp; agentStatus.value.state === 'working'}"
-      width="100%"
+      width="*"
       gap="$space-1"
       verticalAlignment="center">
       <Text
@@ -86,7 +95,7 @@
          dependency, same idiom as $props.enhanceStatus above. -->
     <HStack
       when="{agentStatus.value &amp;&amp; agentStatus.value.state === 'finished'}"
-      width="100%"
+      width="*"
       gap="$space-1"
       verticalAlignment="center">
       <Text

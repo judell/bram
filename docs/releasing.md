@@ -1,9 +1,10 @@
 # Releasing Bram
 
-Debug builds are the shipping format. The Rust side is thin glue (PTY
-relay, loopback HTTP file server, small git/sessions queries); the
-heavy lifting is XMLUI's TypeScript runtime in the WebView, which is
-identical between debug and release. The audience is XMLUI developers,
+Debug builds are the shipping format. The Rust host is large and
+carries most of Bram's logic (the PTY, the loopback server, git and
+session queries, the Worklist gate and its guards). The pane runs on
+XMLUI's TypeScript runtime in the WebView, which is identical between
+debug and release. The audience is XMLUI developers,
 who benefit from devtools being accessible. Don't propose `cargo build
 --release`, code signing, notarization, or installer pipelines.
 

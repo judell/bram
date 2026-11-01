@@ -302,22 +302,10 @@
     }" />
 
   <ModalDialog id="setupInfoDialog" title="About agent coordination">
-    <VStack gap="$space-3">
-      <Text>
-        Bram configures this repo so AI agents share a worklist-driven coordination flow. Setup and refresh both install a small, idempotent set of files; rerunning is safe.
-      </Text>
-      <VStack gap="$space-1">
-        <Text fontWeight="bold">What setup and refresh do</Text>
-        <Text>• Writes the shared `resources/.worklist-authorization.json` record that every adapter consumes.</Text>
-        <Text>• Refreshes the conventions sidecar so Claude and Codex use the current Bram workflow after upgrades.</Text>
-        <Text>• Installs the Claude adapter: a `CLAUDE.md` @-import of the conventions sidecar plus worklist-guard and permission-menu hooks.</Text>
-        <Text>• Installs the Codex adapter: an `AGENTS.md` block, top-level `developer_instructions`, and worklist-guard plus permission-menu hooks in `~/.codex/config.toml` / `~/.bram`.</Text>
-      </VStack>
-      <VStack gap="$space-1">
-        <Text fontWeight="bold">After setup runs</Text>
-        <Text>Later launches of any supported agent in this repo will not prompt again unless the setup artifacts are removed. Additional agent adapters can plug into the same flow in the future.</Text>
-      </VStack>
-    </VStack>
+    <Markdown
+      interpolateBindings="false"
+      allowHtml="false"
+      content="{window.__bramSetupInfoMarkdown()}" />
   </ModalDialog>
 
   <ModalDialog
@@ -964,31 +952,18 @@
     backgroundColor="$color-info-50"
     borderBottom="1px solid $color-info-200">
 <HStack verticalAlignment="center" gap="$space-2">
-  <Heading level="h3">
-    {enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh'
-      ? 'Refresh Agent Coordination'
-      : 'Set Up Agent Coordination'}
-  </Heading>
+  <Heading level="h3">{window.__bramSetupBanner(enhanceStatus.value, 'heading')}</Heading>
   <Button
     label="ⓘ"
     variant="ghost"
     size="sm"
-    tooltip="{enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh' ? 'About agent coordination refresh' : 'About agent coordination setup'}"
+    tooltip="{window.__bramSetupBanner(enhanceStatus.value, 'tooltip')}"
     onClick="setupInfoDialog.open()" />
 </HStack>
-<Text
-  when="{enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh'}"
-  fontSize="$fontSize-sm">
-  Bram was upgraded. Refresh the coordination files so Claude and Codex use the current conventions and hooks.
-</Text>
-<Text
-  when="{!(enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh')}"
-  fontSize="$fontSize-sm">
-  Install Bram's worklist coordination files and agent adapters for this repo.
-</Text>
-<HStack>
+<Text fontSize="$fontSize-sm">{window.__bramSetupBanner(enhanceStatus.value, 'text')}</Text>
+<HStack when="{window.__bramSetupBanner(enhanceStatus.value, 'runnable')}">
   <Button
-    label="{enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh' ? 'Refresh Coordination' : 'Run Setup'}"
+    label="{window.__bramSetupBanner(enhanceStatus.value, 'button')}"
     onClick="setupCompleteProvider = (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || 'setup'; runEnhanceSetup.execute()" />
 </HStack>
   </VStack>

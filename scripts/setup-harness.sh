@@ -419,6 +419,30 @@ scenario_already_setup() {
   shutdown_bram
 }
 
+scenario_stale_instructions() {
+  # #465: a set-up project whose conventions copy no longer matches. The
+  # status used to say only claudeNeedsSetup=true; setupReasons must name the
+  # failed check, and a missing hook must read differently.
+  local dir="$WORK_ROOT/stale_instructions"; mkdir -p "$dir"
+  git -C "$dir" init -q
+  printf '# scratch\n' > "$dir/README.md"
+  launch "$dir" || return
+  run_setup; sleep 1
+  assert_field claudeNeedsSetup false
+  printf '<!-- bram v0.0.1 -->\nold text\n' > "$dir/.claude/bram-conventions.md"
+  sleep 1
+  assert_field claudeNeedsSetup true
+  assert_field claudeDocsCurrent false
+  assert_field menuHookRegistered true
+  local reasons; reasons="$(api __enhance/status | jq -c '.setupReasons')"
+  if [ "$reasons" = '["claude-instructions-stale"]' ]; then
+    ok "setupReasons names stale instructions only"
+  else
+    bad "setupReasons names stale instructions only" "got: $reasons"
+  fi
+  shutdown_bram
+}
+
 scenario_legacy_hooks() {
   # #173: a project carrying the retired generic hook names.
   local dir="$WORK_ROOT/legacy_hooks"; mkdir -p "$dir/.claude/hooks"
@@ -469,7 +493,7 @@ require_bin
 command -v jq >/dev/null || { echo "jq required"; exit 127; }
 printf 'workdir: %s\n' "$WORK_ROOT"
 
-SCENARIOS=(pristine_nogit subfolder pristine_git already_setup legacy_hooks nested)
+SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions legacy_hooks nested)
 [ $# -gt 0 ] && SCENARIOS=("$@")
 
 for s in "${SCENARIOS[@]}"; do

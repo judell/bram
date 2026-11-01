@@ -2115,9 +2115,9 @@ window.__bramTraceHelperTiming = function (name, t0, extra) {
 // name, remaining segments are a property path inside the parsed JSON
 // object. Used by the __bram-prefixed localStorage shim helpers below
 // so they can run in plain JS without re-entering XMLUI's statement
-// queue. `bram.worklistSubmittedMessage` reads
-// `JSON.parse(localStorage.bram).worklistSubmittedMessage`. Splitter keys
-// like `bram.splitter.worklist` are two-level.
+// queue. `bram.turnCompleteBeep` reads
+// `JSON.parse(localStorage.bram).turnCompleteBeep`. Splitter keys like
+// `bram.splitter.worklist` are two-level.
 function __bramSplitKey(key) {
   var s = String(key);
   var dot = s.indexOf(".");
@@ -3342,10 +3342,6 @@ window.__bramClearWorklistUiState = function () {
   try { sessionStorage.removeItem("bram.worklistUiState"); } catch (e) {}
 };
 
-window.__bramRestoreWorklistSubmittedMessage = function () {
-  return __bramReadLS("bram.worklistSubmittedMessage", "");
-};
-
 window.__bramRestoreWorklistSessionSubmittedMessage = function () {
   return __bramReadSS("bram.worklistSessionSubmittedMessage", "");
 };
@@ -3358,17 +3354,7 @@ window.__bramShouldDimAgentDockOnMount = function () {
   return true;
 };
 
-window.__bramRestoreWorklistSubmittedKind = function () {
-  var kind = __bramReadLS("bram.worklistSubmittedKind", "");
-  return kind === "message" || kind === "action" ? kind : null;
-};
-
 window.__bramSetWorklistSubmittedKind = function (kind) {
-  if (kind === "message" || kind === "action") {
-    __bramWriteLS("bram.worklistSubmittedKind", kind);
-  } else {
-    __bramWriteLS("bram.worklistSubmittedKind", "");
-  }
   return kind || null;
 };
 
@@ -3644,9 +3630,7 @@ window.__bramSubmitWorklistMessageFast = function (text, voiceTarget) {
   window.__bramIframeTrace("message-agent-submit", { stage: "after-toTurn", chars: toSend.length, sentAt: sentAt });
   var baseline = 0;
   __bramWriteMessageDraft("", "submit");
-  __bramWriteLS("bram.worklistSubmittedMessage", userTyped);
   __bramWriteSS("bram.worklistSessionSubmittedMessage", userTyped);
-  window.__bramSetWorklistSubmittedKind("message");
   return { message: userTyped, images: __bramExtractImagePaths(toSend), baseline: baseline, sentAtText: new Date().toLocaleTimeString() };
 };
 
@@ -3800,7 +3784,88 @@ window.__bramAlertsKey = function (item) {
   if (!item) return "";
   return (item.id || "") + "|" + (item.activityMarker || item.activityAt || "");
 };
+// alerts-show-whats-new-and-what-was-said: arriving at Alerts snapshots which
+// rows (ALL lanes) are unseen BEFORE marking them seen, and keeps the snapshot
+// until you leave the page, so the rows can wear a New badge. Both the nav
+// pulse binding (Main.xmlui) and the Inbox page call __bramAlertsSnapshot, in
+// whatever order the engine evaluates them: on the page it unions newly
+// unseen keys into the snapshot, then marks them seen, so whichever runs
+// first captures and the other sees them already seen but still in the
+// snapshot. Off the page it clears the snapshot. The pulse itself stays on
+// Needs you now only.
+window.__bramAlertsSeenRead = function (storeKey) {
+  try {
+    return JSON.parse(sessionStorage.getItem(storeKey) || "{}") || {};
+  } catch (e) {
+    return {};
+  }
+};
+window.__bramAlertsAllItems = function (needsYou) {
+  var lanes = (needsYou && needsYou.lanes) || {};
+  var out = [];
+  var names = ["needsYouNow", "yourDecision", "othersHands", "looseEnds"];
+  for (var n = 0; n < names.length; n++) {
+    var arr = lanes[names[n]];
+    if (Array.isArray(arr)) out = out.concat(arr);
+  }
+  return out;
+};
+window.__bramAlertsSnapshotMap = {};
+window.__bramAlertsSnapshot = function (needsYou, pathname) {
+  if (pathname !== "/needs-you") {
+    window.__bramAlertsSnapshotMap = {};
+    return window.__bramAlertsSnapshotMap;
+  }
+  var storeKey = window.__bramProjectScopedKey
+    ? window.__bramProjectScopedKey("bram.alertsSeen")
+    : null;
+  if (!storeKey) return window.__bramAlertsSnapshotMap;
+  var items = window.__bramAlertsAllItems(needsYou);
+  var seen = window.__bramAlertsSeenRead(storeKey);
+  var snap = window.__bramAlertsSnapshotMap;
+  var added = 0;
+  var changed = false;
+  for (var i = 0; i < items.length; i++) {
+    var k = window.__bramAlertsKey(items[i]);
+    if (k && !seen[k]) {
+      seen[k] = 1;
+      changed = true;
+      if (!snap[k]) {
+        snap[k] = 1;
+        added++;
+      }
+    }
+  }
+  if (changed) {
+    try {
+      sessionStorage.setItem(storeKey, JSON.stringify(seen));
+    } catch (e) {}
+  }
+  if (added) {
+    window.__bramIframeTrace("alerts-new-snapshot", { added: added, total: Object.keys(snap).length });
+  }
+  return snap;
+};
+window.__bramAlertsIsNew = function (snap, item) {
+  return !!(snap && snap[window.__bramAlertsKey(item)]);
+};
+window.__bramAlertsAccent = function (snap, item) {
+  return window.__bramAlertsIsNew(snap, item)
+    ? "3px solid var(--xmlui-color-primary-500)"
+    : "";
+};
+// The row's detail line. With an excerpt the comment's own words replace the
+// "GitHub notification (reason)." tail, keeping the replier's name ("Asish's
+// Claude replied"); without one the host's detail stands.
+window.__bramAlertsDetail = function (item) {
+  var d = (item && item.detail) || "";
+  if (!item || !item.excerpt) return d;
+  var cut = d.indexOf(" \u00b7 GitHub notification");
+  return cut > 0 ? d.slice(0, cut) : d;
+};
 window.__bramAlertsShouldPulse = function (needsYou, pathname) {
+  var snap = window.__bramAlertsSnapshot(needsYou, pathname);
+  if (pathname === "/needs-you") return false;
   var items =
     needsYou && needsYou.lanes && Array.isArray(needsYou.lanes.needsYouNow)
       ? needsYou.lanes.needsYouNow
@@ -3808,31 +3873,7 @@ window.__bramAlertsShouldPulse = function (needsYou, pathname) {
   var storeKey = window.__bramProjectScopedKey
     ? window.__bramProjectScopedKey("bram.alertsSeen")
     : null;
-  var seen = {};
-  if (storeKey) {
-    try {
-      seen = JSON.parse(sessionStorage.getItem(storeKey) || "{}") || {};
-    } catch (e) {
-      seen = {};
-    }
-  }
-  if (pathname === "/needs-you") {
-    if (!storeKey) return false;
-    var changed = false;
-    for (var i = 0; i < items.length; i++) {
-      var k = window.__bramAlertsKey(items[i]);
-      if (k && !seen[k]) {
-        seen[k] = 1;
-        changed = true;
-      }
-    }
-    if (changed) {
-      try {
-        sessionStorage.setItem(storeKey, JSON.stringify(seen));
-      } catch (e) {}
-    }
-    return false;
-  }
+  var seen = storeKey ? window.__bramAlertsSeenRead(storeKey) : {};
   for (var j = 0; j < items.length; j++) {
     if (!seen[window.__bramAlertsKey(items[j])]) return true;
   }
@@ -4352,7 +4393,13 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
 window.__bramGateCommitTooltip = function (sel, branch, items, claim, ctx) {
   var scope = window.__bramGateScopeTooltip(sel, "commit", branch) || "";
   var why = window.__bramGateCommitWhyNot(items, sel, claim, ctx);
-  return why ? scope + (scope ? "\n\n" : "") + "**Why it's off:** " + why : scope;
+  if (why) return scope + (scope ? "\n\n" : "") + "**Why it's off:** " + why;
+  // gate-one-way-to-continue-one-to-finish: Commit on a `proposed` item sends
+  // apply-and-commit, which lets the agent make remaining edits first.
+  if (window.__bramSelectionNeedsProposedCommit(items, sel)) {
+    return "The agent may finish remaining edits before it commits." + (scope ? "\n\n" + scope : "");
+  }
+  return scope;
 };
 
 window.__bramSelectionAllCommittable = function (items, sel, claim) {
@@ -6961,6 +7008,114 @@ window.__bramProjectFolderIsOk = function (status) {
   return window.__bramProjectFolderKind(status) === "ok";
 };
 
+// issue-465: the Setup banner's heading, text, button label, tooltip and
+// whether Run Setup is offered, all from one place so the markup stays a
+// single call per attribute. `status` is /__enhance/status; `field` is one of
+// heading | text | button | tooltip | runnable. Three variants: first install,
+// already set up (names what was found; never says "install"), and a process
+// older than its checkout (Setup is not the remedy, so no button).
+window.__bramSetupReasonText = function (code) {
+  var m = {
+    "claude-instructions-stale": "This project's Bram instructions are out of date",
+    "claude-hook-missing": "The worklist guard hook isn't registered",
+    "claude-menu-hook-missing": "The permission hook isn't registered",
+    "codex-hook-missing": "Codex's Bram hooks are missing or out of date",
+    "codex-developer-instructions-missing": "Codex's Bram developer instructions are missing or out of date",
+    "codex-instructions-stale": "This project's AGENTS.md instructions for Codex are out of date",
+    "opencode-plugin-missing": "The OpenCode guard plugin is missing or out of date",
+    "opencode-instructions-missing": "OpenCode isn't configured to load the Bram instructions",
+  };
+  return m[code] || code;
+};
+// What skipping Setup costs until it runs, so the banner answers "do I have to
+// press this?" The guard hook is the only one that changes what agents can do.
+window.__bramSetupReasonCost = function (code) {
+  var m = {
+    "claude-instructions-stale": "Until then the agent works from older instructions.",
+    "claude-hook-missing": "Until then the Worklist isn't enforced: the agent can edit files no item covers.",
+    "claude-menu-hook-missing": "Until then permission prompts appear only in the terminal.",
+    "codex-hook-missing": "Until then the Worklist may not be enforced for Codex.",
+    "codex-developer-instructions-missing": "Until then Codex works from older instructions.",
+    "codex-instructions-stale": "Until then Codex works from older instructions.",
+    "opencode-plugin-missing": "Until then the Worklist isn't enforced for OpenCode.",
+    "opencode-instructions-missing": "Until then OpenCode works without Bram's instructions.",
+  };
+  return m[code] || "";
+};
+// issue-465: the banner's ⓘ dialog. Markdown, because Text prints backticks
+// literally. It lists every situation the banner can report, so keep it in
+// step with __bramSetupReasonText and __bramSetupReasonCost.
+window.__bramSetupInfoMarkdown = function () {
+  return [
+    "Bram sets up this repo so AI agents share the Worklist: agents propose changes, and you approve them. Setup installs a small set of files, and running it again is safe.",
+    "",
+    "**Why this banner appears**",
+    "",
+    "- **New project:** nothing is installed yet. Bram normally does this itself before the agent starts, so you'll see it only if that didn't happen.",
+    "- **Instructions out of date:** Bram's instructions for an agent are older than this Bram. An upgrade usually causes this. The agent works from the older instructions until it's fixed.",
+    "- **Worklist guard missing:** the hook or plugin that enforces the Worklist isn't in place. **This is the serious one:** an agent can edit files no item covers.",
+    "- **Permission hook missing (Claude):** permission prompts appear only in the terminal, not here. If the terminal is hidden, a prompt can go unseen.",
+    "- **Bram older than its checkout:** the code on disk is newer than the running Bram. Setup isn't the fix, so the banner offers no button. Restart Bram, after rebuilding if you haven't. Running Setup from an older Bram would stamp new instructions with the old version.",
+    "",
+    "**If you don't press the button**",
+    "",
+    "Nothing stops working right away, and Bram runs Setup itself at its next launch. Until then, the costs above apply.",
+    "",
+    "**What Setup writes**",
+    "",
+    "- `resources/.worklist-authorization.json`, the approval record every agent's guard reads.",
+    "- The conventions file, `.claude/bram-conventions.md`, and its reference files.",
+    "- **Claude:** an import in `CLAUDE.md`, and the worklist-guard and permission hooks.",
+    "- **Codex:** a block in `AGENTS.md`, plus `developer_instructions` and hooks in `~/.codex/config.toml`.",
+    "- **OpenCode, where installed:** the guard plugin in `.opencode/plugins/`, and the conventions entry in `.opencode/opencode.json`.",
+    "",
+    "**After Setup runs**",
+    "",
+    "Restart the agent, because it reads hooks and instructions when it starts. The banner won't return until something Setup wrote goes missing or falls out of date.",
+  ].join("\n");
+};
+window.__bramSetupBanner = function (status, field) {
+  var s = status || {};
+  var reasons = s.setupReasons || [];
+  var kind = s.providerSetupKind;
+  var refresh = kind === "codex-hook-refresh";
+  var older = kind === "restart-older-process";
+  var firstInstall = reasons.indexOf("not-installed") >= 0 || !reasons.length;
+  var found = reasons
+    .filter(function (c) { return c !== "not-installed"; })
+    .map(function (c) {
+      return (window.__bramSetupReasonText(c) + ". " + window.__bramSetupReasonCost(c)).trim();
+    });
+  if (older) {
+    if (field === "heading") return "Restart Bram";
+    if (field === "text")
+      return "This Bram is " + s.runningVersion + " and its checkout is " + s.checkoutVersion + ". Restart it, after rebuilding if you haven't.";
+    if (field === "button") return "";
+    if (field === "tooltip") return "About restarting Bram";
+    return false;
+  }
+  if (field === "runnable") return true;
+  if (refresh) {
+    if (field === "heading") return "Refresh Agent Coordination";
+    if (field === "text")
+      return "Bram was upgraded. Refresh the coordination files so Claude and Codex use the current conventions and hooks.";
+    if (field === "button") return "Refresh Coordination";
+    return "About agent coordination refresh";
+  }
+  if (firstInstall) {
+    if (field === "heading") return "Set Up Agent Coordination";
+    if (field === "text")
+      return "Install Bram's worklist coordination files and agent adapters for this repo.";
+    if (field === "button") return "Run Setup";
+    return "About agent coordination setup";
+  }
+  if (field === "heading") return "Agent Coordination Needs Attention";
+  if (field === "text")
+    return found.join(" ") + " Run Setup to fix this now, or Bram will at its next launch; it is safe to run again. Restart the agent afterwards.";
+  if (field === "button") return "Run Setup";
+  return "About agent coordination setup";
+};
+
 // Badge takes a dynamic background only through colorMap (value -> color),
 // so the chip's one-entry map is built here rather than as an inline
 // object literal in the markup.
@@ -7976,9 +8131,7 @@ window.__bramRecordWorklistFeedbackConversation = function (text) {
   if (!text || !text.trim()) return false;
   var message = text.trim();
   var baseline = 0;
-  __bramWriteLS("bram.worklistSubmittedMessage", message);
   __bramWriteSS("bram.worklistSessionSubmittedMessage", message);
-  window.__bramSetWorklistSubmittedKind("action");
   return { message: message, images: __bramExtractImagePaths(message), baseline: baseline, sentAtText: new Date().toLocaleTimeString() };
 };
 

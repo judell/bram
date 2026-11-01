@@ -147,7 +147,10 @@ throwaway `HOME` on 2026-10-30. Rendering its terminal stream reproduced
   `Stop` (`terminationReason: NO_TOOL_CALL`, `fullyIdle: true`). Interrupt and
   background-task lifecycle behavior remain unknown.
 - The logged-out profile showed Google OAuth and Google Cloud project choices.
-  Image delivery, subagents and background task state remain uncaptured.
+  Image delivery and background task state remain uncaptured. Subagents'
+  `write_file` calls reach `PreToolUse` (2026-10-31; see
+  `hooks/failure-posture/posture.md`), but no subagent transcript or lifecycle
+  specimen is pinned here.
   Instructions-file loading and loopback were captured on 2026-10-31; see
   `rules-and-transport.md`. `agy --help` lists no ACP subcommand, but ACP
   behavior was not independently probed.

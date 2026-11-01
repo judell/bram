@@ -339,8 +339,16 @@ JSON is left alone and fails the self-test without raising the Setup banner,
 since no Setup run could fix it. Both global and plugin MCP servers on 1.4.12
 registered their tools lazily through `call_mcp_tool`; agy's system prompt also
 describes an eager `mcp_<server>_<tool>` form that neither server produced and
-that `agy mcp add` offers no flag for, so that shape and subagents' tool calls
-remain uncaptured and outside the matcher.
+that `agy mcp add` offers no flag for, so that shape remains uncaptured and
+outside the matcher.
+
+Subagents' tool calls do reach the hook. Live on agy 1.4.12 (2026-10-31), with
+nothing authorized, `write_file` was denied with a `decided=deny` line from a
+direct call, from `invoke_subagent`, from a `define_subagent` type with
+`EnableWriteTools`, and from a subagent whose `Workspace` pointed at another
+folder and whose path pointed into the project (the root stayed the project).
+agy's logs show the subagents ran. Only `write_file` was tried through a
+subagent, not `edit_file`, `run_command` or `call_mcp_tool`.
 
 ## Ranked action plan
 

@@ -25,6 +25,19 @@ Two related findings from the same spike:
 - **Empty output becomes a deny.** On macOS and Linux, Setup registers agy's hook through a shell wrapper, `antigravity_guard_command` (`src-tauri/src/lib.rs`). It captures the guard's output and prints a deny decision, naming the older-Bram cause, when the output is empty. By the same path, a dangling `~/.bram/bram-guard` gets that deny too: the exec fails, so nothing reaches stdout. That follows from the code; it hasn't been run against a dangling link. On Windows the hook is registered bare, and agy blocks a failed exec through the exit-status rows above.
 - **Forwarding across builds.** `~/.bram/bram-guard` is one link per machine, and every running Bram re-points it about once a minute. In the live checks of 2026-10-31, an installed 0.8.1 and a demo on this branch's build held it in turn. agy's real hooks still reached the right guard, because 0.8.1 forwards to the project's recorded guard (`resources/.bram-guard-target`) before it looks at the hook name. The guard self-test calls the link directly with a synthetic project, so it reads the Antigravity rows red while 0.8.1 holds the link.
 
+## Subagents reach the same hook
+
+Live on agy 1.4.12 (2026-10-31), through print mode, with Bram's guard registered and nothing authorized:
+
+| Probe | Result |
+|---|---|
+| Direct `write_file` | denied |
+| `invoke_subagent`, which then calls `write_file` | denied |
+| A `define_subagent` type with `EnableWriteTools`, then invoked | denied |
+| `invoke_subagent` with `Workspace` pointed at another folder and an absolute path into the project | denied, root still the project |
+
+No file was created in any probe. Each denial has a `decided=deny` line in `hook-events.log`, and agy's own logs show the subagent ran. The probes used `write_file` only.
+
 ## Method and limits
 
 - Each case swapped the hook command in a scratch workspace's `.agents/hooks.json` and asked agy, in print mode, to create a file.

@@ -58289,10 +58289,14 @@ mod opencode_instructions_tests {
 const ENHANCE_ANTIGRAVITY_HOOKS_REL: &str = ".agents/hooks.json";
 const ANTIGRAVITY_HOOKS_GROUP: &str = "bram-worklist-guard";
 // The tools that change files in agy 1.4.12 (PreToolUse.jsonl in the specimen
-// pack, and the tool list in resources/worklist-drafts/antigravity-worklist-guard.md),
-// plus `call_mcp_tool`, the tool name captured for MCP server calls on both
-// global and plugin MCP servers (agy-guard-mcp-coverage). The remaining native
-// tools read, search, ask, schedule or manage subagents.
+// pack), plus `call_mcp_tool`, the tool name captured for MCP server calls on
+// both global and plugin MCP servers (agy-guard-mcp-coverage). `write_file`
+// also takes `Append` and `run_command` also takes `IsDaemon`. The other tools
+// `agy -p` listed on 2026-10-31 are manage_task, read_file, ask_question,
+// search_web, invoke_subagent, define_subagent, manage_subagents, send_message
+// and schedule. That list wasn't complete (it left out `call_mcp_tool`).
+// Subagents need no matcher of their own: their writes reach this hook as
+// `write_file` (docs/agent-specimens/antigravity/hooks/failure-posture/posture.md).
 const ANTIGRAVITY_GUARD_MATCHER: &str = "^(write_file|edit_file|run_command|call_mcp_tool)$";
 // agy kills a hook at its timeout and blocks the call (the 2026-10-31 spike),
 // so this only bounds a hung guard. Codex's registration uses 10 s too.

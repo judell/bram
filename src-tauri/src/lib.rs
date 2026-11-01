@@ -6483,6 +6483,7 @@ impl TerminalAttentionTracker {
     ) -> Vec<TerminalAttentionTransition> {
         self.step_with_permission_block_shape(
             authoritative_open,
+            false,
             bytes,
             permission_blocked.then_some("codex-permission"),
             tail_fn,
@@ -6492,6 +6493,7 @@ impl TerminalAttentionTracker {
     fn step_with_permission_block_shape<F: FnOnce() -> (String, Option<SessionProvider>)>(
         &mut self,
         authoritative_open: bool,
+        menu_displayed: bool,
         bytes: usize,
         permission_block: Option<&'static str>,
         tail_fn: F,
@@ -6518,6 +6520,19 @@ impl TerminalAttentionTracker {
                 self.active = true;
                 self.shape = Some(block_shape);
                 out.push(TerminalAttentionTransition::Fire { shape: block_shape });
+            }
+            return out;
+        }
+
+        if menu_displayed {
+            self.silent_ms = 0;
+            self.episode_evaluated = false;
+            if self.active {
+                out.push(TerminalAttentionTransition::Clear {
+                    reason: "menu-displayed",
+                });
+                self.active = false;
+                self.shape = None;
             }
             return out;
         }
@@ -6623,6 +6638,58 @@ mod terminal_attention_permission_tests {
                 .step(true, 0, || panic!("working turn must not inspect prose"))
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn displayed_menu_suppresses_antigravity_silence_fire_and_clears_active_banner() {
+        let approval = include_str!("../../docs/agent-specimens/antigravity/approval.txt");
+        assert_eq!(
+            prompt_shape_for_provider(approval, Some(SessionProvider::Antigravity)),
+            Some("antigravity-permission")
+        );
+
+        let silent_ticks = (TERMINAL_ATTENTION_SILENT_MS / REVEAL_FLOOR_TICK_MS) + 5;
+
+        let mut suppressed = TerminalAttentionTracker::new();
+        for _ in 0..silent_ticks {
+            assert!(suppressed
+                .step_with_permission_block_shape(false, true, 0, None, || (
+                    approval.to_string(),
+                    Some(SessionProvider::Antigravity),
+                ))
+                .is_empty());
+        }
+        assert!(!suppressed.active);
+        assert_eq!(suppressed.silent_ms, 0);
+
+        let mut tracker = TerminalAttentionTracker::new();
+        let mut fired = Vec::new();
+        for _ in 0..silent_ticks {
+            fired.extend(
+                tracker.step_with_permission_block_shape(false, false, 0, None, || {
+                    (approval.to_string(), Some(SessionProvider::Antigravity))
+                }),
+            );
+        }
+        assert_eq!(
+            fired,
+            vec![TerminalAttentionTransition::Fire {
+                shape: "antigravity-permission",
+            }]
+        );
+        assert!(tracker.active);
+
+        assert_eq!(
+            tracker.step_with_permission_block_shape(false, true, 0, None, || {
+                panic!("menu-displayed clear must not inspect tail")
+            }),
+            vec![TerminalAttentionTransition::Clear {
+                reason: "menu-displayed",
+            }]
+        );
+        assert!(!tracker.active);
+        assert_eq!(tracker.shape, None);
+        assert_eq!(tracker.silent_ms, 0);
     }
 }
 
@@ -20502,6 +20569,11 @@ fn pty_spawn(
                     .lock()
                     .map(|s| s.pending_menu.is_none())
                     .unwrap_or(false);
+                let menu_displayed = turn_state_cell()
+                    .lock()
+                    .map(|s| s.pending_menu.is_some())
+                    .unwrap_or(false)
+                    || PANE_MENU_DISPLAYED.load(Ordering::Relaxed);
                 let permission_block_shape =
                     if no_pending_menu && codex_permission_blocked_since_launch(live_provider) {
                         Some("codex-permission")
@@ -20518,6 +20590,7 @@ fn pty_spawn(
                     };
                 for transition in terminal_attention.step_with_permission_block_shape(
                     authoritative_open,
+                    menu_displayed,
                     bytes,
                     permission_block_shape,
                     || {
@@ -91312,6 +91385,7 @@ mod antigravity_permission_menu_tests {
         assert_eq!(
             tracker.step_with_permission_block_shape(
                 true,
+                false,
                 64,
                 Some("antigravity-permission"),
                 || panic!("explicit OSC permission block needs no silence wait"),
@@ -91321,7 +91395,7 @@ mod antigravity_permission_menu_tests {
             }]
         );
         assert_eq!(
-            tracker.step_with_permission_block_shape(true, 0, None, || panic!("unblocked")),
+            tracker.step_with_permission_block_shape(true, false, 0, None, || panic!("unblocked")),
             vec![super::TerminalAttentionTransition::Clear {
                 reason: "permission-unblocked",
             }]

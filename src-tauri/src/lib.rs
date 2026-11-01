@@ -7336,6 +7336,10 @@ mod antigravity_prompt_specimen_tests {
         include_str!("../../docs/agent-specimens/antigravity/tool-shell-approval.txt");
     const COMMAND_APPROVAL: &str =
         include_str!("../../docs/agent-specimens/antigravity/command-approval.txt");
+    const MCP_APPROVAL: &str =
+        include_str!("../../docs/agent-specimens/antigravity/mcp-approval.txt");
+    const MCP_APPROVAL_REASON: &str =
+        include_str!("../../docs/agent-specimens/antigravity/mcp-approval-reason.txt");
     const WORKING_PROMPT: &str =
         include_str!("../../docs/agent-specimens/antigravity/permission-prompt.txt");
     const WORKING_LIFECYCLE: &str =
@@ -7351,6 +7355,8 @@ mod antigravity_prompt_specimen_tests {
             (TOOL_EDIT_APPROVAL, "antigravity-permission"),
             (TOOL_SHELL_APPROVAL, "antigravity-permission"),
             (COMMAND_APPROVAL, "antigravity-permission"),
+            (MCP_APPROVAL, "antigravity-permission"),
+            (MCP_APPROVAL_REASON, "antigravity-permission"),
         ] {
             assert_eq!(terminal_attention_prompt_shape(screen), Some(shape));
             assert_eq!(
@@ -7416,6 +7422,14 @@ mod antigravity_prompt_specimen_tests {
             ),
             (
                 &include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval-reason.raw")[..],
                 "antigravity-permission",
             ),
             (
@@ -90177,6 +90191,7 @@ fn antigravity_permission_menu(
         "Run this command?",
         "Allow creation of this file?",
         "Accept this file edit?",
+        "Allow calling this tool?",
     ];
     const NAV_FOOTER: &str = "↑/↓ Navigate";
 
@@ -90225,29 +90240,20 @@ fn antigravity_permission_menu(
             let options = antigravity_parse_options(option_text);
             if !options.is_empty() {
                 let before_title = &tail[..title_at];
-                let dialog_start = [
-                    NAV_FOOTER,
-                    "Run this command?",
-                    "Allow creation of this file?",
-                    "Accept this file edit?",
-                ]
-                .into_iter()
-                .filter_map(|m| before_title.rfind(m).map(|i| i + m.len()))
-                .max()
-                .unwrap_or(0);
+                let dialog_start = std::iter::once(NAV_FOOTER)
+                    .chain(TITLES.iter().copied())
+                    .filter_map(|m| before_title.rfind(m).map(|i| i + m.len()))
+                    .max()
+                    .unwrap_or(0);
                 let prefix = &before_title[dialog_start..];
                 // antigravity-live-check-fixes: the subject is informational
                 // and never gates the menu.
-                let subject = if title == "Run this command?" {
-                    prefix
+                let (subject, reason) = if title == "Run this command?" {
+                    let subject = prefix
                         .rsplit_once("Requesting permission for:")
                         .map(|(_, s)| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                } else {
-                    antigravity_file_subject(prefix)
-                };
-                let reason = if title == "Run this command?" {
-                    prefix
+                        .filter(|s| !s.is_empty());
+                    let reason = prefix
                         .rsplit_once("Reason:")
                         .map(|(_, s)| {
                             s.split("Requesting permission for:")
@@ -90256,9 +90262,12 @@ fn antigravity_permission_menu(
                                 .trim()
                                 .to_string()
                         })
-                        .filter(|s| !s.is_empty())
+                        .filter(|s| !s.is_empty());
+                    (subject, reason)
+                } else if title == "Allow calling this tool?" {
+                    antigravity_mcp_subject_and_reason(prefix)
                 } else {
-                    None
+                    (antigravity_file_subject(prefix), None)
                 };
                 let text = [Some(title.to_string()), subject, reason]
                     .into_iter()
@@ -90299,18 +90308,12 @@ fn antigravity_permission_menu(
         return None;
     }
     let before_nav = &tail[..nav_at];
-    let cut = [
-        NAV_FOOTER,
-        "esc to cancel",
-        "────",
-        "Run this command?",
-        "Allow creation of this file?",
-        "Accept this file edit?",
-    ]
-    .into_iter()
-    .filter_map(|sep| before_nav.rfind(sep).map(|i| i + sep.len()))
-    .max()
-    .unwrap_or(0);
+    let cut = [NAV_FOOTER, "esc to cancel", "────"]
+        .into_iter()
+        .chain(TITLES.iter().copied())
+        .filter_map(|sep| before_nav.rfind(sep).map(|i| i + sep.len()))
+        .max()
+        .unwrap_or(0);
     let window = &before_nav[cut..];
     const SPINNERS: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
     let mut rev_options: Vec<(usize, String)> = Vec::new();
@@ -90400,6 +90403,31 @@ fn antigravity_file_subject(prefix: &str) -> Option<String> {
     }
     let subject = body[..end].trim();
     (!subject.is_empty()).then(|| subject.to_string())
+}
+
+// The `<server>/<tool>` line immediately above "Allow calling this tool?", plus
+// any `Reason:` line inside the `MCP` header block (which may omit `─` when Ink
+// reuses the composer's horizontal rule row, `mcp-approval-reason.raw`).
+fn antigravity_mcp_subject_and_reason(prefix: &str) -> (Option<String>, Option<String>) {
+    let trimmed = prefix.trim();
+    let (before_subject, subject) = match trimmed.rsplit_once(char::is_whitespace) {
+        Some((before, tok)) if tok.contains('/') => (before.trim_end(), Some(tok.to_string())),
+        _ if trimmed.contains('/') && !trimmed.chars().any(char::is_whitespace) => {
+            ("", Some(trimmed.to_string()))
+        }
+        _ => (trimmed, None),
+    };
+    let header_after_mcp = ["MCP ─", "MCP Reason:"]
+        .into_iter()
+        .filter_map(|hdr| before_subject.rfind(hdr).map(|at| at + "MCP".len()))
+        .max()
+        .map(|after_mcp| &before_subject[after_mcp..]);
+    let reason = header_after_mcp
+        .map(|body| body.trim_start_matches(|c: char| c == '─' || c.is_whitespace()))
+        .and_then(|body| body.strip_prefix("Reason:"))
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    (subject, reason)
 }
 
 // Past this the transcript isn't the live session's.
@@ -90771,6 +90799,7 @@ fn antigravity_menu_identity(menu: &PtyMenu) -> String {
 fn antigravity_apply_menu_detection(
     current_shown: &mut Option<String>,
     open_prompt: &mut Option<OpenPrompt>,
+    retain_shown: bool,
     menu: Option<PtyMenu>,
     now: i64,
 ) -> AntigravityMenuTransition {
@@ -90793,6 +90822,13 @@ fn antigravity_apply_menu_detection(
             superseded,
             shown,
         }
+    } else if retain_shown
+        && current_shown.is_some()
+        && open_prompt
+            .as_ref()
+            .is_some_and(|p| p.source == "antigravity")
+    {
+        AntigravityMenuTransition::Unchanged
     } else if current_shown.take().is_some() {
         let resolved = prompt_resolved_in(
             open_prompt,
@@ -90841,6 +90877,12 @@ fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tai
     if let Some(m) = menu.as_mut() {
         antigravity_enrich_file_dialog(app, m);
     }
+    let retain_shown = provider
+        && state.as_deref().is_some_and(antigravity_permission_state)
+        && !matches!(
+            terminal_attention_prompt_shape(tail),
+            Some("antigravity-folder-trust" | "antigravity-login" | "antigravity-resume-picker")
+        );
     let transition = {
         let Ok(mut current) = antigravity_permission_menu_shown_cell().lock() else {
             return;
@@ -90848,7 +90890,7 @@ fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tai
         let Ok(mut open) = prompt_open_cell().lock() else {
             return;
         };
-        antigravity_apply_menu_detection(&mut current, &mut open, menu, unix_now_ms())
+        antigravity_apply_menu_detection(&mut current, &mut open, retain_shown, menu, unix_now_ms())
     };
     match transition {
         AntigravityMenuTransition::Unchanged => {}
@@ -90906,18 +90948,41 @@ mod antigravity_permission_menu_tests {
                 include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")
                     .as_slice()
             }
+            "mcp" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval.raw").as_slice()
+            }
+            "mcp_reason" => {
+                include_bytes!("../../docs/agent-specimens/antigravity/mcp-approval-reason.raw")
+                    .as_slice()
+            }
+            "mcp_arrow_delta" => include_bytes!(
+                "../../docs/agent-specimens/antigravity/mcp-approval-arrow-down-delta.raw"
+            )
+            .as_slice(),
             _ => unreachable!(),
         };
         collapse_tail(bytes, 1200)
     }
     #[test]
     fn each_captured_dialog_builds_its_expected_menu_and_digit_answers() {
+        let mcp_labels = || {
+            vec![
+                "Yes, allow tool call",
+                "Yes, and always allow tool 'xmlui/xmlui_status' in this conversation",
+                "Yes, and always allow tool 'xmlui/xmlui_status' (Persist to settings.json)",
+                "No, deny tool call",
+                "No, and always deny tool 'xmlui/xmlui_status' in this conversation",
+                "No, and always deny tool 'xmlui/xmlui_status' (Persist to settings.json)",
+            ]
+        };
         for (name, title, subject, labels) in [
             ("approval", "Allow creation of this file?", "<workspace>/specimen.txt", vec!["Yes, allow creation", "No, deny creation"]),
             ("write", "Allow creation of this file?", "<workspace>/tool-probe.txt", vec!["Yes, allow creation", "No, deny creation"]),
             ("edit", "Allow creation of this file?", "<workspace>/tool-probe.txt", vec!["Yes, allow creation", "No, deny creation"]),
             ("shell", "Accept this file edit?", "<workspace>/tool-probe.txt", vec!["Yes, accept this change", "No, reject this change"]),
             ("command", "Run this command?", "echo APPROVAL-7731", vec!["Yes, run command", "Yes, and always allow in this conversation for commands that start with 'echo'", "Yes, and always allow for commands that start with 'echo' (Persist to settings.json)", "No, cancel"]),
+            ("mcp", "Allow calling this tool?", "xmlui/xmlui_status", mcp_labels()),
+            ("mcp_reason", "Allow calling this tool?", "xmlui/xmlui_status", mcp_labels()),
         ] {
             let menu = antigravity_permission_menu(true, Some(STATE), &raw(name)).unwrap_or_else(|| panic!("{name}"));
             assert!(menu.text.contains(title), "{name}: {}", menu.text);
@@ -90925,8 +90990,23 @@ mod antigravity_permission_menu_tests {
             if name == "command" {
                 assert!(menu.text.contains("Specimen command requires approval."), "{}", menu.text);
             }
+            if name == "mcp" {
+                assert_eq!(menu.text, "Allow calling this tool?\nxmlui/xmlui_status");
+            }
+            if name == "mcp_reason" {
+                assert_eq!(
+                    menu.text,
+                    "Allow calling this tool?\nxmlui/xmlui_status\nSpecimen MCP call requires approval."
+                );
+            }
             assert_eq!(menu.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), labels, "{name}");
-            assert!(menu.options.iter().enumerate().all(|(i, o)| o.answer_keys.as_deref() == Some(if i == 0 { "1" } else if i == 1 { "2" } else if i == 2 { "3" } else { "4" })), "{name}");
+            assert!(
+                menu.options.iter().enumerate().all(|(i, o)| {
+                    let expected = (i + 1).to_string();
+                    o.answer_keys.as_deref() == Some(expected.as_str())
+                }),
+                "{name}"
+            );
         }
     }
     #[test]
@@ -91189,6 +91269,9 @@ mod antigravity_permission_menu_tests {
         ));
         assert!(!antigravity_may_be_file_dialog(
             "Run this command?\necho hi"
+        ));
+        assert!(!antigravity_may_be_file_dialog(
+            "Allow calling this tool?\nxmlui/xmlui_status"
         ));
     }
 
@@ -91578,6 +91661,7 @@ mod antigravity_permission_menu_tests {
         let p1 = match antigravity_apply_menu_detection(
             &mut shown,
             &mut open,
+            true,
             Some(edit_menu_for("src/a.rs")),
             1_000,
         ) {
@@ -91597,15 +91681,20 @@ mod antigravity_permission_menu_tests {
         //     without minting a new prompt_id.
         let mut enriched = edit_menu_for("src/a.rs");
         enriched.tool_call_signature = Some("write_file src/a.rs".into());
-        let p1_after_enrich =
-            match antigravity_apply_menu_detection(&mut shown, &mut open, Some(enriched), 1_050) {
-                AntigravityMenuTransition::Show {
-                    menu,
-                    shown: None,
-                    superseded: None,
-                } => menu.prompt_id.expect("preserved prompt_id"),
-                _ => panic!("expected in-place Show without new shown event"),
-            };
+        let p1_after_enrich = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(enriched),
+            1_050,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: None,
+                superseded: None,
+            } => menu.prompt_id.expect("preserved prompt_id"),
+            _ => panic!("expected in-place Show without new shown event"),
+        };
         assert_eq!(p1_after_enrich, p1);
 
         // 2. Answering via `menuAnswer` resolves p1 immediately (`outcome=answered`),
@@ -91620,7 +91709,7 @@ mod antigravity_permission_menu_tests {
             menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p1),
             MenuAnswerIdentityVerdict::NoOpenPrompt
         );
-        match antigravity_apply_menu_detection(&mut shown, &mut open, None, 1_120) {
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 1_120) {
             AntigravityMenuTransition::Clear { resolved: None } => {}
             _ => panic!("clear after menuAnswer should not emit a second resolved event"),
         }
@@ -91629,6 +91718,7 @@ mod antigravity_permission_menu_tests {
         let p2 = match antigravity_apply_menu_detection(
             &mut shown,
             &mut open,
+            true,
             Some(edit_menu_for("src/b.rs")),
             2_000,
         ) {
@@ -91648,7 +91738,7 @@ mod antigravity_permission_menu_tests {
         // 4. Answering directly in the terminal skips `menuAnswer`; the clear
         //    branch resolves p2 (`superseded` / `no-menu`), so a third identical
         //    menu still mints a distinct prompt_id p3.
-        match antigravity_apply_menu_detection(&mut shown, &mut open, None, 2_500) {
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 2_500) {
             AntigravityMenuTransition::Clear { resolved: Some(ev) } => {
                 assert_eq!(ev.open.prompt_id, p2);
                 assert_eq!(ev.outcome, "superseded");
@@ -91659,6 +91749,7 @@ mod antigravity_permission_menu_tests {
         let p3 = match antigravity_apply_menu_detection(
             &mut shown,
             &mut open,
+            true,
             Some(edit_menu_for("src/c.rs")),
             3_000,
         ) {
@@ -91682,7 +91773,7 @@ mod antigravity_permission_menu_tests {
             source: "hook",
             shown_at_ms: 3_100,
         });
-        match antigravity_apply_menu_detection(&mut shown, &mut open, None, 3_200) {
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 3_200) {
             AntigravityMenuTransition::Clear { resolved: None } => {}
             _ => panic!("must not resolve a non-antigravity OpenPrompt"),
         }
@@ -91690,6 +91781,100 @@ mod antigravity_permission_menu_tests {
             open.as_ref().map(|p| p.prompt_id.as_str()),
             Some("p-claude-hook")
         );
+    }
+
+    #[test]
+    fn arrow_key_redraw_retains_shown_menu_until_osc_state_leaves_permission() {
+        use super::{
+            antigravity_apply_menu_detection, finish_antigravity_menu_answer_prompt,
+            menu_answer_identity_verdict, AntigravityMenuTransition, MenuAnswerIdentityVerdict,
+            OpenPrompt,
+        };
+
+        let initial_menu =
+            antigravity_permission_menu(true, Some(STATE), &raw("command")).expect("command menu");
+        // After pty_menu_clear empties PTY_TAIL on `\x1b[B`, agy emits only the
+        // two-option highlight redraw with no title, no footer, and no OSC 7501
+        // state transition (`STATE` stays `blocked:kind=permission:app=antigravity`).
+        let delta_tail = raw("mcp_arrow_delta");
+        assert!(
+            antigravity_permission_menu(true, Some(STATE), &delta_tail).is_none(),
+            "partial arrow-key redraw has neither title nor footer"
+        );
+
+        let mut shown: Option<String> = None;
+        let mut open: Option<OpenPrompt> = None;
+
+        // 1. Initial menu shows and mints p1.
+        let p1 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(initial_menu.clone()),
+            1_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected initial Show"),
+        };
+
+        // 2. Arrow-key redraw (`menu == None`, `retain_shown == true`) keeps the
+        //    pane card and `p1` alive.
+        match antigravity_apply_menu_detection(&mut shown, &mut open, true, None, 1_050) {
+            AntigravityMenuTransition::Unchanged => {}
+            _ => panic!("expected Unchanged on arrow-key redraw"),
+        }
+        assert!(shown.is_some(), "shown marker must remain set");
+        assert_eq!(
+            menu_answer_identity_verdict(open.as_ref().map(|p| p.prompt_id.as_str()), &p1),
+            MenuAnswerIdentityVerdict::Accept
+        );
+
+        // 3. Terminal Esc (`state=idle`) or Enter/digit (`state=working`) flips
+        //    `retain_shown` to false and clears + resolves `p1`.
+        match antigravity_apply_menu_detection(&mut shown, &mut open, false, None, 1_200) {
+            AntigravityMenuTransition::Clear { resolved: Some(ev) } => {
+                assert_eq!(ev.open.prompt_id, p1);
+                assert_eq!(ev.outcome, "superseded");
+                assert_eq!(ev.detail, "no-menu");
+            }
+            _ => panic!("expected Clear with resolved prompt once OSC state leaves permission"),
+        }
+        assert!(shown.is_none());
+        assert!(open.is_none());
+
+        // 4. Clicking a pane button after terminal arrow-key navigation resolves
+        //    `open` via `finish_antigravity_menu_answer_prompt`, so the next chunk
+        //    clears `shown` even before OSC 7501 flips out of permission.
+        let p2 = match antigravity_apply_menu_detection(
+            &mut shown,
+            &mut open,
+            true,
+            Some(initial_menu),
+            2_000,
+        ) {
+            AntigravityMenuTransition::Show {
+                menu,
+                shown: Some(_),
+                superseded: None,
+            } => menu.prompt_id.expect("bound prompt_id"),
+            _ => panic!("expected second Show"),
+        };
+        assert_ne!(p2, p1);
+        match antigravity_apply_menu_detection(&mut shown, &mut open, true, None, 2_050) {
+            AntigravityMenuTransition::Unchanged => {}
+            _ => panic!("expected Unchanged on arrow-key redraw"),
+        }
+        let answered = finish_antigravity_menu_answer_prompt(&mut open, 2_100)
+            .expect("pane click resolves open prompt");
+        assert_eq!(answered.open.prompt_id, p2);
+        match antigravity_apply_menu_detection(&mut shown, &mut open, true, None, 2_120) {
+            AntigravityMenuTransition::Clear { resolved: None } => {}
+            _ => panic!("expected Clear after pane click resolved open prompt"),
+        }
     }
 }
 

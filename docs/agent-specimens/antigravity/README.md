@@ -29,6 +29,10 @@ files are rendered from those redacted streams.
 | `approval.raw`, `approval.txt`, `tool-write-approval.raw`, `tool-write-approval.txt`, `tool-edit-approval.raw`, `tool-edit-approval.txt`, `tool-shell-approval.raw`, `tool-shell-approval.txt` | File creation/edit approval dialogs with numbered choices |
 | `command-approval.raw`, `command-approval.txt` | `force_ask` shell-command approval with four numbered choices (captured 2026-10-31) |
 | `permission-digit.raw`, `permission-digit.txt` | Digit-only answer to a forced command approval; the command ran without Enter (captured 2026-10-31) |
+| `permission-full-screen-44x67.raw`, `permission-full-screen-44x67.txt` | Filled 44×67 screen followed by two command-approval dialogs (`echo alpha`, `echo bravo`) with `AGY_CLI_OSC7501=on`; once the screen is full, the `"esc to cancel"` bottom row is omitted while `"↑/↓ Navigate · tab Amend"` stays (captured 2026-10-31) |
+| `permission-short-46x26.raw`, `permission-short-46x26.txt` | Wrapped `curl` command approval at 46×26 with `AGY_CLI_OSC7501=on`; `"esc to cancel"` row omitted (captured 2026-10-31) |
+| `permission-scrolled-title-46x12.raw`, `permission-scrolled-title-46x12.txt` | Wrapped `curl` command approval at 46×12 with `AGY_CLI_OSC7501=on`; `"Run this command?"` title and option 1 clipped off the top, leaving options 2–4 and `"↑/↓ Navigate · tab Amend"` (captured 2026-10-31) |
+| `capture/schedules/permission-full-screen-44x67.json`, `capture/schedules/permission-short-46x26.json`, `capture/schedules/permission-scrolled-title-46x12.json` | Schedules for the 44×67 full-screen and 46×26 / 46×12 narrow/short permission captures (2026-10-31) |
 | `capture/schedules/command-approval.json` | Schedule that requests a command and captures its forced approval dialog (2026-10-31) |
 | `capture/schedules/permission-digit.json` | Schedule that selects a forced command approval with the digit alone (2026-10-31) |
 | `permission-declined.raw`, `permission-declined.txt` | Choosing option 4 reports `User declined the tool call` |

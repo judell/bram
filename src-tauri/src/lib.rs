@@ -6169,12 +6169,6 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     const AGY_TRUST_FOOTER: &str = "↑/↓ navigate · enter confirm";
     const AGY_RESUME_MARKERS: &[&str] = &["conversations", "type to search conversations"];
     const AGY_RESUME_FOOTER: &str = "f2 rename f4 delete tab switch tab esc go back / clear search";
-    const AGY_PERMISSION_MARKERS: &[&str] = &[
-        "allow creation of this file?",
-        "accept this file edit?",
-        "run this command?",
-    ];
-    const AGY_PERMISSION_OPTION_MARKERS: &[&str] = &["1. yes", "2."];
     const AGY_PERMISSION_FOOTER: &str = "↑/↓ navigate · tab amend";
     // Squashed chars allowed after a dialog footer: the captures' 36 of fixed
     // hints plus room for a model line up to 64 chars.
@@ -6309,10 +6303,11 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     if AGY_RESUME_MARKERS.iter().all(|m| has(m)) && agy_footer_last(AGY_RESUME_FOOTER) {
         return Some("antigravity-resume-picker");
     }
-    if AGY_PERMISSION_MARKERS.iter().any(|m| has(m))
-        && AGY_PERMISSION_OPTION_MARKERS.iter().all(|m| has(m))
-        && agy_footer_last(AGY_PERMISSION_FOOTER)
-    {
+    // agy-permission-menu-parser: the footer alone, last on the screen. Its
+    // title and first option can scroll off a dialog taller than the screen
+    // (the 46x12 specimen), so neither can be required, and the footer belongs
+    // to this dialog alone.
+    if agy_footer_last(AGY_PERMISSION_FOOTER) {
         return Some("antigravity-permission");
     }
     if CODEX_SESSION_LOCK_MARKERS.iter().any(|m| has(m))
@@ -6365,6 +6360,7 @@ struct TerminalAttentionTracker {
     silent_ms: i64,
     active: bool,
     shape: Option<&'static str>,
+    permission_blocked_active: bool,
     // Guards both the Fire and the observe-only Candidate paths to at most
     // one evaluation per continuous silence episode. Byte-silence means the
     // tail can't have changed since the last evaluation, so re-checking
@@ -6380,6 +6376,7 @@ impl TerminalAttentionTracker {
             silent_ms: 0,
             active: false,
             shape: None,
+            permission_blocked_active: false,
             episode_evaluated: false,
         }
     }
@@ -6402,6 +6399,7 @@ impl TerminalAttentionTracker {
         self.step_with_permission_block(authoritative_open, bytes, false, tail_fn)
     }
 
+    #[cfg(test)]
     fn step_with_permission_block<F: FnOnce() -> (String, Option<SessionProvider>)>(
         &mut self,
         authoritative_open: bool,
@@ -6409,26 +6407,43 @@ impl TerminalAttentionTracker {
         permission_blocked: bool,
         tail_fn: F,
     ) -> Vec<TerminalAttentionTransition> {
+        self.step_with_permission_block_shape(
+            authoritative_open,
+            bytes,
+            permission_blocked.then_some("codex-permission"),
+            tail_fn,
+        )
+    }
+
+    fn step_with_permission_block_shape<F: FnOnce() -> (String, Option<SessionProvider>)>(
+        &mut self,
+        authoritative_open: bool,
+        bytes: usize,
+        permission_block: Option<&'static str>,
+        tail_fn: F,
+    ) -> Vec<TerminalAttentionTransition> {
         let mut out = Vec::new();
 
-        if self.active && self.shape == Some("codex-permission") && !permission_blocked {
-            out.push(TerminalAttentionTransition::Clear {
-                reason: "permission-unblocked",
-            });
-            self.active = false;
-            self.shape = None;
-            self.episode_evaluated = false;
+        if self.permission_blocked_active && permission_block.is_none() {
+            self.permission_blocked_active = false;
+            if self.active {
+                out.push(TerminalAttentionTransition::Clear {
+                    reason: "permission-unblocked",
+                });
+                self.active = false;
+                self.shape = None;
+                self.episode_evaluated = false;
+            }
         }
 
         // Unlike a guessed boot prompt, the CLI explicitly reports this
         // block. Reveal it immediately, even during an open turn/redraw.
-        if permission_blocked {
-            if !self.active || self.shape != Some("codex-permission") {
+        if let Some(block_shape) = permission_block {
+            self.permission_blocked_active = true;
+            if !self.active || self.shape != Some(block_shape) {
                 self.active = true;
-                self.shape = Some("codex-permission");
-                out.push(TerminalAttentionTransition::Fire {
-                    shape: "codex-permission",
-                });
+                self.shape = Some(block_shape);
+                out.push(TerminalAttentionTransition::Fire { shape: block_shape });
             }
             return out;
         }
@@ -7260,6 +7275,24 @@ mod antigravity_prompt_specimen_tests {
             ),
             (
                 &include_bytes!("../../docs/agent-specimens/antigravity/command-approval.raw")[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!(
+                    "../../docs/agent-specimens/antigravity/permission-full-screen-44x67.raw"
+                )[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!(
+                    "../../docs/agent-specimens/antigravity/permission-short-46x26.raw"
+                )[..],
+                "antigravity-permission",
+            ),
+            (
+                &include_bytes!(
+                    "../../docs/agent-specimens/antigravity/permission-scrolled-title-46x12.raw"
+                )[..],
                 "antigravity-permission",
             ),
         ] {
@@ -20356,16 +20389,29 @@ fn pty_spawn(
                         _ => {}
                     }
                 }
-                let permission_blocked =
-                    codex_permission_blocked_since_launch(current_provider(&app_for_throughput))
-                        && turn_state_cell()
-                            .lock()
-                            .map(|s| s.pending_menu.is_none())
-                            .unwrap_or(false);
-                for transition in terminal_attention.step_with_permission_block(
+                let live_provider = current_provider(&app_for_throughput);
+                let no_pending_menu = turn_state_cell()
+                    .lock()
+                    .map(|s| s.pending_menu.is_none())
+                    .unwrap_or(false);
+                let permission_block_shape =
+                    if no_pending_menu && codex_permission_blocked_since_launch(live_provider) {
+                        Some("codex-permission")
+                    } else if no_pending_menu
+                        && antigravity_permission_blocked_since_launch(live_provider)
+                    {
+                        let tail = pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS);
+                        match prompt_shape_for_provider(&tail, live_provider) {
+                            Some("antigravity-folder-trust") => Some("antigravity-folder-trust"),
+                            _ => Some("antigravity-permission"),
+                        }
+                    } else {
+                        None
+                    };
+                for transition in terminal_attention.step_with_permission_block_shape(
                     authoritative_open,
                     bytes,
-                    permission_blocked,
+                    permission_block_shape,
                     || {
                         (
                             pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS),
@@ -21736,9 +21782,11 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // user answers the prompt. codex-update joins them: its Enter runs
     // "Update now" and exits Codex. slash-panel is left out: Esc closes it,
     // and an Enter there grants nothing.
-    let prompt_shape = pane_input_blocking_prompt(
+    let live_provider = current_provider(app);
+    let prompt_shape = pane_input_blocking_prompt_or_osc(
         &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
-        current_provider(app),
+        live_provider,
+        antigravity_permission_blocked_since_launch(live_provider),
     );
     let mut prompt_restores: Vec<(String, String)> = Vec::new();
     let mut esc_held: usize = 0;
@@ -23156,6 +23204,8 @@ static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic
 static AGENT_LAUNCH_BEGAN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 static CODEX_PERMISSION_BLOCKED_AT_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+static ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
 
 fn codex_permission_marker(body: &str) -> bool {
     // Captured Codex 0.165.0 Windows OSC 7501, 2026-10-28 (#455).
@@ -23168,6 +23218,20 @@ fn codex_permission_marker(body: &str) -> bool {
 fn codex_permission_blocked_since_launch(provider: Option<SessionProvider>) -> bool {
     let at = CODEX_PERMISSION_BLOCKED_AT_MS.load(std::sync::atomic::Ordering::SeqCst);
     provider == Some(SessionProvider::Codex)
+        && at > 0
+        && at >= AGENT_LAUNCH_BEGAN_MS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn antigravity_permission_state(body: &str) -> bool {
+    let parts: Vec<&str> = body.split(':').collect();
+    parts.first() == Some(&"blocked")
+        && parts.contains(&"app=antigravity")
+        && parts.contains(&"kind=permission")
+}
+
+fn antigravity_permission_blocked_since_launch(provider: Option<SessionProvider>) -> bool {
+    let at = ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.load(std::sync::atomic::Ordering::SeqCst);
+    provider == Some(SessionProvider::Antigravity)
         && at > 0
         && at >= AGENT_LAUNCH_BEGAN_MS.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -23219,6 +23283,7 @@ fn agent_state_marker_since_launch(provider: SessionProvider) -> bool {
 
 fn begin_agent_launch() -> u64 {
     CODEX_PERMISSION_BLOCKED_AT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+    ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
     AGENT_LAUNCH_BEGAN_MS.store(unix_now_ms(), std::sync::atomic::Ordering::SeqCst);
     // codex-resume-false-working: a fresh launch hasn't shown its composer.
     CODEX_COMPOSER_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -49142,6 +49207,17 @@ fn pane_input_blocking_prompt(
     })
 }
 
+fn pane_input_blocking_prompt_or_osc(
+    stripped_tail: &str,
+    provider: Option<SessionProvider>,
+    agy_permission_blocked: bool,
+) -> Option<&'static str> {
+    pane_input_blocking_prompt(stripped_tail, provider).or_else(|| {
+        (provider == Some(SessionProvider::Antigravity) && agy_permission_blocked)
+            .then_some("antigravity-permission")
+    })
+}
+
 #[cfg(test)]
 mod pane_input_blocking_prompt_tests {
     use super::{pane_input_blocking_prompt, SessionProvider};
@@ -49771,9 +49847,11 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     // answers it: at hooks-trust it chose "Review hooks", at folder-trust
     // "Trust and continue", at codex-update "Update now". The pane-send guard
     // already refuses sends at these shapes; the nudge had no such check.
-    let prompt_shape = pane_input_blocking_prompt(
+    let live_provider = current_provider(app);
+    let prompt_shape = pane_input_blocking_prompt_or_osc(
         &pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS),
-        current_provider(app),
+        live_provider,
+        antigravity_permission_blocked_since_launch(live_provider),
     );
     if agent_boot_hold_active()
         || prompt_shape.is_some()
@@ -89201,69 +89279,62 @@ fn antigravity_permission_menu_shown_cell() -> &'static Mutex<Option<String>> {
     CELL.get_or_init(|| Mutex::new(None))
 }
 
-fn antigravity_permission_menu(
-    provider_is_antigravity: bool,
-    latest_state: Option<&str>,
-    tail: &str,
-) -> Option<PtyMenu> {
-    if !provider_is_antigravity
-        || !latest_state.is_some_and(|s| {
-            s.starts_with("blocked:kind=permission") && s.contains("app=antigravity")
-        })
-    {
-        return None;
+fn antigravity_after_footer_is_live(after_footer: &str) -> bool {
+    let squashed: String = after_footer
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    !squashed.contains("?forshortcuts")
+        && !squashed.contains("────")
+        && squashed.chars().count() <= 120
+}
+
+fn antigravity_find_option_marker(text: &str, number: usize) -> Option<usize> {
+    let marker = format!("{number}. ");
+    let mut offset = 0;
+    while let Some(rel) = text[offset..].find(&marker) {
+        let at = offset + rel;
+        if at == 0 || matches!(text.as_bytes()[at - 1], b' ' | b'>') {
+            return Some(at);
+        }
+        offset = at + marker.len();
     }
-    let title = [
-        "Run this command?",
-        "Allow creation of this file?",
-        "Accept this file edit?",
-    ]
-    .into_iter()
-    .find(|title| tail.contains(title))?;
-    let title_at = tail.rfind(title)?;
-    if terminal_attention_prompt_shape(tail) != Some("antigravity-permission") {
-        return None;
+    None
+}
+
+fn antigravity_rfind_option_marker(text: &str, number: usize) -> Option<usize> {
+    let marker = format!("{number}. ");
+    let mut end = text.len();
+    while let Some(at) = text[..end].rfind(&marker) {
+        if at == 0 || matches!(text.as_bytes()[at - 1], b' ' | b'>') {
+            return Some(at);
+        }
+        end = at;
     }
-    // antigravity-live-check-fixes: the subject is informational and never
-    // gates the menu. Live, a long workspace path is cut off at the terminal
-    // width, which also pushes the "+1" diff stat off the line.
-    let subject = if title == "Run this command?" {
-        tail[..title_at]
-            .rsplit_once("Requesting permission for:")
-            .map(|(_, s)| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    } else {
-        antigravity_file_subject(&tail[..title_at])
-    };
-    let reason = tail[..title_at].rsplit_once("Reason:").map(|(_, s)| {
-        s.split("Requesting permission for:")
-            .next()
-            .unwrap_or(s)
-            .trim()
-            .to_string()
-    });
+    None
+}
+
+fn antigravity_parse_options(option_text: &str) -> Vec<MenuOption> {
     let mut options = Vec::new();
-    let footer = tail[title_at + title.len()..]
-        .find("esc to cancel")
-        .map(|n| title_at + title.len() + n)?;
-    let option_text = &tail[title_at + title.len()..footer];
+    let mut offset = 0;
     for number in 1..=9 {
-        let marker = format!("{}. ", number);
-        let Some(at) = option_text.find(&marker) else {
+        let Some(rel) = antigravity_find_option_marker(&option_text[offset..], number) else {
             if !options.is_empty() {
                 break;
-            } else {
-                continue;
             }
+            continue;
         };
-        let value_start = at + marker.len();
-        let next_at = (number + 1..=9)
-            .filter_map(|n| option_text.find(&format!(" {}. ", n)))
+        let value_start = offset + rel + format!("{number}. ").len();
+        let after = &option_text[value_start..];
+        let next_rel = (number + 1..=9)
+            .filter_map(|n| antigravity_find_option_marker(after, n))
             .min();
-        let label_end = next_at.unwrap_or(option_text.len());
-        let label = option_text[value_start..label_end]
+        let raw_end = next_rel.unwrap_or(after.len());
+        let label = after[..raw_end]
             .trim()
             .trim_start_matches('>')
+            .trim_end_matches('>')
             .trim();
         let label = label.split("↑/↓").next().unwrap_or(label).trim();
         if label.is_empty() {
@@ -89275,18 +89346,202 @@ fn antigravity_permission_menu(
             answer_keys: Some(number.to_string()),
             description: None,
         });
+        offset = value_start + raw_end;
     }
-    if options.is_empty() {
+    options
+}
+
+fn antigravity_permission_menu(
+    provider_is_antigravity: bool,
+    latest_state: Option<&str>,
+    tail: &str,
+) -> Option<PtyMenu> {
+    const TITLES: &[&str] = &[
+        "Run this command?",
+        "Allow creation of this file?",
+        "Accept this file edit?",
+    ];
+    const NAV_FOOTER: &str = "↑/↓ Navigate";
+
+    if !provider_is_antigravity || !latest_state.is_some_and(antigravity_permission_state) {
         return None;
     }
-    let text = [Some(title.to_string()), subject, reason]
+    // agy draws backspaces before an option whose predecessor wrapped
+    // ("'jq' \x08\x083. Yes", permission-wrapped-options-44x67). collapse_tail
+    // keeps them, and an option number after one wouldn't be recognized, which
+    // lost options 3 and 4, "No, cancel" among them.
+    let tail: String = tail
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let tail = tail.as_str();
+    if matches!(
+        terminal_attention_prompt_shape(tail),
+        Some("antigravity-folder-trust" | "antigravity-login" | "antigravity-resume-picker")
+    ) {
+        return None;
+    }
+
+    // 1. Newest known title (`rfind`), provided that dialog is still the live
+    //    bottom of the screen (not an earlier answered dialog followed by
+    //    composer chrome or a later titleless dialog). Options end at the
+    //    "↑/↓ Navigate" footer or at "esc to cancel". Every capture draws one
+    //    of them, full and short screens included. With neither, the dialog
+    //    is still being painted (the state marker comes first, and the paint
+    //    spans chunks), so wait: a menu now would show partial options.
+    let latest_title = TITLES
+        .iter()
+        .filter_map(|&t| tail.rfind(t).map(|at| (t, at)))
+        .max_by_key(|(_, at)| *at);
+    if let Some((title, title_at)) = latest_title {
+        let after_title = &tail[title_at + title.len()..];
+        let option_slice = if let Some(nav_rel) = after_title.find(NAV_FOOTER) {
+            antigravity_after_footer_is_live(&after_title[nav_rel + NAV_FOOTER.len()..])
+                .then_some(&after_title[..nav_rel])
+        } else if let Some(esc_rel) = after_title.find("esc to cancel") {
+            antigravity_after_footer_is_live(&after_title[esc_rel + "esc to cancel".len()..])
+                .then_some(&after_title[..esc_rel])
+        } else {
+            None
+        };
+        if let Some(option_text) = option_slice {
+            let options = antigravity_parse_options(option_text);
+            if !options.is_empty() {
+                let before_title = &tail[..title_at];
+                let dialog_start = [
+                    NAV_FOOTER,
+                    "Run this command?",
+                    "Allow creation of this file?",
+                    "Accept this file edit?",
+                ]
+                .into_iter()
+                .filter_map(|m| before_title.rfind(m).map(|i| i + m.len()))
+                .max()
+                .unwrap_or(0);
+                let prefix = &before_title[dialog_start..];
+                // antigravity-live-check-fixes: the subject is informational
+                // and never gates the menu.
+                let subject = if title == "Run this command?" {
+                    prefix
+                        .rsplit_once("Requesting permission for:")
+                        .map(|(_, s)| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                } else {
+                    antigravity_file_subject(prefix)
+                };
+                let reason = if title == "Run this command?" {
+                    prefix
+                        .rsplit_once("Reason:")
+                        .map(|(_, s)| {
+                            s.split("Requesting permission for:")
+                                .next()
+                                .unwrap_or(s)
+                                .trim()
+                                .to_string()
+                        })
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                };
+                let text = [Some(title.to_string()), subject, reason]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Some(PtyMenu {
+                    tool: "Antigravity permission".into(),
+                    text,
+                    options,
+                    prompt_id: None,
+                    tool_call_signature: None,
+                    tool_call_diff: None,
+                    tool_call_content: None,
+                    cache_source: None,
+                    at_host_ms: None,
+                    signature_source: None,
+                });
+            }
+        }
+    }
+
+    // 2. Titleless fallback (e.g. 46x12, where Ink clips the dialog's title
+    //    and top option off the screen): require the live permission footer
+    //    ("↑/↓ Navigate · tab Amend") so an OSC marker arriving a chunk before
+    //    the dialog paint cannot misread an assistant markdown list, then read
+    //    the contiguous numbered options leading into that footer.
+    let nav_at = tail.rfind(NAV_FOOTER)?;
+    if !antigravity_after_footer_is_live(&tail[nav_at + NAV_FOOTER.len()..]) {
+        return None;
+    }
+    let footer_sq: String = tail[nav_at..]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    if !footer_sq.starts_with("↑/↓navigate·tabamend") {
+        return None;
+    }
+    let before_nav = &tail[..nav_at];
+    let cut = [
+        NAV_FOOTER,
+        "esc to cancel",
+        "────",
+        "Run this command?",
+        "Allow creation of this file?",
+        "Accept this file edit?",
+    ]
+    .into_iter()
+    .filter_map(|sep| before_nav.rfind(sep).map(|i| i + sep.len()))
+    .max()
+    .unwrap_or(0);
+    let window = &before_nav[cut..];
+    const SPINNERS: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+    let mut rev_options: Vec<(usize, String)> = Vec::new();
+    let mut end = window.len();
+    for number in (1..=9).rev() {
+        let Some(at) = antigravity_rfind_option_marker(&window[..end], number) else {
+            if !rev_options.is_empty() {
+                break;
+            }
+            continue;
+        };
+        if let Some(&(prev_num, _)) = rev_options.last() {
+            if number + 1 != prev_num {
+                break;
+            }
+        }
+        let val_start = at + format!("{number}. ").len();
+        let label = window[val_start..end]
+            .trim()
+            .trim_start_matches('>')
+            .trim_end_matches('>')
+            .trim();
+        if label.is_empty() || label.chars().count() > 260 || label.contains(SPINNERS) {
+            if !rev_options.is_empty() {
+                break;
+            }
+            continue;
+        }
+        rev_options.push((number, label.to_string()));
+        end = at;
+    }
+    if rev_options.is_empty() {
+        return None;
+    }
+    rev_options.reverse();
+    let options = rev_options
         .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|(number, label)| MenuOption {
+            key: number.to_string(),
+            label,
+            answer_keys: Some(number.to_string()),
+            description: None,
+        })
+        .collect();
     Some(PtyMenu {
         tool: "Antigravity permission".into(),
-        text,
+        text: "Permission required (top of dialog scrolled off — check terminal for full details)"
+            .into(),
         options,
         prompt_id: None,
         tool_call_signature: None,
@@ -89363,10 +89618,18 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
         return;
     }
     for (mark, state) in marks {
+        let now = unix_now_ms();
+        ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.store(
+            if antigravity_permission_state(&state) {
+                now
+            } else {
+                0
+            },
+            std::sync::atomic::Ordering::SeqCst,
+        );
         if let Ok(mut latest) = antigravity_latest_state_cell().lock() {
             *latest = Some(state.clone());
         }
-        let now = unix_now_ms();
         let started = antigravity_turn_cell().lock().ok().and_then(|g| *g);
         let (open, event) = antigravity_turn_step(started.is_some(), mark);
         if let Ok(mut g) = antigravity_turn_cell().lock() {
@@ -89400,6 +89663,7 @@ fn antigravity_permission_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, tai
         // Switched away with agy's dialog up: its last state is moot, and
         // keeping it would send every later chunk of the new provider here.
         // A relaunched agy reports fresh states.
+        ANTIGRAVITY_PERMISSION_BLOCKED_AT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut latest) = antigravity_latest_state_cell().lock() {
             *latest = None;
         }
@@ -89618,6 +89882,184 @@ mod antigravity_permission_menu_tests {
         let quoted_and_idle = [dialog.as_slice(), composer.as_slice()].concat();
         let quoted_and_idle = collapse_tail(&quoted_and_idle, 1200);
         assert!(antigravity_permission_menu(true, Some(STATE), &quoted_and_idle).is_none());
+    }
+
+    #[test]
+    fn full_screen_44x67_shows_menu_for_every_dialog_without_esc_footer() {
+        let stream = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-full-screen-44x67.raw"
+        );
+        // First dialog (`echo alpha`) ends right before the `working` marker
+        // emitted when the first digit answer ran; the stream as saved ends on
+        // the second dialog (`echo bravo`). Neither draws "esc to cancel".
+        let needle = b"\x1b]7501;state=blocked:kind=permission";
+        let first_perm = stream
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("first permission marker");
+        let first_working = first_perm
+            + stream[first_perm..]
+                .windows(b"\x1b]7501;state=working".len())
+                .position(|w| w == b"\x1b]7501;state=working")
+                .expect("working marker after first dialog");
+        let first_tail = collapse_tail(&stream[..first_working], 1200);
+        assert!(
+            !first_tail[first_tail.rfind("Run this command?").unwrap()..].contains("esc to cancel"),
+            "{first_tail}"
+        );
+        let first_menu =
+            antigravity_permission_menu(true, Some(STATE), &first_tail).expect("first dialog menu");
+        assert_eq!(first_menu.text, "Run this command?\necho alpha");
+        assert_eq!(first_menu.options.len(), 4);
+        assert_eq!(first_menu.options[0].label, "Yes, run command");
+        assert_eq!(first_menu.options[3].label, "No, cancel");
+
+        let second_tail = collapse_tail(stream, 1200);
+        assert!(
+            !second_tail[second_tail.rfind("Run this command?").unwrap()..]
+                .contains("esc to cancel"),
+            "{second_tail}"
+        );
+        let second_menu = antigravity_permission_menu(true, Some(STATE), &second_tail)
+            .expect("second dialog menu");
+        assert_eq!(second_menu.text, "Run this command?\necho bravo");
+        assert_eq!(second_menu.options.len(), 4);
+        assert_eq!(second_menu.options[0].label, "Yes, run command");
+        assert_eq!(second_menu.options[3].label, "No, cancel");
+    }
+
+    #[test]
+    fn short_46x26_and_scrolled_title_46x12_specimens_parse_and_hold() {
+        let short_raw =
+            include_bytes!("../../docs/agent-specimens/antigravity/permission-short-46x26.raw");
+        let short_tail = collapse_tail(short_raw, 1200);
+        let short_menu =
+            antigravity_permission_menu(true, Some(STATE), &short_tail).expect("46x26 menu");
+        assert!(short_menu
+            .text
+            .starts_with("Run this command?\ncurl -4 -sS"));
+        assert_eq!(short_menu.options.len(), 4);
+        assert_eq!(short_menu.options[0].answer_keys.as_deref(), Some("1"));
+        assert_eq!(short_menu.options[3].label, "No, cancel");
+
+        // 46x12: Ink clipped the dialog title and option 1 off the top of the
+        // screen, leaving options 2..4 and "↑/↓ Navigate · tab Amend".
+        let scrolled_raw = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-scrolled-title-46x12.raw"
+        );
+        let scrolled_tail = collapse_tail(scrolled_raw, 1200);
+        assert!(!scrolled_tail.contains("Run this command?"));
+        let fallback = antigravity_permission_menu(true, Some(STATE), &scrolled_tail)
+            .expect("46x12 fallback menu");
+        assert!(fallback.text.contains("scrolled off"));
+        let keys_and_labels: Vec<_> = fallback
+            .options
+            .iter()
+            .map(|o| (o.key.as_str(), o.answer_keys.as_deref(), o.label.as_str()))
+            .collect();
+        assert_eq!(keys_and_labels.len(), 3);
+        assert_eq!(keys_and_labels[0].0, "2");
+        assert_eq!(keys_and_labels[0].1, Some("2"));
+        assert!(keys_and_labels[0]
+            .2
+            .starts_with("Yes, and always allow in this conversation"));
+        assert_eq!(keys_and_labels[1].0, "3");
+        assert_eq!(keys_and_labels[2], ("4", Some("4"), "No, cancel"));
+    }
+
+    // A wrapped label makes agy draw backspaces before the next option. The
+    // parser once lost options 3 and 4 here, so a pipeline's approval had no
+    // "No, cancel", and option 2's label ran on through option 3's text.
+    #[test]
+    fn backspaces_before_a_wrapped_option_keep_every_option() {
+        let raw = include_bytes!(
+            "../../docs/agent-specimens/antigravity/permission-wrapped-options-44x67.raw"
+        );
+        let tail = collapse_tail(raw, 1200);
+        assert!(tail.contains('\u{8}'), "the specimen shows the backspaces");
+        let menu = antigravity_permission_menu(true, Some(STATE), &tail).expect("menu");
+        let labels: Vec<_> = menu.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels.len(), 4, "{labels:?}");
+        assert!(labels[1].ends_with("start with 'jq'"), "{labels:?}");
+        assert!(
+            labels[2].ends_with("(Persist to settings.json)"),
+            "{labels:?}"
+        );
+        assert_eq!(labels[3], "No, cancel");
+    }
+
+    #[test]
+    fn newest_dialog_wins_when_command_and_file_dialogs_share_the_tail() {
+        let combined = "\
+            Command Reason: Specimen command requires approval. \
+            Requesting permission for: echo OLD \
+            Run this command? > 1. Yes, run command 2. Yes, and always allow \
+            3. Yes, and always allow (Persist) 4. No, cancel \
+            ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command \
+            Create file <workspace>/next.txt +1 1 + NEW \
+            Allow creation of this file? > 1. Yes, allow creation 2. No, deny creation \
+            ↑/↓ Navigate · tab Amend · f full diff";
+        let menu = antigravity_permission_menu(true, Some(STATE), combined).expect("newest menu");
+        assert_eq!(
+            menu.text,
+            "Allow creation of this file?\n<workspace>/next.txt"
+        );
+        let labels: Vec<_> = menu.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, vec!["Yes, allow creation", "No, deny creation"]);
+    }
+
+    #[test]
+    fn a_dialog_still_painting_shows_no_menu_and_osc_holds_unreadable() {
+        // The state marker comes first, and the paint spans chunks: options
+        // so far, no footer yet. A menu here would show a partial list.
+        let painting = "Requesting permission for: echo hi \
+            Run this command? > 1. Yes, run command 2. Yes, and always allow";
+        assert!(antigravity_permission_menu(true, Some(STATE), painting).is_none());
+        let painted =
+            format!("{painting} in this conversation 3. No, cancel ↑/↓ Navigate · tab Amend");
+        let menu = antigravity_permission_menu(true, Some(STATE), &painted).expect("painted");
+        assert_eq!(menu.options.len(), 3);
+        assert_eq!(menu.options[2].label, "No, cancel");
+
+        // Pre-paint / completely clipped screen: no menu, no fake options from
+        // assistant prose, and OSC state still blocks pane sends and fires the
+        // terminal-attention hold.
+        let prose_before_paint = "Plan: 1. Read lib.rs 2. Run cargo test";
+        assert!(antigravity_permission_menu(true, Some(STATE), prose_before_paint).is_none());
+        assert_eq!(
+            super::pane_input_blocking_prompt_or_osc(
+                prose_before_paint,
+                Some(super::SessionProvider::Antigravity),
+                true,
+            ),
+            Some("antigravity-permission")
+        );
+        assert_eq!(
+            super::pane_input_blocking_prompt_or_osc(
+                prose_before_paint,
+                Some(super::SessionProvider::Claude),
+                true,
+            ),
+            None
+        );
+        let mut tracker = super::TerminalAttentionTracker::new();
+        assert_eq!(
+            tracker.step_with_permission_block_shape(
+                true,
+                64,
+                Some("antigravity-permission"),
+                || panic!("explicit OSC permission block needs no silence wait"),
+            ),
+            vec![super::TerminalAttentionTransition::Fire {
+                shape: "antigravity-permission",
+            }]
+        );
+        assert_eq!(
+            tracker.step_with_permission_block_shape(true, 0, None, || panic!("unblocked")),
+            vec![super::TerminalAttentionTransition::Clear {
+                reason: "permission-unblocked",
+            }]
+        );
     }
 }
 

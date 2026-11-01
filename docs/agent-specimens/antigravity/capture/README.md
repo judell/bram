@@ -28,6 +28,10 @@ configurations and path-resolution finding.
 | `schedules/permission-decline.json`, `schedules/permission-decline-number.json` | Escape interruption versus explicit option 4 decline |
 | `schedules/resume-then-exit.json`, `schedules/exit-idle.json`, `schedules/exit-idle-settled.json`, `schedules/exit-double-ctrl-c.json` | Resume and exit-key timing attempts |
 | `schedules/rename-and-resume.json`, `schedules/rename-by-id.json`, `schedules/rename-then-resume.json` | Rename result and conversation list |
+| `schedules/permission-full-screen-44x67.json` | Two sequential command approvals after filling a 44×67 screen (`ANTIGRAVITY_CAPTURE_COLS=44 ANTIGRAVITY_CAPTURE_ROWS=67 AGY_CLI_OSC7501=on`); `"esc to cancel"` bottom row omitted on both dialogs |
+| `schedules/permission-short-46x26.json` | Wrapped `curl` command approval on a 46×26 screen (`ANTIGRAVITY_CAPTURE_COLS=46 ANTIGRAVITY_CAPTURE_ROWS=26 AGY_CLI_OSC7501=on`); `"esc to cancel"` omitted |
+| `schedules/permission-scrolled-title-46x12.json` | Same `curl` command approval on a 46×12 screen (`ANTIGRAVITY_CAPTURE_COLS=46 ANTIGRAVITY_CAPTURE_ROWS=12 AGY_CLI_OSC7501=on`); dialog title and option 1 clipped off top |
+| `permission-wrapped-options-44x67.raw` (from `scripts/capture-terminal-specimen.py --cols 44 --rows 67`, `AGY_CLI_OSC7501=on`, not a schedule) | Approval of `gh api … \| jq -s add \| tail -5`: a wrapped option label makes agy draw backspaces before option 3 |
 
 `logged-out.json` was replayed after capture. Rendering that stream produced
 the committed `../logged-out.txt` exactly.

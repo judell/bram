@@ -1,0 +1,40 @@
+
+  Antigravity CLI 1.4.12
+  ser-email>       (Google AI Pro)
+  Gemini 4 Argon (Medium)
+  <workspace>
+
+─────────────────────────────────────────
+> Run exactly this one shell command with
+  run_command and nothing else, unchanged:
+  gh api --paginate
+  repos/judell/bram/issues/462/comments |
+  jq -s add | tail -5
+
+▸ , 139 tokens5s
+
+  I will run the requested gh api
+  spect the lain          st lines   of
+  mments JSON for issue #462    .
+
+● Ran (gh api --pagi...) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────
+
+Requesting permission for:
+   gh api --paginate
+repos/judell/bram/issues/462/comments
+| jq -s add | tail -5
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this
+conversation for commands that start with
+'jq'
+    3. Yes, and always allow for commands that
+start with 'jq' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/exp
+esc to cancel        Gemini 4 Argon · medium

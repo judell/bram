@@ -1,7 +1,9 @@
-# Copied unchanged (apart from this header) from ../../codex/capture/render.py.
-import sys,re
+# Copied from ../../codex/capture/render.py; honors ANTIGRAVITY_CAPTURE_ROWS/COLS (default 40x120).
+import os,sys,re
 # minimal VT renderer -> final screen text
-def render(data,rows=40,cols=120):
+def render(data,rows=None,cols=None):
+    rows=rows or int(os.environ.get("ANTIGRAVITY_CAPTURE_ROWS","40"))
+    cols=cols or int(os.environ.get("ANTIGRAVITY_CAPTURE_COLS","120"))
     g=[[" "]*cols for _ in range(rows)];r=c=0
     s=data.decode("utf-8","replace");i=0
     while i<len(s):

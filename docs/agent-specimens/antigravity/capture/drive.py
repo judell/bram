@@ -1,11 +1,13 @@
-# Copied unchanged (apart from this header) from ../../codex/capture/drive.py.
+# Copied from ../../codex/capture/drive.py; honors ANTIGRAVITY_CAPTURE_COLS/ROWS (default 120x40).
 import sys,os,pty,fcntl,termios,struct,select,time,signal,json,re
 # usage: drive.py OUTDIR SCHEDULE.json -- cmd...   schedule: [[t_seconds, "keys"|null, "snapname"|null],...] ; total = last t
 out=sys.argv[1]; sched=json.load(open(sys.argv[2])); cmd=sys.argv[4:]
+cols=int(os.environ.get("ANTIGRAVITY_CAPTURE_COLS","120"))
+rows=int(os.environ.get("ANTIGRAVITY_CAPTURE_ROWS","40"))
 pid,fd=pty.fork()
 if pid==0:
-    os.environ["COLUMNS"],os.environ["LINES"]="120","40"; os.execvp(cmd[0],cmd)
-fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack("HHHH",40,120,0,0))
+    os.environ["COLUMNS"],os.environ["LINES"]=str(cols),str(rows); os.execvp(cmd[0],cmd)
+fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack("HHHH",rows,cols,0,0))
 print("PID",pid,file=sys.stderr)
 buf=b"";mark=0;start=time.time();i=0
 def pump(d):

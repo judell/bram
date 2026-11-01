@@ -1,0 +1,67 @@
+  51            40  56       43
+    52            41  57       44
+      53            42  58       45
+        54            43  59       46
+          55            44  60       47
+            56            45  61       48
+              57            46  62       49
+                58            47  63       5
+0                 59            48  64
+ 51                 60            49  65
+   52                 61            50  66
+     53                 62            51  67
+       54                 63            52
+68       55                 64            53
+  69       56                 65
+54  70       57                 66
+  55  71       58                 67
+    56  72       59                 68
+      57  73       60                 69
+        58  74       61                 70
+          59  75       62                 71
+            60  76       63
+72            61  77       64
+  73            62  78       65
+    74            63  79       66
+  67  75            64  80
+  68    76            65  81
+  69      77            66  82
+  70        78            67  83
+  71          79            68  84
+    72          80            69  85
+      73          81            70  86
+        74          82            71  87
+  75                  83            72  88
+  76                    84            73  89
+  77                      85            74
+9078                        86            75
+                              87
+76Running echo alpha now.       88
+  77                              89
+● Ra78                              90
+
+  Running echo alpha now.
+
+● Ran (echo alpha) (ctrl+o to expand)
+
+  Running echo bravo next.
+
+● Ran (echo bravo) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────
+
+Requesting permission for:
+   echo bravoo alpha now.t to
+
+Run this command?) (ctrl+o to expand)
+> 1. Yes, run command
+  2. Yes, and always allow in this
+conversation for commands that start with
+'echo'ing (echo bravo) (ctrl+o to expand)
+  3. Yes, and always allow for commands that
+start with 'echo' (Persist toetween availabl
+settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/exp

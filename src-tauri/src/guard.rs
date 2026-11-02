@@ -53,13 +53,19 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
             started,
             authority_worklist_hook,
         ),
-        "codex-worklist" => authority_guarded_dispatch(
-            "codex-rs",
-            &payload,
-            stdin_error,
-            started,
-            authority_worklist_hook,
-        ),
+        // current-session-from-events: Codex reports from the guard it already
+        // runs, because registering a new hook event raises its "Hooks need
+        // review" prompt. So a change shows at the next tool call.
+        "codex-worklist" => {
+            session_report("codex", &payload);
+            authority_guarded_dispatch(
+                "codex-rs",
+                &payload,
+                stdin_error,
+                started,
+                authority_worklist_hook,
+            )
+        }
         // opencode-worklist-guard: called by the Bram OpenCode plugin's
         // `execute.before` hook with OpenCode's own tool event.
         "opencode-worklist" => authority_guarded_dispatch(
@@ -84,7 +90,7 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
             antigravity_worklist_hook(&payload, stdin_error, started)
         }
         "antigravity-session" => {
-            antigravity_session_report(&payload);
+            session_report("antigravity", &payload);
             0
         }
         other => {
@@ -289,30 +295,45 @@ fn post_json_outcome(port: u16, path: &str, body: &str) -> &'static str {
 //   with its parent's, with an empty lastUserInput; the parent's carries the
 //   prompt. That is observed, not documented. If it stops holding, the
 //   Transcript follows the subagent until the parent's next invocation.
-fn antigravity_session_report_body(
+fn session_report_body(
+    provider: &str,
     payload: &serde_json::Value,
     token: &str,
 ) -> Option<serde_json::Value> {
-    let session = str_field(payload, "conversationId");
-    if session.is_empty() || token.is_empty() || str_field(payload, "lastUserInput").is_empty() {
+    let (session, mine) = if provider == "antigravity" {
+        (
+            str_field(payload, "conversationId"),
+            !str_field(payload, "lastUserInput").is_empty(),
+        )
+    } else {
+        // current-session-from-events: Claude's and Codex's subagent hooks
+        // carry the parent's session_id plus an agent_id (Claude 2.1, captured
+        // 2026-11-02; Codex: docs/agent-specimens/codex). Skipped regardless,
+        // so a CLI that changes this can't move the session.
+        (
+            str_field(payload, "session_id"),
+            str_field(payload, "agent_id").is_empty(),
+        )
+    };
+    if session.is_empty() || token.is_empty() || !mine {
         return None;
     }
     Some(serde_json::json!({
-        "provider": "antigravity",
+        "provider": provider,
         "session": session,
         "bram_token": token,
     }))
 }
 
 // The port comes from this terminal's environment, not resources/.bram-port,
-// which names whichever instance wrote it last. No output and exit 0 whatever
-// happens: agy blocks on a failing hook, and this one only informs.
-fn antigravity_session_report(payload: &serde_json::Value) {
+// which names whichever instance wrote it last. Never affects the hook's
+// outcome: agy blocks on a failing hook, and this only informs.
+fn session_report(provider: &str, payload: &serde_json::Value) {
     let port = std::env::var("BRAM_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok());
     let token = std::env::var("BRAM_MENU_TOKEN").unwrap_or_default();
-    if let (Some(port), Some(body)) = (port, antigravity_session_report_body(payload, &token)) {
+    if let (Some(port), Some(body)) = (port, session_report_body(provider, payload, &token)) {
         let _ = post_json_outcome(port, "/__agent/session", &body.to_string());
     }
 }
@@ -1065,6 +1086,13 @@ fn authority_menu_hook(
     started: std::time::Instant,
 ) -> i32 {
     let event = str_field(payload, "hook_event_name");
+    // current-session-from-events: SessionStart fires at once on `/clear` and
+    // on `/resume` inside the CLI, with the new id. UserPromptSubmit restores
+    // the session after a nested `claude -p`, which inherits the token.
+    if provider == "claude-rs" && matches!(event.as_str(), "SessionStart" | "UserPromptSubmit") {
+        session_report("claude", payload);
+        return 0;
+    }
     let tool = str_field(payload, "tool_name");
     let root = resolve_project_root(provider, payload);
     let Some(path) = menu_would_action(provider, &event, &tool) else {
@@ -1340,18 +1368,27 @@ mod guard_mode_tests {
     use super::*;
 
     #[test]
-    fn antigravity_session_report_skips_subagents_and_foreign_terminals() {
+    fn session_report_skips_subagents_and_foreign_terminals() {
         let turn = serde_json::json!({ "conversationId": "c1", "lastUserInput": "hi" });
-        let body = antigravity_session_report_body(&turn, "tok").unwrap();
+        let body = session_report_body("antigravity", &turn, "tok").unwrap();
         assert_eq!(body["session"], "c1");
         assert_eq!(body["bram_token"], "tok");
         // Another terminal has no token.
-        assert!(antigravity_session_report_body(&turn, "").is_none());
+        assert!(session_report_body("antigravity", &turn, "").is_none());
         // A subagent's payload has an empty lastUserInput (agy 1.4.12).
         let sub = serde_json::json!({ "conversationId": "c2", "lastUserInput": "" });
-        assert!(antigravity_session_report_body(&sub, "tok").is_none());
+        assert!(session_report_body("antigravity", &sub, "tok").is_none());
         let none = serde_json::json!({ "lastUserInput": "hi" });
-        assert!(antigravity_session_report_body(&none, "tok").is_none());
+        assert!(session_report_body("antigravity", &none, "tok").is_none());
+        for provider in ["claude", "codex"] {
+            let start = serde_json::json!({ "session_id": "s1", "source": "clear" });
+            let body = session_report_body(provider, &start, "tok").unwrap();
+            assert_eq!(body["provider"], provider);
+            assert_eq!(body["session"], "s1");
+            assert!(session_report_body(provider, &start, "").is_none());
+            let sub = serde_json::json!({ "session_id": "s1", "agent_id": "a1" });
+            assert!(session_report_body(provider, &sub, "tok").is_none());
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {

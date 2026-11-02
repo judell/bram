@@ -54,8 +54,8 @@ Permission-menu callbacks use a separate per-Bram-instance credential,
 `BRAM_MENU_TOKEN`, inherited by the terminal child and echoed by its hook as
 `bram_token`. Missing or mismatched credentials receive HTTP 403; presenting a
 menu does not authorize the underlying tool or a Worklist operation.
-`POST /__agent/session`, where Antigravity's `PreInvocation` hook names the
-running conversation, takes the same credential (`handle_agent_session`). It
+`POST /__agent/session`, where a Claude, Codex or Antigravity hook names the
+running session, takes the same credential (`handle_agent_session`). It
 moves which session Bram shows as current and authorizes nothing. Bram
 feature-detects Codex's `--no-daemon` option and adds it to local launches so
 hooks run with this instance's environment rather than a shared server's.

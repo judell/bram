@@ -21202,13 +21202,17 @@ fn run_startup_autostart(
                     if launch_provider == SessionProvider::Antigravity {
                         mark_antigravity_session_current(app, session_id, "autostart");
                     }
+                    set_named_session(launch_provider, Some(session_id));
                     // Make the exact resumed conversation current
                     // immediately; neither CLI is guaranteed to touch its
                     // JSONL before the tools pane asks for the first
                     // transcript.
                     resync_transcript_to_session(app, launch_provider, session_id);
-                } else if launch_provider == SessionProvider::Antigravity {
-                    clear_antigravity_live_session(app, "autostart");
+                } else {
+                    set_named_session(launch_provider, None);
+                    if launch_provider == SessionProvider::Antigravity {
+                        clear_antigravity_live_session(app, "autostart");
+                    }
                 }
                 schedule_agent_switch_refresh(app.clone(), provider, "autostart");
             }),
@@ -24354,6 +24358,10 @@ fn switch_agent(
             clear_antigravity_live_session(&app, "switch");
         }
     }
+    set_named_session(
+        target_provider,
+        partner.as_deref().or(latest_target.as_deref()),
+    );
     let pair_from = leaving.clone();
     // new-session-switch-starts-fresh-partner: queue the fresh partner's name
     // (applied when its session surfaces), and note the target's live session
@@ -26604,10 +26612,9 @@ fn set_current_provider<R: tauri::Runtime>(
 // clear the tail cursor so the next emit is a full reset, then emit — the
 // iframe replaces its transcript buffer with the resumed conversation.
 //
-// Claude `--resume <id>` reuses the same file, so it's the final target.
-// Codex `resume` rotates to a NEW sid: bumping the clicked file shows the
-// resumed history right away, and once codex writes the rotated file (real
-// user activity, newer mtime) latest_codex_session_path transitions to it.
+// Claude `--resume <id>` and Codex `resume <id>` both keep the session id
+// (docs/agent-specimens/codex, SessionStart-resume.json), so this is the final
+// target either way.
 fn resync_transcript_to_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: SessionProvider,
@@ -26789,6 +26796,7 @@ fn reload_agent_session(
             clear_antigravity_live_session(&app, "reload-fresh");
         }
     }
+    set_named_session(session_provider, session_exists.then_some(session.as_str()));
     let generation = begin_agent_launch();
     // pair-offer-warns-before-replacing: a newer launch ends the situation the
     // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
@@ -26904,6 +26912,7 @@ fn start_agent_fresh(
     if session_provider == SessionProvider::Antigravity {
         clear_antigravity_live_session(&app, "start-fresh");
     }
+    set_named_session(session_provider, None);
     launch_agent_command(AgentLaunch {
         app: app.clone(),
         generation,
@@ -35511,6 +35520,37 @@ fn opencode_live_session_cell() -> &'static Mutex<Option<String>> {
 // Explicit launch identity, independent of database availability and export
 // success. Only another explicit launch, or the running CLI naming its own
 // session (handle_agent_session), replaces or clears this pin.
+// current-session-from-events: rules 1 and 2 of the session spine
+// (docs/decisions/2026-10-27-bram-chooses-the-session.md) for Claude and Codex.
+// Bram's launch sets this and the CLI's own events replace it. While it is
+// set, file times don't decide; they answer only when nothing has named a
+// session. A named session whose file doesn't exist yet (the CLI writes it at
+// the first message) or can't be found keeps its name, so the next read
+// retries the same session.
+fn named_session_cell() -> &'static Mutex<std::collections::HashMap<&'static str, String>> {
+    static CELL: OnceLock<Mutex<std::collections::HashMap<&'static str, String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn named_session(provider: SessionProvider) -> Option<String> {
+    named_session_cell()
+        .lock()
+        .ok()
+        .and_then(|cell| cell.get(session_provider_label(provider)).cloned())
+}
+
+fn set_named_session(provider: SessionProvider, id: Option<&str>) -> Option<String> {
+    if !matches!(provider, SessionProvider::Claude | SessionProvider::Codex) {
+        return None;
+    }
+    let label = session_provider_label(provider);
+    let mut cell = named_session_cell().lock().ok()?;
+    match id {
+        Some(id) => cell.insert(label, id.to_string()),
+        None => cell.remove(label),
+    }
+}
+
 fn antigravity_live_session_cell() -> &'static Mutex<Option<String>> {
     static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
@@ -35561,9 +35601,9 @@ fn mark_antigravity_session_current<R: tauri::Runtime>(app: &AppHandle<R>, id: &
     }
 }
 
-// agy-reads-conversation-id: rule 1 of the session spine. The running CLI
-// named its own session, which outranks Bram's launch pin. Reports come from
-// the PreInvocation hook, once per model invocation, so a repeat is a no-op.
+// agy-reads-conversation-id, current-session-from-events: rule 1 of the session
+// spine. The running CLI named its own session, which outranks Bram's launch.
+// Hooks report it repeatedly, so a repeat is a no-op.
 fn handle_agent_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -35572,35 +35612,49 @@ fn handle_agent_session<R: tauri::Runtime>(
     let Some(value) = authenticated_menu_payload(body, menu_session_token()) else {
         return (403, JSON, b"{\"error\":\"bad token\"}".to_vec());
     };
-    let provider = value.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let provider = value
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .and_then(SessionProvider::from_str)
+        .filter(|p| {
+            matches!(
+                p,
+                SessionProvider::Antigravity | SessionProvider::Claude | SessionProvider::Codex
+            )
+        });
     let session = value.get("session").and_then(|v| v.as_str()).unwrap_or("");
-    if provider != "antigravity" || !session_id_is_safe(session) {
+    let Some(provider) = provider.filter(|_| session_id_is_safe(session)) else {
         return (400, JSON, b"{\"error\":\"bad session\"}".to_vec());
-    }
-    if current_provider(app) != Some(SessionProvider::Antigravity) {
+    };
+    if current_provider(app) != Some(provider) {
         return (200, JSON, b"{\"ok\":true,\"changed\":false}".to_vec());
     }
-    let previous = antigravity_live_session_cell()
-        .lock()
-        .ok()
-        .and_then(|mut live| live.replace(session.to_string()));
+    let previous = if provider == SessionProvider::Antigravity {
+        antigravity_live_session_cell()
+            .lock()
+            .ok()
+            .and_then(|mut live| live.replace(session.to_string()))
+    } else {
+        set_named_session(provider, Some(session))
+    };
     if previous.as_deref() == Some(session) {
         return (200, JSON, b"{\"ok\":true,\"changed\":false}".to_vec());
     }
-    remember_last_active_session(app, SessionProvider::Antigravity, session);
+    remember_last_active_session(app, provider, session);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
             "agent-switch",
             &format!(
-                "op=live-session-set provider=antigravity session={} previous={} source=agent-event",
+                "op=live-session-set provider={} session={} previous={} source=agent-event",
+                session_provider_label(provider),
                 session,
                 previous.as_deref().unwrap_or("")
             ),
         );
     }
     emit_replayable_signal(app, "sessions-list-changed");
-    emit_talk_session_changed_for_provider(app, Some(SessionProvider::Antigravity));
+    emit_talk_session_changed_for_provider(app, Some(provider));
     (200, JSON, b"{\"ok\":true,\"changed\":true}".to_vec())
 }
 
@@ -40351,6 +40405,16 @@ fn latest_claude_session_path<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Option<std::path::PathBuf>, String> {
     let dir = claude_sessions_dir(app)?;
+    if let Some(id) = named_session(SessionProvider::Claude) {
+        let path = dir.join(format!("{}.jsonl", id));
+        if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+            let cache_cell = LIVE_CLAUDE_SESSION.get_or_init(|| Mutex::new(None));
+            if let Ok(mut cached) = cache_cell.lock() {
+                *cached = Some((path.clone(), mtime));
+            }
+            return Ok(Some(path));
+        }
+    }
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -40429,6 +40493,24 @@ fn latest_claude_session_path<R: tauri::Runtime>(
 fn latest_codex_session_path<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Option<std::path::PathBuf>, String> {
+    // This runs on every poll, and finding a rollout by id walks the sessions
+    // tree, so the id's path is kept until the id changes.
+    static NAMED_PATH: OnceLock<Mutex<Option<(String, PathBuf)>>> = OnceLock::new();
+    if let Some(id) = named_session(SessionProvider::Codex) {
+        let cell = NAMED_PATH.get_or_init(|| Mutex::new(None));
+        let known = cell
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|(known, path)| *known == id && path.exists())
+            .map(|(_, path)| path);
+        if let Some(path) = known.or_else(|| codex_session_path_for_id(app, &id)) {
+            if let Ok(mut g) = cell.lock() {
+                *g = Some((id, path.clone()));
+            }
+            return Ok(Some(path));
+        }
+    }
     let project = project_root(Some(app)).ok_or("could not resolve project root")?;
     let project_cwd = canonical_path_string(&project);
     let home = home_dir().ok_or("no HOME or USERPROFILE")?;
@@ -55083,6 +55165,8 @@ fn settings_has_permission_menu_hook(
         && event_has_menu_hook("PostToolUse")
         && event_has_menu_hook("PermissionDenied")
         && event_has_menu_hook("PreToolUse")
+        && event_has_menu_hook("SessionStart")
+        && event_has_menu_hook("UserPromptSubmit")
 }
 
 // Remove any PreToolUse hook entries whose `command` contains
@@ -55493,6 +55577,9 @@ fn merge_guard_menu_hook_into_settings(
         ("PostToolUse", ".*"),
         ("PermissionDenied", ".*"),
         ("PreToolUse", "AskUserQuestion"),
+        // current-session-from-events: the guard reports the session id.
+        ("SessionStart", ".*"),
+        ("UserPromptSubmit", ".*"),
     ] {
         changed |= merge_command_hook_into_event(hooks_obj, event, matcher, shadow_command, marker);
     }
@@ -55641,11 +55728,13 @@ mod guard_shadow_registration_tests {
     const MENU_AUTHORITY: &str =
         "\"/Users/x/.bram/bram-guard\" guard claude-permission-menu --authority";
     const MENU_PY: &str = "\"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"";
-    const MENU_EVENTS: [&str; 4] = [
+    const MENU_EVENTS: [&str; 6] = [
         "PermissionRequest",
         "PostToolUse",
         "PermissionDenied",
         "PreToolUse",
+        "SessionStart",
+        "UserPromptSubmit",
     ];
 
     fn events_with_command(path: &Path, command: &str) -> Vec<String> {

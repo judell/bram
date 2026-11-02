@@ -16,16 +16,18 @@ File times and database update times never replace a named session, and a failed
 
 | Provider | (1) Its own event | (2) Bram's launch | Where it stands |
 |---|---|---|---|
-| OpenCode | plugin events (`sessionID`) overwrite the cell | live cell | Follows the rule. Whether events from another terminal can reach the cell is unverified |
+| Claude | `SessionStart` and `UserPromptSubmit` through the menu hook | named-session cell | Follows the rule (`current-session-from-events`). File times answer only when nothing has named a session |
+| Codex | the existing `PreToolUse` guard reports `session_id` | named-session cell | Follows the rule, with a lag: a change shows at the next tool call, because a new hook event raises Codex's "Hooks need review" prompt |
 | Antigravity | `PreInvocation` hook posts `conversationId` to `/__agent/session` | live cell, with a pinned session never falling back to newest | Follows the rule (`agy-reads-conversation-id`). A change with no turn taken is seen at the next invocation |
-| Claude | not read for identity; hook payloads carry the transcript path | cache set on explicit resume, reserved id on New session | Doesn't follow it: after launch, newest mtime with hysteresis decides |
-| Codex | not read for identity; its hook payloads carry `session_id` | reload pin, persisted | Doesn't follow it: after launch, newest mtime decides, and rules retire the pin |
+| OpenCode | plugin events (`sessionID`) overwrite the cell | live cell | **Doesn't follow it:** the plugin runs in a shared service with no token, so another terminal's events move the session. Open: `opencode-session-own-terminal` |
+
+Audit, 2026-11-02, on a demo: an outside copy of each CLI in the same project took one turn. Before these changes it moved `current` on Claude, Codex and OpenCode. After them it holds on Claude, Codex and Antigravity. Claude followed `/clear` at once, and a Codex subagent turn didn't move `current`.
 
 **"From this Bram's terminal" is enforced by the terminal's environment.** Bram exports `BRAM_PORT` and `BRAM_MENU_TOKEN` to its terminal. A hook in another terminal has neither, so it can't report, and the route refuses a wrong token. Captured on agy 1.4.12, 2026-11-02, on a live demo: an agy with no such environment moved nothing; one with it moved `current` to a new conversation and then through `/resume` inside the TUI, with no launch by Bram.
 
-**A subagent isn't the session.** An agy subagent fires `PreInvocation` under its own `conversationId`, interleaved with its parent's, and its `lastUserInput` is empty, so the hook skips it. That's observed, not documented. If it stops holding, the Transcript follows the subagent until the parent's next invocation. Any provider moved onto rule 1 needs the same check.
+**A subagent isn't the session.** An agy subagent fires `PreInvocation` under its own `conversationId`, interleaved with its parent's, and its `lastUserInput` is empty, so the hook skips it. That's observed, not documented. If it stops holding, the Transcript follows the subagent until the parent's next invocation. Claude's and Codex's subagent hooks carry the parent's `session_id` plus an `agent_id`, and the guard skips any payload with one. Any provider moved onto rule 1 needs the same check.
 
-The remaining gap is tracked as `current-session-from-events`.
+A fresh launch has no name until the CLI's first event, so rule 3 applies for that moment: Claude's `SessionStart` closes it at once, and Codex's at its first tool call.
 
 **Evidence:** one day of driving switches across the three agents broke this rule in a different place each time. Each break, its trace receipt and the commit that closed it:
 

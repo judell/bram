@@ -61,6 +61,11 @@ session resume picker) are already specimens:
 
 ## Session id (`--session-id`, `--name`, `--resume`)
 
+- Identity after launch (2026-11-02): `SessionStart` fired at once on `/clear`
+  (`source: "clear"`, new id) and on `/resume` inside the TUI
+  (`source: "resume"`, the resumed id). A subagent's hooks carry the parent's
+  `session_id` plus `agent_id`, and it fires no `SessionStart`.
+
 - `claude --session-id <uuid>` pre-allocates the id. `SessionStart` fired with
   that exact `session_id` before any message (`hooks/SessionStart.json`).
 - **The transcript file does not exist until the first message.** The

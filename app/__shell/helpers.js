@@ -885,7 +885,8 @@ window.__bramAgentSwitcherTrace = function (stage, fields) {
 // which lands in __bramHandleAgentSwitcherChange(next, previous, ...) with
 // previous === next (both are the live provider), and that returns early.
 // `busy` skips the correction while a switch is in flight, so a status push
-// cannot yank the user's click back to the provider it is leaving.
+// cannot yank the user's click back to the provider it is leaving; it lasts
+// until the status reports the request (__bramAgentSwitcherHoldUntilReported).
 window.__bramSyncAgentSwitcher = function (select, provider, busy) {
   if (!select || busy) return;
   var key = window.__bramProviderKey(provider);
@@ -1543,6 +1544,34 @@ window.__bramUnpairSession = function (provider, id, toastApi) {
   };
 })();
 
+// provider-switch-flashes-back: switch_agent returns when the launch is sent,
+// not when the agent runs, so the status still names the old provider for up
+// to a few seconds. Clearing busy then let __bramSyncAgentSwitcher set the
+// control back to the agent being left, and forward again when the status
+// caught up. Stay busy until the status reports the request. The short delay
+// lets mainAgentStatus reach the pane first, so the sync that busy-to-idle
+// fires compares against the new provider. The limit keeps a launch that never
+// reports from leaving the control disabled; the sync then shows what the
+// status says.
+function __bramAgentSwitcherHoldUntilReported(key) {
+  var startedAt = Date.now();
+  var done = false;
+  var unsub = null;
+  var limit = null;
+  var finish = function (stage) {
+    if (done) return;
+    done = true;
+    clearTimeout(limit);
+    if (unsub) unsub();
+    window.__bramAgentSwitcherTrace(stage, { provider: key, waitedMs: Date.now() - startedAt });
+    setTimeout(function () { __bramPublishAgentSwitcherBusy(false); }, stage === "settled" ? 200 : 0);
+  };
+  limit = setTimeout(function () { finish("settle-timeout"); }, 15000);
+  unsub = window.bramSubscribeAgentStatus()(function (status) {
+    if (window.__bramProviderKey(status && status.provider) === key) finish("settled");
+  });
+  if (done) unsub();
+}
 window.__bramHandleAgentSwitcherChange = function (next, previous, select, toastApi) {
   var key = window.__bramProviderKey(next);
   var prev = window.__bramProviderKey(previous) || "claude";
@@ -1551,7 +1580,7 @@ window.__bramHandleAgentSwitcherChange = function (next, previous, select, toast
   __bramPublishAgentSwitcherBusy(true);
   window.__bramSwitchAgent(key).then(function () {
     window.__bramAgentSwitcherTrace("complete", { provider: key });
-    __bramPublishAgentSwitcherBusy(false);
+    __bramAgentSwitcherHoldUntilReported(key);
   }).catch(function (e) {
     window.__bramAgentSwitcherTrace("revert", {
       provider: key,

@@ -914,12 +914,21 @@ window.__bramStartupPolicyIsNone = function (pushedEvt, fetchedSettings) {
   return shell.startupPolicy === "none";
 };
 // PR #394 review: the header switcher's `when`, kept as a single call per
-// docs/developing-bram.md. Shown only when Bram is launching agents itself
-// (policy is not "none") AND a provider is known.
-window.__bramShowAgentSwitcher = function (pushedEvt, fetchedSettings, mainStatus, enhance) {
-  if (window.__bramStartupPolicyIsNone(pushedEvt, fetchedSettings)) return false;
-  var provider = (mainStatus && mainStatus.provider) || (enhance && enhance.activeProvider);
-  return !!provider;
+// docs/developing-bram.md. Shown whenever Bram is launching agents itself
+// (policy is not "none"). top-banner-wraps: no longer waits for a known
+// provider, since __bramShownProvider always has an answer.
+window.__bramShowAgentSwitcher = function (pushedEvt, fetchedSettings) {
+  return !window.__bramStartupPolicyIsNone(pushedEvt, fetchedSettings);
+};
+// top-banner-wraps: the provider the header dropdown shows: the live one, else
+// the active one, else the configured default (shell.agent), else claude, the
+// same fallback as the host's configured_agent_provider.
+window.__bramShownProvider = function (pushedEvt, fetchedSettings, mainStatus, enhance) {
+  var settings = (pushedEvt && pushedEvt.payload) || fetchedSettings || {};
+  return window.__bramProviderKey(mainStatus && mainStatus.provider) ||
+    window.__bramProviderKey(enhance && enhance.activeProvider) ||
+    window.__bramProviderKey((settings.shell || {}).agent) ||
+    "claude";
 };
 // opencode-provider-switch: the one place a provider string is recognized.
 // Key is "" for anything unknown, so each caller picks its own default;
@@ -11829,6 +11838,91 @@ window.bramSubscribeTranscriptSplitHeight = (function () {
       return function () { subscribers.delete(fire); };
     };
     return factory;
+  };
+})();
+
+// top-banner-wraps: the header's two groups sit on one row until they no
+// longer fit, then stack (level 1), then the left group stacks too (level 2).
+// Main.xmlui binds `orientation` to this level. The groups are fit-content,
+// so their widths don't depend on the row's orientation and the choice can't
+// oscillate. The left group's width does change at level 2, so that level
+// compares against the width last read below it.
+//
+// The AppHeader's height is a fixed theme value, and the pinned StickySections
+// sit at the same value, so a stacked header must raise it or its second row
+// spills over the content. Writes --xmlui-height-AppHeader inline on <html>,
+// where XMLUI puts the root theme class. Level 0 removes the override, leaving
+// a wide window exactly as themed.
+(function () {
+  var level = 0;
+  var subscribers = new Set();
+  window.bramSubscribeHeaderRows = function () {
+    return function (emit) {
+      var fire = function () { emit(level); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+  };
+  window.__bramWatchHeaderRows = function () {
+    var row = document.querySelector('[data-testid="app-header-row"]');
+    var left = document.querySelector('[data-testid="app-header-left"]');
+    var right = document.querySelector('[data-testid="app-header-right"]');
+    if (!row || !left || !right || row.__bramHeaderRowsWatched) return;
+    row.__bramHeaderRowsWatched = true;
+    var root = document.documentElement;
+    var prop = "--xmlui-height-AppHeader";
+    // Read before any override, and kept as the theme's own expression so it
+    // still scales with the A− / A+ font size.
+    var base = getComputedStyle(root).getPropertyValue(prop).trim() || "3.5rem";
+    var extra = 0;
+    var leftW = 0;
+    var pending = false;
+    function schedule() {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(measure);
+    }
+    function measure() {
+      pending = false;
+      var rowW = row.getBoundingClientRect().width;
+      var l = left.getBoundingClientRect();
+      var r = right.getBoundingClientRect();
+      if (!rowW) return;
+      if (level < 2) leftW = l.width;
+      var next = leftW > rowW ? 2 : leftW + r.width + 4 > rowW ? 1 : 0;
+      if (next !== level) {
+        window.__bramIframeTrace("header-rows", {
+          level: next, prev: level, rowW: Math.round(rowW),
+          leftW: Math.round(leftW), rightW: Math.round(r.width),
+        });
+        level = next;
+        subscribers.forEach(function (fn) {
+          try { fn(); } catch (e) { console.error("[bramSubscribeHeaderRows] subscriber threw:", e); }
+        });
+        schedule(); // heights are read once the new orientation has laid out
+        return;
+      }
+      var nextExtra = level ? Math.max(0, Math.round(Math.max(l.bottom, r.bottom) -
+        Math.min(l.top, r.top) - Math.max(l.height, r.height))) : 0;
+      if (level === 2) nextExtra += Math.max(0, Math.round(l.height - r.height));
+      if (nextExtra === extra) return;
+      extra = nextExtra;
+      window.__bramIframeTrace("header-rows", { op: "height", extraPx: extra, level: level });
+      if (extra) root.style.setProperty(prop, "calc(" + base + " + " + extra + "px)");
+      else root.style.removeProperty(prop);
+    }
+    // Deferred to a frame: resizing from inside the callback is what makes
+    // the browser report a ResizeObserver loop.
+    if (typeof ResizeObserver !== "undefined") {
+      var ro = new ResizeObserver(schedule);
+      [row, left, right].forEach(function (el) { ro.observe(el); });
+    }
+    window.addEventListener("resize", schedule);
+    window.__bramIframeTrace("header-rows", {
+      op: "watch", base: base, rowW: Math.round(row.getBoundingClientRect().width),
+    });
+    schedule();
   };
 })();
 

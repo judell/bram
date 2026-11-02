@@ -50,6 +50,12 @@
     id="rightPaneSizeEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeRightPaneSize()}" />
+  <!-- top-banner-wraps: how far the header has stacked (0 one row, 1 two
+       groups, 2 the left group stacked too). Measured in helpers.js. -->
+  <PushSource
+    id="headerRows"
+    initial="{0}"
+    subscribe="{window.bramSubscribeHeaderRows()}" />
   <PushSource
     id="whisperNotice"
     initial="{null}"
@@ -566,7 +572,32 @@
        both edges. -->
   <AppHeader backgroundColor="{window.__bramProjectBandTint(appInfo.value)}">
     <Theme fontSize-Button="$fontSize-md">
-      <HStack gap="$space-0_5" verticalAlignment="center" width="100%">
+      <!-- top-banner-wraps: on a narrow pane the header stacks rather than
+           running off the right edge, so every control stays reachable.
+           Not HStack wrapContent: that renders a FlowLayout, which puts each
+           child in a flow item, so marginLeft="auto" does nothing and the
+           controls lose their alignment. Two fit-content groups instead;
+           __bramWatchHeaderRows (helpers.js) compares their widths with the
+           row's and drives `orientation` through headerRows. It also grows
+           height-AppHeader, which is fixed and which the pinned
+           StickySections read. One row leaves the theme value alone.
+           https://www.xmlui.org/docs/reference/components/Stack
+           https://www.xmlui.org/docs/howto/know-when-to-use-fit-content
+           https://www.xmlui.org/docs/howto/run-a-one-time-action-on-page-load -->
+      <Stack
+        testId="app-header-row"
+        orientation="{headerRows.value > 0 ? 'vertical' : 'horizontal'}"
+        gap="$space-0_5"
+        verticalAlignment="center"
+        width="100%"
+        onMount="window.__bramWatchHeaderRows()">
+        <Stack
+          testId="app-header-left"
+          orientation="{headerRows.value > 1 ? 'vertical' : 'horizontal'}"
+          gap="$space-0_5"
+          verticalAlignment="center"
+          width="fit-content"
+          canShrink="false">
         <!-- Badge takes a dynamic background only via colorMap:
              https://docs.xmlui.org/components/Badge -->
         <Theme textTransform-Badge="none">
@@ -586,23 +617,25 @@
           variant="secondary"
           value="Agent managed externally"
           tooltip="Settings → On Bram launch is set to “Do not start an agent”, so Bram won’t start, switch, or type into the terminal’s agent." />
-        <RadioGroup
+        <!-- top-banner-wraps: back to a dropdown (Jon, 2026-11-01). Four radio
+             options were what pushed this row off the edge. Select has the
+             same setValue / value API, so the helpers are unchanged.
+             https://www.xmlui.org/docs/reference/components/Select -->
+        <Select
           id="agentSwitcherSelect"
-          when="{window.__bramShowAgentSwitcher(headerSettingsEvt.value, footerTipSettings.value, mainAgentStatus.value, enhanceStatus.value)}"
-          orientation="horizontal"
-          initialValue="{(mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider)}"
+          when="{window.__bramShowAgentSwitcher(headerSettingsEvt.value, footerTipSettings.value)}"
+          width="9rem"
+          initialValue="{window.__bramShownProvider(headerSettingsEvt.value, footerTipSettings.value, mainAgentStatus.value, enhanceStatus.value)}"
           enabled="{!agentSwitcherBusy.value}"
           tooltip="{agentSwitcherBusy.value ? 'Agent switch in progress' : 'Switch terminal agent'}"
-          onDidChange="(next) => window.__bramHandleAgentSwitcherChange(next, (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '', agentSwitcherSelect, toast)">
+          onDidChange="(next) => window.__bramHandleAgentSwitcherChange(next, window.__bramShownProvider(headerSettingsEvt.value, footerTipSettings.value, mainAgentStatus.value, enhanceStatus.value), agentSwitcherSelect, toast)">
           <Option value="claude" label="Claude" />
           <Option value="codex" label="Codex" />
           <Option value="opencode" label="OpenCode" />
           <Option value="antigravity" label="Antigravity" />
-        </RadioGroup>
-        <!-- agent-switcher-shows-stale-provider: RadioGroup's `initialValue`
-             only seeds the mount
-             (https://www.xmlui.org/docs/howto/present-choices-with-a-radiogroup),
-             and the seed above falls back to enhanceStatus before
+        </Select>
+        <!-- agent-switcher-shows-stale-provider: `initialValue` only seeds the
+             mount, and the seed above falls back to enhanceStatus before
              mainAgentStatus reports the live provider — so the pane can mount
              showing a provider the terminal is no longer running. Correct it
              when the truth arrives. A sibling of the RadioGroup so the id
@@ -610,12 +643,12 @@
              (https://www.xmlui.org/docs/howto/debounce-with-changelistener),
              which is what we want: the mount seed already ran. -->
         <ChangeListener
-          listenTo="{((mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '') + '|' + (agentSwitcherBusy.value ? 'busy' : 'idle')}"
-          onDidChange="() => window.__bramSyncAgentSwitcher(agentSwitcherSelect, (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '', agentSwitcherBusy.value)" />
+          listenTo="{window.__bramShownProvider(headerSettingsEvt.value, footerTipSettings.value, mainAgentStatus.value, enhanceStatus.value) + '|' + (agentSwitcherBusy.value ? 'busy' : 'idle')}"
+          onDidChange="() => window.__bramSyncAgentSwitcher(agentSwitcherSelect, window.__bramShownProvider(headerSettingsEvt.value, footerTipSettings.value, mainAgentStatus.value, enhanceStatus.value), agentSwitcherBusy.value)" />
         <!-- switch-to-transcript-on-action: the "Starting <item>…" claim
              message moved to the footer status line (Jon: it belongs there,
              not in the app header) — see the footer HStack below. -->
-        <SpaceFiller />
+        </Stack>
         <!-- dark-mode-tone-switch: XMLUI's own tone switch, beside the other
              pane-level display controls. Tone rescales every $color-* scale,
              so the pane needs no dark palette of its own; `persistTheme` on
@@ -635,7 +668,7 @@
              https://www.xmlui.org/docs/reference/components/Stack#gap
              https://www.xmlui.org/docs/howto/override-a-components-theme-vars -->
         <Theme paddingHorizontal-Button-sm="$space-1">
-        <HStack gap="$space-3" verticalAlignment="center">
+        <HStack testId="app-header-right" gap="$space-3" verticalAlignment="center" width="fit-content" canShrink="false" marginLeft="auto">
         <Theme fontSize="$fontSize-sm">
           <ToneSwitch
             tooltip="Switch between light and dark tone" />
@@ -670,7 +703,7 @@
         <Inspector src="{'/__vendor/xs-diff.html?v=' + window.APP_VERSION}" />
         </HStack>
         </Theme>
-      </HStack>
+      </Stack>
     </Theme>
   </AppHeader>
 

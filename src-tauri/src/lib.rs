@@ -21199,11 +21199,16 @@ fn run_startup_autostart(
                     if launch_provider == SessionProvider::Codex {
                         let _ = pin_codex_reload_target(app, session_id);
                     }
+                    if launch_provider == SessionProvider::Antigravity {
+                        mark_antigravity_session_current(app, session_id, "autostart");
+                    }
                     // Make the exact resumed conversation current
                     // immediately; neither CLI is guaranteed to touch its
                     // JSONL before the tools pane asks for the first
                     // transcript.
                     resync_transcript_to_session(app, launch_provider, session_id);
+                } else if launch_provider == SessionProvider::Antigravity {
+                    clear_antigravity_live_session(app, "autostart");
                 }
                 schedule_agent_switch_refresh(app.clone(), provider, "autostart");
             }),
@@ -24339,6 +24344,16 @@ fn switch_agent(
             let _ = pin_codex_reload_target(&app, id);
         }
     }
+    // agy-current-session-on-resume: mark the exact conversation `agy
+    // --conversation <id>` launches as current now; clear on a fresh or
+    // `--continue` launch so `fresh_baseline` below reads the newest session.
+    if target_provider == SessionProvider::Antigravity {
+        if let Some(id) = partner.as_deref().or(latest_target.as_deref()) {
+            mark_antigravity_session_current(&app, id, "switch");
+        } else {
+            clear_antigravity_live_session(&app, "switch");
+        }
+    }
     let pair_from = leaving.clone();
     // new-session-switch-starts-fresh-partner: queue the fresh partner's name
     // (applied when its session surfaces), and note the target's live session
@@ -26767,6 +26782,13 @@ fn reload_agent_session(
     if session_provider == SessionProvider::Opencode && session_exists {
         mark_opencode_session_current(&app, &session, "reload");
     }
+    if session_provider == SessionProvider::Antigravity {
+        if session_exists {
+            mark_antigravity_session_current(&app, &session, "reload");
+        } else {
+            clear_antigravity_live_session(&app, "reload-fresh");
+        }
+    }
     let generation = begin_agent_launch();
     // pair-offer-warns-before-replacing: a newer launch ends the situation the
     // pair offer described; on 2026-10-27 22:08Z it outlived a reload.
@@ -26879,6 +26901,9 @@ fn start_agent_fresh(
     pty_write_internal(&app, &state, "\x03", "agent-fresh-interrupt-2")?;
     let session_provider =
         SessionProvider::from_str(provider_key).unwrap_or(SessionProvider::Claude);
+    if session_provider == SessionProvider::Antigravity {
+        clear_antigravity_live_session(&app, "start-fresh");
+    }
     launch_agent_command(AgentLaunch {
         app: app.clone(),
         generation,
@@ -35059,6 +35084,118 @@ mod antigravity_transcript_tests {
         );
         assert_eq!(antigravity_timestamp_ms("not a timestamp"), 0);
     }
+
+    #[test]
+    fn explicit_antigravity_identity_survives_other_writers_and_missing_rows() {
+        use super::resolve_antigravity_live_session_id;
+        let rows = vec![
+            (
+                "other-cli".to_string(),
+                "Other terminal".to_string(),
+                50_000,
+            ),
+            (
+                "outgoing".to_string(),
+                "Late exit write".to_string(),
+                40_000,
+            ),
+            ("resumed".to_string(), "Older".to_string(), 5_000),
+        ];
+        let pin = Some("resumed");
+        assert_eq!(
+            resolve_antigravity_live_session_id(pin, &rows).as_deref(),
+            pin
+        );
+        // A failed query and a successful query that omits the target must
+        // both preserve explicit identity. Neither establishes a new launch.
+        assert_eq!(
+            resolve_antigravity_live_session_id(pin, &[]).as_deref(),
+            pin
+        );
+        assert_eq!(
+            resolve_antigravity_live_session_id(pin, &rows[..2]).as_deref(),
+            pin
+        );
+        assert_eq!(
+            resolve_antigravity_live_session_id(pin, &rows).as_deref(),
+            pin
+        );
+        // An explicit resume replaces the pin; a fresh launch clears it and
+        // lets ordinary discovery find the new session.
+        assert_eq!(
+            resolve_antigravity_live_session_id(Some("outgoing"), &rows).as_deref(),
+            Some("outgoing")
+        );
+        assert_eq!(
+            resolve_antigravity_live_session_id(None, &rows).as_deref(),
+            Some("other-cli")
+        );
+        assert_eq!(resolve_antigravity_live_session_id(None, &[]), None);
+    }
+
+    #[test]
+    fn pinned_antigravity_export_failure_does_not_fall_back_and_recovers() {
+        use super::{
+            antigravity_refresh_export, antigravity_summary_rows_from_db,
+            resolve_antigravity_live_session_id, resolve_antigravity_session_path,
+        };
+        let dir = std::env::temp_dir().join(format!("bram-agy-pin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.jsonl");
+        let export = dir.join("exports/resumed.jsonl");
+        let other = dir.join("other.jsonl");
+        std::fs::write(&other, "another conversation").unwrap();
+        let rows = vec![
+            ("other".into(), "Newest".into(), 50_000),
+            ("resumed".into(), "Older".into(), 5_000),
+        ];
+        let pin = Some("resumed");
+        let lookup = |id: &str| {
+            if id == "other" {
+                return Some(other.clone());
+            }
+            assert_eq!(id, "resumed");
+            antigravity_refresh_export(id, &source, &export).ok()?;
+            Some(export.clone())
+        };
+        // Source read failure: the available newer export must not be used.
+        assert_eq!(resolve_antigravity_session_path(pin, &rows, lookup), None);
+        // An unavailable database cannot turn a cached explicit identity into
+        // "newest" either; the helper's empty-row failure contract is real.
+        let unavailable = antigravity_summary_rows_from_db(&dir.join("missing.db"), "/fixture");
+        assert!(unavailable.is_empty());
+        assert_eq!(
+            resolve_antigravity_live_session_id(pin, &unavailable).as_deref(),
+            pin
+        );
+        std::fs::write(
+            &source,
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl"),
+        )
+        .unwrap();
+        // Export write failure (parent is a file), independent of source/DB.
+        std::fs::write(dir.join("exports"), "blocked").unwrap();
+        assert_eq!(resolve_antigravity_session_path(pin, &rows, lookup), None);
+        std::fs::remove_file(dir.join("exports")).unwrap();
+        // Recovery works even while summary lookup is unavailable. It retries
+        // the same session and leaves newer conversations out of the Transcript.
+        assert_eq!(
+            resolve_antigravity_session_path(pin, &unavailable, lookup),
+            Some(export.clone())
+        );
+        assert!(std::fs::read_to_string(&export)
+            .unwrap()
+            .contains("resumed"));
+        assert_eq!(
+            resolve_antigravity_session_path(pin, &rows, lookup),
+            Some(export.clone())
+        );
+        assert_eq!(
+            resolve_antigravity_session_path(None, &rows, lookup),
+            Some(other)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -35369,6 +35506,77 @@ fn mark_opencode_session_current<R: tauri::Runtime>(app: &AppHandle<R>, id: &str
 fn opencode_live_session_cell() -> &'static Mutex<Option<String>> {
     static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
+}
+
+// Explicit launch identity, independent of database availability and export
+// success. Only another explicit launch replaces or clears this pin.
+fn antigravity_live_session_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn resolve_antigravity_live_session_id(
+    live: Option<&str>,
+    rows: &[(String, String, i64)],
+) -> Option<String> {
+    live.map(str::to_string)
+        .or_else(|| rows.first().map(|(id, _, _)| id.clone()))
+}
+
+// An unavailable pinned transcript must not select someone else's transcript.
+// Keep the identity even if the database temporarily omits it or export fails;
+// the next read can retry the same session. Newest is only an unpinned fallback.
+fn resolve_antigravity_session_path(
+    live: Option<&str>,
+    rows: &[(String, String, i64)],
+    mut export: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    match live {
+        Some(id) => export(id),
+        None => rows.iter().find_map(|(id, _, _)| export(id)),
+    }
+}
+
+fn mark_antigravity_session_current<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, source: &str) {
+    if id.is_empty() {
+        return;
+    }
+    let previous = antigravity_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|mut live| live.replace(id.to_string()));
+    remember_last_active_session(app, SessionProvider::Antigravity, id);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=live-session-set provider=antigravity session={} previous={} source=explicit-resume via={}",
+                id,
+                previous.as_deref().unwrap_or(""),
+                source
+            ),
+        );
+    }
+}
+
+fn clear_antigravity_live_session<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    let prev = antigravity_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take());
+    if let Some(prev) = prev {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=antigravity-live-session-clear session={} reason={}",
+                    prev, reason
+                ),
+            );
+        }
+    }
 }
 
 fn sessions_for_provider<R: tauri::Runtime>(
@@ -39764,12 +39972,17 @@ fn live_session_id<R: tauri::Runtime>(
                     .flatten()
                     .and_then(|p| session_id_for_path(SessionProvider::Opencode, &p))
             }),
-        // No live-session cache and no discovery for Antigravity yet
-        // (antigravity-sessions-browser).
-        SessionProvider::Antigravity => latest_session_path_for_provider(app, provider)
+        // Identity survives a temporarily unreadable database or export.
+        SessionProvider::Antigravity => antigravity_live_session_cell()
+            .lock()
             .ok()
-            .flatten()
-            .and_then(|p| session_id_for_path(provider, &p)),
+            .and_then(|g| g.clone())
+            .or_else(|| {
+                current_antigravity_session_path(app)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| session_id_for_path(provider, &p))
+            }),
     }
 }
 
@@ -40304,11 +40517,31 @@ fn latest_session_path_for_provider<R: tauri::Runtime>(
         SessionProvider::Claude => latest_claude_session_path(app),
         SessionProvider::Codex => latest_codex_session_path(app),
         SessionProvider::Opencode => current_opencode_session_path(app),
-        SessionProvider::Antigravity => Ok(discover_antigravity_sessions(app, Some(1))?
-            .into_iter()
-            .next()
-            .map(|s| s.path)),
+        SessionProvider::Antigravity => current_antigravity_session_path(app),
     }
+}
+
+fn current_antigravity_session_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<PathBuf>, String> {
+    let root = project_root(Some(app))
+        .ok_or("could not resolve project root")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if let Ok(cache_dir) = app.path().app_cache_dir() {
+        let encoded = encode_path_for_filename(&strip_unc_prefix(root.clone()));
+        retire_stale_antigravity_exports(&cache_dir, &encoded);
+    }
+    let rows = antigravity_summary_rows(&root.to_string_lossy());
+    let live = antigravity_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    Ok(resolve_antigravity_session_path(
+        live.as_deref(),
+        &rows,
+        |id| antigravity_export_path_for_project(app, id, &root),
+    ))
 }
 
 // opencode-model-from-database (2026-10-28 07:31Z): "the current OpenCode
@@ -90760,9 +90993,12 @@ fn antigravity_in_flight_tool_from_transcript_str(source: &str) -> Option<Pendin
 
 fn antigravity_in_flight_tool_for_project(root: &Path) -> Option<PendingToolCall> {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let (id, _, _) = antigravity_summary_rows(&canonical.to_string_lossy())
-        .into_iter()
-        .next()?;
+    let rows = antigravity_summary_rows(&canonical.to_string_lossy());
+    let live = antigravity_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let id = resolve_antigravity_live_session_id(live.as_deref(), &rows)?;
     let logs = antigravity_data_dir()?
         .join("brain")
         .join(id)
@@ -92224,6 +92460,11 @@ fn stop_antigravity_turn_watch() {
 }
 
 fn current_antigravity_session_id<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    if let Some(sid) =
+        live_session_id(app, SessionProvider::Antigravity).filter(|s| session_id_is_safe(s))
+    {
+        return Some(sid);
+    }
     if let Ok(last) = last_talk_session_sid_cell().lock() {
         if let Some(sid) = last.get("antigravity").filter(|s| session_id_is_safe(s)) {
             return Some(sid.clone());

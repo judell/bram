@@ -6,6 +6,23 @@ Status: decided 2026-10-27 · revisit when a CLI changes how it names or resumes
 
 **Decision:** Bram chooses the session, launches it by id, marks it current at launch, and groups sessions only through an explicit act tied to that id. Nothing in session switching takes a CLI's own "most recent", a cached guess, or a "file created inside a time window" as the identity of a session.
 
+**After launch (added 2026-11-02, `agy-current-session-on-resume`).** The decision above covers the launch. A CLI can also change conversation by itself after launch, and each provider had filled that gap differently. The rule: a session is current because something named it.
+
+1. **The running CLI names its own session in an event**, from this Bram's terminal. Authoritative: it replaces a pin.
+2. **Bram names it at launch.** It holds until (1) says otherwise.
+3. **Newest wins** only when neither has spoken, and never overrides (1) or (2).
+
+File times and database update times never replace a named session, and a failed read changes nothing.
+
+| Provider | (1) Its own event | (2) Bram's launch | Where it stands |
+|---|---|---|---|
+| OpenCode | plugin events (`sessionID`) overwrite the cell | live cell | Follows the rule. Whether events from another terminal can reach the cell is unverified |
+| Antigravity | not read yet; every captured hook carries `conversationId` | live cell, with a pinned session never falling back to newest | Follows (2) and (3). A conversation change inside the TUI isn't seen yet |
+| Claude | not read for identity; hook payloads carry the transcript path | cache set on explicit resume, reserved id on New session | Doesn't follow it: after launch, newest mtime with hysteresis decides |
+| Codex | not read for identity; its hook payloads carry `session_id` | reload pin, persisted | Doesn't follow it: after launch, newest mtime decides, and rules retire the pin |
+
+The gaps are tracked as `agy-reads-conversation-id` and `current-session-from-events`.
+
 **Evidence:** one day of driving switches across the three agents broke this rule in a different place each time. Each break, its trace receipt and the commit that closed it:
 
 | Break | Receipt (2026-10-27 UTC) | Fix |

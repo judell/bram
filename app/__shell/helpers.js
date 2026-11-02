@@ -10732,6 +10732,26 @@ window.__bramToastWhisperNotice = function (notice, toastApi) {
   );
 };
 
+// agy-session-rename: one toast for a failed group name. The host replays the
+// latest event on every pane reload, and a changed format would fail once per
+// member at startup, so `at` is remembered for this session and a burst shows
+// once. Dismissing this is focus, not a decision.
+window.__bramToastGroupNameFailed = function (evt, toastApi) {
+  var p = evt && evt.payload;
+  if (!p || !toastApi || typeof toastApi.error !== "function") return;
+  var key = "bram.groupNameFailedAt";
+  var at = Number(p.at) || 0;
+  var shown = 0;
+  try { shown = Number(window.sessionStorage.getItem(key)) || 0; } catch (e) {}
+  if (at <= shown + 60000) return;
+  try { window.sessionStorage.setItem(key, String(at)); } catch (e) {}
+  toastApi.error(
+    window.__bramProviderLabel(p.provider) + " session couldn't take the name '" +
+    String(p.group || "") + "': " + String(p.detail || "unknown error") +
+    ". It's still in the group."
+  );
+};
+
 // voice-setup-dialog: when a 🎤 click finds whisper-server, the model or
 // ffmpeg missing, main.js posts { type: "bram-voice-setup", missing,
 // blocking, report } (report is whisper_preflight's). This replaces the

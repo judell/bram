@@ -67,6 +67,14 @@
   <ChangeListener
     listenTo="{whisperNotice.value &amp;&amp; whisperNotice.value.at}"
     onDidChange="() => window.__bramToastWhisperNotice(whisperNotice.value, toast)" />
+  <!-- agy-session-rename: a group member that couldn't take the group's name. -->
+  <PushSource
+    id="groupNameFailed"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('group-name-failed')}" />
+  <ChangeListener
+    listenTo="{groupNameFailed.value &amp;&amp; groupNameFailed.value.tick}"
+    onDidChange="() => window.__bramToastGroupNameFailed(groupNameFailed.value, toast)" />
   <!-- voice-setup-dialog: a 🎤 click found whisper-server, the model or
        ffmpeg missing; open voiceSetupDialog (helpers.js decides whether). -->
   <PushSource

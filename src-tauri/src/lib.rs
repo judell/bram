@@ -24780,8 +24780,6 @@ fn session_title_by_id<R: tauri::Runtime>(
         // the group line, and group naming compared against it).
         SessionProvider::Opencode => opencode_session_title_from_db(id)
             .or_else(|| claude_session_title(&path).ok().flatten()),
-        // session_path_for_id answers None for Antigravity, so this is
-        // unreachable until antigravity-sessions-browser; None keeps it honest.
         SessionProvider::Antigravity => antigravity_summary_rows_for_id(app, id)
             .map(|(_, title, _)| title)
             .filter(|title| !title.trim().is_empty())
@@ -24945,33 +24943,86 @@ fn harmonize_group_names<R: tauri::Runtime>(
         return;
     };
     for (p, id) in &group.members {
-        let Some(sp) = SessionProvider::from_str(p) else {
-            continue;
-        };
-        let current = session_title_by_id(app, sp, id);
-        if current.as_deref() == Some(name.as_str()) {
-            continue;
-        }
-        let result = rename_session(app, id, Some(sp), &name);
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "state-mirror",
-                &format!(
-                    "op=group-name {}={} from={:?} to={:?} source={} result={}",
-                    p,
-                    id,
-                    current.unwrap_or_default(),
-                    name,
-                    source,
-                    match &result {
-                        Ok(_) => "ok".to_string(),
-                        Err(e) => format!("error detail={}", e),
-                    }
-                ),
-            );
-        }
+        take_group_name(app, p, id, &name, source);
     }
+}
+
+fn take_group_name<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: &str,
+    id: &str,
+    name: &str,
+    source: &str,
+) {
+    let Some(sp) = SessionProvider::from_str(provider) else {
+        return;
+    };
+    let current = session_title_by_id(app, sp, id);
+    if current.as_deref() == Some(name) {
+        return;
+    }
+    let result = rename_session(app, id, Some(sp), name);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "state-mirror",
+            &format!(
+                "op=group-name {}={} from={:?} to={:?} source={} result={}",
+                provider,
+                id,
+                current.unwrap_or_default(),
+                name,
+                source,
+                match &result {
+                    Ok(_) => "ok".to_string(),
+                    Err(e) => format!("error detail={}", e),
+                }
+            ),
+        );
+    }
+    // agy-session-rename: a member that can't take the name looks wrong and
+    // says nothing, which is how 2026-11-02's two Leaves happened. agy's title
+    // file is a private format, so this can fail again.
+    if let Err(detail) = result {
+        emit_replayable_payload(
+            app,
+            "group-name-failed",
+            serde_json::json!({
+                "provider": provider,
+                "group": name,
+                "detail": detail,
+                "at": unix_now_ms(),
+            }),
+        );
+    }
+}
+
+// agy-session-rename: members that joined while Bram couldn't name Antigravity
+// sessions take the name once, off the startup thread: reading titles reads
+// each agent's session list.
+fn harmonize_antigravity_members_at_startup<R: tauri::Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
+        let Some(conn) = worklist_state_open(&app) else {
+            return;
+        };
+        let Ok(snap) = worklist_state::group_snapshot(&conn) else {
+            return;
+        };
+        let label = session_provider_label(SessionProvider::Antigravity);
+        for group in snap.groups() {
+            let members: Vec<_> = group.members.iter().filter(|(p, _)| p == label).collect();
+            if members.is_empty() {
+                continue;
+            }
+            let Some(name) = group_title(&app, &group) else {
+                continue;
+            };
+            for (p, id) in members {
+                take_group_name(&app, p, id, &name, "startup");
+            }
+        }
+        emit_replayable_signal(&app, "sessions-list-changed");
+    });
 }
 
 // provider-session-pair-offer, session-groups: each /__sessions/list row whose
@@ -27190,10 +27241,17 @@ fn apply_pending_session_title<R: tauri::Runtime>(
     // is only to stop it attaching to an unrelated much-later rotation.
     let stale = unix_now_ms() - rec.created_at_ms > 600_000;
     if rec.provider == want && !stale {
-        let created_ms = session_path_for_id(app, provider, new_sid)
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.created().ok())
-            .and_then(system_time_ms);
+        // agy-session-rename: agy's birth evidence is its conversation file.
+        // None yet means a conversation too new to have one, while a
+        // `/resume`d old one has an old file and can't take the name.
+        let created_ms = if matches!(provider, SessionProvider::Antigravity) {
+            antigravity_conversation_created_ms(new_sid).or_else(|| Some(unix_now_ms()))
+        } else {
+            session_path_for_id(app, provider, new_sid)
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.created().ok())
+                .and_then(system_time_ms)
+        };
         let old_target = rec.session_id.clone();
         if !claim_pending_session_title(&mut rec, new_sid, allow_claim, created_ms) {
             return;
@@ -27226,9 +27284,8 @@ fn apply_pending_session_title<R: tauri::Runtime>(
             // fresh-partner-takes-partner-name: an OpenCode fresh partner's
             // queued name lands here once its session rotates in; the rename
             // is a title UPDATE in OpenCode's database (509deb8).
-            // Antigravity keeps the queued name unreachable for now: New
-            // session refuses it, and rename_session says so
-            // (antigravity-sessions-browser).
+            // Antigravity's fresh partner lands here from its session event;
+            // New session itself still refuses (see that refusal).
             SessionProvider::Claude | SessionProvider::Opencode | SessionProvider::Antigravity => {
                 rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
             }
@@ -27857,11 +27914,10 @@ fn create_new_session(
     };
     refuse_agent_typing_if_policy_none(&app, "new-session")?;
     // antigravity-provider-switch: New session promises a name, and a name
-    // lands by renaming the session once its file surfaces. Bram has no rename
-    // path into agy (its durable title store was not identified in the
-    // specimen pack) and cannot see its sessions yet
-    // (antigravity-sessions-browser), so the queued name would never apply.
-    // Refuse rather than create a session titled with its first message.
+    // lands by renaming the session once its file surfaces. rename_session
+    // can now name an agy session (agy-session-rename), but this path hasn't
+    // been tried with one, so New session stays refused. Refuse rather than
+    // create a session titled with its first message.
     if provider_key == "antigravity" {
         return Err(
             "Named new sessions aren't available for Antigravity yet. Start a new session from inside Antigravity."
@@ -28193,8 +28249,8 @@ fn new_session_launch_command(provider: &str, title: &str, session_id: Option<&s
         // No naming flag, and New session refuses OpenCode until its
         // sessions are visible (opencode-sessions-browser).
         "opencode" => "opencode".to_string(),
-        // Same for Antigravity: `/rename` exists inside the TUI, but the
-        // durable title store was not identified in the specimen pack.
+        // Same for Antigravity: its title lands after launch
+        // (antigravity_set_title).
         "antigravity" => "agy".to_string(),
         _ => "".to_string(),
     }
@@ -34181,6 +34237,110 @@ fn antigravity_data_dir() -> Option<PathBuf> {
     Some(home_dir()?.join(".gemini").join("antigravity-cli"))
 }
 
+// agy-session-rename: agy keeps a conversation's title in
+// annotations/<id>.pbtxt, one text-format field: `title:"..."`. /rename writes
+// it; conversation_summaries.db copies it, but only when agy next loads the
+// conversation: a write from outside didn't reach the database within 24 s
+// of an idle agy, or by its exit. So the file is the title and the database a
+// lagging copy. Checked on agy 1.4.12 from outside, with agy closed, running,
+// and in its first turn, whose auto-title didn't overwrite it; see
+// docs/agent-specimens/antigravity/README.md. This is agy's private format.
+fn antigravity_annotation_path(data_dir: &Path, id: &str) -> PathBuf {
+    data_dir.join("annotations").join(format!("{id}.pbtxt"))
+}
+
+// agy writes `\"` and `\\` and leaves UTF-8 raw, as this does.
+fn antigravity_annotation_text(title: &str) -> String {
+    let mut out = String::with_capacity(title.len() + 9);
+    out.push_str("title:\"");
+    for c in title.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+// The title, or None for anything but exactly one `title` field: a file this
+// doesn't fully understand must be neither shown nor overwritten.
+fn antigravity_annotation_title(text: &str) -> Option<String> {
+    let body = text
+        .trim()
+        .strip_prefix("title:")?
+        .trim_start()
+        .strip_prefix('"')?;
+    let mut bytes = Vec::with_capacity(body.len());
+    let mut chars = body.bytes().peekable();
+    while let Some(b) = chars.next() {
+        match b {
+            b'"' => {
+                return chars
+                    .next()
+                    .is_none()
+                    .then(|| String::from_utf8(bytes).ok())
+                    .flatten();
+            }
+            b'\\' => match chars.next()? {
+                b'n' => bytes.push(b'\n'),
+                b'r' => bytes.push(b'\r'),
+                b't' => bytes.push(b'\t'),
+                b @ (b'"' | b'\'' | b'\\') => bytes.push(b),
+                // Text format's octal byte, as protobuf's own printers write
+                // non-ASCII.
+                d @ b'0'..=b'7' => {
+                    let mut value = u32::from(d - b'0');
+                    for _ in 0..2 {
+                        match chars.peek() {
+                            Some(&o @ b'0'..=b'7') => {
+                                value = value * 8 + u32::from(o - b'0');
+                                chars.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                    bytes.push(u8::try_from(value).ok()?);
+                }
+                _ => return None,
+            },
+            b => bytes.push(b),
+        }
+    }
+    None
+}
+
+// An id needs no check that agy has its conversation yet: a group joins on
+// agy's first hook, which can be before the conversation file exists.
+fn antigravity_set_title(data_dir: &Path, id: &str, title: &str) -> Result<(), String> {
+    let path = antigravity_annotation_path(data_dir, id);
+    if !path.parent().is_some_and(Path::is_dir) {
+        return Err("Antigravity's annotations folder wasn't found".to_string());
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() && antigravity_annotation_title(&text).is_none() => {
+            return Err("Antigravity's title file has a format Bram doesn't know".to_string());
+        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("read {}: {}", path.display(), e));
+        }
+        _ => {}
+    }
+    atomic_write_text(&path, &antigravity_annotation_text(title))
+}
+
+fn antigravity_conversation_created_ms(id: &str) -> Option<i64> {
+    let path = antigravity_data_dir()?
+        .join("conversations")
+        .join(format!("{id}.db"));
+    let created = std::fs::metadata(path).ok()?.created().ok()?;
+    system_time_ms(created)
+}
+
 fn antigravity_workspace_matches(value: &str, canonical: &str) -> bool {
     let decoded = percent_decode(value);
     let path = decoded
@@ -34257,6 +34417,12 @@ fn antigravity_summary_rows_from_db(
             // ISO-8601 timestamps sort lexically in the database query. Keep
             // an order-preserving numeric token for SessionRecord consumers.
             let millis = antigravity_timestamp_ms(&modified);
+            // agy-session-rename: the database lags the annotation file.
+            let title = path
+                .parent()
+                .and_then(|dir| std::fs::read_to_string(antigravity_annotation_path(dir, &id)).ok())
+                .and_then(|text| antigravity_annotation_title(&text))
+                .unwrap_or(title);
             Some((id, title, millis))
         })
         .collect()
@@ -35079,6 +35245,111 @@ mod antigravity_transcript_tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // agy-session-rename: the shapes below are what agy 1.4.12 itself wrote or
+    // read back: `\"` and `\\` escaped, UTF-8 raw.
+    #[test]
+    fn annotation_titles_round_trip_in_agys_format() {
+        use super::{antigravity_annotation_text, antigravity_annotation_title};
+
+        assert_eq!(
+            antigravity_annotation_text("v0.8.3 burndown"),
+            "title:\"v0.8.3 burndown\""
+        );
+        let awkward = "Q \"q\" caf\u{e9} \u{65e5}\u{672c} back\\slash\nline\ttab";
+        assert_eq!(
+            antigravity_annotation_text("Q \"q\" caf\u{e9} back\\slash"),
+            "title:\"Q \\\"q\\\" caf\u{e9} back\\\\slash\""
+        );
+        assert_eq!(
+            antigravity_annotation_title(&antigravity_annotation_text(awkward)).as_deref(),
+            Some(awkward)
+        );
+        // Octal bytes, as a protobuf printer writes non-ASCII.
+        assert_eq!(
+            antigravity_annotation_title("title:\"caf\\303\\251\"\n").as_deref(),
+            Some("caf\u{e9}")
+        );
+    }
+
+    #[test]
+    fn annotation_reader_refuses_what_it_does_not_fully_understand() {
+        use super::antigravity_annotation_title;
+
+        for text in [
+            "",
+            "title:\"unterminated",
+            "title:\"a\" pinned:true",
+            "title:\"a\"\npinned:true",
+            "pinned:true\ntitle:\"a\"",
+            "title:\"bad \\q escape\"",
+            "title:\"\\777\"",
+            "title:\"\\377\"",
+        ] {
+            assert_eq!(antigravity_annotation_title(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn set_title_replaces_a_title_and_leaves_an_unknown_file_alone() {
+        use super::{antigravity_annotation_path, antigravity_set_title};
+
+        let dir = std::env::temp_dir().join(format!("bram-agy-title-{}", uuid::Uuid::new_v4()));
+        let missing = antigravity_set_title(&dir, "fixture", "x").unwrap_err();
+        assert!(missing.contains("wasn't found"), "{missing}");
+        std::fs::create_dir_all(dir.join("annotations")).unwrap();
+        let path = antigravity_annotation_path(&dir, "fixture");
+
+        antigravity_set_title(&dir, "fixture", "first").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "title:\"first\"");
+        antigravity_set_title(&dir, "fixture", "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "title:\"second\"");
+
+        std::fs::write(&path, "title:\"a\"\npinned:true").unwrap();
+        let refused = antigravity_set_title(&dir, "fixture", "third").unwrap_err();
+        assert!(refused.contains("format"), "{refused}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "title:\"a\"\npinned:true"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The database lagged an annotation written with agy running (2026-11-02);
+    // a file Bram can't read falls back to the database.
+    #[test]
+    fn summary_reader_prefers_the_annotation_file() {
+        use super::{antigravity_annotation_path, antigravity_summary_rows_from_db};
+
+        let dir = std::env::temp_dir().join(format!("bram-agy-rows-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("annotations")).unwrap();
+        let db = dir.join("conversation_summaries.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id TEXT, title TEXT NOT NULL DEFAULT '',
+                    workspace_uris TEXT NOT NULL, last_modified_time TEXT NOT NULL
+                 );
+                 INSERT INTO conversation_summaries VALUES
+                   ('renamed', 'Old', '[\"file:///p\"]', '2026-10-31 21:17:11+00:00'),
+                   ('odd', 'Kept', '[\"file:///p\"]', '2026-10-31 21:17:10+00:00'),
+                   ('plain', 'Plain', '[\"file:///p\"]', '2026-10-31 21:17:09+00:00');",
+            )
+            .unwrap();
+        std::fs::write(
+            antigravity_annotation_path(&dir, "renamed"),
+            "title:\"New\"",
+        )
+        .unwrap();
+        std::fs::write(antigravity_annotation_path(&dir, "odd"), "pinned:true").unwrap();
+        let titles: Vec<String> = antigravity_summary_rows_from_db(&db, "/p")
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
+        assert_eq!(titles, ["New", "Kept", "Plain"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn summary_timestamps_parse_space_and_rfc3339_forms() {
         use super::antigravity_timestamp_ms;
@@ -35652,6 +35923,12 @@ fn handle_agent_session<R: tauri::Runtime>(
                 previous.as_deref().unwrap_or("")
             ),
         );
+    }
+    // agy-session-rename: agy surfaces no session file for the watcher, so its
+    // fresh partner's queued name is claimed here. Left queued, it stays a
+    // `pending-` row in the Sessions list.
+    if matches!(provider, SessionProvider::Antigravity) {
+        apply_pending_session_title(app, provider, session, true);
     }
     emit_replayable_signal(app, "sessions-list-changed");
     emit_talk_session_changed_for_provider(app, Some(provider));
@@ -40352,6 +40629,14 @@ fn rename_session<R: tauri::Runtime>(
     if trimmed.is_empty() {
         return Err("empty title".to_string());
     }
+    // agy-session-rename: by id, before the list: a session joining a group
+    // on its first turn isn't listed yet (2026-11-02 16:36:39
+    // `session not found`).
+    if matches!(preferred, Some(SessionProvider::Antigravity)) {
+        let dir = antigravity_data_dir().ok_or("home directory not found")?;
+        antigravity_set_title(&dir, id, trimmed)?;
+        return Ok(b"{\"ok\":true}".to_vec());
+    }
     let (provider, sessions) = sessions_for_provider(app, preferred, None)?;
     let session = sessions
         .into_iter()
@@ -40377,10 +40662,10 @@ fn rename_session<R: tauri::Runtime>(
             // database, so the rename is a single UPDATE there.
             opencode_set_session_title(app, &session.id, trimmed)?;
         }
-        // A title store for agy was not identified in the specimen pack, and
-        // its sessions aren't listed yet (antigravity-sessions-browser).
+        // agy-session-rename: no provider named, but the list resolved agy.
         SessionProvider::Antigravity => {
-            return Err("Antigravity sessions can't be renamed yet".to_string());
+            let dir = antigravity_data_dir().ok_or("home directory not found")?;
+            antigravity_set_title(&dir, &session.id, trimmed)?;
         }
     }
     Ok(b"{\"ok\":true}".to_vec())
@@ -95099,6 +95384,7 @@ pub fn run() {
             // design), so name it at startup too — the trace dedupe keeps
             // this and the board serve from double-logging one record.
             let _ = stranded_approval_ids(app.handle());
+            harmonize_antigravity_members_at_startup(app.handle().clone());
             // Remove any stale pty-intent queue from a prior session so
             // its intents don't replay into the fresh PTY. Refs #86.
             cleanup_stale_pty_intents(app.handle());

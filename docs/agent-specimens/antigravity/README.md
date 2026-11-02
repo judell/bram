@@ -145,7 +145,8 @@ throwaway `HOME` on 2026-10-30. Rendering its terminal stream reproduced
   empty `lastUserInput`.
 - `--conversation <id>` resumed the recorded conversation. `/resume` listed
   conversations and the renamed title appeared in that list. `/rename`
-  reported success; the durable title store was not identified. The
+  reported success and writes the title to `annotations/<id>.pbtxt` (see
+  *Title store* below). The
   `SessionStart.workspacePaths` field links a conversation to its workspace
   at launch, but a persisted project mapping was not found under `brain/<id>`.
   The first idle
@@ -168,6 +169,27 @@ describes workspace `.agents/hooks.json`, hook event schemas and the
 `PreToolUse` decisions. Those docs informed the probe configuration; the
 findings above are limited to the artifacts actually captured.
 
+
+## Title store
+
+Tested on agy 1.4.12 on 2026-11-02, on throwaway conversations:
+
+- `/rename X` rewrites `~/.gemini/antigravity-cli/annotations/<id>.pbtxt`. The
+  file is one text-format field, `title:"X"`. agy escapes `"` and `\` and
+  leaves UTF-8 raw.
+- agy's auto-title lands in the same file. Across 43 conversations it was the
+  only field.
+- `conversation_summaries.db` holds a copy that lags. A write from outside
+  didn't reach it within 24 s of an idle agy, or by agy's exit, and it did by
+  the next load of that conversation. So read the file first.
+- Writing the file from outside works with agy closed, with agy running
+  followed by another turn, and during the first turn, where the auto-title
+  didn't overwrite it. Quotes, a backslash and non-ASCII all came back intact
+  through `/resume`.
+
+This is agy's private format, not an interface, so re-check it on upgrades.
+Bram refuses to overwrite a file holding anything but one `title` field.
+
 ## Seams
 
 | Seam | Antigravity CLI | Evidence |
@@ -175,7 +197,7 @@ findings above are limited to the artifacts actually captured.
 | Launch and resume | `agy --conversation <id>` resumed the recorded session; `/resume` lists conversations | `help.txt`, `resume-by-id.txt`, `renamed-session-list.txt` |
 | Session id | Present in `SessionStart` on the first prompted turn | `hooks/payloads/SessionStart.jsonl` |
 | Session store | Transcript JSONL under `brain/<id>/.system_generated/logs/`; `SessionStart` carries `workspacePaths`, durable project mapping not identified | `transcript-record.jsonl`, `hooks/payloads/SessionStart.jsonl` |
-| Session metadata and naming | `/rename` changes the title shown by `/resume`; durable title store not identified | `rename-result.txt`, `renamed-session-list.txt` |
+| Session metadata and naming | `/rename` changes the title shown by `/resume`; the title lives in `annotations/<id>.pbtxt` (see *Title store*) | `rename-result.txt`, `renamed-session-list.txt` |
 | Guard hook | Workspace `.agents/hooks.json`; failed command stopped later calls, and `deny.reason` reached the model | `hooks/hooks.json`, `hooks/deny-hooks.json`, `hook-deny.txt` |
 | Guard failure posture | Fails closed except exit 0 with empty output, which runs the call | `hooks/failure-posture/posture.md` |
 | Tool payload | `write_file` (`Content`, `Overwrite`, `Path`), `edit_file` (`Path`, `Replacement`, `Target`), and `run_command` (`CommandLine`, `WaitMsBeforeAsync`, `toolSummary`) | `hooks/payloads/PreToolUse.jsonl`, `hooks/payloads/PreToolUse-denied.jsonl` |

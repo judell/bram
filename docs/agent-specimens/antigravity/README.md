@@ -170,6 +170,21 @@ describes workspace `.agents/hooks.json`, hook event schemas and the
 findings above are limited to the artifacts actually captured.
 
 
+## Deleting a conversation
+
+Tested on agy 1.4.12 on 2026-11-02, on throwaway conversations. `agy --help`
+has no delete command; **F4** in `/resume` deletes after `Delete? (y/n)`.
+
+- F4 removed `conversations/<id>.db`, `annotations/<id>.pbtxt`, `brain/<id>/`
+  and the `conversation_summaries.db` row.
+- It left `presence/<id>.lock`, and the id's mentions in `history.jsonl` and
+  `cache/conversation_metadata.json`.
+- Removing those three paths from outside left the database row, even after a
+  launch, but a `/resume` search no longer found the conversation.
+- `presence/<id>.lock` is empty, and agy holds an OS lock on it while the
+  conversation is open: `flock` and `lockf` both reported it held, and free
+  before and after. The file's existence means nothing on its own.
+
 ## Title store
 
 Tested on agy 1.4.12 on 2026-11-02, on throwaway conversations:

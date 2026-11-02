@@ -34333,6 +34333,60 @@ fn antigravity_set_title(data_dir: &Path, id: &str, title: &str) -> Result<(), S
     atomic_write_text(&path, &antigravity_annotation_text(title))
 }
 
+// agy-session-delete: what `/resume`'s F4 removes (agy has no delete command),
+// less its conversation_summaries.db row: that's agy's private database, and
+// agy's list dropped a conversation with these gone while the row remained.
+// antigravity_summary_rows_from_db drops it for Bram.
+//
+// agy holds an OS lock on presence/<id>.lock while a conversation is open, in
+// any terminal, and Bram's running check sees only its own. Holding it here
+// also keeps one from opening mid-delete. The conversation file goes first
+// because the row filter keys on it: a failure after that leaves a hidden
+// remainder, not a row that resumes into nothing. Checked on agy 1.4.12.
+const ANTIGRAVITY_DELETE_OPEN_REFUSAL: &str =
+    "This conversation is open in Antigravity. Close it there first.";
+
+fn antigravity_delete_conversation(data_dir: &Path, id: &str) -> Result<(), String> {
+    let conversations = data_dir.join("conversations");
+    if !conversations.is_dir() {
+        return Err("Antigravity's conversations folder wasn't found".to_string());
+    }
+    let lock_path = data_dir.join("presence").join(format!("{id}.lock"));
+    let _lock = match std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(file) => match file.try_lock() {
+            Ok(()) => Some(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(ANTIGRAVITY_DELETE_OPEN_REFUSAL.to_string());
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(format!("lock {}: {}", lock_path.display(), e));
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("open {}: {}", lock_path.display(), e)),
+    };
+    let remove = |result: std::io::Result<()>, path: &Path| match result {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("remove {}: {}", path.display(), e))
+        }
+        _ => Ok(()),
+    };
+    let database = conversations.join(format!("{id}.db"));
+    remove(std::fs::remove_file(&database), &database)?;
+    for suffix in ["db-wal", "db-shm"] {
+        let sidecar = conversations.join(format!("{id}.{suffix}"));
+        remove(std::fs::remove_file(&sidecar), &sidecar)?;
+    }
+    let annotation = antigravity_annotation_path(data_dir, id);
+    remove(std::fs::remove_file(&annotation), &annotation)?;
+    let brain = data_dir.join("brain").join(id);
+    remove(std::fs::remove_dir_all(&brain), &brain)
+}
+
 fn antigravity_conversation_created_ms(id: &str) -> Option<i64> {
     let path = antigravity_data_dir()?
         .join("conversations")
@@ -34397,6 +34451,17 @@ fn antigravity_summary_rows_from_db(
         .filter_map(|(id, title, workspaces, modified)| {
             if !session_id_is_safe(&id) {
                 return None;
+            }
+            // agy-session-delete: a deleted conversation keeps its row. No
+            // folder at all means the layout moved, not that all were deleted.
+            if let Some(dir) = path
+                .parent()
+                .map(|p| p.join("conversations"))
+                .filter(|d| d.is_dir())
+            {
+                if !dir.join(format!("{id}.db")).exists() {
+                    return None;
+                }
             }
             let value: serde_json::Value = serde_json::from_str(&workspaces).ok()?;
             let matches = value
@@ -35311,6 +35376,115 @@ mod antigravity_transcript_tests {
             std::fs::read_to_string(&path).unwrap(),
             "title:\"a\"\npinned:true"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn agy_fixture(id: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bram-agy-del-{}", uuid::Uuid::new_v4()));
+        let brain = dir.join("brain").join(id).join("scratch");
+        std::fs::create_dir_all(&brain).unwrap();
+        for sub in ["conversations", "annotations", "presence"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("conversations").join(format!("{id}.db")), "x").unwrap();
+        std::fs::write(dir.join("conversations/other.db"), "x").unwrap();
+        std::fs::write(
+            dir.join("annotations").join(format!("{id}.pbtxt")),
+            "title:\"t\"",
+        )
+        .unwrap();
+        std::fs::write(dir.join("presence").join(format!("{id}.lock")), "").unwrap();
+        dir
+    }
+
+    // A parallel test forking a child copies an open lock until its exec, so
+    // a lock just released can read as held for a moment.
+    fn retry_past_a_forks_copy_of_the_lock(dir: &std::path::Path, id: &str) {
+        let mut result = super::antigravity_delete_conversation(dir, id);
+        for _ in 0..100 {
+            if result.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            result = super::antigravity_delete_conversation(dir, id);
+        }
+        result.unwrap();
+    }
+
+    #[test]
+    fn delete_removes_what_f4_removes_and_nothing_else() {
+        use super::antigravity_delete_conversation;
+
+        let dir = agy_fixture("victim");
+        antigravity_delete_conversation(&dir, "victim").unwrap();
+        assert!(!dir.join("conversations/victim.db").exists());
+        assert!(!dir.join("annotations/victim.pbtxt").exists());
+        assert!(!dir.join("brain/victim").exists());
+        assert!(dir.join("conversations/other.db").exists());
+        // Repeating it finds nothing to do.
+        retry_past_a_forks_copy_of_the_lock(&dir, "victim");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // agy holds this lock while the conversation is open anywhere.
+    #[test]
+    fn delete_refuses_a_conversation_open_in_another_agy() {
+        use super::antigravity_delete_conversation;
+
+        let dir = agy_fixture("open");
+        let held = std::fs::File::open(dir.join("presence/open.lock")).unwrap();
+        held.lock().unwrap();
+        let refused = antigravity_delete_conversation(&dir, "open").unwrap_err();
+        assert!(refused.contains("open in Antigravity"), "{refused}");
+        assert!(dir.join("conversations/open.db").exists());
+        assert!(dir.join("annotations/open.pbtxt").exists());
+        assert!(dir.join("brain/open").exists());
+        drop(held);
+        retry_past_a_forks_copy_of_the_lock(&dir, "open");
+        assert!(!dir.join("conversations/open.db").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn delete_refuses_when_the_layout_has_moved() {
+        use super::antigravity_delete_conversation;
+
+        let dir = std::env::temp_dir().join(format!("bram-agy-del-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let refused = antigravity_delete_conversation(&dir, "x").unwrap_err();
+        assert!(refused.contains("wasn't found"), "{refused}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn summary_reader_drops_a_deleted_conversation_but_survives_a_moved_folder() {
+        use super::antigravity_summary_rows_from_db;
+
+        let dir = std::env::temp_dir().join(format!("bram-agy-rows-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("conversation_summaries.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id TEXT, title TEXT NOT NULL DEFAULT '',
+                    workspace_uris TEXT NOT NULL, last_modified_time TEXT NOT NULL
+                 );
+                 INSERT INTO conversation_summaries VALUES
+                   ('kept', 'Kept', '[\"file:///p\"]', '2026-10-31 21:17:11+00:00'),
+                   ('gone', 'Gone', '[\"file:///p\"]', '2026-10-31 21:17:10+00:00');",
+            )
+            .unwrap();
+        let ids = || -> Vec<String> {
+            antigravity_summary_rows_from_db(&db, "/p")
+                .into_iter()
+                .map(|row| row.0)
+                .collect()
+        };
+        assert_eq!(ids(), ["kept", "gone"]);
+        std::fs::create_dir_all(dir.join("conversations")).unwrap();
+        std::fs::write(dir.join("conversations/kept.db"), "x").unwrap();
+        assert_eq!(ids(), ["kept"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -40403,9 +40577,6 @@ fn delete_session<R: tauri::Runtime>(
         .into_iter()
         .find(|session| session.id == id)
         .ok_or("session not found")?;
-    if provider == SessionProvider::Antigravity {
-        return Err("Antigravity sessions can't be deleted yet".to_string());
-    }
     // delete-live-session-leaves-stub (2026-10-27 20:49Z): deleting the
     // session its CLI was running let the CLI rewrite the file at exit, a
     // 1 KB stub that its partner then resumed into "No conversation found".
@@ -40424,6 +40595,11 @@ fn delete_session<R: tauri::Runtime>(
     // Then the export goes, so the list doesn't show it until the next scan.
     if provider == SessionProvider::Opencode {
         opencode_delete_session(app, id)?;
+        let _ = std::fs::remove_file(&session.path);
+    } else if provider == SessionProvider::Antigravity {
+        // agy-session-delete: `session.path` is only Bram's export.
+        let dir = antigravity_data_dir().ok_or("home directory not found")?;
+        antigravity_delete_conversation(&dir, id)?;
         let _ = std::fs::remove_file(&session.path);
     } else {
         std::fs::remove_file(&session.path).map_err(|e| e.to_string())?;
@@ -81372,7 +81548,9 @@ fn route_request<R: tauri::Runtime>(
                 let status = match e.as_str() {
                     "session not found" => 404,
                     "empty title" | "invalid session id" => 400,
-                    SESSION_DELETE_LIVE_REFUSAL | PAIR_PLACEHOLDER_REFUSAL => 409,
+                    SESSION_DELETE_LIVE_REFUSAL
+                    | ANTIGRAVITY_DELETE_OPEN_REFUSAL
+                    | PAIR_PLACEHOLDER_REFUSAL => 409,
                     _ => 500,
                 };
                 (status, "text/plain; charset=utf-8", e.into_bytes())

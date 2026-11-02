@@ -257,6 +257,13 @@ async function forwardTurns(api) {
     // Chained so the host sees boundaries in order; never awaited here, so
     // a slow or absent Bram can't hold up OpenCode's event stream.
     const body = { type: evt.type, sessionID: sid, at: evt.created };
+    // opencode-session-own-terminal: Bram launches OpenCode --standalone, so
+    // this plugin inherits its terminal's token, and another OpenCode has
+    // none. The shared service (ppid 1) can hold a token too, from whichever
+    // terminal started it, while serving every OpenCode, so it never sends one.
+    if (process.env.BRAM_MENU_TOKEN && process.ppid !== 1) {
+      body.bram_token = process.env.BRAM_MENU_TOKEN;
+    }
     if (evt.type.startsWith("permission.")) body.permission = data;
     if (evt.type.startsWith("form.")) body.form = data;
     chain = chain.then(() => postEvent(body));

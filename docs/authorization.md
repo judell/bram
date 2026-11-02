@@ -56,9 +56,14 @@ Permission-menu callbacks use a separate per-Bram-instance credential,
 menu does not authorize the underlying tool or a Worklist operation.
 `POST /__agent/session`, where a Claude, Codex or Antigravity hook names the
 running session, takes the same credential (`handle_agent_session`). It
-moves which session Bram shows as current and authorizes nothing. Bram
-feature-detects Codex's `--no-daemon` option and adds it to local launches so
-hooks run with this instance's environment rather than a shared server's.
+moves which session Bram shows as current and authorizes nothing. OpenCode's
+`POST /__opencode/event` checks the same credential to tell this terminal's
+OpenCode from another (`handle_opencode_event`); it stays open to a missing
+token until this Bram has seen a valid one, so a project whose plugin predates
+the token keeps working until Setup refreshes it. Bram
+feature-detects Codex's `--no-daemon` option and OpenCode's `--standalone`
+option and adds them to local launches so hooks and plugins run with this
+instance's environment rather than a shared server's.
 Explicit remote connections are preserved and may require the terminal
 fallback. Existing same-user-process limits still apply; no project-readable
 credential file or unauthenticated callback fallback is introduced. Regression

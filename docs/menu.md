@@ -93,11 +93,14 @@ end of the turn.
 
 Two things differ from the hook path:
 
-- **No token, so the payload only describes the request.**
-  `/__opencode/event` is unauthenticated. The plugin runs in OpenCode's shared
-  background service (`opencode serve --service`), started by whichever
-  OpenCode ran first, so it can't carry this launch's `BRAM_MENU_TOKEN`. Any
-  same-user process that can read `resources/.bram-port` can post to the
+- **The payload only describes the request.** Bram launches OpenCode
+  `--standalone`, so the plugin runs in a private server and sends this
+  launch's `BRAM_MENU_TOKEN` (opencode-session-own-terminal). Without that flag
+  it runs in OpenCode's shared background service (`opencode serve --service`),
+  with no token. A project whose plugin predates the token, or an OpenCode
+  older than the flag, still reaches `/__opencode/event` untokened, and the
+  route accepts that until it has seen a tokened event. So the token doesn't
+  settle what the card may say. Any same-user process that can read `resources/.bram-port` can post to the
   route, an agent working in the project included. That is the same-user
   loopback residual [security.md](security.md) accepts under H6 (#113). When
   each row's keys came from the posted JSON, a crafted `permission.asked` sent

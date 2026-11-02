@@ -4048,12 +4048,14 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // the one Bram resumed or its events named, not the newest export;
         // otherwise this path re-marks the newest export current.
         let ordinary_latest = if provider == SessionProvider::Opencode {
-            opencode_live_session_cell()
+            match opencode_live_session_cell()
                 .lock()
                 .ok()
                 .and_then(|g| g.clone())
-                .and_then(|id| opencode_session_path_for_id(app, &id))
-                .or(ordinary_latest)
+            {
+                Some(id) => opencode_session_path_for_id(app, &id),
+                None => ordinary_latest,
+            }
         } else {
             ordinary_latest
         };
@@ -23668,6 +23670,51 @@ fn codex_instance_launch_command(command: &str, supported: bool) -> String {
     format!("{command} --no-daemon")
 }
 
+// opencode-session-own-terminal: the same shape as Codex's --no-daemon (#455).
+// OpenCode's plugin normally runs in a background service shared by every
+// terminal, with none of Bram's environment, so its events couldn't be told
+// from another OpenCode's. `--standalone` gives this launch a private server,
+// a child of this terminal, in the same session store. Checked on 2.1.4.
+fn opencode_supports_standalone() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            // npm installs a .cmd shim, which Command::new cannot run directly.
+            let mut command = std::process::Command::new("cmd.exe");
+            command.args(["/d", "/c", "opencode", "--help"]);
+            command.creation_flags(CREATE_NO_WINDOW);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("opencode");
+            command.arg("--help");
+            command
+        };
+        command
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .is_some_and(|out| {
+                out.status.success()
+                    && String::from_utf8_lossy(&out.stdout).contains("--standalone")
+            })
+    })
+}
+
+fn opencode_instance_launch_command(command: &str, supported: bool) -> String {
+    if !supported
+        || command
+            .split_whitespace()
+            .any(|arg| arg == "--standalone" || arg == "--server" || arg.starts_with("--server="))
+    {
+        return command.to_string();
+    }
+    format!("{command} --standalone")
+}
+
 fn launch_agent_command<R: tauri::Runtime>(mut launch: AgentLaunch<R>) {
     std::thread::spawn(move || {
         // A shared Codex server inherits another launch's environment. Hooks
@@ -23677,8 +23724,38 @@ fn launch_agent_command<R: tauri::Runtime>(mut launch: AgentLaunch<R>) {
             launch.command =
                 codex_instance_launch_command(&launch.command, codex_supports_no_daemon());
         }
+        if launch.provider == "opencode" {
+            launch.command =
+                opencode_instance_launch_command(&launch.command, opencode_supports_standalone());
+        }
         run_agent_launch(launch)
     });
+}
+
+#[cfg(test)]
+mod opencode_instance_launch_tests {
+    use super::opencode_instance_launch_command as launch;
+
+    #[test]
+    fn opencode_launches_get_a_private_server() {
+        assert_eq!(launch("opencode", true), "opencode --standalone");
+        assert_eq!(
+            launch("opencode --session ses_a", true),
+            "opencode --session ses_a --standalone"
+        );
+        assert_eq!(launch("opencode --continue", false), "opencode --continue");
+    }
+
+    #[test]
+    fn a_users_own_server_choice_stands() {
+        for command in [
+            "opencode --standalone",
+            "opencode --server http://x",
+            "opencode --server=http://x",
+        ] {
+            assert_eq!(launch(command, true), command);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -41145,11 +41222,13 @@ fn current_opencode_session_path<R: tauri::Runtime>(
         .lock()
         .ok()
         .and_then(|g| g.clone());
-    if let Some(path) = live.and_then(|id| session_path_for_id(app, SessionProvider::Opencode, &id))
-    {
-        return Ok(Some(path));
+    // opencode-session-own-terminal: rule 3 of the session spine. Newest only
+    // if nothing named a session: a failed export read isn't a change of
+    // session.
+    match live {
+        Some(id) => Ok(session_path_for_id(app, SessionProvider::Opencode, &id)),
+        None => latest_opencode_session_path(app),
     }
-    latest_opencode_session_path(app)
 }
 
 fn system_time_ms(t: std::time::SystemTime) -> Option<i64> {
@@ -93588,12 +93667,12 @@ mod antigravity_turn_tests {
 // (in the terminal, or by the pane's keys). Each request becomes a claim in the
 // queue Claude's and Codex's hook menus use, keyed by OpenCode's request id.
 //
-// The plugin runs in OpenCode's shared background service (`opencode serve
-// --service`, started by whichever OpenCode ran first, ppid 1), so it can't
-// carry the BRAM_MENU_TOKEN Bram gives the agent it launches (#113). The
-// evidence instead is Bram's own terminal: the card shows only once the
-// terminal draws OpenCode's permission prompt. That also keeps a prompt from
-// another OpenCode window on the same project out of this pane.
+// The token doesn't settle this. Launched --standalone the plugin carries
+// BRAM_MENU_TOKEN (#113), but the route still accepts an untokened event until
+// it has seen one (handle_opencode_event), as OpenCode's shared background
+// service sends. The evidence stays Bram's own terminal: the card shows only
+// once the terminal draws OpenCode's permission prompt. That also keeps a
+// prompt from another OpenCode window on the same project out of this pane.
 //
 // opencode-question-card: its question tool's forms (form.created, then
 // form.replied or form.cancelled) take the same path, keyed by the form id and
@@ -93971,10 +94050,37 @@ fn handle_opencode_event<R: tauri::Runtime>(
     body: &[u8],
 ) -> (u16, &'static str, Vec<u8>) {
     const JSON: &str = "application/json; charset=utf-8";
-    let v: serde_json::Value = match serde_json::from_slice(body) {
+    let parsed: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return (400, JSON, b"{\"ok\":false}".to_vec()),
     };
+    // opencode-session-own-terminal: rule 1 of the session spine, "this Bram's
+    // terminal". Launched `--standalone`, the plugin has the token.
+    let authed = authenticated_menu_payload(body, menu_session_token());
+    let claimed = parsed.get("bram_token").is_some();
+    if authed.is_some() {
+        OPENCODE_TOKEN_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    if opencode_event_is_foreign(
+        authed.is_some(),
+        claimed,
+        OPENCODE_TOKEN_SEEN.load(std::sync::atomic::Ordering::SeqCst),
+    ) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "opencode-event",
+                &format!(
+                    "op=foreign-dropped type={} session={} claimed={}",
+                    opencode_event_token(&parsed, "type"),
+                    opencode_event_token(&parsed, "sessionID"),
+                    claimed
+                ),
+            );
+        }
+        return (200, JSON, b"{\"ok\":true,\"handled\":false}".to_vec());
+    }
+    let v = authed.unwrap_or(parsed);
     // Ids and event names are token-shaped; anything else is dropped from the
     // trace rather than written into it.
     let token = |k: &str| opencode_event_token(&v, k);
@@ -94038,11 +94144,58 @@ fn handle_opencode_event<R: tauri::Runtime>(
     // opencode-sessions-browser: whichever session OpenCode's events name is
     // the live one, and every boundary may have added export lines, so the
     // Transcript refreshes as it does when a Claude transcript grows.
-    if let Ok(mut live) = opencode_live_session_cell().lock() {
-        *live = Some(sid.clone());
+    let previous = opencode_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|mut live| live.replace(sid.clone()));
+    if previous.as_deref() != Some(sid.as_str()) && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=live-session-set provider=opencode session={} previous={} source=agent-event",
+                sid,
+                previous.as_deref().unwrap_or("")
+            ),
+        );
     }
     emit_talk_session_changed_for_provider(app, Some(SessionProvider::Opencode));
     (200, JSON, b"{\"ok\":true,\"handled\":true}".to_vec())
+}
+
+// opencode-session-own-terminal: until a tokened event has been seen, an
+// untokened one is a project whose plugin predates the token (Setup's banner
+// offers the refresh), or an OpenCode without --standalone, and is taken as
+// before. After one, it's another OpenCode in this project. A wrong token is
+// another Bram's terminal either way.
+static OPENCODE_TOKEN_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn opencode_event_is_foreign(authenticated: bool, claimed: bool, token_seen: bool) -> bool {
+    !authenticated && (claimed || token_seen)
+}
+
+#[cfg(test)]
+mod opencode_event_identity_tests {
+    use super::opencode_event_is_foreign as foreign;
+
+    #[test]
+    fn this_terminals_events_always_count() {
+        assert!(!foreign(true, true, false));
+        assert!(!foreign(true, true, true));
+    }
+
+    #[test]
+    fn a_wrong_token_never_counts() {
+        assert!(foreign(false, true, false));
+        assert!(foreign(false, true, true));
+    }
+
+    #[test]
+    fn an_untokened_event_counts_only_until_the_token_is_seen() {
+        assert!(!foreign(false, false, false));
+        assert!(foreign(false, false, true));
+    }
 }
 
 fn handle_hook_trace<R: tauri::Runtime>(

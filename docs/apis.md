@@ -712,7 +712,10 @@ composer with Worklist items selected.
   (`type`, `sessionID`, `at`). The host traces the event and, while OpenCode
   is the active provider, moves the claim and refreshes the Transcript;
   answers `{ ok: true, handled: bool }`, 400 on bad JSON. It grants no
-  authorization.
+  authorization. The plugin sends `bram_token` (`BRAM_MENU_TOKEN`) when it
+  runs in Bram's terminal. A wrong token is dropped, as is a missing one once
+  this Bram has seen a valid one (`op=foreign-dropped`, still 200). Until then
+  a missing one is accepted, for a plugin older than the token.
 
 ## 14. Search index
 

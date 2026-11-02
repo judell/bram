@@ -29063,11 +29063,269 @@ fn write_bram_port_files(proj: &Path, port: u16, started_at_ms: i64) -> Result<(
     Ok(())
 }
 
-fn remove_bram_port_files(proj: &Path) {
+// A listening socket (or any HTTP response) is not enough: the previous
+// port may now belong to another project or an unrelated server. An
+// unresponsive listener is uncertain, not permission to replace its record.
+fn bram_port_serves_project(port: u16, proj: &Path) -> Result<bool, String> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    match TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Ok(false),
+        Err(e) => return Err(format!("probe port {}: {}", port, e)),
+    }
+    let response = match ureq::AgentBuilder::new()
+        .try_proxy_from_env(false)
+        .redirects(0)
+        .timeout(Duration::from_secs(1))
+        .build()
+        .get(&format!("http://127.0.0.1:{}/__app-info", port))
+        .call()
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, _)) => return Ok(false),
+        Err(e) => return Err(format!("probe port {}: {}", port, e)),
+    };
+    let mut body = String::new();
+    response
+        .into_reader()
+        .take(65536)
+        .read_to_string(&mut body)
+        .map_err(|e| format!("read port {} identity: {}", port, e))?;
+    let info: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let Some(root) = info.get("projectKey").and_then(|v| v.as_str()) else {
+        return Ok(false);
+    };
+    if info.get("current").and_then(|v| v.as_str()).is_none() {
+        return Ok(false);
+    }
+    Ok(std::fs::canonicalize(root)
+        .ok()
+        .zip(std::fs::canonicalize(proj).ok())
+        .is_some_and(|(owner, project)| owner == project))
+}
+
+// Returns the preserved owner's port, or None when this instance publishes.
+// Keep the lock in this worktree's git directory: it is local runtime state,
+// and separate worktrees must not share the lock. Never unlink a lock file;
+// the OS releases the lock when this handle closes (including on a crash).
+fn publish_bram_port_files(
+    proj: &Path,
+    git_dir: &Path,
+    port: u16,
+    started_at_ms: i64,
+) -> Result<Option<u16>, String> {
+    let lock_path = git_dir.join("bram-port.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("open {}: {}", lock_path.display(), e))?;
+    lock.lock()
+        .map_err(|e| format!("lock {}: {}", lock_path.display(), e))?;
     let port_path = proj.join("resources/.bram-port");
-    let meta_path = bram_port_metadata_path(&port_path);
-    let _ = std::fs::remove_file(port_path);
-    let _ = std::fs::remove_file(meta_path);
+    let recorded_port = std::fs::read_to_string(&port_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .or_else(|| {
+            let raw = std::fs::read(bram_port_metadata_path(&port_path)).ok()?;
+            let meta: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+            u16::try_from(meta.get("port")?.as_u64()?).ok()
+        })
+        .filter(|p| *p != 0);
+    if let Some(previous) = recorded_port {
+        if previous != port && bram_port_serves_project(previous, proj)? {
+            return Ok(Some(previous));
+        }
+    }
+    write_bram_port_files(proj, port, started_at_ms)?;
+    Ok(None)
+}
+
+#[cfg(test)]
+mod bram_port_publication_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    struct Project(PathBuf);
+    impl Project {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("bram-port-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            Self(root)
+        }
+        fn publish(&self, port: u16) -> Result<Option<u16>, String> {
+            publish_bram_port_files(&self.0, &self.0.join(".git"), port, 123)
+        }
+        fn bytes(&self) -> (Vec<u8>, Vec<u8>) {
+            (
+                std::fs::read(self.0.join("resources/.bram-port")).unwrap(),
+                std::fs::read(self.0.join("resources/.bram-port.json")).unwrap(),
+            )
+        }
+    }
+    impl Drop for Project {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct Server {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        task: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Server {
+        fn new(body: String, status: u16, delay: Duration) -> Self {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let port = server.server_addr().to_ip().unwrap().port();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = stop.clone();
+            let task = std::thread::spawn(move || {
+                while !stopping.load(Ordering::SeqCst) {
+                    if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(20)) {
+                        assert_eq!(request.url(), "/__app-info");
+                        std::thread::sleep(delay);
+                        let _ = request.respond(
+                            tiny_http::Response::from_string(&body).with_status_code(status),
+                        );
+                    }
+                }
+            });
+            Self {
+                port,
+                stop,
+                task: Some(task),
+            }
+        }
+        fn project(project: &Project) -> Self {
+            Self::new(
+                serde_json::json!({"current":"0.8.2", "projectKey":project.0}).to_string(),
+                200,
+                Duration::ZERO,
+            )
+        }
+    }
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            self.task.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    fn second_instance_preserves_both_live_owner_files_byte_for_byte() {
+        let project = Project::new();
+        let first = Server::project(&project);
+        let second = Server::project(&project);
+        assert_eq!(project.publish(first.port).unwrap(), None);
+        let before = project.bytes();
+        assert_eq!(project.publish(second.port).unwrap(), Some(first.port));
+        assert_eq!(project.bytes(), before);
+        drop(second);
+        assert!(bram_port_serves_project(first.port, &project.0).unwrap());
+        assert_eq!(project.bytes(), before);
+    }
+
+    #[test]
+    fn dead_owner_is_replaced_and_restart_can_reuse_its_port() {
+        let project = Project::new();
+        let old = Server::project(&project);
+        let dead_port = old.port;
+        project.publish(dead_port).unwrap();
+        drop(old);
+        let new = Server::project(&project);
+        assert_eq!(project.publish(new.port).unwrap(), None);
+        let (plain, meta) = project.bytes();
+        assert_eq!(String::from_utf8(plain).unwrap(), new.port.to_string());
+        let meta: serde_json::Value = serde_json::from_slice(&meta).unwrap();
+        assert_eq!(meta["port"], new.port);
+        assert_eq!(meta["pid"], std::process::id());
+        assert_eq!(meta["startedAtMs"], 123);
+        assert_eq!(project.publish(new.port).unwrap(), None);
+    }
+
+    #[test]
+    fn other_projects_and_non_bram_http_do_not_own_this_project() {
+        let project = Project::new();
+        let other = Project::new();
+        let new = Server::project(&project);
+        for (body, status) in [
+            (
+                serde_json::json!({"current":"0.8.2", "projectKey":other.0}).to_string(),
+                200,
+            ),
+            ("<html>another server</html>".to_string(), 200),
+            ("not found".to_string(), 404),
+        ] {
+            let old = Server::new(body, status, Duration::ZERO);
+            write_bram_port_files(&project.0, old.port, 1).unwrap();
+            assert_eq!(project.publish(new.port).unwrap(), None);
+        }
+        // A separate project has an independent lock and publication.
+        let other_server = Server::project(&other);
+        assert_eq!(other.publish(other_server.port).unwrap(), None);
+    }
+
+    #[test]
+    fn uncertain_listener_leaves_the_previous_record_untouched() {
+        let project = Project::new();
+        let slow = Server::new("{}".to_string(), 200, Duration::from_millis(1300));
+        let new = Server::project(&project);
+        write_bram_port_files(&project.0, slow.port, 1).unwrap();
+        let before = project.bytes();
+        assert!(project.publish(new.port).is_err());
+        assert_eq!(project.bytes(), before);
+    }
+
+    #[test]
+    fn legacy_port_file_without_metadata_still_preserves_a_live_owner() {
+        let project = Project::new();
+        let old = Server::project(&project);
+        let new = Server::project(&project);
+        std::fs::create_dir_all(project.0.join("resources")).unwrap();
+        std::fs::write(project.0.join("resources/.bram-port"), old.port.to_string()).unwrap();
+        assert_eq!(project.publish(new.port).unwrap(), Some(old.port));
+        assert!(!project.0.join("resources/.bram-port.json").exists());
+    }
+
+    #[test]
+    fn simultaneous_publishers_choose_one_owner_and_keep_the_pair_consistent() {
+        let project = Project::new();
+        let a = Server::project(&project);
+        let b = Server::project(&project);
+        let barrier = Arc::new(Barrier::new(2));
+        let tasks: Vec<_> = [a.port, b.port]
+            .into_iter()
+            .map(|port| {
+                let root = project.0.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (
+                        port,
+                        publish_bram_port_files(&root, &root.join(".git"), port, 123).unwrap(),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = tasks.into_iter().map(|task| task.join().unwrap()).collect();
+        let owners: Vec<_> = results.iter().filter(|(_, kept)| kept.is_none()).collect();
+        assert_eq!(owners.len(), 1, "{results:?}");
+        let owner = owners[0].0;
+        assert!(results.iter().any(|(_, kept)| *kept == Some(owner)));
+        let (plain, meta) = project.bytes();
+        assert_eq!(String::from_utf8(plain).unwrap(), owner.to_string());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&meta).unwrap()["port"],
+            owner
+        );
+    }
 }
 
 fn wait_for_loopback_http(port: u16, total_ms: u64) -> bool {
@@ -94390,7 +94648,6 @@ pub fn run() {
             let _ = LOOPBACK_STARTED_MS.set(started_at_ms);
             eprintln!("[bram] loopback port={} sticky={}", port, sticky);
             if let Some(proj) = startup_project_root.as_ref() {
-                remove_bram_port_files(proj);
                 // issue-217: startup is the safe cutover point for the
                 // hook rename — no Bram-spawned session exists yet.
                 prune_legacy_claude_hooks(proj);
@@ -94577,8 +94834,9 @@ pub fn run() {
                 }
             });
             // Publish the loopback port only after the accept loop is
-            // actually serving HTTP. Otherwise agents can race startup:
-            // lsof shows a listener, but curl still gets connection refused.
+            // actually serving HTTP, and preserve a live same-project owner.
+            // Leave the old files in place until this decision: deleting them
+            // at startup hides the owner and lets a second instance take over.
             if let Some(proj) = startup_project_root.as_ref() {
                 let port_path = proj.join("resources/.bram-port");
                 // issue-353: never scaffold the home directory. The port
@@ -94597,18 +94855,27 @@ pub fn run() {
                         proj.display()
                     );
                 } else if wait_for_loopback_http(port, 5000) {
-                    match write_bram_port_files(proj, port, started_at_ms) {
-                        Ok(()) => eprintln!(
-                            "[bram] wrote ready port files: {}, {}",
-                            port_path.display(),
-                            bram_port_metadata_path(&port_path).display()
+                    let publication = git_dir_path(app.handle())
+                        .ok_or_else(|| "could not resolve this project's git directory".to_string())
+                        .and_then(|git_dir| {
+                            publish_bram_port_files(proj, &git_dir, port, started_at_ms)
+                        });
+                    let detail = match publication {
+                        Ok(None) => format!(
+                            "op=publish port={} pid={} started_at_ms={}",
+                            port, std::process::id(), started_at_ms
                         ),
-                        Err(e) => eprintln!(
-                            "[bram] failed to write ready port files for {}: {}",
-                            port_path.display(),
-                            e
+                        Ok(Some(owner_port)) => format!(
+                            "op=preserve reason=live-project-owner port={} owner_port={} pid={}",
+                            port, owner_port, std::process::id()
                         ),
-                    }
+                        Err(e) => format!(
+                            "op=publish-error port={} pid={} error={:?}",
+                            port, std::process::id(), e
+                        ),
+                    };
+                    eprintln!("[bram-port] {}", detail);
+                    append_bram_trace_line(app.handle(), "bram-port", &detail);
                 } else {
                     eprintln!(
                         "[bram] loopback port {} did not become HTTP-ready; leaving {} unpublished",

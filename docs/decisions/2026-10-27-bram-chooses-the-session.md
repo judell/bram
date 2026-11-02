@@ -17,11 +17,15 @@ File times and database update times never replace a named session, and a failed
 | Provider | (1) Its own event | (2) Bram's launch | Where it stands |
 |---|---|---|---|
 | OpenCode | plugin events (`sessionID`) overwrite the cell | live cell | Follows the rule. Whether events from another terminal can reach the cell is unverified |
-| Antigravity | not read yet; every captured hook carries `conversationId` | live cell, with a pinned session never falling back to newest | Follows (2) and (3). A conversation change inside the TUI isn't seen yet |
+| Antigravity | `PreInvocation` hook posts `conversationId` to `/__agent/session` | live cell, with a pinned session never falling back to newest | Follows the rule (`agy-reads-conversation-id`). A change with no turn taken is seen at the next invocation |
 | Claude | not read for identity; hook payloads carry the transcript path | cache set on explicit resume, reserved id on New session | Doesn't follow it: after launch, newest mtime with hysteresis decides |
 | Codex | not read for identity; its hook payloads carry `session_id` | reload pin, persisted | Doesn't follow it: after launch, newest mtime decides, and rules retire the pin |
 
-The gaps are tracked as `agy-reads-conversation-id` and `current-session-from-events`.
+**"From this Bram's terminal" is enforced by the terminal's environment.** Bram exports `BRAM_PORT` and `BRAM_MENU_TOKEN` to its terminal. A hook in another terminal has neither, so it can't report, and the route refuses a wrong token. Captured on agy 1.4.12, 2026-11-02, on a live demo: an agy with no such environment moved nothing; one with it moved `current` to a new conversation and then through `/resume` inside the TUI, with no launch by Bram.
+
+**A subagent isn't the session.** An agy subagent fires `PreInvocation` under its own `conversationId`, interleaved with its parent's, and its `lastUserInput` is empty, so the hook skips it. That's observed, not documented. If it stops holding, the Transcript follows the subagent until the parent's next invocation. Any provider moved onto rule 1 needs the same check.
+
+The remaining gap is tracked as `current-session-from-events`.
 
 **Evidence:** one day of driving switches across the three agents broke this rule in a different place each time. Each break, its trace receipt and the commit that closed it:
 

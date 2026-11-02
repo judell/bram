@@ -83,6 +83,10 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
             enter_antigravity_workspace(&payload);
             antigravity_worklist_hook(&payload, stdin_error, started)
         }
+        "antigravity-session" => {
+            antigravity_session_report(&payload);
+            0
+        }
         other => {
             // Misregistration surfaces in stderr, never in the exit code: a
             // nonzero exit from a PreToolUse-shaped hook could block a tool
@@ -273,6 +277,44 @@ fn post_json_outcome(port: u16, path: &str, body: &str) -> &'static str {
     let mut buf = [0u8; 256];
     let _ = std::io::Read::read(&mut stream, &mut buf);
     "ok"
+}
+
+// agy-reads-conversation-id: rule 1 of the session spine
+// (docs/decisions/2026-10-27-bram-chooses-the-session.md). agy's PreInvocation
+// names the conversation that is running, including after `/resume` inside
+// the TUI. Captured on agy 1.4.12, 2026-11-02:
+// - An agy in another terminal has no BRAM_PORT or BRAM_MENU_TOKEN, so it
+//   reports nothing, and a mismatched token is refused by the route.
+// - A subagent fires PreInvocation under its own conversationId, interleaved
+//   with its parent's, with an empty lastUserInput; the parent's carries the
+//   prompt. That is observed, not documented. If it stops holding, the
+//   Transcript follows the subagent until the parent's next invocation.
+fn antigravity_session_report_body(
+    payload: &serde_json::Value,
+    token: &str,
+) -> Option<serde_json::Value> {
+    let session = str_field(payload, "conversationId");
+    if session.is_empty() || token.is_empty() || str_field(payload, "lastUserInput").is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "provider": "antigravity",
+        "session": session,
+        "bram_token": token,
+    }))
+}
+
+// The port comes from this terminal's environment, not resources/.bram-port,
+// which names whichever instance wrote it last. No output and exit 0 whatever
+// happens: agy blocks on a failing hook, and this one only informs.
+fn antigravity_session_report(payload: &serde_json::Value) {
+    let port = std::env::var("BRAM_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok());
+    let token = std::env::var("BRAM_MENU_TOKEN").unwrap_or_default();
+    if let (Some(port), Some(body)) = (port, antigravity_session_report_body(payload, &token)) {
+        let _ = post_json_outcome(port, "/__agent/session", &body.to_string());
+    }
 }
 
 // The [hook] decision line, shipped exactly the way the Python guards ship
@@ -1296,6 +1338,21 @@ pub fn guard_hook_command(link: &Path, hook: &str) -> String {
 #[cfg(test)]
 mod guard_mode_tests {
     use super::*;
+
+    #[test]
+    fn antigravity_session_report_skips_subagents_and_foreign_terminals() {
+        let turn = serde_json::json!({ "conversationId": "c1", "lastUserInput": "hi" });
+        let body = antigravity_session_report_body(&turn, "tok").unwrap();
+        assert_eq!(body["session"], "c1");
+        assert_eq!(body["bram_token"], "tok");
+        // Another terminal has no token.
+        assert!(antigravity_session_report_body(&turn, "").is_none());
+        // A subagent's payload has an empty lastUserInput (agy 1.4.12).
+        let sub = serde_json::json!({ "conversationId": "c2", "lastUserInput": "" });
+        assert!(antigravity_session_report_body(&sub, "tok").is_none());
+        let none = serde_json::json!({ "lastUserInput": "hi" });
+        assert!(antigravity_session_report_body(&none, "tok").is_none());
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir =

@@ -137,6 +137,12 @@ throwaway `HOME` on 2026-10-30. Rendering its terminal stream reproduced
 - A `PreToolUse` hook returning `force_ask` produced a four-choice command
   approval menu. Pressing Escape interrupted the turn; selecting option 4
   produced `User declined the tool call`. These are separate captures.
+- Session identity (2026-11-02, agy 1.4.12): `SessionStart` fired only for a
+  new conversation, not on `--conversation` or `/resume`. `PreInvocation`
+  carries the running `conversationId`, and it changed at the next invocation
+  after `/resume` inside the TUI. A subagent fires its own `SessionStart` and
+  `PreInvocation` under its own id, interleaved with its parent's, with an
+  empty `lastUserInput`.
 - `--conversation <id>` resumed the recorded conversation. `/resume` listed
   conversations and the renamed title appeared in that list. `/rename`
   reported success; the durable title store was not identified. The

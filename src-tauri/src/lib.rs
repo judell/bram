@@ -35509,7 +35509,8 @@ fn opencode_live_session_cell() -> &'static Mutex<Option<String>> {
 }
 
 // Explicit launch identity, independent of database availability and export
-// success. Only another explicit launch replaces or clears this pin.
+// success. Only another explicit launch, or the running CLI naming its own
+// session (handle_agent_session), replaces or clears this pin.
 fn antigravity_live_session_cell() -> &'static Mutex<Option<String>> {
     static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
@@ -35558,6 +35559,49 @@ fn mark_antigravity_session_current<R: tauri::Runtime>(app: &AppHandle<R>, id: &
             ),
         );
     }
+}
+
+// agy-reads-conversation-id: rule 1 of the session spine. The running CLI
+// named its own session, which outranks Bram's launch pin. Reports come from
+// the PreInvocation hook, once per model invocation, so a repeat is a no-op.
+fn handle_agent_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let Some(value) = authenticated_menu_payload(body, menu_session_token()) else {
+        return (403, JSON, b"{\"error\":\"bad token\"}".to_vec());
+    };
+    let provider = value.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+    let session = value.get("session").and_then(|v| v.as_str()).unwrap_or("");
+    if provider != "antigravity" || !session_id_is_safe(session) {
+        return (400, JSON, b"{\"error\":\"bad session\"}".to_vec());
+    }
+    if current_provider(app) != Some(SessionProvider::Antigravity) {
+        return (200, JSON, b"{\"ok\":true,\"changed\":false}".to_vec());
+    }
+    let previous = antigravity_live_session_cell()
+        .lock()
+        .ok()
+        .and_then(|mut live| live.replace(session.to_string()));
+    if previous.as_deref() == Some(session) {
+        return (200, JSON, b"{\"ok\":true,\"changed\":false}".to_vec());
+    }
+    remember_last_active_session(app, SessionProvider::Antigravity, session);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=live-session-set provider=antigravity session={} previous={} source=agent-event",
+                session,
+                previous.as_deref().unwrap_or("")
+            ),
+        );
+    }
+    emit_replayable_signal(app, "sessions-list-changed");
+    emit_talk_session_changed_for_provider(app, Some(SessionProvider::Antigravity));
+    (200, JSON, b"{\"ok\":true,\"changed\":true}".to_vec())
 }
 
 fn clear_antigravity_live_session<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
@@ -58908,8 +58952,27 @@ fn antigravity_guard_command(link: &Path) -> String {
 // Single-quoted in the shell, so no apostrophes.
 const ANTIGRAVITY_NO_DECISION_DENY: &str = r#"{"decision":"deny","reason":"Blocked: the Bram worklist guard gave no decision. The guard ~/.bram/bram-guard reaches is probably from an older Bram that predates Antigravity support. Update or relaunch every running Bram, then retry."}"#;
 
+// agy-reads-conversation-id: reports the running conversation at each model
+// invocation. It shares the guard's link, so it's cut from the guard command.
+// Never the guard's wrapper: that turns empty output into a deny, and empty
+// is this hook's normal answer. agy blocks on a failing hook, so nothing here
+// can fail: an older guard's "unknown hook" exits 0 with no output too.
+fn antigravity_session_hook_command(guard_command: &str) -> String {
+    let link = guard_command.split('"').nth(1).unwrap_or("");
+    let bare = guard::guard_hook_command(Path::new(link), "antigravity-session");
+    if cfg!(windows) {
+        return bare;
+    }
+    format!("{} >/dev/null 2>&1; exit 0", bare)
+}
+
 fn antigravity_hooks_group(command: &str) -> serde_json::Value {
     serde_json::json!({
+        "PreInvocation": [{
+            "type": "command",
+            "command": antigravity_session_hook_command(command),
+            "timeout": ANTIGRAVITY_GUARD_TIMEOUT_SECS,
+        }],
         "PreToolUse": [{
             "matcher": ANTIGRAVITY_GUARD_MATCHER,
             "hooks": [{
@@ -59098,6 +59161,19 @@ mod antigravity_hooks_tests {
         let allow = fake("allow", r#"cat > /dev/null; echo '{"decision":"allow"}'"#);
         assert_eq!(run(&allow), serde_json::json!({ "decision": "allow" }));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_hook_shares_the_guard_link_and_cannot_block() {
+        let wrapped = antigravity_guard_command(std::path::Path::new("/b/bram-guard"));
+        for guard in [CMD, wrapped.as_str()] {
+            let session = super::antigravity_session_hook_command(guard);
+            assert!(session.contains(" guard antigravity-session"), "{session}");
+            assert!(!session.contains("worklist"), "{session}");
+            assert!(!session.contains("deny"), "{session}");
+            #[cfg(not(windows))]
+            assert!(session.ends_with("exit 0"), "{session}");
+        }
     }
 
     #[test]
@@ -93977,6 +94053,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_permission_menu(app, &buf, false)
+        }
+    } else if path == "__agent/session" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_agent_session(app, &buf)
         }
     } else if path == "__menu/permission/clear" {
         if method != "POST" {

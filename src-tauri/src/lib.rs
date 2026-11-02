@@ -5744,6 +5744,10 @@ struct RevealFloorInputs {
     identity: String,
     authoritative_open: bool,
     menu_displayed: bool,
+    // terminal-attention-suppresses-silence: Bram already told the user why
+    // the terminal is quiet. An Antigravity permission prompt is read from the
+    // screen and puts up no menu, so menu_displayed doesn't cover it.
+    terminal_attention_open: bool,
     post_escape: bool,
     cancelled: bool,
     bytes: usize,
@@ -5856,6 +5860,8 @@ impl RevealFloorTracker {
         self.silent_ms += REVEAL_FLOOR_TICK_MS;
         let suppression = if input.menu_displayed {
             Some("menu-displayed")
+        } else if input.terminal_attention_open {
+            Some("terminal-attention")
         } else if input.cancelled {
             Some("cancelled-turn")
         } else if input.post_escape {
@@ -5972,11 +5978,73 @@ mod reveal_floor_tests {
             identity: format!("codex:{identity}"),
             authoritative_open: true,
             menu_displayed: false,
+            terminal_attention_open: false,
             post_escape: false,
             cancelled: false,
             bytes,
             now_ms,
         }
+    }
+
+    // terminal-attention-suppresses-silence, 2026-11-02 18:15: an Antigravity
+    // permission prompt raised both banners.
+    #[test]
+    fn an_open_attention_prompt_holds_the_silence_warning() {
+        let mut tracker = RevealFloorTracker::new();
+        tracker.step(&input("1", 9, 1_000));
+        let mut held = input("1", 0, 2_000);
+        held.terminal_attention_open = true;
+        let mut seen = Vec::new();
+        for i in 0..40 {
+            held.now_ms = 2_000 + i * REVEAL_FLOOR_TICK_MS;
+            seen.extend(tracker.step(&held));
+        }
+        assert!(!seen.contains(&RevealFloorTransition::Warn), "{seen:?}");
+        assert!(seen.contains(&RevealFloorTransition::Suppressed("terminal-attention")));
+    }
+
+    #[test]
+    fn an_attention_prompt_clears_a_warning_already_up() {
+        let mut tracker = RevealFloorTracker::new();
+        tracker.step(&input("1", 9, 1_000));
+        let mut seen = Vec::new();
+        for i in 0..40 {
+            seen.extend(tracker.step(&input("1", 0, 2_000 + i * REVEAL_FLOOR_TICK_MS)));
+        }
+        assert!(seen.contains(&RevealFloorTransition::Warn));
+        let mut held = input("1", 0, 20_000);
+        held.terminal_attention_open = true;
+        assert_eq!(
+            tracker.step(&held),
+            vec![
+                RevealFloorTransition::Cleared {
+                    reason: "terminal-attention",
+                    was_warned: true
+                },
+                RevealFloorTransition::Suppressed("terminal-attention"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_real_silence_after_the_prompt_is_answered_still_warns() {
+        let mut tracker = RevealFloorTracker::new();
+        tracker.step(&input("1", 9, 1_000));
+        let mut held = input("1", 0, 2_000);
+        held.terminal_attention_open = true;
+        for i in 0..40 {
+            held.now_ms = 2_000 + i * REVEAL_FLOOR_TICK_MS;
+            tracker.step(&held);
+        }
+        // Answering it draws to the terminal. The wait counts as a gap, so the
+        // threshold has grown.
+        tracker.step(&input("1", 9, 30_000));
+        let ticks = tracker.threshold_ms() / REVEAL_FLOOR_TICK_MS + 2;
+        let mut seen = Vec::new();
+        for i in 0..ticks {
+            seen.extend(tracker.step(&input("1", 0, 31_000 + i * REVEAL_FLOOR_TICK_MS)));
+        }
+        assert!(seen.contains(&RevealFloorTransition::Warn), "{seen:?}");
     }
 
     fn quiet(
@@ -20497,6 +20565,9 @@ fn pty_spawn(
                     authoritative_open,
                     menu_displayed: turn.pending_menu.is_some()
                         || PANE_MENU_DISPLAYED.load(Ordering::Relaxed),
+                    // Last tick's: this detector steps first. A warning that
+                    // lands on the same tick clears on the next.
+                    terminal_attention_open: terminal_attention.active,
                     post_escape,
                     cancelled,
                     bytes,

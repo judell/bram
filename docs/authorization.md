@@ -251,6 +251,22 @@ coverage can satisfy the general write check. #387 added observation to
 previously unseen surfaces; logging did not turn the observation into a
 blocking rule. The policy to wait for approval still binds.
 
+**The subagent lifecycle check reads only inline command text.**
+`subagent_lifecycle_verdict` (`guard_policy.rs`) denies a subagent's Bash
+call when the payload carries an `agent_id` and the command string contains
+a worklist lifecycle route. It is a substring test. A route called from a
+script file, a shell function or an alias is not seen; a command whose text
+merely mentions a route (writing a message template that names it, grepping
+the docs for it) is denied. The host routes do not know the caller's
+`agent_id`, so a hidden call is caught only if another rule covers it, and
+the accepted residual is the same as for local processes above. Seen on
+2026-11-02 during #469 wave 1: a subagent's inline edit script carried
+`/__worklist/mutate` inside a deny-message template, was denied, and was
+then run from a file. The diff held no lifecycle call, but the detour is the
+routing-around the conventions forbid, whatever the content: a subagent that
+meets the denial reports it and stops. Trace: `[hook] … decision=deny
+reason=subagent-lifecycle-call`.
+
 **The grant does not encode every policy distinction.** Both Start and
 Commit use kind `approved`; only apply-and-commit adds `commitToo`.
 `ensure_worklist_commit_authorized` checks kind, ids and freshness, not a

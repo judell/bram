@@ -34591,14 +34591,40 @@ fn antigravity_conversation_created_ms(id: &str) -> Option<i64> {
     system_time_ms(created)
 }
 
-fn antigravity_workspace_matches(value: &str, canonical: &str) -> bool {
+// windows-antigravity-sessions-workspace-match: agy stores a workspace as a
+// file URI. On Windows that is `file:///C:/Users/jon/bram` (forward slashes,
+// a slash before the drive letter), while the canonical root the callers
+// pass is `\\?\C:\Users\jon\bram`; compared whole, no row ever matched, so
+// the Sessions tab listed no Antigravity session there (2026-11-03,
+// `[sessions] op=list provider=antigravity visible=0` with three rows for
+// this workspace). Both sides reduce to one spelling: no scheme, no
+// verbatim prefix, forward slashes, no slash before a drive letter, and
+// case-folded on Windows, where NTFS ignores case and agy records the
+// folder as the user typed it.
+fn antigravity_workspace_key(value: &str) -> String {
     let decoded = percent_decode(value);
-    let path = decoded
+    let mut path = decoded
         .strip_prefix("file://")
         .unwrap_or(&decoded)
-        .trim_end_matches('/');
-    let canonical = canonical.trim_end_matches('/');
-    path == canonical || path.strip_prefix("file://") == Some(canonical)
+        .to_string();
+    if cfg!(windows) {
+        if let Some(rest) = path.strip_prefix(r"\\?\") {
+            if !rest.starts_with("UNC\\") {
+                path = rest.to_string();
+            }
+        }
+        path = path.replace('\\', "/");
+        let b = path.as_bytes();
+        if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+            path.remove(0);
+        }
+        path = path.to_lowercase();
+    }
+    path.trim_end_matches('/').to_string()
+}
+
+fn antigravity_workspace_matches(value: &str, canonical: &str) -> bool {
+    antigravity_workspace_key(value) == antigravity_workspace_key(canonical)
 }
 
 fn antigravity_summary_rows(canonical_root: &str) -> Vec<(String, String, i64)> {
@@ -35454,6 +35480,31 @@ mod antigravity_transcript_tests {
         assert!(!antigravity_workspace_matches(
             "file:///work/project-two",
             "/work/project"
+        ));
+    }
+
+    // windows-antigravity-sessions-workspace-match: agy's
+    // `file:///C:/Users/jon/bram` against the `\\?\C:\Users\jon\bram` that
+    // canonicalize() returns, with a percent-encoded space and a case
+    // difference; the home folder must still not match the project.
+    #[cfg(windows)]
+    #[test]
+    fn windows_workspace_uris_match_verbatim_canonical_roots() {
+        assert!(antigravity_workspace_matches(
+            "file:///C:/Users/jon/bram",
+            r"\\?\C:\Users\jon\bram"
+        ));
+        assert!(antigravity_workspace_matches(
+            "file:///C:/Users/Jon%20Udell/bram",
+            r"\\?\C:\Users\Jon Udell\bram"
+        ));
+        assert!(antigravity_workspace_matches(
+            "file:///c:/users/jon/bram",
+            r"C:\Users\jon\bram"
+        ));
+        assert!(!antigravity_workspace_matches(
+            "file:///C:/Users/jon",
+            r"\\?\C:\Users\jon\bram"
         ));
     }
 

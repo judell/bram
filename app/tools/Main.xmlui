@@ -1481,7 +1481,7 @@
               content="{window.__bramFooterStatusMarkdown(window.__bramFooterSessionLine(window.__bramCurrentSessionOf(footerSessions.value), footerAgents.value), null)}" />
           </Theme>
           <HStack
-            when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
+            when="{window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) > 0}"
             gap="$space-1"
             verticalAlignment="center">
             <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="· Transcripts:" />
@@ -1495,7 +1495,7 @@
               label="{window.__bramMainChipLabel(mainAgentStatus.value)}"
               size="xs"
               variant="{transcriptAgentId === '' ? 'solid' : 'outlined'}"
-              tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
+              tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(window.__bramRosterForSession(footerAgents.value, footerSessions.value)) : 'Show the main conversation in the Transcript tab'}"
               onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
             <!-- One continuous reverse-chron read: newest chip leftmost (after
                  Main), then the dropdown continues newest→oldest top-down. Each
@@ -1504,7 +1504,7 @@
                  visible chip promotes the next agent up from the dropdown. The
                  Main chip is intentionally never dismissible. A selection from
                  the dropdown takes a chip (__bramFooterChipAgents). -->
-            <Items data="{window.__bramFooterChipAgents(footerAgents.value, dismissedAgentIds, transcriptAgentId)}">
+            <Items data="{window.__bramFooterChipAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds, transcriptAgentId)}">
               <HStack gap="0" verticalAlignment="center">
                 <Button
                   label="{window.__bramAgentChipLabel($item)}"
@@ -1522,11 +1522,11 @@
               </HStack>
             </Items>
             <DropdownMenu
-              when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 3}"
-              label="{'+' + (window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length - 3) + ' more'}"
+              when="{window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length > 3}"
+              label="{'+' + (window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length - 3) + ' more'}"
               alignment="end"
               triggerButtonVariant="outlined">
-              <Items data="{window.__bramFooterOverflowAgents(footerAgents.value, dismissedAgentIds, transcriptAgentId)}">
+              <Items data="{window.__bramFooterOverflowAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds, transcriptAgentId)}">
                 <MenuItem
                   label="{window.__bramAgentChipLabel($item)}"
                   tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
@@ -1539,11 +1539,11 @@
                  even when every subagent is hidden, because the strip's when also
                  opens for hidden-in-roster agents. -->
             <DropdownMenu
-              when="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
-              label="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) + ' hidden'}"
+              when="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) > 0}"
+              label="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) + ' hidden'}"
               alignment="end"
               triggerButtonVariant="ghost">
-              <Items data="{window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).slice().reverse() : []}">
+              <Items data="{window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).slice().reverse() : []}">
                 <MenuItem
                   label="{'↩ ' + window.__bramAgentChipLabel($item)}"
                   tooltip="{'Restore ' + (window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"

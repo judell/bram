@@ -15314,6 +15314,17 @@ window.__bramRestoreAllAgents = function () {
 // top-3 Items, and the "+N more" dropdown so a dismissal promotes the next
 // agent up from overflow. Returns the raw agents array untouched when
 // nothing is dismissed.
+// footer-subagents-hidden-while-session-pending: until a new session's first
+// turn confirms it, /__agents falls back to the PREVIOUS session's transcript,
+// so its subagents (and "N hidden") leaked into the new session's footer. While
+// the current /__sessions/list row is `pending`, the chip strip gets no roster.
+// Keyed on the pending flag, not a sid comparison: a Codex roster's sid is the
+// rollout file stem, not the session id.
+window.__bramRosterForSession = function (roster, sessions) {
+  var current = window.__bramCurrentSessionOf(sessions);
+  return current && current.pending ? null : roster;
+};
+
 window.__bramVisibleFooterAgents = function (roster, dismissed) {
   var agents = (roster && roster.agents) || [];
   if (!dismissed || !dismissed.length) return agents;

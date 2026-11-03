@@ -54875,37 +54875,20 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 // (/__repo/tree/dir), because listing them up front would add ~15,750 rows
 // (worklist-history alone is 11,560) to a 272-row tree.
 //
-// These lists are relative to Bram's state folder; bram_state_rel turns
-// them into the repo-relative paths git and the tree use.
-const BRAM_STATE_FILES: &[&str] = &["worklist.json"];
-const BRAM_STATE_DIRS: &[&str] = &[
-    "worklist-drafts",
-    "worklist-history",
-    "feedback-drafts",
-    "feedback-history",
-    "session-digests",
-    "handoffs",
-    "outbound-turns",
-    "bram-traces",
-];
-// The state the content search also covers: everything but the traces
-// (1.4 GB of logs). History was first left out on a guess that it would be
-// slow; measured, the three history folders (~123 MB) grep in 0.21-0.27 s
-// warm, and the tab searches on Enter, not per keystroke. Jon's first
-// search, for an event name, matched only in worklist-history.
+// The lists (bram_state_files, bram_state_dirs, bram_state_grep) are the
+// `files_tab` and `grep_rank` projections of BRAM_OWNED_ENTRIES, relative to
+// Bram's state folder; bram_state_rel turns them into the repo-relative
+// paths git and the tree use.
+//
+// The content search covers everything but the traces (1.4 GB of logs).
+// History was first left out on a guess that it would be slow; measured,
+// the three history folders (~123 MB) grep in 0.21-0.27 s warm, and the tab
+// searches on Enter, not per keystroke. Jon's first search, for an event
+// name, matched only in worklist-history.
 //
 // Order is priority: results are capped (REPO_GREP_CAP), so the current
 // state comes before the histories. bram_state_grep_ordered sorts by it.
-const BRAM_STATE_GREP: &[&str] = &[
-    "worklist.json",
-    "worklist-drafts",
-    "feedback-drafts",
-    "session-digests",
-    "handoffs",
-    "worklist-history",
-    "feedback-history",
-    "outbound-turns",
-];
+//
 // Each history entry is a .json and .md pair. The .json is a snapshot of the
 // whole board after the change, so a term in one long-lived item matches
 // every snapshot taken while it existed (on the demo board,
@@ -54914,10 +54897,10 @@ const BRAM_STATE_GREP: &[&str] = &[
 // Globs relative to the state folder, each passed as `:(exclude)<state>/<glob>`.
 const BRAM_STATE_GREP_EXCLUDE: &[&str] = &["worklist-history/*.json"];
 
-// The pathspecs for the state search: BRAM_STATE_GREP, then the excludes.
+// The pathspecs for the state search: bram_state_grep, then the excludes.
 fn bram_state_grep_pathspecs(root: &Path) -> Vec<String> {
-    let mut specs: Vec<String> = BRAM_STATE_GREP
-        .iter()
+    let mut specs: Vec<String> = bram_state_grep()
+        .into_iter()
         .map(|r| bram_state_rel(root, r))
         .collect();
     specs.extend(
@@ -54929,13 +54912,13 @@ fn bram_state_grep_pathspecs(root: &Path) -> Vec<String> {
 }
 
 // Reorder `git grep -n -z` output from the state search before the cap:
-// files grouped by the BRAM_STATE_GREP root they fall under (in that
+// files grouped by the bram_state_grep root they fall under (in that
 // order), and within a root, timestamp-named files (names starting with a
 // digit) newest first, others alphabetically. git grep lists by path, which
 // put the OLDEST history first, so a capped search showed only stale lines.
 fn bram_state_grep_ordered(root: &Path, out: &str) -> String {
-    let roots: Vec<String> = BRAM_STATE_GREP
-        .iter()
+    let roots: Vec<String> = bram_state_grep()
+        .into_iter()
         .map(|r| bram_state_rel(root, r))
         .collect();
     let rank = |path: &str| {
@@ -54980,9 +54963,7 @@ fn bram_state_dir_allowed(root: &Path, dir: &str) -> bool {
     let Some(dir) = bram_state_rel_strip(root, dir) else {
         return false;
     };
-    BRAM_STATE_DIRS
-        .iter()
-        .any(|d| dir == *d || dir.starts_with(&format!("{}/", d)))
+    bram_state_dirs().any(|d| dir == d || dir.starts_with(&format!("{}/", d)))
 }
 
 // Rows for one state folder's immediate children: subfolders first (dynamic,
@@ -55020,13 +55001,11 @@ fn bram_state_dir_rows(dir: &str, subdirs: &[String], files: &[String]) -> Vec<s
 // The state entries that exist under `root`: files to list as rows, and
 // folders to show collapsed.
 fn bram_state_present(root: &Path) -> (Vec<String>, Vec<String>) {
-    let files = BRAM_STATE_FILES
-        .iter()
+    let files = bram_state_files()
         .filter(|f| resource_relative_path(root, f).is_file())
         .map(|f| bram_state_rel(root, f))
         .collect();
-    let dirs = BRAM_STATE_DIRS
-        .iter()
+    let dirs = bram_state_dirs()
         .filter(|d| resource_relative_path(root, d).is_dir())
         .map(|d| bram_state_rel(root, d))
         .collect();
@@ -61042,6 +61021,175 @@ fn bram_state_rel_strip<'a>(root: &Path, rel: &'a str) -> Option<&'a str> {
 
 fn resource_relative_path<P: AsRef<Path>>(root: &Path, rel: P) -> PathBuf {
     bram_state_dir(root).join(rel)
+}
+
+// Everything Bram writes into a project, in one table (judell/bram#469).
+// is_bram_owned_path (the untracked-file counter) and the Files tab's state
+// rows read it; `owned_entries_cover_every_state_write` checks that every
+// literal state path in this file is on it, and
+// `repo_gitignore_covers_machine_state_entries` that this repo's .gitignore
+// ignores every machine-state entry. The 0.8.4 mover reads it to decide what
+// moves and what to report as foreign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedKind {
+    File,
+    Dir,
+    // Every dotfile directly under the state folder (`rel` is empty).
+    DotfilesUnderStateRoot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedClass {
+    // Per-machine, per-session state: never committed.
+    MachineState,
+    // What Setup seeds for agents to read.
+    SeededContent,
+    // On the Files tab only: Bram writes none of it, so it is not Bram-owned
+    // (is_bram_owned_path) and not expected in .gitignore.
+    Shown,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OwnedEntry {
+    rel: &'static str,
+    kind: OwnedKind,
+    class: OwnedClass,
+    // `rel` is relative to the project root, not the state folder.
+    root_relative: bool,
+    // Shown on the Files tab (a row for a file, a lazy folder for a dir).
+    files_tab: bool,
+    // Position in the Files tab's content search, which is capped, so the
+    // current state comes before the histories (bram_state_grep_ordered).
+    grep_rank: Option<u8>,
+}
+
+const fn owned(rel: &'static str, kind: OwnedKind) -> OwnedEntry {
+    OwnedEntry {
+        rel,
+        kind,
+        class: OwnedClass::MachineState,
+        root_relative: false,
+        files_tab: false,
+        grep_rank: None,
+    }
+}
+
+const fn owned_tab(rel: &'static str, kind: OwnedKind, grep_rank: Option<u8>) -> OwnedEntry {
+    OwnedEntry {
+        files_tab: true,
+        grep_rank,
+        ..owned(rel, kind)
+    }
+}
+
+const fn seeded(rel: &'static str, kind: OwnedKind) -> OwnedEntry {
+    OwnedEntry {
+        class: OwnedClass::SeededContent,
+        root_relative: true,
+        ..owned(rel, kind)
+    }
+}
+
+const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
+    use OwnedKind::{Dir, DotfilesUnderStateRoot, File};
+    &[
+        owned_tab("worklist.json", File, Some(0)),
+        owned_tab("worklist-drafts", Dir, Some(1)),
+        owned_tab("worklist-history", Dir, Some(5)),
+        owned_tab("feedback-drafts", Dir, Some(2)),
+        owned_tab("feedback-history", Dir, Some(6)),
+        owned_tab("session-digests", Dir, Some(3)),
+        // Agents' handoff notes; no host writer.
+        OwnedEntry {
+            class: OwnedClass::Shown,
+            ..owned_tab("handoffs", Dir, Some(4))
+        },
+        owned_tab("outbound-turns", Dir, Some(7)),
+        // Left out of the search: 1.4 GB of logs.
+        owned_tab("bram-traces", Dir, None),
+        owned("message-drafts", Dir),
+        owned("audit-ledger.jsonl", File),
+        // Written by scripts/build.sh, in the source repo only.
+        owned("build-log.jsonl", File),
+        // Written by scripts/codex-permission-capture.py.
+        owned("codex-permission-hook-capture.jsonl", File),
+        // Startup forensics dumps; nothing writes them today.
+        owned("startup-traces", Dir),
+        owned("", DotfilesUnderStateRoot),
+        owned(".bram-port", File),
+        owned(".bram-port.json", File),
+        owned(".bram-guard-target", File),
+        owned(".bram-queue.json", File),
+        owned(".bram-message-draft.json", File),
+        owned(".inflight-claim.json", File),
+        owned(".claim-intervals.json", File),
+        owned(".pty-intent.jsonl", File),
+        owned(".worklist-authorization.json", File),
+        owned(".worklist-intent.json", File),
+        owned(".worklist-result.json", File),
+        owned(".worklist-push-mirror.json", File),
+        owned(".worklist-issue-close.json", File),
+        owned(".worklist-plan.json", File),
+        owned(".worklist-direct-edit.json", File),
+        owned(".codex-reload-target.json", File),
+        owned(".pending-session-title.json", File),
+        owned(".host-notes.json", File),
+        owned(".needs-you-dismissed.json", File),
+        owned(".turn-context.json", File),
+        owned(".target-server-pid", File),
+        seeded(".claude/bram-conventions.md", File),
+        seeded(".claude/bram-reference", Dir),
+        seeded(".claude/settings.json", File),
+        seeded(".claude/settings.local.json", File),
+        seeded(".claude/skills", Dir),
+    ]
+};
+
+// Does `entry` cover `rel` (forward-slash, relative to the entry's base)? A
+// state-folder file entry also covers its temp and backup siblings
+// (worklist.json.tmp.N), which the old `worklist` prefix rule caught.
+fn owned_entry_covers(entry: &OwnedEntry, rel: &str) -> bool {
+    match entry.kind {
+        OwnedKind::File => {
+            rel == entry.rel
+                || (!entry.root_relative
+                    && rel
+                        .strip_prefix(entry.rel)
+                        .is_some_and(|r| r.starts_with('.')))
+        }
+        OwnedKind::Dir => {
+            rel == entry.rel
+                || rel
+                    .strip_prefix(entry.rel)
+                    .is_some_and(|r| r.starts_with('/'))
+        }
+        OwnedKind::DotfilesUnderStateRoot => rel.starts_with('.') && !rel.contains('/'),
+    }
+}
+
+// The Files tab's state rows, relative to the state folder.
+fn bram_state_files() -> impl Iterator<Item = &'static str> {
+    BRAM_OWNED_ENTRIES
+        .iter()
+        .filter(|e| e.files_tab && e.kind == OwnedKind::File)
+        .map(|e| e.rel)
+}
+
+fn bram_state_dirs() -> impl Iterator<Item = &'static str> {
+    BRAM_OWNED_ENTRIES
+        .iter()
+        .filter(|e| e.files_tab && e.kind == OwnedKind::Dir)
+        .map(|e| e.rel)
+}
+
+// The state the Files tab's content search covers, in priority order.
+fn bram_state_grep() -> Vec<&'static str> {
+    let mut ranked: Vec<(u8, &'static str)> = BRAM_OWNED_ENTRIES
+        .iter()
+        .filter_map(|e| e.grep_rank.map(|r| (r, e.rel)))
+        .collect();
+    ranked.sort_by_key(|(r, _)| *r);
+    ranked.into_iter().map(|(_, rel)| rel).collect()
 }
 
 // Tests that need a repo-relative state path as fixture data: a root with no
@@ -69777,32 +69925,19 @@ const UNTRACKED_UNDECLARED_WARN: usize = 1000;
 // outbound turns and drafts), so counting them would trip the .gitignore
 // suggestion for files the user never created. NOT all of resources/: a
 // project keeps its own content there too (tau tracks resources/review/...).
+// The list is BRAM_OWNED_ENTRIES.
 fn is_bram_owned_path(root: &Path, path: &str) -> bool {
-    if let Some(rest) = bram_state_rel_strip(root, path) {
-        // Every dotfile directly under the state folder is a Bram sidecar.
-        if rest.starts_with('.') && !rest.contains('/') {
-            return true;
-        }
-        return [
-            "bram-traces/",
-            "outbound-turns/",
-            "message-drafts/",
-            "session-digests/",
-            "worklist",
-            "feedback-",
-        ]
+    let owned = BRAM_OWNED_ENTRIES
         .iter()
-        .any(|p| rest.starts_with(p));
+        .filter(|e| e.class != OwnedClass::Shown);
+    match bram_state_rel_strip(root, path) {
+        Some(rest) => owned
+            .filter(|e| !e.root_relative)
+            .any(|e| owned_entry_covers(e, rest)),
+        None => owned
+            .filter(|e| e.root_relative)
+            .any(|e| owned_entry_covers(e, path)),
     }
-    [
-        ".claude/bram-conventions.md",
-        ".claude/bram-reference/",
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-        ".claude/skills/",
-    ]
-    .iter()
-    .any(|p| path == *p || (p.ends_with('/') && path.starts_with(p)))
 }
 
 fn untracked_undeclared_summary(
@@ -89773,6 +89908,264 @@ mod worklist_authorization_tests {
             "state-folder literals outside the resolver (use bram_state_dir / \
              resource_relative_path / bram_state_rel, or mark the line):\n{}",
             offenders.join("\n")
+        );
+    }
+
+    // judell/bram#469: every state path this file names as a literal is on
+    // BRAM_OWNED_ENTRIES. Finds each resolver call (and bram_state_dir(..)
+    // .join(..)), takes its path argument, and checks it: a string literal or
+    // a `const NAME: &str` must match a File entry or sit under a Dir entry;
+    // a format! must start with a Dir entry's literal segment. Arguments
+    // that are variables are plumbing and skipped. A line carrying the
+    // marker below is skipped; say why beside it. Needles are assembled so
+    // this test's own lines don't match them.
+    #[test]
+    fn owned_entries_cover_every_state_write() {
+        use super::{owned_entry_covers, OwnedEntry, OwnedKind, BRAM_OWNED_ENTRIES};
+        let src: &str = include_str!("lib.rs");
+        let marker = concat!("owned-entries: ", "not state");
+        let needles = [
+            concat!("resource_relative_path", "("),
+            concat!("project_resource_path", "("),
+            concat!("bram_state_rel", "("),
+            concat!("bram_state_dir", "("),
+        ];
+        let bytes = src.as_bytes();
+        let line_of = |at: usize| src[..at].matches('\n').count() + 1;
+        let line_text = |at: usize| {
+            let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+            let end = src[at..].find('\n').map_or(src.len(), |i| at + i);
+            &src[start..end]
+        };
+        // Top-level arguments of the call whose `(` ends at `open`, and the
+        // index just past its `)`.
+        let call_args = |open: usize| -> (Vec<String>, usize) {
+            let (mut depth, mut i, mut cur) = (0i32, open, String::new());
+            let mut args = Vec::new();
+            let mut in_str = false;
+            while i < bytes.len() {
+                let c = bytes[i] as char;
+                if in_str {
+                    cur.push(c);
+                    if c == '\\' {
+                        cur.push(bytes[i + 1] as char);
+                        i += 1;
+                    } else if c == '"' {
+                        in_str = false;
+                    }
+                } else {
+                    match c {
+                        '"' => {
+                            in_str = true;
+                            cur.push(c);
+                        }
+                        '(' | '[' | '{' => {
+                            depth += 1;
+                            cur.push(c);
+                        }
+                        ')' | ']' | '}' if depth == 0 => {
+                            args.push(cur.trim().to_string());
+                            return (args, i + 1);
+                        }
+                        ')' | ']' | '}' => {
+                            depth -= 1;
+                            cur.push(c);
+                        }
+                        ',' if depth == 0 => {
+                            args.push(cur.trim().to_string());
+                            cur.clear();
+                        }
+                        _ => cur.push(c),
+                    }
+                }
+                i += 1;
+            }
+            (args, i)
+        };
+        let first_literal = |s: &str| -> Option<String> {
+            let start = s.find('"')? + 1;
+            let end = s[start..].find('"')? + start;
+            Some(s[start..end].to_string())
+        };
+        let const_value = |name: &str| -> Option<String> {
+            let decl = format!("const {}: &str = ", name);
+            let at = src.find(&decl)? + decl.len();
+            first_literal(&src[at..src[at..].find(';')? + at])
+        };
+        let state_entries: Vec<&OwnedEntry> = BRAM_OWNED_ENTRIES
+            .iter()
+            .filter(|e| !e.root_relative && e.kind != OwnedKind::DotfilesUnderStateRoot)
+            .collect();
+        let covered = |rel: &str| {
+            state_entries.iter().any(|e| match e.kind {
+                OwnedKind::File => rel == e.rel,
+                _ => owned_entry_covers(e, rel),
+            })
+        };
+        let mut checked = 0usize;
+        let mut unmatched: Vec<String> = Vec::new();
+        for needle in needles {
+            for (at, _) in src.match_indices(needle) {
+                let line = line_text(at);
+                if line.contains(marker) || src[..at].ends_with("fn ") {
+                    continue;
+                }
+                let (args, end) = call_args(at + needle.len());
+                let arg = if needle.starts_with("bram_state_dir") {
+                    // Only `bram_state_dir(..).join(<path>)` names a path.
+                    let rest = src[end..].trim_start();
+                    let join = ".join(";
+                    if !rest.starts_with(join) {
+                        continue;
+                    }
+                    let open = src.len() - rest.len() + join.len();
+                    call_args(open).0.first().cloned().unwrap_or_default()
+                } else {
+                    args.last().cloned().unwrap_or_default()
+                };
+                let arg = arg.trim_start_matches('&');
+                let (rel, computed) = if arg.starts_with('"') || arg.starts_with("Path::new(\"") {
+                    (first_literal(arg), false)
+                } else if arg.starts_with("format!(") {
+                    (first_literal(arg), true)
+                } else if !arg.is_empty()
+                    && arg
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                {
+                    (const_value(arg), false)
+                } else {
+                    continue;
+                };
+                let Some(rel) = rel else {
+                    unmatched.push(format!("{}: unresolved {}", line_of(at), arg));
+                    continue;
+                };
+                // The empty path names the folder itself.
+                if rel.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                let ok = if computed {
+                    rel.split_once('/').is_some_and(|(head, _)| {
+                        !head.contains('{')
+                            && state_entries
+                                .iter()
+                                .any(|e| e.kind == OwnedKind::Dir && e.rel == head)
+                    })
+                } else {
+                    covered(&rel)
+                };
+                if !ok {
+                    unmatched.push(format!("{}: {:?} ({})", line_of(at), rel, line.trim()));
+                }
+            }
+        }
+        assert!(checked > 40, "scan found only {} state paths", checked);
+        assert!(
+            unmatched.is_empty(),
+            "state paths missing from BRAM_OWNED_ENTRIES (add an entry, or mark \
+             a read of something Bram doesn't own):\n{}",
+            unmatched.join("\n")
+        );
+    }
+
+    // judell/bram#469: this repo's hand-maintained .gitignore ignores every
+    // machine-state entry (Setup writes no project .gitignore).
+    #[test]
+    fn repo_gitignore_covers_machine_state_entries() {
+        use super::{OwnedClass, OwnedKind, BRAM_OWNED_ENTRIES};
+        let lines: std::collections::HashSet<&str> = include_str!("../../.gitignore")
+            .lines()
+            .map(str::trim)
+            .collect();
+        let legacy = super::BRAM_STATE_DIR_LEGACY;
+        let missing: Vec<String> = BRAM_OWNED_ENTRIES
+            .iter()
+            .filter(|e| e.class == OwnedClass::MachineState && !e.root_relative)
+            .filter_map(|e| match e.kind {
+                OwnedKind::File => Some(format!("{}/{}", legacy, e.rel)),
+                OwnedKind::Dir => Some(format!("{}/{}/", legacy, e.rel)),
+                OwnedKind::DotfilesUnderStateRoot => None,
+            })
+            .filter(|want| !lines.contains(want.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            ".gitignore lacks machine-state entries:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    // The owned-path predicate keeps every answer it gave before the table
+    // (judell/bram#469), and covers the two sidecars #393 found.
+    #[test]
+    fn owned_path_answers_survive_the_table() {
+        use super::{bram_state_dirs, bram_state_files, bram_state_grep, is_bram_owned_path};
+        use crate::test_state_rel as st;
+        let root = crate::test_state_root();
+        for rel in [
+            "worklist.json",
+            "worklist.json.tmp.123",
+            "worklist-drafts/a.md",
+            "worklist-history/1.json",
+            "feedback-drafts/a.md",
+            "feedback-history/a.md",
+            "bram-traces/bram-trace.log",
+            "outbound-turns/1.json",
+            "message-drafts/d.md",
+            "session-digests/codex-x.md",
+            ".bram-port",
+            ".needs-you-dismissed.json",
+            ".worklist-direct-edit.json",
+        ] {
+            assert!(is_bram_owned_path(root, &st(rel)), "{}", rel);
+        }
+        for path in [
+            ".claude/bram-conventions.md",
+            ".claude/bram-reference/diagnostics.md",
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".claude/skills/x/SKILL.md",
+        ] {
+            assert!(is_bram_owned_path(root, path), "{}", path);
+        }
+        for path in [
+            st("review/catalog.json"),
+            st("sub/.hidden"),
+            st("handoffs/note.md"),
+            ".claude/my-notes.md".to_string(),
+            ".claude/bram-conventions.md.orig/x".to_string(),
+            "worklist.json".to_string(),
+        ] {
+            assert!(!is_bram_owned_path(root, &path), "{}", path);
+        }
+        assert_eq!(bram_state_files().collect::<Vec<_>>(), ["worklist.json"]);
+        assert_eq!(
+            bram_state_grep(),
+            [
+                "worklist.json",
+                "worklist-drafts",
+                "feedback-drafts",
+                "session-digests",
+                "handoffs",
+                "worklist-history",
+                "feedback-history",
+                "outbound-turns",
+            ]
+        );
+        assert_eq!(
+            bram_state_dirs().collect::<Vec<_>>(),
+            [
+                "worklist-drafts",
+                "worklist-history",
+                "feedback-drafts",
+                "feedback-history",
+                "session-digests",
+                "handoffs",
+                "outbound-turns",
+                "bram-traces",
+            ]
         );
     }
 

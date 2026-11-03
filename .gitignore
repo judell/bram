@@ -72,6 +72,10 @@ resources/.bram-queue.json
 resources/.bram-message-draft.json
 resources/.worklist-plan.json
 resources/.host-notes.json
+resources/.needs-you-dismissed.json
+resources/.worklist-direct-edit.json
+resources/.turn-context.json
+resources/.target-server-pid
 
 # issue-229 lean audit ledger: machine-local, append-only record of
 # authorization decisions and Bram-gated commits. Untracked by design —

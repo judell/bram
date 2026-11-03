@@ -1,6 +1,6 @@
 # A turn's lifecycle: detail
 
-Click-through detail for 02-turn.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). One arrow, reading a draft by reference, depends on the agent doing something Bram can't force; the rest is what code does on its own. This is the path of one user turn. The Worklist gate (diagram 3) rides on top of it.
+Click-through detail for 02-turn.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). One arrow, reading a draft by reference, depends on the agent doing something Bram can't force; the rest is what code does on its own. This is the path of one user turn. The Worklist (diagram 1) rides on top of it.
 
 ## Pane action
 
@@ -49,7 +49,7 @@ The consumer. The spine doc lists them: "The toolbar uses agent status and turn 
 
 <!-- read: docs/spine.md#State carried -->
 
-"The spine is Bram's host-owned record of what the agent turn is doing right now." [`docs/spine.md:3-4`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L3-L4) It exists because "no single signal is authoritative enough to drive the agent pane by itself." [`docs/spine.md:6-11`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L6-L11) The carried fields are `provider`, `phase`, `turnStamp`, `pendingMenu`, activity clocks, and a completion cursor that "prevents older PTY activity from relighting `working`". [`docs/spine.md:73-88`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L73-L88) The update function is `update_turn_state`. [`src-tauri/src/lib.rs:9251-9257`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9251-L9257) Entering `working` while an authorization is live re-establishes the execution claim, which links this diagram to diagram 3. [`src-tauri/src/lib.rs:9299-9307`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9299-L9307)
+"The spine is Bram's host-owned record of what the agent turn is doing right now." [`docs/spine.md:3-4`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L3-L4) It exists because "no single signal is authoritative enough to drive the agent pane by itself." [`docs/spine.md:6-11`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L6-L11) The carried fields are `provider`, `phase`, `turnStamp`, `pendingMenu`, activity clocks, and a completion cursor that "prevents older PTY activity from relighting `working`". [`docs/spine.md:73-88`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L73-L88) The update function is `update_turn_state`. [`src-tauri/src/lib.rs:9251-9257`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9251-L9257) Entering `working` while an authorization is live re-establishes the execution claim, which links this diagram to diagram 1. [`src-tauri/src/lib.rs:9299-9307`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9299-L9307)
 
 ## toTurn via Tauri command
 

@@ -1,28 +1,57 @@
+---
+config:
+  flowchart:
+    wrappingWidth: 400
+---
 flowchart TD
-  prop["Proposed item"]
-  pane["Worklist pane"]
-  auth["Authorization record"]
-  claim["Execution claim"]
-  guard["bram-guard"]
-  edits["Agent edits"]
-  applied["Applied item"]
-  route["Commit route"]
-  commit["Git commit"]
-  done["Pruned, kept in history"]
+  subgraph define["`**1 · Define the item**`"]
+    issue["Issue"]
+    person["You or the agent"]
+    prop["Proposed item"]
+  end
+  subgraph refine["`**2 · Refine it, then Start**`"]
+    pane["Worklist pane"]
+  end
+  subgraph build["`**3 · Build and test it, then Commit**`"]
+    auth["Authorization record"]
+    claim["Execution claim"]
+    guard["bram-guard"]
+    edits["Agent edits"]
+    applied["Applied item"]
+    test["You test the change"]
+  end
+  subgraph land["`**4 · Land it**`"]
+    route["Commit route"]
+    commit["Git commit"]
+    done["Pruned, kept in history"]
+  end
 
+  issue -->|"derived from"| prop
+  person -->|"defined directly"| prop
   prop -->|"shown on the board"| pane
+  pane -->|"feedback revises the draft"| prop
   pane -->|"Start records approval"| auth
   auth -->|"starts claim"| claim
   prop -->|"coverage read by guard"| guard
   guard -->|"allow or deny"| edits
   claim -->|"boundary trees"| edits
   edits -->|"agent calls advance"| applied
-  applied -->|"Commit click"| route
+  applied -->|"you try it"| test
+  test -->|"feedback edits the files"| edits
+  test -->|"Commit click"| route
   auth -->|"checked by mutate and commit"| route
   route -->|"stages and commits"| commit
   commit -->|"prune and snapshot"| done
   pane -->|"Drop"| done
 
+%% tip: Issue :: A forge issue. An item derived from one gets an issue-<N>- id and, when the commit resolves it, closesIssues.
+%% tip: You or the agent :: You ask for a change in chat, or the agent proposes one it found. Either way the agent writes the item.
+%% tip: You test the change :: You run or read the change. Feedback with the item selected goes back to the agent as edits.
+%% tip: derived from :: The item cites the issue; the close-on-commit dialog closes it after your next Push.
+%% tip: defined directly :: No issue: a bare descriptive id, and the draft carries the whole rationale.
+%% tip: feedback revises the draft :: Before Start, feedback on a selected item changes only its before/after prose. No project files.
+%% tip: you try it :: The changes are on disk; nothing is committed yet.
+%% tip: feedback edits the files :: After Start, feedback on a selected item edits files on disk. The item keeps its status.
 %% tip: Proposed item :: An entry in resources/worklist.json plus before/after prose in resources/worklist-drafts/<id>.md. Writing it is asking, not approval.
 %% tip: Worklist pane :: The board where the user ticks items and clicks Start, Start & commit, Commit or Drop.
 %% tip: Authorization record :: resources/.worklist-authorization.json: one slot, replaced by the next gate click, 30 minute TTL.
@@ -40,7 +69,7 @@ flowchart TD
 %% tip: allow or deny :: Exit code and stderr: the model reads the deny reason.
 %% tip: boundary trees :: Each claim change captures a tree of the whole project, so changes can be attributed to intervals.
 %% tip: agent calls advance :: The agent must call mutate op advance after applying. Nothing but the conventions makes it.
-%% tip: Commit click :: Records a fresh approval; Start & commit skips the advance.
+%% tip: Commit click :: When you're satisfied, Commit records a fresh approval; Start & commit skips the advance.
 %% tip: checked by mutate and commit :: Routes check kind, ids and freshness against the stored record, not the button label.
 %% tip: stages and commits :: Path-scoped add and commit, or hunk-by-hunk when another item owns lines in the same file.
 %% tip: prune and snapshot :: The commit route prunes through the mutate handler; history snapshots follow.

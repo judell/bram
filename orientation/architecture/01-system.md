@@ -1,4 +1,4 @@
-# System at a glance: detail
+# Components: detail
 
 Click-through detail for 01-system.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). One arrow, the conventions, depends on the agent reading and following instructions; the rest is what code does on its own. Where a claim is not backed by a cited line, the text says the repo is silent.
 
@@ -90,7 +90,7 @@ The host pushes state changes with `emit_replayable_payload`; for example the tu
 <!-- read: app/__shell/conventions.md#Enforcement -->
 <!-- read: docs/authorization.md#Action matrix -->
 
-File edits by the agent are decided by `bram-guard`: "Worklist hooks decide with real exit codes and fail CLOSED on guard faults". [`src-tauri/src/guard.rs:1-15`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L1-L15) See diagram 3. Hooks "check coverage, which is not approval". [`app/__shell/conventions.md:508-511`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L508-L511)
+File edits by the agent are decided by `bram-guard`: "Worklist hooks decide with real exit codes and fail CLOSED on guard faults". [`src-tauri/src/guard.rs:1-15`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L1-L15) See diagram 1. Hooks "check coverage, which is not approval". [`app/__shell/conventions.md:508-511`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L508-L511)
 
 ## Worklist calls
 

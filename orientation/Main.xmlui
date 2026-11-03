@@ -89,7 +89,7 @@
         <Items items="{Arch.sections}">
           <VStack gap="$space-2">
             <Heading level="h3">{$item.title}</Heading>
-            <Text>{$item.note}</Text>
+            <Markdown content="{$item.note}" openLinkInNewTab="{true}" />
             <Text when="{svgs &amp;&amp; svgs[$item.file] &amp;&amp; svgs[$item.file].error}" color="$color-danger-500">
               {svgs[$item.file].error}
             </Text>

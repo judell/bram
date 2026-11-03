@@ -1,6 +1,18 @@
-# The Worklist gate: detail
+# Worklist: detail
 
-Click-through detail for 03-gate.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). One arrow, the agent calling advance, depends on the agent remembering; the rest is what code does on its own. The gate has more states than one picture holds; the conventions file and `docs/authorization.md` are the full account.
+Click-through detail for 03-gate.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). The picture is four stages: define an item, refine it until you click Start, build and test it until you click Commit, and land it. Each of the two middle stages is a loop driven by your feedback. Of the arrows inside the stages, one, the agent calling advance, depends on the agent remembering; the rest is what code does on its own. The gate has more states than one picture holds; the conventions file and `docs/authorization.md` are the full account.
+
+## Issue
+
+<!-- read: app/__shell/conventions.md#Authoring conventions -->
+
+An item can start from a forge issue. Its id then takes the form `issue-<N>-<slug>`, "paired with `closesIssues` when both apply". [`app/__shell/conventions.md:472-474`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L472-L474) `closesIssues` "declares which issues the commit resolves and drives the close-on-commit dialog", and is set conservatively: "only when the commit truly closes the issue". [`app/__shell/conventions.md:232-235`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L232-L235)
+
+## You or the agent
+
+<!-- read: app/__shell/conventions.md#Lifecycle: propose → triage → mechanical transitions -->
+
+Without an issue, the item gets "a bare descriptive slug". [`app/__shell/conventions.md:474-475`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L474-L475) Either way the agent writes it: "write the draft to `<state>/worklist-drafts/<id>.md`, then the metadata item to `<state>/worklist.json`. Each item small, discrete, independently rejectable." [`app/__shell/conventions.md:268-271`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L268-L271)
 
 ## Proposed item
 
@@ -51,6 +63,12 @@ The convention allows edits only inside an authorized item, with stated opt-outs
 <!-- read: app/__shell/conventions.md#Schema and draft layout -->
 
 A `status` of applied means changes are on disk and awaiting commit approval, and "a begun `proposed` item can be committable too". [`app/__shell/conventions.md:254-257`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L254-L257) The standard flow, in the conventions' words, is approved proposed, then advance to applied, then a separate commit approval, then prune. [`app/__shell/conventions.md:259-261`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L259-L261) `begunAtMs` is stamped by the host, never the agent. [`app/__shell/conventions.md:244-249`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L244-L249)
+
+## You test the change
+
+<!-- read: app/__shell/conventions.md#Lifecycle: propose → triage → mechanical transitions -->
+
+The second loop. With items selected, a message you send "is **feedback addressed to those items**, and arrives as an `iterate:` turn." [`app/__shell/conventions.md:285-288`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L285-L288) On a begun or applied item the agent will "edit on-disk files per the feedback". [`app/__shell/conventions.md:334-335`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L334-L335) The loop ends when you click Commit.
 
 ## Commit route
 
@@ -116,6 +134,36 @@ Deny is an exit code plus stderr that the model reads. [`src-tauri/src/guard_pol
 This step is the agent's to remember. After applying, the agent is told to call the mutate route with `op: advance`, and never to rewrite the applied status directly. [`app/__shell/conventions.md:279-283`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L279-L283) `validate_worklist_mutate_authorization` checks the stored record when the call arrives. [`src-tauri/src/lib.rs:85899-85907`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L85899-L85907) If the agent never advances, a begun `proposed` item still gets a Commit button, so the flow doesn't deadlock; Start & commit skips the advance by design. [`app/__shell/conventions.md:107-111`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L107-L111) [`app/__shell/conventions.md:382-387`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L382-L387)
 
 Claude, OpenCode and Antigravity make this call with loopback curl: "Claude, OpenCode and Antigravity: loopback curl." [`app/__shell/conventions.md:416-416`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L416-L416) Codex writes intent and result files, and both reach the same handlers. [`app/__shell/reference/worklist-mechanics.md:268-275`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/reference/worklist-mechanics.md?plain=1#L268-L275)
+
+## derived from
+
+<!-- read: app/__shell/conventions.md#Schema and draft layout -->
+
+Before the item is committable, the issue link is "an *association* (the pane renders \"for #N\")"; "closes #N" and the gate's ticks appear "only once committable". [`app/__shell/conventions.md:236-238`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L236-L238) The agent must "re-verify the claim against what the work became" before asking for commit approval. [`app/__shell/conventions.md:238-240`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L238-L240)
+
+## defined directly
+
+<!-- read: app/__shell/conventions.md#Authoring conventions -->
+
+Exploratory, cross-cutting or multi-issue items get "a bare descriptive slug". [`app/__shell/conventions.md:473-475`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L473-L475)
+
+## feedback revises the draft
+
+<!-- read: app/__shell/conventions.md#Lifecycle: propose → triage → mechanical transitions -->
+
+The first loop. "Item feedback (`iterate:`) authorizes no state change." [`app/__shell/conventions.md:328-328`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L328-L328) On a "`proposed`, not yet begun" item the agent will "revise the draft's `before` / `after`; update `files` only if scope shifts. No project file edits." [`app/__shell/conventions.md:331-333`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L331-L333)
+
+## you try it
+
+<!-- read: app/__shell/conventions.md#Schema and draft layout -->
+
+The changes are on disk and nothing is committed. See Applied item: a begun proposed item is committable too, so testing can start before the agent advances.
+
+## feedback edits the files
+
+<!-- read: app/__shell/conventions.md#Lifecycle: propose → triage → mechanical transitions -->
+
+On a begun or applied item, feedback edits files on disk. "Either way the item keeps its status; iterate never advances or commits on its own." [`app/__shell/conventions.md:336-337`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L336-L337)
 
 ## Commit click
 

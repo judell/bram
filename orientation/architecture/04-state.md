@@ -149,7 +149,7 @@ The host starts a background indexer at startup: "issue-230 unified search: back
 
 <!-- read: docs/subagents.md#The provider seam -->
 
-The host discovers a project's Claude sessions directory from the encoded project path. [`src-tauri/src/lib.rs:32741-32750`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32741-L32750) It scans session tails for turn end, see diagram 2. [`src-tauri/src/lib.rs:68857-68857`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L68857-L68857)
+The host discovers a project's Claude sessions directory from the encoded project path. [`src-tauri/src/lib.rs:32741-32750`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32741-L32750) It scans session tails for turn end, see diagram 3. [`src-tauri/src/lib.rs:68857-68857`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L68857-L68857)
 
 ## read by guard
 

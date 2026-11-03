@@ -59302,6 +59302,14 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     seed_opencode_plugin(app, &proj, &mut wrote, &mut skipped)?;
     if opencode_plugin_wanted(app, &proj) {
         seed_opencode_instructions(&proj, is_source_repo, &mut wrote, &mut skipped)?;
+        apply_self_ignore(
+            app,
+            &proj,
+            ".opencode",
+            is_source_repo,
+            &mut wrote,
+            &mut skipped,
+        );
     }
     // antigravity-worklist-guard: agy's guard registration, Bram's group in
     // .agents/hooks.json. Runs on the source repo too, as OpenCode's plugin
@@ -59317,6 +59325,14 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         let conventions = seeded_conventions_bytes(app)
             .ok_or_else(|| "conventions template not found".to_string())?;
         seed_antigravity_rules(&proj, &conventions, &mut wrote, &mut skipped)?;
+        apply_self_ignore(
+            app,
+            &proj,
+            ".agents",
+            is_source_repo,
+            &mut wrote,
+            &mut skipped,
+        );
     }
 
     // issue-227: surface stale legacy-hook references in user-global settings.
@@ -59359,6 +59375,345 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         "codexHookNeedsTrust": codex_hook_install.installed,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+// judell/bram#469 decision 7: Setup's files in `.opencode/` and `.agents/`
+// are ignored by a `.gitignore` inside each folder. Both loaders were checked
+// to ignore it: OpenCode 2.1.4 still loads the plugin, Antigravity 1.4.12
+// still loads the rules
+// (resources/worklist-drafts/issue-469-self-ignore-opencode-agents.md).
+// These folders are shared with the user (their own rules, plugins, hooks),
+// unlike `.bram/`, so the file names only Setup's entries, generated from
+// BRAM_OWNED_ENTRIES (self_ignore_bytes): a user's own file there stays
+// visible to git. Left alone: a `.gitignore` already there, byte for byte and
+// even when it lacks Bram's lines (a hand-written one is never overwritten,
+// and a second Setup changes no bytes); a folder the project tracks files in
+// (it keeps its own config in git); and the source repo, whose root
+// .gitignore covers both. One rule for both folders, so they can't drift.
+
+// The folder's ignore file: one anchored line per root-relative table entry
+// under `folder`, plus the file's own line, sorted, newline-terminated.
+fn self_ignore_bytes(folder: &str) -> Vec<u8> {
+    let prefix = format!("{}/", folder);
+    let mut lines: Vec<String> = BRAM_OWNED_ENTRIES
+        .iter()
+        .filter(|e| e.root_relative)
+        .filter_map(|e| {
+            let rest = e.rel.strip_prefix(prefix.as_str())?;
+            Some(match e.kind {
+                OwnedKind::Dir => format!("/{}/", rest),
+                _ => format!("/{}", rest),
+            })
+        })
+        .collect();
+    lines.push("/.gitignore".to_string());
+    lines.sort();
+    lines.dedup();
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out.into_bytes()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfIgnoreOutcome {
+    Written,
+    AlreadyPresent,
+    TrackedSkip,
+    SourceRepoSkip,
+    Error,
+}
+
+impl SelfIgnoreOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            SelfIgnoreOutcome::Written => "written",
+            SelfIgnoreOutcome::AlreadyPresent => "already-present",
+            SelfIgnoreOutcome::TrackedSkip => "tracked-skip",
+            SelfIgnoreOutcome::SourceRepoSkip => "source-repo-skip",
+            SelfIgnoreOutcome::Error => "error",
+        }
+    }
+}
+
+// `git ls-files -- <folder>` from the root. Not a repo, or no git, reads as
+// nothing tracked: there is no index for an ignore file to disturb.
+fn folder_has_tracked_files(root: &Path, folder: &str) -> bool {
+    std::process::Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--", folder])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| !out.stdout.iter().all(|b| b.is_ascii_whitespace()))
+}
+
+fn seed_self_ignore(root: &Path, folder: &str, is_source_repo: bool) -> SelfIgnoreOutcome {
+    if is_source_repo {
+        return SelfIgnoreOutcome::SourceRepoSkip;
+    }
+    let dir = root.join(folder);
+    let path = dir.join(".gitignore");
+    // Any existing file is kept as it is, Bram's lines or not.
+    if path.exists() {
+        return SelfIgnoreOutcome::AlreadyPresent;
+    }
+    if folder_has_tracked_files(root, folder) {
+        return SelfIgnoreOutcome::TrackedSkip;
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return SelfIgnoreOutcome::Error;
+    }
+    // create_new: a file that appeared since the check is kept, not truncated.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            match file.write_all(&self_ignore_bytes(folder)) {
+                Ok(()) => SelfIgnoreOutcome::Written,
+                Err(_) => SelfIgnoreOutcome::Error,
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            SelfIgnoreOutcome::AlreadyPresent
+        }
+        Err(_) => SelfIgnoreOutcome::Error,
+    }
+}
+
+// Setup's call: one trace line per folder, the written file in `wrote`, a
+// failure named in `skipped` (it never fails Setup).
+fn apply_self_ignore<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    folder: &str,
+    is_source_repo: bool,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) {
+    let outcome = seed_self_ignore(root, folder, is_source_repo);
+    let path = root.join(folder).join(".gitignore");
+    match outcome {
+        SelfIgnoreOutcome::Written => wrote.push(path.display().to_string()),
+        SelfIgnoreOutcome::Error => skipped.push(format!(
+            "{} (could not write the folder's self-ignore file)",
+            path.display()
+        )),
+        _ => {}
+    }
+    append_bram_trace_line(
+        app,
+        "setup",
+        &format!(
+            "op=self-ignore folder={} outcome={}",
+            folder,
+            outcome.as_str()
+        ),
+    );
+}
+
+#[cfg(test)]
+mod self_ignore_tests {
+    use super::{seed_self_ignore, SelfIgnoreOutcome};
+    use std::path::{Path, PathBuf};
+
+    const OPENCODE_BYTES: &[u8] = b"/.gitignore\n/opencode.json\n/plugins/bram.js\n";
+    const AGENTS_BYTES: &[u8] = b"/.gitignore\n/hooks.json\n/rules/bram-conventions-*.md\n";
+
+    fn write(dir: &Path, rel: &str, text: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    // `git check-ignore -q <rel>`: true when ignored (exit 0), false on 1.
+    fn ignored(dir: &Path, rel: &str) -> bool {
+        let code = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["check-ignore", "-q", rel])
+            .status()
+            .unwrap()
+            .code();
+        assert!(
+            matches!(code, Some(0) | Some(1)),
+            "check-ignore {}: {:?}",
+            rel,
+            code
+        );
+        code == Some(0)
+    }
+
+    // A fresh scratch folder, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!(
+                "bram-self-ignore-test-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {:?} failed", args);
+    }
+
+    fn repo(tag: &str) -> Scratch {
+        let dir = Scratch::new(tag);
+        git(dir.path(), &["init", "-q"]);
+        dir
+    }
+
+    #[test]
+    fn writes_opencode_entries_then_is_already_present() {
+        let dir = repo("fresh-opencode");
+        write(dir.path(), ".opencode/plugins/bram.js", "x");
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".opencode", false),
+            SelfIgnoreOutcome::Written
+        );
+        let path = dir.path().join(".opencode/.gitignore");
+        assert_eq!(std::fs::read(&path).unwrap(), OPENCODE_BYTES);
+        // A second Setup changes nothing.
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".opencode", false),
+            SelfIgnoreOutcome::AlreadyPresent
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), OPENCODE_BYTES);
+    }
+
+    #[test]
+    fn writes_agents_entries() {
+        let dir = repo("fresh-agents");
+        write(dir.path(), ".agents/hooks.json", "{}");
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".agents", false),
+            SelfIgnoreOutcome::Written
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(".agents/.gitignore")).unwrap(),
+            AGENTS_BYTES
+        );
+    }
+
+    // The folders are shared: a user's own rule or plugin stays visible.
+    #[test]
+    fn ignores_bram_files_but_not_the_users() {
+        let dir = repo("users-files");
+        write(dir.path(), ".agents/rules/bram-conventions-1.md", "slice");
+        write(dir.path(), ".agents/rules/mine.md", "my rule");
+        write(dir.path(), ".opencode/plugins/bram.js", "x");
+        write(dir.path(), ".opencode/plugins/mine.js", "mine");
+        for folder in [".agents", ".opencode"] {
+            assert_eq!(
+                seed_self_ignore(dir.path(), folder, false),
+                SelfIgnoreOutcome::Written
+            );
+        }
+        assert!(ignored(dir.path(), ".agents/rules/bram-conventions-1.md"));
+        assert!(ignored(dir.path(), ".agents/.gitignore"));
+        assert!(ignored(dir.path(), ".opencode/plugins/bram.js"));
+        assert!(!ignored(dir.path(), ".agents/rules/mine.md"));
+        assert!(!ignored(dir.path(), ".opencode/plugins/mine.js"));
+    }
+
+    // Kept byte for byte even though it lacks Bram's lines.
+    #[test]
+    fn keeps_an_existing_gitignore_byte_for_byte() {
+        let dir = repo("existing");
+        std::fs::create_dir_all(dir.path().join(".agents/rules")).unwrap();
+        let path = dir.path().join(".agents/.gitignore");
+        std::fs::write(&path, "hooks.json\n# mine\n").unwrap();
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".agents", false),
+            SelfIgnoreOutcome::AlreadyPresent
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"hooks.json\n# mine\n");
+    }
+
+    #[test]
+    fn skips_a_folder_the_project_tracks() {
+        let dir = repo("tracked");
+        std::fs::create_dir_all(dir.path().join(".agents/rules")).unwrap();
+        std::fs::write(dir.path().join(".agents/rules/team.md"), "team rule\n").unwrap();
+        git(dir.path(), &["add", ".agents/rules/team.md"]);
+        git(dir.path(), &["commit", "-q", "-m", "track a rule"]);
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".agents", false),
+            SelfIgnoreOutcome::TrackedSkip
+        );
+        assert!(!dir.path().join(".agents/.gitignore").exists());
+    }
+
+    #[test]
+    fn skips_the_source_repo() {
+        let dir = repo("source");
+        std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".opencode", true),
+            SelfIgnoreOutcome::SourceRepoSkip
+        );
+        assert!(!dir.path().join(".opencode/.gitignore").exists());
+    }
+
+    #[test]
+    fn not_a_repo_reads_as_untracked() {
+        let dir = Scratch::new("not-a-repo");
+        std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".opencode", false),
+            SelfIgnoreOutcome::Written
+        );
+    }
+
+    #[test]
+    fn outcome_names() {
+        let names: Vec<&str> = [
+            SelfIgnoreOutcome::Written,
+            SelfIgnoreOutcome::AlreadyPresent,
+            SelfIgnoreOutcome::TrackedSkip,
+            SelfIgnoreOutcome::SourceRepoSkip,
+            SelfIgnoreOutcome::Error,
+        ]
+        .iter()
+        .map(|o| o.as_str())
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "written",
+                "already-present",
+                "tracked-skip",
+                "source-repo-skip",
+                "error"
+            ]
+        );
+    }
 }
 
 // opencode-worklist-guard: seed the plugin only where OpenCode can run (its
@@ -61056,6 +61411,9 @@ enum OwnedKind {
     Dir,
     // Every dotfile directly under the state folder (`rel` is empty).
     DotfilesUnderStateRoot,
+    // Files matching `rel`, one `*` in its last segment standing for any run
+    // without a `/` (gitignore's meaning, so the line can be written as is).
+    Glob,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61111,7 +61469,7 @@ const fn seeded(rel: &'static str, kind: OwnedKind) -> OwnedEntry {
 }
 
 const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
-    use OwnedKind::{Dir, DotfilesUnderStateRoot, File};
+    use OwnedKind::{Dir, DotfilesUnderStateRoot, File, Glob};
     &[
         owned_tab("worklist.json", File, Some(0)),
         owned_tab("worklist-drafts", Dir, Some(1)),
@@ -61162,6 +61520,17 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         seeded(".claude/settings.json", File),
         seeded(".claude/settings.local.json", File),
         seeded(".claude/skills", Dir),
+        // OpenCode's guard plugin and config (seed_opencode_plugin,
+        // seed_opencode_instructions), Antigravity's hooks and the
+        // conventions cut into rules (antigravity_rule_path names them
+        // bram-conventions-1.md, -2.md, ...), and each folder's self-ignore
+        // file, which self_ignore_bytes builds from these entries.
+        seeded(".opencode/plugins/bram.js", File),
+        seeded(".opencode/opencode.json", File),
+        seeded(".opencode/.gitignore", File),
+        seeded(".agents/hooks.json", File),
+        seeded(".agents/rules/bram-conventions-*.md", Glob),
+        seeded(".agents/.gitignore", File),
     ]
 };
 
@@ -61184,6 +61553,12 @@ fn owned_entry_covers(entry: &OwnedEntry, rel: &str) -> bool {
                     .is_some_and(|r| r.starts_with('/'))
         }
         OwnedKind::DotfilesUnderStateRoot => rel.starts_with('.') && !rel.contains('/'),
+        OwnedKind::Glob => entry.rel.split_once('*').is_some_and(|(pre, suf)| {
+            rel.len() >= pre.len() + suf.len()
+                && rel.starts_with(pre)
+                && rel.ends_with(suf)
+                && !rel[pre.len()..rel.len() - suf.len()].contains('/')
+        }),
     }
 }
 
@@ -61220,6 +61595,7 @@ fn owned_kind_label(kind: OwnedKind) -> &'static str {
         OwnedKind::File => "file",
         OwnedKind::Dir => "dir",
         OwnedKind::DotfilesUnderStateRoot => "dotfile",
+        OwnedKind::Glob => "glob",
     }
 }
 
@@ -90376,7 +90752,8 @@ mod worklist_authorization_tests {
     }
 
     // judell/bram#469: this repo's hand-maintained .gitignore ignores every
-    // machine-state entry (Setup writes no project .gitignore).
+    // machine-state entry (Setup's only .gitignore writes are the self-ignore
+    // files inside .opencode/ and .agents/).
     #[test]
     fn repo_gitignore_covers_machine_state_entries() {
         use super::{OwnedClass, OwnedKind, BRAM_OWNED_ENTRIES};
@@ -90391,7 +90768,7 @@ mod worklist_authorization_tests {
             .filter_map(|e| match e.kind {
                 OwnedKind::File => Some(format!("{}/{}", legacy, e.rel)),
                 OwnedKind::Dir => Some(format!("{}/{}/", legacy, e.rel)),
-                OwnedKind::DotfilesUnderStateRoot => None,
+                OwnedKind::DotfilesUnderStateRoot | OwnedKind::Glob => None,
             })
             .filter(|want| !lines.contains(want.as_str()))
             .collect();

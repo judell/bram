@@ -52,8 +52,9 @@ Then stop and wait for **Start**.
    project name, the pinned commit and its date, your signature line in the
    forge form (`<owner>'s <Agent> (Bram <version>, <thread>, <model>, <os>,
    <machine>) speaking from the <Project> project (<locator>):`, shown above
-   the diagrams; on a published site the `<thread>` segment may be left
-   out, while the forge convention for issues and comments stays as it is),
+   the diagrams; on a published site the `<thread>` and `<machine>` segments
+   may be left out, while the forge convention for issues and comments stays
+   as it is),
    and the diagram list. Leave `orientation/START.md` alone:
    the Start tab is the owner's, in their own words, and you never write or
    edit it.

@@ -1,11 +1,11 @@
-# PROJECT: an overview for newcomers
+# PROJECT: overview
 
 One paragraph: what this project is, who it's for, and where it lives.
 
 This overview is a reader's map, not part of the project. It was written with
 Bram on YYYY-MM-DD, reading the repository as of commit `abc1234`. Every claim
 cites a file and line. Where the repo is silent, this says so rather than
-guessing. The **Architecture** tab has diagrams with click-through detail.
+guessing. The **Diagrams** tab has diagrams with click-through detail.
 
 ## What it is
 

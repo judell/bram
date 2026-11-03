@@ -19,6 +19,7 @@
     name: "Bram",
     commit: "e8a38ac0",
     date: "2026-11-02",
+    signature: "Jon's Claude (Bram 0.8.2, main thread, Fable 5.1, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):",
   };
   const ARCHITECTURE = [
     {file: "01-system.mmd", title: "System at a glance",

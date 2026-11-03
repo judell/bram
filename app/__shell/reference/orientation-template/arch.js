@@ -19,6 +19,7 @@
     name: "PROJECT",
     commit: "abc1234",
     date: "YYYY-MM-DD",
+    signature: "",  // the agent's signature line, forge form; shown above the caption
   };
   const ARCHITECTURE = [
     {file: "01-system.mmd", title: "System at a glance",

@@ -6,11 +6,13 @@
      Markdown file via DataSource -> content: https://www.xmlui.org/docs/howto/render-markdown-content-as-a-page -->
 <App>
   <Tabs>
-    <TabItem label="Overview">
-      <DataSource id="overview" url="OVERVIEW.md" />
-      <Markdown when="{overview.loaded}" content="{overview.value}" openLinkInNewTab="{true}" />
+    <TabItem label="Start">
+      <!-- The owner's own words, from START.md. The agent never writes or
+           edits this file; everything after this tab is the agent's. -->
+      <DataSource id="start" url="START.md" />
+      <Markdown when="{start.loaded}" content="{start.value}" openLinkInNewTab="{true}" />
     </TabItem>
-    <TabItem label="Architecture">
+    <TabItem label="Diagrams">
       <!-- Mermaid diagrams from architecture/*.mmd, rendered once on mount:
            https://www.xmlui.org/docs/howto/run-a-one-time-action-on-page-load
            Each renders as live SVG in an IFrame so labels can carry hover text:
@@ -32,6 +34,7 @@
             <HStack><Button label="Close" onClick="detailDialog.close()" /></HStack>
           </VStack>
         </ModalDialog>
+        <Text when="{Arch.site.signature}">{Arch.site.signature}</Text>
         <Text variant="caption">{Arch.caption}</Text>
         <Text when="{!svgs}" variant="caption">Rendering diagrams…</Text>
         <Items items="{Arch.sections}">
@@ -53,6 +56,10 @@
           </VStack>
         </Items>
       </VStack>
+    </TabItem>
+    <TabItem label="Overview">
+      <DataSource id="overview" url="OVERVIEW.md" />
+      <Markdown when="{overview.loaded}" content="{overview.value}" openLinkInNewTab="{true}" />
     </TabItem>
   </Tabs>
 </App>

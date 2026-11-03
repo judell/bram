@@ -60062,20 +60062,76 @@ fn expected_antigravity_guard_command() -> Option<String> {
 // one, agy's writes would pass unchecked. The wrapper turns no decision into
 // a deny that says why, as OpenCode's plugin does with any non-decision.
 // agy runs hook commands through a shell (the spike's quoted `printf` hooks
-// worked). Windows keeps the bare command until a capture shows which shell
-// agy uses there.
+// worked). On Windows that shell is cmd.exe, reached through Go's
+// exec.Command, which backslash-escapes every `"` in the command string; cmd
+// then sees `\"C:\…\bram-guard.exe\"` and reports it "is not recognized as an
+// internal or external command" (agy 1.4.12's own log, captured in
+// docs/agent-specimens/antigravity/hooks/windows-cmd-shell.md). So the
+// Windows command carries no quotes at all, and no wrapper: with agy failing
+// closed on a non-zero exit, a quoting mistake blocks every tool call.
 fn antigravity_guard_command(link: &Path) -> String {
-    let bare = guard::guard_hook_command(link, "antigravity-worklist");
-    if cfg!(windows) {
-        return bare;
+    #[cfg(windows)]
+    {
+        return format!(
+            "{} guard antigravity-worklist",
+            windows_unquoted_hook_path(link)
+        );
     }
-    format!(
-        "out=$({}); if [ -n \"$out\" ]; then printf '%s\\n' \"$out\"; else printf '%s\\n' '{}'; fi",
-        bare, ANTIGRAVITY_NO_DECISION_DENY
-    )
+    #[cfg(not(windows))]
+    {
+        let bare = guard::guard_hook_command(link, "antigravity-worklist");
+        format!(
+            "out=$({}); if [ -n \"$out\" ]; then printf '%s\\n' \"$out\"; else printf '%s\\n' '{}'; fi",
+            bare, ANTIGRAVITY_NO_DECISION_DENY
+        )
+    }
 }
 
-// Single-quoted in the shell, so no apostrophes.
+// An unquoted path cmd.exe can run: the path as is, or its 8.3 short name
+// when it contains a space (a user profile like `C:\Users\Jon Udell`). The
+// short name comes from cmd's own `%~s` expansion at seed time, so no extra
+// Windows API binding is needed; if that lookup fails the long path is kept,
+// which only loses the space case, and the seeded file shows it.
+#[cfg(windows)]
+fn windows_unquoted_hook_path(link: &Path) -> String {
+    let long = link.display().to_string();
+    if !long.contains(' ') {
+        return long;
+    }
+    let out = std::process::Command::new("cmd")
+        .args([
+            "/d",
+            "/c",
+            &format!("for %I in (\"{}\") do @echo %~sI", long),
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let short = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !short.is_empty() && !short.contains(' ') {
+                short
+            } else {
+                long
+            }
+        }
+        _ => long,
+    }
+}
+
+// The guard link inside a registered command, whichever shape it has: quoted
+// (`"/Users/x/.bram/bram-guard" guard …`, Unix) or bare up to the first
+// ` guard ` (Windows).
+fn antigravity_guard_link(guard_command: &str) -> &str {
+    let command = guard_command.trim_start_matches("out=$(");
+    if let Some(rest) = command.strip_prefix('"') {
+        return rest.split('"').next().unwrap_or("");
+    }
+    command.split(" guard ").next().unwrap_or("")
+}
+
+// Single-quoted in the shell, so no apostrophes. Unix only: the Windows
+// command has no wrapper (see antigravity_guard_command).
+#[cfg(not(windows))]
 const ANTIGRAVITY_NO_DECISION_DENY: &str = r#"{"decision":"deny","reason":"Blocked: the Bram worklist guard gave no decision. The guard ~/.bram/bram-guard reaches is probably from an older Bram that predates Antigravity support. Update or relaunch every running Bram, then retry."}"#;
 
 // agy-reads-conversation-id: reports the running conversation at each model
@@ -60084,12 +60140,17 @@ const ANTIGRAVITY_NO_DECISION_DENY: &str = r#"{"decision":"deny","reason":"Block
 // is this hook's normal answer. agy blocks on a failing hook, so nothing here
 // can fail: an older guard's "unknown hook" exits 0 with no output too.
 fn antigravity_session_hook_command(guard_command: &str) -> String {
-    let link = guard_command.split('"').nth(1).unwrap_or("");
-    let bare = guard::guard_hook_command(Path::new(link), "antigravity-session");
-    if cfg!(windows) {
-        return bare;
+    let link = antigravity_guard_link(guard_command);
+    #[cfg(windows)]
+    {
+        // Already unquoted (and short-named if needed) by the guard command.
+        return format!("{} guard antigravity-session", link);
     }
-    format!("{} >/dev/null 2>&1; exit 0", bare)
+    #[cfg(not(windows))]
+    {
+        let bare = guard::guard_hook_command(Path::new(link), "antigravity-session");
+        format!("{} >/dev/null 2>&1; exit 0", bare)
+    }
 }
 
 fn antigravity_hooks_group(command: &str) -> serde_json::Value {
@@ -60300,6 +60361,55 @@ mod antigravity_hooks_tests {
             #[cfg(not(windows))]
             assert!(session.ends_with("exit 0"), "{session}");
         }
+    }
+
+    // The link is read back from either registered shape.
+    #[test]
+    fn guard_link_is_read_from_either_command_shape() {
+        use super::antigravity_guard_link;
+        assert_eq!(
+            antigravity_guard_link(CMD),
+            "/Users/example/.bram/bram-guard"
+        );
+        assert_eq!(
+            antigravity_guard_link(r"C:\Users\jon\.bram\bram-guard.exe guard antigravity-worklist"),
+            r"C:\Users\jon\.bram\bram-guard.exe"
+        );
+        assert_eq!(
+            antigravity_guard_link(
+                "out=$(\"/b/bram-guard\" guard antigravity-worklist); if [ -n \"$out\" ]; then echo; fi"
+            ),
+            "/b/bram-guard"
+        );
+    }
+
+    // windows-antigravity-hook-command-under-cmd: agy runs hooks through
+    // cmd.exe with every `"` escaped, so the Windows commands carry none
+    // (agy 1.4.12's log: `'\"C:\…\bram-guard.exe\"' is not recognized`).
+    #[cfg(windows)]
+    #[test]
+    fn windows_commands_carry_no_quotes() {
+        let link = std::path::Path::new(r"C:\Users\jon\.bram\bram-guard.exe");
+        let guard = antigravity_guard_command(link);
+        assert_eq!(
+            guard,
+            r"C:\Users\jon\.bram\bram-guard.exe guard antigravity-worklist"
+        );
+        let session = super::antigravity_session_hook_command(&guard);
+        assert_eq!(
+            session,
+            r"C:\Users\jon\.bram\bram-guard.exe guard antigravity-session"
+        );
+        for c in [&guard, &session] {
+            assert!(!c.contains('"'), "{c}");
+            assert!(!c.contains("out=$("), "{c}");
+        }
+        // A path with a space is replaced by a short name with none, or kept.
+        let spaced = antigravity_guard_command(std::path::Path::new(
+            r"C:\Users\Jon Udell\.bram\bram-guard.exe",
+        ));
+        assert!(!spaced.contains('"'), "{spaced}");
+        assert!(spaced.ends_with(" guard antigravity-worklist"), "{spaced}");
     }
 
     #[test]

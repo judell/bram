@@ -29354,13 +29354,23 @@ fn write_bram_port_files(proj: &Path, port: u16, started_at_ms: i64) -> Result<(
 // port may now belong to another project or an unrelated server. An
 // unresponsive listener is uncertain, not permission to replace its record.
 fn bram_port_serves_project(port: u16, proj: &Path) -> Result<bool, String> {
-    use std::net::{SocketAddr, TcpStream};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::time::Duration;
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    // windows-dead-port-probe-timeout: a port nobody holds can be bound, which
+    // settles "dead" at once on every platform. It matters on Windows, where
+    // a connect to a closed loopback port is refused only after about 2 s of
+    // SYN retries, so the 200 ms probe below reported a timeout, which the
+    // rule treats as uncertain, and the stale record was kept (2026-11-03).
+    // A failed bind proves nothing (a live listener, or TIME_WAIT on Unix)
+    // and falls through to the probe.
+    if TcpListener::bind(addr).is_ok() {
+        return Ok(false);
+    }
     match TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Ok(false),
-        Err(e) => return Err(format!("probe port {}: {}", port, e)),
+        Err(e) => return Err(format!("probe port {}: {} (kind {:?})", port, e, e.kind())),
     }
     let response = match ureq::AgentBuilder::new()
         .try_proxy_from_env(false)
@@ -29535,6 +29545,26 @@ mod bram_port_publication_tests {
         assert_eq!(meta["pid"], std::process::id());
         assert_eq!(meta["startedAtMs"], 123);
         assert_eq!(project.publish(new.port).unwrap(), None);
+    }
+
+    // windows-dead-port-probe-timeout: a port nobody holds is reported dead
+    // well inside the probe's 200 ms, on every platform; Windows used to
+    // answer "connection timed out" here, because it refuses a closed
+    // loopback port only after about 2 s.
+    #[test]
+    fn a_closed_port_is_dead_at_once() {
+        let project = Project::new();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(bram_port_serves_project(port, &project.0).unwrap(), false);
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

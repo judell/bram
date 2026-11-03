@@ -31,7 +31,7 @@
     {file: "04-state.mmd", title: "State and data",
       note: "Where Bram keeps what it knows. Everything per project lives in one state folder (resources/ today, .bram/ once it exists): the worklist and its drafts, the record of what you approved, the claim marking which lines an item wrote, traces, a mirror of the board's history, and the search index over all of it. Git holds the claim refs. The one dashed arrow is a person pushing those refs on purpose."},
     {file: "05-providers.mmd", title: "Providers",
-      note: "The four providers are one kind of thing. The top is what every provider does, drawn once: the seeded conventions it loads (dashed: the model must follow them), the guard it runs before every tool call, the Worklist routes it reaches, the transcript the host reads. The bottom row is the providers; each box lists only where it differs. A new provider is one more box."},
+      note: "A provider wraps an agentic CLI. Each wrapped CLI is influenced by the same set of soft conventions and hard enforcement."},
     {file: "06-build.mmd", title: "Build, run and release",
       note: "How Bram is built, started and shipped. A debug build is the shipping build; launched through the ./bram symlink, the pane is served from the source tree so edits show on reload, while the Rust host needs a rebuild and relaunch. Setup seeds each managed repo with the conventions and the hooks. A release is one script that bumps, tags, pushes and starts the build. Dashed arrows need a person to rebuild, relaunch or click Setup."},
   ];

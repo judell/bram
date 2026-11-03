@@ -1,36 +1,45 @@
-flowchart TD
-  conv["Seeded conventions"]
-  provider["Provider"]
+flowchart LR
+  conv[("Seeded conventions")]
+  subgraph cli["Agent CLI"]
+    direction TB
+    claude["Claude"]
+    codex["Codex"]
+    opencode["OpenCode"]
+    antigravity["Antigravity"]
+    others["others"]
+    claude ~~~ codex ~~~ opencode ~~~ antigravity ~~~ others
+  end
   guard["bram-guard"]
-  routes["Worklist routes"]
-  tx["Provider transcripts"]
-  claude["Claude<br/>· hook in project-local settings<br/>· loopback curl<br/>· JSONL under ~/.claude/projects<br/>· hook events"]
-  codex["Codex<br/>· hook in ~/.codex/config.toml<br/>· intent and result files<br/>· rollouts under ~/.codex/sessions<br/>· rollout mtime"]
-  opencode["OpenCode<br/>· plugin in .opencode/plugins<br/>· loopback curl<br/>· SQLite plus plugin events<br/>· --standalone, this terminal's token"]
-  antigravity["Antigravity (agy)<br/>· hook group in .agents/hooks.json<br/>· loopback curl<br/>· exported from ~/.gemini/antigravity-cli<br/>· OSC 7501 turn state, menus read from the screen"]
+  host["Bram host"]
+  tx[("Turn records")]
+  state[("State folder")]
 
-  conv -.->|"loaded each session"| provider
-  provider -->|"before every tool call"| guard
-  provider -->|"resolve, mutate, commit, end"| routes
-  provider -->|"the turns the host reads"| tx
+  conv -->|"loaded each session"| cli
+  host -->|"launches, answers menus"| cli
+  cli -->|"each tool call"| guard
+  guard -->|"allow or deny"| cli
+  guard -->|"reads coverage"| state
+  cli -->|"resolve, mutate, commit, end"| host
+  host -->|"writes"| state
+  cli -->|"each turn"| tx
+  tx -->|"read for turn state and the Transcript"| host
 
-  %% Each concrete provider is a Provider: a plain line, no arrowhead. Adding
-  %% a provider is adding one box on this row.
-  provider --- claude
-  provider --- codex
-  provider --- opencode
-  provider --- antigravity
-
-%% tip: Seeded conventions :: app/__shell/conventions.md, copied into managed projects by Setup. Each provider has its own way of loading it; following it is up to the model (dashed).
-%% tip: Provider :: What every provider does, drawn once: loads the conventions, runs bram-guard before each tool call, reaches the Worklist routes, records turns the host reads. The four boxes below are the providers; each lists only where it differs.
-%% tip: bram-guard :: One Rust binary with four registrations: claude-worklist, codex-worklist, opencode-worklist and antigravity-worklist all reach the same decider.
-%% tip: Worklist routes :: The host's handlers for resolve, mutate, commit and end. Codex reaches them by a different transport but the same handlers.
-%% tip: Provider transcripts :: Where each provider records turns. Bram reads them for turn state and the Transcript tab.
-%% tip: loaded each session :: Dashed: the conventions reach the model as instructions; obeying them is up to the model.
-%% tip: before every tool call :: The guard runs as a hook or plugin before each tool call and can deny it; a deny reaches the model as a tool error.
-%% tip: resolve, mutate, commit, end :: The lifecycle routes every provider's agent calls, by curl or, for Codex, by files the host watches.
-%% tip: the turns the host reads :: Each provider's own record of its turns, which Bram projects into one shape for the Transcript and search.
-%% tip: Claude · hook in project-local settings · loopback curl · JSONL under ~/.claude/projects · hook events :: Claude Code, the claude command. Hook in the ignored .claude/settings.local.json; curl to the routes; one JSONL file per session; its hooks name the session and report turns.
-%% tip: Codex · hook in ~/.codex/config.toml · intent and result files · rollouts under ~/.codex/sessions · rollout mtime :: Codex CLI, launched with --no-daemon. Its sandbox refuses loopback, so it writes .worklist-intent.json and reads .worklist-result.json; the host polls rollout mtime for turn end.
-%% tip: OpenCode · plugin in .opencode/plugins · loopback curl · SQLite plus plugin events · --standalone, this terminal's token :: OpenCode, launched --standalone so its plugin carries this Bram's token; sessions are SQLite rows, and the plugin forwards turn boundaries.
-%% tip: Antigravity (agy) · hook group in .agents/hooks.json · loopback curl · exported from ~/.gemini/antigravity-cli · OSC 7501 turn state, menus read from the screen :: Antigravity CLI, the agy command. Hooks in the project's .agents/hooks.json; turn state from OSC 7501 escape sequences; approval dialogs read from the screen; transcripts projected from agy's own store.
+%% tip: Seeded conventions :: app/__shell/conventions.md and its reference files, copied into the project by Setup. Each provider loads them by its own channel; following them is up to the model.
+%% tip: Claude :: Claude Code, the claude command, launched with a session id Bram reserves.
+%% tip: Codex :: Codex CLI, launched with --no-daemon when its help lists it.
+%% tip: OpenCode :: OpenCode, launched --standalone so its plugin carries this Bram's token.
+%% tip: Antigravity :: Antigravity CLI, the agy command, with AGY_CLI_OSC7501=on so it reports turn state.
+%% tip: others :: Not a provider yet. A fifth one is another wrapped CLI on the same flows; Cursor has a specimen pack.
+%% tip: bram-guard :: One Rust binary with four registrations (claude-worklist, codex-worklist, opencode-worklist, antigravity-worklist), all reaching the same decider.
+%% tip: Bram host :: The Rust process: launches each CLI, serves the loopback routes, reads the turn records, and shows the pane.
+%% tip: Turn records :: Where each provider writes its turns: Claude's JSONL, Codex's rollouts, OpenCode's SQLite and plugin events, agy's store projected by Bram.
+%% tip: State folder :: resources/ (or .bram/ once it exists): the worklist, drafts, the authorization record, the claim, traces.
+%% tip: loaded each session :: CLAUDE.md import; the AGENTS.md block and Codex developer instructions; opencode.json instructions; always-on rules in .agents/rules.
+%% tip: launches, answers menus :: claude with a session id; codex --no-daemon; opencode --standalone so its events carry this Bram's token; agy with AGY_CLI_OSC7501=on; menu hooks, the plugin, or agy's screen-read dialogs.
+%% tip: each tool call :: A hook in .claude/settings.local.json; a hook in ~/.codex/config.toml; the .opencode/plugins plugin; the hook group in .agents/hooks.json.
+%% tip: allow or deny :: The decision goes back as the hook's exit or the plugin's throw; the Antigravity payload is shape-checked and fails closed.
+%% tip: reads coverage :: The guard reads worklist.json and the authorization record from the state folder to decide whether an edit is covered.
+%% tip: resolve, mutate, commit, end :: Loopback curl for Claude, OpenCode and Antigravity; intent and result files for Codex, whose sandbox refuses loopback.
+%% tip: writes :: The host writes the worklist, the authorization record, the claim, the history and the traces.
+%% tip: each turn :: JSONL under ~/.claude/projects; rollouts under ~/.codex/sessions; SQLite plus plugin events; agy's records under ~/.gemini/antigravity-cli, exported by Bram.
+%% tip: read for turn state and the Transcript :: Hook events for Claude; rollout mtime for Codex; plugin events for OpenCode; OSC 7501 state and screen-read menus for Antigravity. All project into one Transcript.

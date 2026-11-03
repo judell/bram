@@ -2096,11 +2096,15 @@ mod guard_mode_tests {
             r#"{"version":1,"items":[]}"#,
         )
         .unwrap();
-        let ws = root.to_string_lossy().into_owned();
+        // antigravity-specimen-test-escapes-windows-path: `<workspace>` sits
+        // inside JSON strings, and a Windows path carries backslashes, so
+        // splice the JSON-escaped form (quotes trimmed) rather than the raw path.
+        let ws_json = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap();
+        let ws = ws_json.trim_matches('"');
         let records: Vec<serde_json::Value> = specimens
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|line| serde_json::from_str(&line.replace("<workspace>", &ws)).unwrap())
+            .map(|line| serde_json::from_str(&line.replace("<workspace>", ws)).unwrap())
             .collect();
         assert!(records.len() >= 13);
         for rec in &records {

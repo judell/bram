@@ -1107,6 +1107,29 @@ fn authority_menu_hook(
     // the session after a nested `claude -p`, which inherits the token.
     if provider == "claude-rs" && matches!(event.as_str(), "SessionStart" | "UserPromptSubmit") {
         session_report("claude", payload);
+        let cwd_s = str_field(payload, "cwd");
+        let cwd = if cwd_s.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            std::path::PathBuf::from(cwd_s)
+        };
+        if crate::guard_policy::claude_enforcement_paused(&cwd) {
+            let out = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": event,
+                    "additionalContext": crate::guard_policy::enforcement_paused_context(),
+                }
+            });
+            println!("{}", out);
+            let root = resolve_project_root(provider, payload);
+            append_breadcrumb(
+                &root,
+                provider,
+                &event,
+                "",
+                "action=enforcement-paused-context",
+            );
+        }
         return 0;
     }
     let tool = str_field(payload, "tool_name");

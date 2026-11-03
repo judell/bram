@@ -625,6 +625,18 @@
           variant="secondary"
           value="Agent managed externally"
           tooltip="Settings → On Bram launch is set to “Do not start an agent”, so Bram won’t start, switch, or type into the terminal’s agent." />
+        <!-- issue-466-pause-install-uninstall (v1): a light, always-visible
+             sign that Claude's Worklist enforcement is paused, linking to the
+             switch: the standard pause glyph (icon.circle-pause, as on stopped
+             Worklist rows), just before the provider selector. Same pushed-settings source as the label above.
+             https://www.xmlui.org/docs/reference/components/Link -->
+        <Link
+          when="{window.__bramEnforcementPausedFrom(headerSettingsEvt.value, footerTipSettings.value)}"
+          to="/settings?highlight=worklistEnforcement"
+          noIndicator="{true}"
+          tooltip="Worklist enforcement is paused for Claude in this repo. Click to open the setting.">
+          <Icon name="circle-pause" size="md" />
+        </Link>
         <!-- top-banner-wraps: back to a dropdown (Jon, 2026-11-01). Four radio
              options were what pushed this row off the edge. Select has the
              same setValue / value API, so the helpers are unchanged.

@@ -247,6 +247,24 @@
           labelPosition="end"
           initialValue="{!!(settingsValue &amp;&amp; settingsValue.mirrorWorklistLifecycleToIssue)}"
           onDidChange="(v) => saveSettings.execute({ mirrorWorklistLifecycleToIssue: v })" />
+        <!-- issue-466-pause-install-uninstall (v1): worklist.enforcement,
+             Claude only. Same Switch pattern as the mirror switch above;
+             the info note is in settingsInfoBodies.batchCommitActions.
+             https://www.xmlui.org/docs/reference/components/Switch -->
+        <!-- The header's "Enforcement paused" link lands here via
+             ?highlight=worklistEnforcement (settings-highlight-deeplink). -->
+        <VStack
+          testId="setting-worklistEnforcement"
+          padding="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="{highlightKey === 'worklistEnforcement' ? '$color-primary-100' : 'transparent'}">
+          <Switch
+            id="pauseEnforcementSwitch"
+            label="Pause Worklist enforcement for Claude (advanced)"
+            labelPosition="end"
+            initialValue="{window.__bramEnforcementPaused(settingsValue)}"
+            onDidChange="(v) => saveSettings.execute(window.__bramEnforcementUpdate(v))" />
+        </VStack>
       </VStack>
 
       <ContentSeparator />

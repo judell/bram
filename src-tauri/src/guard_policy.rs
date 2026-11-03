@@ -3595,7 +3595,49 @@ pub fn shadow_worklist_decision(provider: &str, payload: &Value) -> Option<Shado
     }
 }
 
+/// Per-repo pause of Worklist coverage enforcement for Claude. Reads
+/// `worklist.enforcement` from `.bram.json` (legacy `.xmlui-desktop.json`);
+/// any error or other value means enforcement stays on.
+pub fn claude_enforcement_paused(cwd: &Path) -> bool {
+    let Some(root) = find_project_root(&cwd.to_string_lossy()) else {
+        return false;
+    };
+    for name in [".bram.json", ".xmlui-desktop.json"] {
+        let path = root.join(name);
+        if path.exists() {
+            let Ok(bytes) = std::fs::read(&path) else {
+                return false;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                return false;
+            };
+            return value
+                .pointer("/worklist/enforcement")
+                .and_then(|v| v.as_str())
+                == Some("paused");
+        }
+    }
+    false
+}
+
+/// Context text handed to Claude at SessionStart / UserPromptSubmit while
+/// enforcement is paused. Factual phrasing on purpose.
+pub fn enforcement_paused_context() -> &'static str {
+    "Worklist enforcement is paused for Claude in this repository: the user turned it off in Bram's Settings (.bram.json worklist.enforcement = \"paused\"). While it is paused, Bram's guard does not deny edits that no Worklist item covers, and the user manages the work and its commits directly, without Worklist items. Bram's conventions about proposing an item before editing, and the Start / Commit gate, do not apply while this is in effect. The guard's other checks (session URLs in commits, signatures on forge writes, subagent lifecycle calls) still apply."
+}
+
 fn claude_decision(payload: &Value) -> ShadowVerdict {
+    let v = claude_decision_inner(payload);
+    if v.decision == "deny"
+        && (v.reason.starts_with("no-coverage") || v.reason.starts_with("bash-write-no-coverage"))
+        && claude_enforcement_paused(&payload_cwd(payload))
+    {
+        return allow(format!("enforcement-paused:{}", v.reason), v.target);
+    }
+    v
+}
+
+fn claude_decision_inner(payload: &Value) -> ShadowVerdict {
     let tool_name = str_field(payload, "tool_name");
     if tool_name == "Bash" {
         return bash_branch(payload);
@@ -7614,6 +7656,91 @@ mod guard_policy_tests {
             "\nworktree=agent-a (coverage checked against the corresponding real-tree path; this denial is still authoritative)\nresolved_project_root="
         ), "body: {}", body_of(&v));
         assert!(v.reason.contains(":worktree=agent-a:root="), "{}", v.reason);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn paused_claude(name: &str, enforcement: &str) -> PathBuf {
+        let root = managed_claude(name);
+        std::fs::write(
+            root.join(".bram.json"),
+            format!("{{\"worklist\":{{\"enforcement\":\"{}\"}}}}", enforcement),
+        )
+        .unwrap();
+        root
+    }
+
+    fn write_uncovered(root: &Path) -> ShadowVerdict {
+        claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": root.join("app/x.txt").to_string_lossy(),
+                "content": "new",
+            },
+            "cwd": root.to_string_lossy(),
+        }))
+    }
+
+    #[test]
+    fn enforcement_default_denies_uncovered_write() {
+        let root = managed_claude("enf-default");
+        let v = write_uncovered(&root);
+        assert_eq!(v.decision, "deny");
+        assert!(v.reason.starts_with("no-coverage"), "{}", v.reason);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_paused_allows_uncovered_write() {
+        let root = paused_claude("enf-paused", "paused");
+        let v = write_uncovered(&root);
+        assert_eq!(v.decision, "allow");
+        assert!(
+            v.reason.starts_with("enforcement-paused:no-coverage"),
+            "{}",
+            v.reason
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_on_still_denies_uncovered_write() {
+        let root = paused_claude("enf-on", "on");
+        let v = write_uncovered(&root);
+        assert_eq!(v.decision, "deny");
+        assert!(v.reason.starts_with("no-coverage"), "{}", v.reason);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_paused_keeps_non_coverage_denies() {
+        let root = paused_claude("enf-paused-other", "paused");
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue comment 5 --body @body.md"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("deny", "gh-body-at-antipattern")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_paused_allows_bash_write_no_coverage() {
+        let root = paused_claude("enf-paused-bash", "paused");
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm stale.txt"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.decision, "allow");
+        assert!(
+            v.reason
+                .starts_with("enforcement-paused:bash-write-no-coverage"),
+            "{}",
+            v.reason
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

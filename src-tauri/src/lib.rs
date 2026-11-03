@@ -396,6 +396,8 @@ struct WorklistConfig {
     batch_commit_actions: Option<bool>,
     #[serde(default, rename = "gateExplainer")]
     gate_explainer: Option<bool>,
+    #[serde(default)]
+    enforcement: Option<String>,
 }
 
 // Optional UI block. `showTargetApp` controls whether the embedded
@@ -28879,7 +28881,7 @@ mod agent_startup_policy_tests {
                 "startupPolicy": "agentRecent",
                 "continueLast": true
             },
-            "worklist": { "batchCommitActions": false },
+            "worklist": { "batchCommitActions": false, "enforcement": "on" },
             "ui": { "showTargetApp": false, "toolsPaneHotReload": false },
             "sessions": {
                 "suggestOnNewItem": true,
@@ -29047,6 +29049,16 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
     // commands, diffs, written content, context, or result excerpts to an
     // external model. Only an explicit project setting enables the route.
     let describe_commands = project_config_describe_commands(config.clone());
+    let enforcement = if config
+        .as_ref()
+        .and_then(|c| c.worklist.as_ref())
+        .and_then(|w| w.enforcement.as_deref())
+        == Some("paused")
+    {
+        "paused"
+    } else {
+        "on"
+    };
     let search_commit_depth = search_commit_depth_from_config(config.as_ref());
     let search_issue_limit = search_issue_limit_from_config(config.as_ref());
     let sessions_cfg = config.as_ref().and_then(|c| c.sessions.clone());
@@ -29153,7 +29165,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             "continueLast": startup_policy != AgentStartupPolicy::NewSession.as_str()
                 && startup_policy != AgentStartupPolicy::None.as_str()
         },
-        "worklist": { "batchCommitActions": batch },
+        "worklist": { "batchCommitActions": batch, "enforcement": enforcement },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
         "sessions": {
             "suggestOnNewItem": suggest_on_new_item,
@@ -32407,6 +32419,19 @@ fn handle_settings_post<R: tauri::Runtime>(
     };
     if let Err(e) = write_settings_to_config(&root, &update) {
         return (500, "text/plain; charset=utf-8", e.into_bytes());
+    }
+    if let Some(v) = update.pointer("/worklist/enforcement") {
+        if bram_trace_enabled() {
+            let paused = v.as_str() == Some("paused");
+            append_bram_trace_line(
+                app,
+                "worklist-enforcement",
+                &format!(
+                    "op={} provider=claude",
+                    if paused { "paused" } else { "resumed" }
+                ),
+            );
+        }
     }
     // Publish and return the freshly merged view rather than echoing the POST
     // body. PushSource consumers see the canonical state immediately; the

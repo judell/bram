@@ -59,6 +59,15 @@ remain usable after that turn. Do not interpret this as permission to
 carry the user's opt-out into unrelated work. Neither an opt-out nor
 a tool allow supplies an approved/drop lifecycle grant.
 
+**Enforcement paused for Claude (experimental, #466).** The user can turn
+on `worklist.enforcement: "paused"` in Settings. While it's on, Claude's
+`SessionStart` and `UserPromptSubmit` hooks add a note saying so. The
+user is managing the work directly: edit without proposing items, and
+commit only when asked, with plain `git`. The guard turns coverage
+denials into `enforcement-paused:` allows; its other checks still deny.
+Codex, OpenCode and Antigravity stay enforced. Never turn the setting on
+yourself: the switch is the user's, even though `.bram.json` is writable.
+
 ## Feedback payload details
 
 Item feedback is a message sent with Worklist items selected; it arrives

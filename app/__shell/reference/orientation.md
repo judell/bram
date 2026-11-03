@@ -63,6 +63,19 @@ Then stop and wait for **Start**.
    and the diagram list. Leave `orientation/START.md` alone:
    the Start page is the owner's, in their own words, and you never write or
    edit it.
+   **The engine is Bram's.** `arch.js` and `Main.xmlui` carry a
+   `bram-managed: orientation engine` marker, and Bram's Setup refreshes
+   them from the template wherever the site lives, keeping your `SITE` /
+   `ARCHITECTURE` block and your `PageMetaTitle`. Don't change anything else
+   in those two files: the next Setup overwrites it. An engine change (how
+   dialogs, citations or marks work) is made in Bram's template, and reaches
+   every site from there. Everything else in the folder, `index.html`
+   included, is the site's own and is never touched.
+   **Adopting** (a site built before the marker existed): copy the
+   template's `arch.js` and `Main.xmlui` over the site's, then put the
+   site's own `SITE` / `ARCHITECTURE` block and title back. Setup keeps it
+   current from then on. A site that doesn't follow the template's layout
+   is rebuilt on it rather than patched.
 3. Write `orientation/OVERVIEW.md`: what the project is, how it runs, where
    to start reading, and open questions. Keep the template's headings unless
    the repo calls for others.

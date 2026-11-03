@@ -1,3 +1,6 @@
+<!-- bram-managed: orientation engine. Bram's Setup refreshes this file from the
+     template (app/__shell/reference/orientation-template/Main.xmlui in Bram),
+     keeping this site's PageMetaTitle. Change it in the template, never here. -->
 <!-- Orientation site: an overview and architecture diagrams (see index.html).
      From Bram's orientation template, first built for tau-hub,
      together-groups-beta and pwkm. Content lives in OVERVIEW.md and

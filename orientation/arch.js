@@ -1,3 +1,7 @@
+// bram-managed: orientation engine. Bram's Setup refreshes this file from the
+// template (app/__shell/reference/orientation-template/arch.js in Bram),
+// keeping this site's SITE / ARCHITECTURE block below. Change the engine in
+// the template, never here: an edit here is overwritten by the next Setup.
 // Helpers for the Architecture tab of a Bram orientation site (Main.xmlui).
 // Template from Bram (.claude/bram-reference/orientation-template/), first
 // built for tau-hub, together-groups-beta and pwkm. The playbook is

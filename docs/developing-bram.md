@@ -320,6 +320,31 @@ them, so they were deleted, not scoped. When a key looks misfiled, check first
 that something reads it. `bram.dismissedAgentIds` stays unscoped: agent ids are
 unique per dispatch, so windows only share its cap of 500.
 
+## The orientation site's engine lives in the template
+
+Bram's own orientation site (`orientation/`) is a copy of the template in
+`app/__shell/reference/orientation-template/`, like every other repo's site.
+The template is the source; nothing flows from a site back to it
+(settled 2026-11-03, `orientation-scaffolding-managed-by-setup`).
+
+- **Engine files:** `arch.js` and `Main.xmlui` carry a
+  `bram-managed: orientation engine` marker. Setup finds every directory in a
+  project whose `arch.js` carries it, wherever it lives (code-exam's is
+  `docs/orientation/`), and refreshes both files from the template, keeping
+  the site's `SITE` / `ARCHITECTURE` block and its `PageMetaTitle`. Unmarked
+  files are never touched. Setup traces one
+  `op=orientation-scaffolding path=… outcome=…` line per file it finds.
+- **Here too:** the refresh runs on the source-repo path as well, which
+  otherwise skips seeded docs and skills, so `orientation/` here is refreshed
+  like any site.
+- **The loop for an engine change:** edit the template, run Setup
+  (`GET /__enhance/run?force=true` on the loopback port, or the Setup
+  button), reload `orientation/` on the preview server, and commit the
+  template and the refreshed `orientation/` files in one item. Editing
+  `orientation/arch.js` or `Main.xmlui` directly is lost on the next Setup.
+- **Content** (`OVERVIEW.md`, `architecture/*`, `screenshots/`, the `SITE`
+  block, every `index.html`) is the site's own, here and everywhere.
+
 ## Push over polling
 
 Do NOT add `pollIntervalInSeconds` to XMLUI DataSources for

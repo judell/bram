@@ -57364,6 +57364,149 @@ fn sidecar_matches_seeded<R: tauri::Runtime>(app: &AppHandle<R>, on_disk: &Path)
 const ENHANCE_REFERENCE_DIR_REL: &str = ".claude/bram-reference";
 const ENHANCE_REFERENCE_BUNDLE_DIR: &str = "__shell/reference";
 
+const ORIENTATION_MARKER: &str = "bram-managed: orientation engine";
+const ORIENTATION_EDIT_START: &str =
+    "  // ---- Edit this block, and nothing else in this file. -------------------";
+const ORIENTATION_EDIT_END: &str =
+    "  // ------------------------------------------------------------------------";
+const ORIENTATION_TEMPLATE_DIR: &str = "__shell/reference/orientation-template";
+const ORIENTATION_TITLE_PREFIX: &str = "<PageMetaTitle value=\"";
+
+// Refresh an orientation site's engine file from the template, keeping the
+// site's own content (arch.js edit block; Main.xmlui page title).
+fn orientation_refreshed(file: &str, site: &str, template: &str) -> Result<String, &'static str> {
+    if !site.contains(ORIENTATION_MARKER) {
+        return Err("unmarked");
+    }
+    match file {
+        "arch.js" => {
+            let block = |s: &str| -> Option<(usize, usize)> {
+                let a = s.find(ORIENTATION_EDIT_START)?;
+                let b = a + s[a..].find(ORIENTATION_EDIT_END)?;
+                Some((a, b))
+            };
+            let (Some((sa, sb)), Some((ta, tb))) = (block(site), block(template)) else {
+                return Err("no-edit-block");
+            };
+            Ok(format!(
+                "{}{}{}",
+                &template[..ta],
+                &site[sa..sb],
+                &template[tb..]
+            ))
+        }
+        "Main.xmlui" => {
+            let title = |s: &str| -> Option<(usize, usize)> {
+                let a = s.find(ORIENTATION_TITLE_PREFIX)? + ORIENTATION_TITLE_PREFIX.len();
+                let b = a + s[a..].find('"')?;
+                Some((a, b))
+            };
+            let Some((sa, sb)) = title(site) else {
+                return Ok(template.to_string());
+            };
+            let Some((ta, tb)) = title(template) else {
+                return Ok(template.to_string());
+            };
+            Ok(format!(
+                "{}{}{}",
+                &template[..ta],
+                &site[sa..sb],
+                &template[tb..]
+            ))
+        }
+        _ => Err("unknown"),
+    }
+}
+
+fn find_orientation_site_dirs(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if let Ok(s) = std::fs::read_to_string(dir.join("arch.js")) {
+            if s.contains(ORIENTATION_MARKER) {
+                out.push(dir.to_path_buf());
+            }
+        }
+        if depth >= 4 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if !ft.is_dir() || ft.is_symlink() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.')
+                || matches!(name.as_str(), "node_modules" | "target" | "vendor")
+            {
+                continue;
+            }
+            walk(&e.path(), depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, 0, &mut out);
+    out.sort();
+    out
+}
+
+fn refresh_orientation_sites<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+    wrote: &mut Vec<String>,
+) -> Vec<(String, &'static str)> {
+    let mut results = Vec::new();
+    let mut templates: Vec<(&str, String)> = Vec::new();
+    for name in ["arch.js", "Main.xmlui"] {
+        let Some((bytes, _)) =
+            serve_app_file(Some(app), &format!("{}/{}", ORIENTATION_TEMPLATE_DIR, name))
+        else {
+            return results;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return results;
+        };
+        templates.push((name, text));
+    }
+    // In Bram's own repo the template itself carries the marker; it is the
+    // source, not a site.
+    let template_dir = proj.join("app").join(ORIENTATION_TEMPLATE_DIR);
+    for dir in find_orientation_site_dirs(proj) {
+        if dir == template_dir {
+            continue;
+        }
+        for (name, template) in &templates {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(proj)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(current) = std::fs::read_to_string(&path) else {
+                results.push((rel, "unreadable"));
+                continue;
+            };
+            match orientation_refreshed(name, &current, template) {
+                Err(e) => results.push((rel, e)),
+                Ok(new) if new == current => results.push((rel, "unchanged")),
+                Ok(new) => {
+                    if atomic_write_text(&path, &new).is_ok() {
+                        wrote.push(path.display().to_string());
+                        results.push((rel, "refreshed"));
+                    } else {
+                        results.push((rel, "write-failed"));
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
 // new-repo-orientation: the set is the top-level *.md docs plus every file
 // in a subfolder (the orientation template: a static site the playbook has
 // the agent copy), as `/`-joined paths relative to the reference dir.
@@ -59498,6 +59641,21 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             &mut wrote,
             &mut skipped,
         );
+    }
+
+    // Orientation sites marked `bram-managed: orientation engine`: refresh
+    // their engine files from the template. Runs in the source repo too.
+    for (path, outcome) in refresh_orientation_sites(app, &proj, &mut wrote) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "setup",
+                &format!(
+                    "op=orientation-scaffolding path={} outcome={}",
+                    path, outcome
+                ),
+            );
+        }
     }
 
     // issue-227: surface stale legacy-hook references in user-global settings.
@@ -101405,5 +101563,127 @@ mod checkout_version_root_tests {
         // into the target through it.
         let _ = std::fs::remove_dir(&link);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod orientation_scaffolding_tests {
+    use super::*;
+
+    fn arch(engine: &str, site: &str) -> String {
+        format!(
+            "// {}\n{}\n{}\n{}\n{}\n{}\n",
+            ORIENTATION_MARKER, engine, ORIENTATION_EDIT_START, site, ORIENTATION_EDIT_END, engine
+        )
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "bram-orient-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn arch_keeps_site_block_takes_template_engine() {
+        let site = arch("old engine", "const SITE = 'mine';");
+        let tmpl = arch("new engine", "const SITE = 'PROJECT';");
+        let out = orientation_refreshed("arch.js", &site, &tmpl).unwrap();
+        assert_eq!(out, arch("new engine", "const SITE = 'mine';"));
+    }
+
+    #[test]
+    fn arch_unmarked() {
+        let tmpl = arch("e", "x");
+        assert_eq!(
+            orientation_refreshed("arch.js", "plain file", &tmpl),
+            Err("unmarked")
+        );
+    }
+
+    #[test]
+    fn arch_marked_without_edit_block() {
+        let tmpl = arch("e", "x");
+        let site = format!("// {}\nno block here\n", ORIENTATION_MARKER);
+        assert_eq!(
+            orientation_refreshed("arch.js", &site, &tmpl),
+            Err("no-edit-block")
+        );
+    }
+
+    #[test]
+    fn main_keeps_site_title() {
+        let site = format!(
+            "<!-- {} -->\n<PageMetaTitle value=\"Mine\" />\nold",
+            ORIENTATION_MARKER
+        );
+        let tmpl = "<!-- t -->\n<PageMetaTitle value=\"PROJECT\" />\nnew".to_string();
+        assert_eq!(
+            orientation_refreshed("Main.xmlui", &site, &tmpl).unwrap(),
+            "<!-- t -->\n<PageMetaTitle value=\"Mine\" />\nnew"
+        );
+        let notitle = format!("<!-- {} -->\nold", ORIENTATION_MARKER);
+        assert_eq!(
+            orientation_refreshed("Main.xmlui", &notitle, &tmpl).unwrap(),
+            tmpl
+        );
+        assert_eq!(orientation_refreshed("other", &site, &tmpl), Err("unknown"));
+    }
+
+    #[test]
+    fn already_current_is_identical() {
+        let site = arch("same", "const SITE = 'mine';");
+        let tmpl = arch("same", "const SITE = 'PROJECT';");
+        assert_eq!(
+            orientation_refreshed("arch.js", &site, &tmpl).unwrap(),
+            site
+        );
+    }
+
+    #[test]
+    fn discovery_finds_marked_and_skips_the_rest() {
+        let root = scratch("find");
+        let marked = format!("// {}\n", ORIENTATION_MARKER);
+        let put = |rel: &str, body: &str| {
+            let d = root.join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("arch.js"), body).unwrap();
+        };
+        put("a/orientation", &marked);
+        put("docs/orientation", &marked);
+        put("unmarked", "nothing");
+        put(".hidden/o", &marked);
+        put("node_modules/o", &marked);
+        put("l1/l2/l3/l4/l5", &marked);
+        let found = find_orientation_site_dirs(&root);
+        assert_eq!(
+            found,
+            vec![root.join("a/orientation"), root.join("docs/orientation")]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn real_template_matches_real_site() {
+        let m = env!("CARGO_MANIFEST_DIR");
+        let t = format!("{}/../app/__shell/reference/orientation-template", m);
+        let o = format!("{}/../orientation", m);
+        for f in ["arch.js", "Main.xmlui"] {
+            let tmpl = std::fs::read_to_string(format!("{}/{}", t, f)).unwrap();
+            let site = std::fs::read_to_string(format!("{}/{}", o, f)).unwrap();
+            assert_eq!(
+                orientation_refreshed(f, &site, &tmpl).unwrap(),
+                site,
+                "{}",
+                f
+            );
+        }
     }
 }

@@ -16822,6 +16822,39 @@ window.__bramGuardRoutingLine = function (r) {
   return "The shared link points at " + g.linkTarget + " (another Bram); hooks here are routed to this project's guard: " + g.projectGuard;
 };
 
+// issue-469-status-dry-run: the Status tab's "State folder" section
+// (GET /__state-dir/plan). Nothing moves; these only format the plan.
+window.__bramStateDirPlanFolderLine = function (p) {
+  if (!p) return "";
+  return "State folder: " + p.stateDir + (p.stateDirExists ? " (exists)" : " (not created yet)");
+};
+window.__bramStateDirPlanHeading = function (p, key) {
+  if (!p) return "";
+  var labels = { wouldMove: "Would move", foreign: "Foreign", tracked: "Tracked", nested: "Nested" };
+  var n = key === "tracked" ? ((p.tracked || {}).count || 0) : (p[key] || []).length;
+  var more = key === "tracked" && (p.tracked || {}).truncated ? " (first 200 shown)" : "";
+  return (labels[key] || key) + " " + n + more;
+};
+window.__bramStateDirPlanTrackedPaths = function (p) {
+  return ((p && p.tracked) || {}).paths || [];
+};
+window.__bramStateDirPlanRow = function (item) {
+  if (item == null) return "";
+  if (typeof item === "string") return item;
+  if (item.stateDir) return item.path + " (own " + item.stateDir + "/, migrates itself)";
+  if (item.kind) return item.path + " (" + item.kind + ")";
+  return item.name + (item.isDir ? "/" : "");
+};
+window.__bramStateDirPlanLiveClaimLine = function (p) {
+  if (!p) return "";
+  if (!p.liveClaim) return "Live claim: no";
+  var d = p.liveClaimDetail || {};
+  var bits = [];
+  if ((d.claimIds || []).length) bits.push("claim on " + d.claimIds.join(", "));
+  if (d.authorization) bits.push(d.authorization + " authorization open");
+  return "Live claim: yes" + (bits.length ? " (" + bits.join("; ") + ")" : "");
+};
+
 window.__bramLandedNote = function (board) {
   var n = window.__bramLandedIds(board).length;
   if (!n) return "";

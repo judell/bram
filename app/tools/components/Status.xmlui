@@ -10,6 +10,9 @@
        against a throwaway project when the tab opens and on Refresh; no
        polling (docs/developing-bram.md, Push over polling). -->
   <DataSource id="guardSelftest" url="/__guard/selftest?t={refreshTick}" />
+  <!-- issue-469-status-dry-run: what the 0.8.4 state-folder move would do.
+       Read-only; refetched on Refresh, no polling. -->
+  <DataSource id="stateDirPlan" url="/__state-dir/plan?t={refreshTick}" />
 
   <VStack padding="$space-6" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -23,7 +26,7 @@
       <Button
         label="Refresh"
         size="sm"
-        onClick="refreshTick = refreshTick + 1; status.refetch(); sessionSize.refetch(); guardSelftest.refetch();" />
+        onClick="refreshTick = refreshTick + 1; status.refetch(); sessionSize.refetch(); guardSelftest.refetch(); stateDirPlan.refetch();" />
     </HStack>
 
     <!-- issue-415: whether the worklist guard actually runs and decides as
@@ -58,6 +61,32 @@
           <Text fontSize="$fontSize-sm" value="{$item.reason}" overflowMode="flow" breakMode="word" />
         </Column>
       </Table>
+    </VStack>
+
+    <!-- issue-469-status-dry-run: the state folder's plan, formatted by the
+         window.__bramStateDirPlan* helpers. Items, not List: short lists
+         (tracked is capped at 200 by the host). -->
+    <VStack when="{stateDirPlan.value}" gap="$space-2">
+      <Heading level="h3">State folder</Heading>
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{stateDirPlan.value.note}" />
+      <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanFolderLine(stateDirPlan.value)}" />
+      <Text value="{window.__bramStateDirPlanLiveClaimLine(stateDirPlan.value)}" />
+      <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'wouldMove')}" />
+      <Items data="{stateDirPlan.value.wouldMove || []}">
+        <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
+      </Items>
+      <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'foreign')}" />
+      <Items data="{stateDirPlan.value.foreign || []}">
+        <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
+      </Items>
+      <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'tracked')}" />
+      <Items data="{window.__bramStateDirPlanTrackedPaths(stateDirPlan.value)}">
+        <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
+      </Items>
+      <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'nested')}" />
+      <Items data="{stateDirPlan.value.nested || []}">
+        <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
+      </Items>
     </VStack>
 
     <VStack when="{sessionSize.value &amp;&amp; sessionSize.value.humanBytes}" gap="$space-2">

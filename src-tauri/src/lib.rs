@@ -792,6 +792,26 @@ fn parse_cli_flags() {
                 }
             }
         }
+        // issue-469: the state-folder dry run without a window, so the
+        // acceptance checkouts (and Windows) can record what the 0.8.4 move
+        // would do with no instance running. Same JSON as /__state-dir/plan.
+        "--state-dir-plan" => {
+            let Some(dir) = args.get(2) else {
+                eprintln!("bram: --state-dir-plan requires a project root path");
+                std::process::exit(1);
+            };
+            let root = Path::new(dir);
+            if !root.is_dir() {
+                eprintln!("bram: {} is not a directory", dir);
+                std::process::exit(1);
+            }
+            let plan = state_dir_plan(root);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plan).unwrap_or_else(|_| plan.to_string())
+            );
+            std::process::exit(0);
+        }
         s if is_launch_flag(s) => {}
         s if s.starts_with('-') => {
             eprintln!("bram: unknown option '{}'", s);
@@ -61192,6 +61212,172 @@ fn bram_state_grep() -> Vec<&'static str> {
     ranked.into_iter().map(|(_, rel)| rel).collect()
 }
 
+const STATE_DIR_PLAN_NOTE: &str = "Nothing moves in this release. This is what 0.8.4 would do.";
+const STATE_DIR_PLAN_TRACKED_CAP: usize = 200;
+
+fn owned_kind_label(kind: OwnedKind) -> &'static str {
+    match kind {
+        OwnedKind::File => "file",
+        OwnedKind::Dir => "dir",
+        OwnedKind::DotfilesUnderStateRoot => "dotfile",
+    }
+}
+
+// The inventory entry a top-level name in the state folder falls under: a
+// named entry first, then the dotfiles rule. Root-relative (seeded) entries
+// never live in the state folder.
+fn state_dir_entry_for(name: &str) -> Option<&'static OwnedEntry> {
+    let state = || BRAM_OWNED_ENTRIES.iter().filter(|e| !e.root_relative);
+    state()
+        .filter(|e| e.kind != OwnedKind::DotfilesUnderStateRoot)
+        .find(|e| owned_entry_covers(e, name))
+        .or_else(|| {
+            state()
+                .filter(|e| e.kind == OwnedKind::DotfilesUnderStateRoot)
+                .find(|e| owned_entry_covers(e, name))
+        })
+}
+
+// Whether an inflight claim names ids, or an authorization record is still
+// usable: the same claim file the Status tab's "Current claim" row reads, and
+// the record's freshness under worklist_auth_freshness_ok (the TTL mutate
+// and commit apply).
+fn state_dir_live_claim(root: &Path, now_ms: i64) -> (bool, Vec<String>, Option<String>) {
+    let claim_ids: Vec<String> =
+        std::fs::read_to_string(resource_relative_path(root, INFLIGHT_CLAIM_REL))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| {
+                v.get("ids").and_then(|ids| ids.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|id| id.as_str().map(String::from))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+    let auth_kind = std::fs::read_to_string(resource_relative_path(root, WORKLIST_AUTH_REL))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|v| {
+            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("none");
+            let issued = v.get("issuedAtMs").and_then(|i| i.as_i64()).unwrap_or(0);
+            kind != "none"
+                && issued > 0
+                && worklist_auth_freshness_ok(v, now_ms, WorklistAuthUse::Reconcile).is_ok()
+        })
+        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(String::from));
+    (
+        !claim_ids.is_empty() || auth_kind.is_some(),
+        claim_ids,
+        auth_kind,
+    )
+}
+
+// Subfolders (depth <= 3) holding another Bram instance's state, which that
+// instance migrates itself (#469 plan decision 8). The walk stops at each one.
+fn state_dir_nested(root: &Path, state_name: &str) -> Vec<serde_json::Value> {
+    const SKIP: &[&str] = &[".git", "node_modules", "target"];
+    const MARKERS: &[&str] = &[".bram-port", "worklist.json"];
+    let mut found = Vec::new();
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if SKIP.contains(&name.as_str()) || (depth == 0 && name == state_name) {
+                continue;
+            }
+            let sub = entry.path();
+            let marked = [BRAM_STATE_DIR_LEGACY, BRAM_STATE_DIR_NEW]
+                .iter()
+                .find(|d| MARKERS.iter().any(|m| sub.join(d).join(m).is_file()));
+            if let Some(d) = marked {
+                let rel = sub
+                    .strip_prefix(root)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                found.push(serde_json::json!({ "path": rel, "stateDir": d }));
+            } else if depth + 1 < 3 {
+                stack.push((sub, depth + 1));
+            }
+        }
+    }
+    found.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    found
+}
+
+// judell/bram#469: what the 0.8.4 state-folder move would do for `root`,
+// read-only. GET /__state-dir/plan serves it on the Status tab.
+fn state_dir_plan(root: &Path) -> serde_json::Value {
+    let state_name = bram_state_dir_name(root);
+    let state_dir = bram_state_dir(root);
+    let mut would_move = Vec::new();
+    let mut foreign = Vec::new();
+    if let Ok(read) = std::fs::read_dir(&state_dir) {
+        let mut names: Vec<(String, bool)> = read
+            .flatten()
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.file_type().map(|t| t.is_dir()).unwrap_or(false),
+                )
+            })
+            .collect();
+        names.sort();
+        for (name, is_dir) in names {
+            match state_dir_entry_for(&name) {
+                Some(e) if e.class == OwnedClass::SeededContent => {}
+                Some(e) => would_move.push(serde_json::json!({
+                    "path": format!("{}/{}", state_name, name),
+                    "kind": owned_kind_label(e.kind),
+                    "isDir": is_dir,
+                })),
+                None => foreign.push(serde_json::json!({ "name": name, "isDir": is_dir })),
+            }
+        }
+    }
+    let tracked: Vec<String> = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "-z", "--", state_name])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            o.stdout
+                .split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let (live_claim, claim_ids, auth_kind) = state_dir_live_claim(root, unix_now_ms());
+    let nested = state_dir_nested(root, state_name);
+    serde_json::json!({
+        "stateDir": state_name,
+        "stateDirExists": state_dir.is_dir(),
+        "wouldMove": would_move,
+        "foreign": foreign,
+        "tracked": {
+            "count": tracked.len(),
+            "paths": tracked.iter().take(STATE_DIR_PLAN_TRACKED_CAP).collect::<Vec<_>>(),
+            "truncated": tracked.len() > STATE_DIR_PLAN_TRACKED_CAP,
+        },
+        "liveClaim": live_claim,
+        "liveClaimDetail": { "claimIds": claim_ids, "authorization": auth_kind },
+        "nested": nested,
+        "note": STATE_DIR_PLAN_NOTE,
+    })
+}
+
 // Tests that need a repo-relative state path as fixture data: a root with no
 // `.bram/`, so the answer is today's legacy folder.
 #[cfg(test)]
@@ -83186,6 +83372,35 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
+    // /__state-dir/plan — judell/bram#469: what the 0.8.4 state-folder move
+    // would do here. Read-only; the Status tab's "State folder" section.
+    if path == "__state-dir/plan" {
+        let Some(root) = project_root(Some(app)) else {
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            );
+        };
+        let plan = state_dir_plan(&root);
+        let len = |k: &str| plan[k].as_array().map_or(0, |a| a.len());
+        append_bram_trace_line(
+            app,
+            "state-dir",
+            &format!(
+                "op=plan state_dir={} would_move={} foreign={} tracked={} live_claim={} nested={}",
+                plan["stateDir"].as_str().unwrap_or(""),
+                len("wouldMove"),
+                len("foreign"),
+                plan["tracked"]["count"].as_u64().unwrap_or(0),
+                plan["liveClaim"].as_bool().unwrap_or(false),
+                len("nested"),
+            ),
+        );
+        let body = serde_json::to_vec(&plan).unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     // /__pty-intent — diagnostic readout of the right-pane intent queue
     // (#86). Returns `{"queue": [<parsed-jsonl-line>, ...]}`. Empty
     // queue or missing file returns `{"queue": []}`. Read-only.
@@ -89874,6 +90089,96 @@ mod worklist_authorization_tests {
             ".bram/worklist.json"
         );
         assert_eq!(super::bram_state_rel_strip(&root, &legacy_wl), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn state_dir_plan_temp_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("bram-469-plan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn state_dir_plan_on_an_empty_root() {
+        let root = state_dir_plan_temp_root();
+        let plan = super::state_dir_plan(&root);
+        assert_eq!(plan["stateDir"], super::BRAM_STATE_DIR_LEGACY);
+        assert_eq!(plan["stateDirExists"], false);
+        assert_eq!(plan["wouldMove"].as_array().unwrap().len(), 0);
+        assert_eq!(plan["foreign"].as_array().unwrap().len(), 0);
+        assert_eq!(plan["tracked"]["count"], 0);
+        assert_eq!(plan["tracked"]["truncated"], false);
+        assert_eq!(plan["liveClaim"], false);
+        assert_eq!(plan["nested"].as_array().unwrap().len(), 0);
+        assert_eq!(plan["note"], super::STATE_DIR_PLAN_NOTE);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_dir_plan_splits_owned_foreign_and_nested() {
+        let root = state_dir_plan_temp_root();
+        let legacy = super::BRAM_STATE_DIR_LEGACY;
+        std::fs::create_dir_all(super::bram_state_dir(&root)).unwrap();
+        std::fs::write(resource_relative_path(&root, "worklist.json"), "{}").unwrap();
+        std::fs::write(resource_relative_path(&root, ".bram-port"), "1").unwrap();
+        let foreign_name = "custom.txt";
+        std::fs::write(super::bram_state_dir(&root).join(foreign_name), "x").unwrap();
+        let sub_state = root.join("sub").join(legacy);
+        std::fs::create_dir_all(&sub_state).unwrap();
+        std::fs::write(sub_state.join(".bram-port"), "2").unwrap();
+        let plan = super::state_dir_plan(&root);
+        assert_eq!(plan["stateDir"], legacy);
+        assert_eq!(plan["stateDirExists"], true);
+        let moved: Vec<(String, String)> = plan["wouldMove"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["path"].as_str().unwrap().to_string(),
+                    e["kind"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            moved,
+            vec![
+                (format!("{}/.bram-port", legacy), "file".to_string()),
+                (format!("{}/worklist.json", legacy), "file".to_string()),
+            ]
+        );
+        assert_eq!(
+            plan["foreign"],
+            serde_json::json!([{ "name": "custom.txt", "isDir": false }])
+        );
+        assert_eq!(
+            plan["nested"],
+            serde_json::json!([{ "path": "sub", "stateDir": legacy }])
+        );
+        assert_eq!(plan["tracked"]["count"], 0);
+        assert_eq!(plan["liveClaim"], false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_dir_plan_resolves_dot_bram() {
+        let root = state_dir_plan_temp_root();
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_NEW)).unwrap();
+        // An unknown dotfile falls under the dotfiles rule.
+        std::fs::write(resource_relative_path(&root, ".bram-port"), "1").unwrap();
+        let unknown_dotfile = ".something-new.json";
+        std::fs::write(super::bram_state_dir(&root).join(unknown_dotfile), "{}").unwrap();
+        let plan = super::state_dir_plan(&root);
+        assert_eq!(plan["stateDir"], super::BRAM_STATE_DIR_NEW);
+        assert_eq!(plan["stateDirExists"], true);
+        let kinds: Vec<&str> = plan["wouldMove"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["file", "dotfile"]);
+        assert_eq!(plan["foreign"].as_array().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

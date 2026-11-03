@@ -25,7 +25,7 @@
   };
   const ARCHITECTURE = [
     {file: "03-gate.mmd", title: "Worklist",
-      note: "How a change gets into the repo, in four stages. An item is defined, directly or from an issue. You refine it with feedback, which changes only its draft, until you click Start. The agent builds it; you test it and send feedback, which changes the files, until you click Commit. The host then commits it and keeps the record. Inside the stages, the guard lets the agent edit only what an item covers, and telling the board it has finished editing is the agent's to remember; the rest happens on its own."},
+      note: "How a change gets into the repo, in four stages. An item is defined, directly or from an issue. You refine it with feedback, which changes only its draft, until you click Start. The agent builds it; you test it and send feedback, which changes the files, until you click Commit. The host then commits it and keeps the record. Inside the stages, the guard lets the agent edit only the files declared for an item. If the item needs more files as you iterate, the agent can add them to the list."},
     {file: "01-system.mmd", title: "Components",
       note: "What you are looking at when Bram is open. A Rust shell runs the agent CLI in a terminal and provides a UI over it; the pane and the agent both talk to a small HTTP server on your machine; a target-app pane is optional. The conventions Bram seeds into the repo are instructions the agent reads and follows; everything else is wiring that works on its own. Click a box or arrow for detail."},
     {file: "02-turn.mmd", title: "A turn's lifecycle",

@@ -7,10 +7,12 @@
 // (bram-guard-authority-fail-closed); menu hooks POST the pane's menu
 // claims/clears and stay deliberately fail-open, exit 0 always — a menu hook
 // must never gate or delay a tool call. Every invocation appends one
-// breadcrumb to resources/bram-traces/hook-events.log, tagged `claude-rs` /
-// `codex-rs` / `opencode-rs` / `antigravity-rs`, written only when <root>/resources already exists — outside
-// that, guard mode creates nothing (`guard_mode_is_inert_without_
-// resources_dir` holds the line).
+// breadcrumb to <state>/bram-traces/hook-events.log, tagged `claude-rs` /
+// `codex-rs` / `opencode-rs` / `antigravity-rs`, written only when the root's
+// state folder already exists — `<root>/.bram` if it exists, else
+// `<root>/resources` (issue-469, `guard_policy::state_dir`). Outside that,
+// guard mode creates nothing (`guard_mode_is_inert_without_resources_dir`
+// and its `.bram/` twin hold the line).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -114,22 +116,42 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
 // hands the call to that one. Registrations don't change for either
 // provider. Any routing failure falls back to deciding in-process, as
 // before; routing never denies on its own.
+//
+// issue-469: the file lives in the root's state folder, `.bram/` if it
+// exists, else `resources/`. `GUARD_TARGET_REL` keeps the legacy spelling
+// for the host's callers until they move to `guard_target_path`.
 pub const GUARD_TARGET_REL: &str = "resources/.bram-guard-target";
+pub const GUARD_TARGET_LEAF: &str = ".bram-guard-target";
+
+/// `<root>/<state folder>/.bram-guard-target`, for the folder resolved for `root`.
+pub fn guard_target_path(root: &Path) -> PathBuf {
+    crate::guard_policy::state_path(root, GUARD_TARGET_LEAF)
+}
+
+/// The first readable `<dir>/<state folder>/<leaf>` walking up from `start`,
+/// trying `.bram/` then `resources/` at each level before moving up, so a
+/// nested instance is found before its parent. Returns the file's text and
+/// the directory it was found under.
+fn find_state_file_upward(start: &Path, leaf: &str) -> Option<(String, PathBuf)> {
+    let mut cur = start.to_path_buf();
+    loop {
+        for dir in crate::guard_policy::state_dir_candidates(&cur) {
+            if let Ok(text) = std::fs::read_to_string(dir.join(leaf)) {
+                return Some((text, cur));
+            }
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
 const GUARD_ROUTED_ENV: &str = "BRAM_GUARD_ROUTED";
 
 // The project's recorded guard, when it exists and isn't `current`, with
 // the project root it was recorded in (where the breadcrumb belongs; the
 // hook's cwd can be a subdirectory with no resources/).
 pub(crate) fn route_target(start: &Path, current: &Path) -> Option<(PathBuf, PathBuf)> {
-    let mut cur = start.to_path_buf();
-    let text = loop {
-        if let Ok(text) = std::fs::read_to_string(cur.join(GUARD_TARGET_REL)) {
-            break text;
-        }
-        if !cur.pop() {
-            return None;
-        }
-    };
+    let (text, cur) = find_state_file_upward(start, GUARD_TARGET_LEAF)?;
     let target = PathBuf::from(text.trim());
     if text.trim().is_empty() || !target.is_file() {
         return None;
@@ -235,19 +257,13 @@ fn route_to_project_guard(
 
 // --- Deciding worklist hooks ----------------------------------------------
 
-// Walk up from `start` to the nearest resources/.bram-port, mirroring the
-// Python guard's port discovery so the [hook] trace lands the same way.
+// Walk up from `start` to the nearest `.bram/.bram-port` or
+// `resources/.bram-port` (both names at each level, `.bram/` first,
+// issue-469), mirroring the Python guard's port discovery so the [hook]
+// trace lands the same way.
 fn find_port_upward(start: &Path) -> Option<u16> {
-    let mut cur = start.to_path_buf();
-    loop {
-        let candidate = cur.join("resources").join(".bram-port");
-        if let Ok(text) = std::fs::read_to_string(&candidate) {
-            return text.trim().parse().ok();
-        }
-        if !cur.pop() {
-            return None;
-        }
-    }
+    let (text, _) = find_state_file_upward(start, ".bram-port")?;
+    text.trim().parse().ok()
 }
 
 // Minimal fail-silent HTTP POST over std TcpStream — the guard must never
@@ -1013,7 +1029,7 @@ fn menu_would_action(provider: &str, event: &str, tool: &str) -> Option<&'static
 }
 
 fn read_port(root: &Path) -> Option<u16> {
-    std::fs::read_to_string(root.join("resources").join(".bram-port"))
+    std::fs::read_to_string(crate::guard_policy::state_path(root, ".bram-port"))
         .ok()?
         .trim()
         .parse()
@@ -1171,17 +1187,18 @@ fn authority_menu_hook(
 
 // One line per invocation into the hook breadcrumb file, same
 // refusal-to-create discipline the retired Python hooks applied: no
-// <root>/resources, no write anywhere; the existing log over the cap stops
+// state folder under <root> (`.bram/` or `resources/`), no write anywhere;
+// the existing log over the cap stops
 // growing rather than rotating. `reason=` fields are deliberately LAST and
 // run to end-of-line: Codex reasons are prose with spaces, so every
 // fixed-width field must precede them for lines to stay
 // whitespace-splittable.
 pub(crate) fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: &str, tail: &str) {
-    let resources = root.join("resources");
-    if !resources.is_dir() {
+    let state = crate::guard_policy::state_dir(root);
+    if !state.is_dir() {
         return;
     }
-    let dir = resources.join("bram-traces");
+    let dir = state.join("bram-traces");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -2425,5 +2442,129 @@ mod guard_mode_tests {
         install_guard_link(&home, &exe_b).expect("retarget link");
         assert_eq!(std::fs::read_link(&link).unwrap(), exe_b);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // --- issue-469: the `.bram/` twins ----------------------------------------
+
+    #[test]
+    fn route_target_finds_the_project_guard_under_dot_bram() {
+        let root = scratch("route-found-dot-bram");
+        let nested = root.join("app").join("tools");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        let project_guard = root.join("project-guard");
+        std::fs::write(&project_guard, "").unwrap();
+        let running_guard = root.join("running-guard");
+        std::fs::write(&running_guard, "").unwrap();
+        assert_eq!(
+            guard_target_path(&root),
+            root.join(".bram/.bram-guard-target")
+        );
+        std::fs::write(
+            guard_target_path(&root),
+            format!("{}\n", project_guard.display()),
+        )
+        .unwrap();
+        let (target, found_root) = route_target(&nested, &running_guard).expect("routed");
+        assert_eq!(
+            target.canonicalize().unwrap(),
+            project_guard.canonicalize().unwrap()
+        );
+        assert_eq!(found_root, root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn guard_mode_is_inert_without_either_state_dir() {
+        // No `.bram/` and no `resources/` under root: nothing written, and
+        // no `.bram/` created either.
+        let root = scratch("inert-both");
+        let payload = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "cwd": root.to_string_lossy(),
+        });
+        authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        authority_menu_hook("claude-rs", &payload, std::time::Instant::now());
+        assert_eq!(count_entries(&root), 0, "guard mode created files");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn breadcrumb_lands_under_dot_bram_when_it_exists() {
+        let root = scratch("crumb-dot-bram");
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        // A legacy folder beside it is not the state folder any more.
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "cwd": root.to_string_lossy(),
+        });
+        authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        let log = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
+            .expect("breadcrumb written under .bram");
+        assert!(
+            log.contains("codex-rs PermissionRequest Bash"),
+            "log: {log}"
+        );
+        assert!(log.contains("post=skipped port=none"), "log: {log}");
+        assert!(!root.join("resources/bram-traces").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn port_is_read_from_either_state_dir() {
+        let legacy = scratch("port-legacy");
+        std::fs::create_dir_all(legacy.join("resources")).unwrap();
+        std::fs::write(legacy.join("resources/.bram-port"), "4101\n").unwrap();
+        assert_eq!(read_port(&legacy), Some(4101));
+        assert_eq!(find_port_upward(&legacy), Some(4101));
+
+        let dot = scratch("port-dot-bram");
+        std::fs::create_dir_all(dot.join(".bram")).unwrap();
+        std::fs::write(dot.join(".bram/.bram-port"), "4102\n").unwrap();
+        assert_eq!(read_port(&dot), Some(4102));
+        let deep = dot.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(find_port_upward(&deep), Some(4102));
+        let _ = std::fs::remove_dir_all(&legacy);
+        let _ = std::fs::remove_dir_all(&dot);
+    }
+
+    #[test]
+    fn walk_up_finds_a_nested_dot_bram_instance_before_its_parent() {
+        // root/resources/.bram-port (parent, old name) and
+        // root/sub/.bram/.bram-port (nested, new name): a run from
+        // root/sub/x resolves to root/sub.
+        let root = scratch("nested-dot-bram");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources/.bram-port"), "5001").unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir_all(sub.join(".bram")).unwrap();
+        std::fs::write(sub.join(".bram/.bram-port"), "5002").unwrap();
+        let x = sub.join("x");
+        std::fs::create_dir_all(&x).unwrap();
+        let (_, found) = find_state_file_upward(&x, ".bram-port").expect("found");
+        assert_eq!(found, sub);
+        assert_eq!(find_port_upward(&x), Some(5002));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walk_up_reaches_the_parent_when_the_child_has_neither_name() {
+        let root = scratch("parent-only");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources/.bram-port"), "5003").unwrap();
+        let x = root.join("sub").join("x");
+        std::fs::create_dir_all(&x).unwrap();
+        let (_, found) = find_state_file_upward(&x, ".bram-port").expect("found");
+        assert_eq!(found, root);
+        assert_eq!(find_port_upward(&x), Some(5003));
+        // The child, having no state folder, gets no breadcrumb either.
+        append_breadcrumb(&root.join("sub"), "claude-rs", "PreToolUse", "Edit", "t");
+        assert!(!root.join("sub/resources").exists());
+        assert!(!root.join("sub/.bram").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

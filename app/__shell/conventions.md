@@ -42,16 +42,19 @@ overwrites them.
 
 ## Coordinate via worklist.json
 
-`resources/worklist.json` is the canonical surface for multi-step
+Bram's state folder, written `<state>/` below, is `.bram/` if it
+exists, else `resources/`; whichever one holds `.bram-port` is in use.
+
+`<state>/worklist.json` is the canonical surface for multi-step
 coordination between you and the user. The Worklist tab in the agent
 pane renders it as a checklist under "Worklist". It doesn't need to
 exist in advance — Bram serves an empty default and the Worklist tab
-creates the file (and `resources/`) on first use. Empty state is fine:
+creates the file (and the state folder) on first use. Empty state is fine:
 `{ "description": "", "items": [] }`.
 
 ### When to route through the worklist
 
-**Default: every change request goes through `resources/worklist.json`.**
+**Default: every change request goes through `<state>/worklist.json`.**
 Single-file, single-line, single-attribute — size doesn't matter.
 Propose first, wait for the user's `approved:` payload, then apply. The
 two-stage proposed → applied flow lets the user redirect or veto before
@@ -100,7 +103,7 @@ suggest "just do it" unless the user asks how to skip the Worklist.
 
 **Worklist items represent repository changes.** A `proposed` item
 names a `file` (or `files`) plus `before` / `after` prose in
-`resources/worklist-drafts/<id>.md`, describing what would change on
+`<state>/worklist-drafts/<id>.md`, describing what would change on
 disk. An `applied` item has those changes on disk awaiting commit
 approval — and so can a `proposed` item that has **begun** (approved
 and started, not advanced): once its changes are on disk the pane
@@ -133,7 +136,7 @@ found the item's premise **false** (**Drop**, and the draft's own
 claims must say they are wrong), or **done elsewhere**: a PR in another
 repo, a server change, a forge action (**Drop**, and the draft links
 where the work landed). Record in
-`resources/worklist-drafts/<id>.md` which of the four it is: the
+`<state>/worklist-drafts/<id>.md` which of the four it is: the
 premise that failed, what was verified, and what would make the item
 actionable again.
 
@@ -168,8 +171,8 @@ the Alerts inbox key on that prefix.
 Metadata and review prose live in two files:
 
 ```text
-resources/worklist.json              # compact metadata index
-resources/worklist-drafts/<id>.md    # before / after prose per item
+<state>/worklist.json              # compact metadata index
+<state>/worklist-drafts/<id>.md    # before / after prose per item
 ```
 
 The draft file:
@@ -200,7 +203,7 @@ so the pane sees one combined item; hashes cover metadata + resolved
 prose. A missing draft yields empty `before` / `after` plus
 `"_draftMissing": true` and a placeholder in the UI.
 
-**`resources/worklist-history/` is host-written**; the guard denies
+**`<state>/worklist-history/` is host-written**; the guard denies
 agent edits. An instruction to edit it is stale.
 
 **The `version` rule.** `worklist.json` carries a top-level `version`
@@ -262,8 +265,8 @@ status; the user's Commit button judges committability independently.
 
 ### Lifecycle: propose → triage → mechanical transitions
 
-1. **Propose** — write the draft to `resources/worklist-drafts/<id>.md`,
-   then the metadata item to `resources/worklist.json`. Each item small,
+1. **Propose** — write the draft to `<state>/worklist-drafts/<id>.md`,
+   then the metadata item to `<state>/worklist.json`. Each item small,
    discrete, independently rejectable. Writing the item is *asking*, not
    approval. Don't show or instruct on raw `approved:` / `drop:` /
    `iterate:` payloads — the buttons generate them.
@@ -323,7 +326,7 @@ as authorization**. `iterate:` and other non-authorization turns never
 route through `resolve`.
 
 **Item feedback (`iterate:`)** authorizes no state change. Re-read items from `/__worklist` (resolved prose) or
-`resources/worklist.json` (metadata), then per item:
+`<state>/worklist.json` (metadata), then per item:
 
 - **`proposed`, not yet begun** (no `begunAtMs`, nothing on disk):
   revise the draft's `before` / `after`; update `files` only if scope
@@ -343,7 +346,7 @@ for it as feedback on the item.
 - **Routing a change, or a commit left `unowned` residue** → read `.claude/bram-reference/worklist-mechanics.md` (§Routing edits to the right item; §Edits made in chat turns).
 
 Feedback items arrive as `{id, feedbackRef}`: read the user's
-full-fidelity text from `resources/feedback-drafts/<feedbackRef>.md`
+full-fidelity text from `<state>/feedback-drafts/<feedbackRef>.md`
 (refs are per send, typically `<unix-ms>-<item-id>`, not item ids).
 That text is the user's submission for this turn. An inline
 `{id, feedback}` appears only as a degradation fallback when the draft
@@ -411,7 +414,7 @@ response saying the commit "ALREADY RAN" is success.
 ### Transports
 
 **Claude, OpenCode and Antigravity: loopback curl.** Bram writes its port to
-`resources/.bram-port` (plain decimal). Read it once and put the literal
+`<state>/.bram-port` (plain decimal). Read it once and put the literal
 number where `61455` appears (`$BRAM_PORT` won't match the permission
 allowlist):
 
@@ -445,7 +448,7 @@ Two pitfalls:
 ### Notice when feedback drifts from its item
 
 Feedback sent with a row ticked is filed to that item's audit trail
-(`resources/feedback-drafts/`, then `feedback-history/`), so feedback
+(`<state>/feedback-drafts/`, then `feedback-history/`), so feedback
 about something else makes the record **false**. When a turn's feedback
 is plainly about something else — a different subsystem, bug or
 project — open with the question, verbatim:
@@ -535,7 +538,7 @@ they'll grep.
 ### Cite, don't gesture
 
 When referencing a file, route, or doc, name it
-(`resources/worklist.json`, `/__worklist/resolve`,
+(`<state>/worklist.json`, `/__worklist/resolve`,
 `.claude/bram-reference/diagnostics.md`) so the user can verify in one
 click. If you can't cite, say so.
 
@@ -663,7 +666,7 @@ you never meet them.
   tweaks; never switch branches without clear consent.
 - **Two unpushed commits look like one feature** → read `.claude/bram-reference/worklist-mechanics.md` (§Pushing: grace window and auto-rebase) before offering a squash.
 - **Don't rewrite a commit the worklist history has recorded.**
-  `resources/worklist-history/` stores commit links by SHA, so rewriting
+  `<state>/worklist-history/` stores commit links by SHA, so rewriting
   any commit made through the gate orphans them permanently, pushed or
   not. Prefer a follow-up commit. Guards deny a forge write citing a full
   40-hex SHA that doesn't resolve locally.
@@ -751,7 +754,7 @@ we done X / did we decide Y" questions.
 The test: if you're groveling through the tree or asking the user for a
 fact a prior session likely established, the query was overdue.
 
-**The call** (literal port from `resources/.bram-port`; allowlisted):
+**The call** (literal port from `<state>/.bram-port`; allowlisted):
 
 ```
 curl -4 -sS "http://127.0.0.1:61455/__search?q=<urlencoded>&limit=20&types=commit,issue"

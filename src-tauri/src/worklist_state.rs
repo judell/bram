@@ -1,9 +1,9 @@
 //! Phase A of the mirror-then-migrate strategy for worklist lifecycle state
 //! (worklist item `state-mirror-store-and-ledger`): a SQLite shadow of the
 //! two agent-reachable state files —
-//! `resources/.worklist-authorization.json` and
-//! `resources/.inflight-claim.json` — plus an append-only transitions
-//! ledger.
+//! `.worklist-authorization.json` and `.inflight-claim.json` in Bram's
+//! state folder (`.bram/` if it exists, else `resources/`; `lib.rs`'s
+//! `bram_state_dir` decides) — plus an append-only transitions ledger.
 //!
 //! **Files remain the sole truth this phase.** `lib.rs` calls the
 //! `mirror_*` functions in this module AFTER each successful file write, at

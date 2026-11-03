@@ -896,7 +896,7 @@ fn init_bram_trace_from_env() {
     BRAM_TRACE_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
     if over == Some(true) {
         eprintln!(
-            "[bram-trace] enabled (BRAM_TRACE=1); live trace destination: <project_root>/resources/bram-traces/bram-trace.log; previous runs archived at startup as <project_root>/resources/bram-traces/bram-trace-YYYY-MM-DD*.log"
+            "[bram-trace] enabled (BRAM_TRACE=1); live trace destination: bram-traces/bram-trace.log in Bram's state folder (<project_root>/.bram/ if it exists, else <project_root>/resources/); previous runs archived at startup as bram-traces/bram-trace-YYYY-MM-DD*.log in Bram's state folder"
         );
     }
 }
@@ -2386,9 +2386,17 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
     project_resource_path(app, "bram-traces/bram-trace.log")
 }
 
-fn is_bram_trace_archive_rel(rel: &str) -> bool {
-    rel.starts_with("resources/bram-traces/bram-trace-")
+// `rel` is repo-relative under `root`.
+fn is_bram_trace_archive_rel(root: &Path, rel: &str) -> bool {
+    bram_state_rel_strip(root, rel)
+        .map(|r| r.starts_with("bram-traces/bram-trace-"))
+        .unwrap_or(false)
         && (rel.ends_with(".log") || rel.ends_with(".log.gz"))
+}
+
+// `rel` is repo-relative under `root`: the live trace log.
+fn is_bram_trace_live_rel(root: &Path, rel: &str) -> bool {
+    bram_state_rel_strip(root, rel) == Some("bram-traces/bram-trace.log")
 }
 
 fn bram_trace_date_stamp_local() -> String {
@@ -3456,14 +3464,23 @@ mod secret_observability_tests {
 
     #[test]
     fn raw_and_gzip_trace_archives_are_ignored_by_project_watchers() {
+        let root = std::path::Path::new("/nonexistent-bram-469-root");
+        let rel = |r: &str| super::bram_state_rel(root, r);
         assert!(is_bram_trace_archive_rel(
-            "resources/bram-traces/bram-trace-2026-01-01.log"
+            root,
+            &rel("bram-traces/bram-trace-2026-01-01.log")
         ));
         assert!(is_bram_trace_archive_rel(
-            "resources/bram-traces/bram-trace-2026-01-01.log.gz"
+            root,
+            &rel("bram-traces/bram-trace-2026-01-01.log.gz")
         ));
         assert!(!is_bram_trace_archive_rel(
-            "resources/bram-traces/bram-trace.log"
+            root,
+            &rel("bram-traces/bram-trace.log")
+        ));
+        assert!(super::is_bram_trace_live_rel(
+            root,
+            &rel("bram-traces/bram-trace.log")
         ));
     }
 
@@ -20428,7 +20445,7 @@ fn pty_spawn(
                         // issue-439: rotate the guard's breadcrumb log at its
                         // cap (first pass is at launch: last_ensure starts 0).
                         if let Some(root) = project_root(Some(&app_for_throughput)) {
-                            let dir = root.join("resources").join("bram-traces");
+                            let dir = resource_relative_path(&root, "bram-traces");
                             if let Some((bytes, to, removed)) = rotate_hook_events_log(
                                 &dir,
                                 &bram_trace_date_stamp_local(),
@@ -22721,7 +22738,8 @@ fn record_prefixed_inflight_sentinel<R: tauri::Runtime>(
 // exists only while an ADDRESSED turn is in flight — absent means a general
 // turn, a terminal-typed turn, or a pre-368 build, which the guard reads as
 // ctx=none and the gate as unblocked.
-const TURN_CONTEXT_REL: &str = "resources/.turn-context.json";
+// Relative to Bram's state folder (resource_relative_path).
+const TURN_CONTEXT_REL: &str = ".turn-context.json";
 
 fn emit_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String], kind: &str) {
     let payload = serde_json::json!({
@@ -22731,7 +22749,7 @@ fn emit_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String], kind
         "atMs": unix_now_ms(),
     });
     if let Some(root) = project_root(Some(app)) {
-        let path = root.join(TURN_CONTEXT_REL);
+        let path = resource_relative_path(&root, TURN_CONTEXT_REL);
         if ids.is_empty() {
             let _ = std::fs::remove_file(&path);
         } else if let Ok(text) = serde_json::to_string(&payload) {
@@ -22758,7 +22776,9 @@ fn emit_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String], kind
 // the whole turn. Same 2 s guard here.
 fn end_turn_context_unless_fresh<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) {
     let set_at_ms = project_root(Some(app))
-        .and_then(|root| std::fs::read_to_string(root.join(TURN_CONTEXT_REL)).ok())
+        .and_then(|root| {
+            std::fs::read_to_string(resource_relative_path(&root, TURN_CONTEXT_REL)).ok()
+        })
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("atMs").and_then(|t| t.as_i64()));
     if let Some(at) = set_at_ms {
@@ -22815,7 +22835,7 @@ fn record_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
 // would otherwise pin the gate's withhold and skew the guard soak.
 fn cleanup_stale_turn_context<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(root) = project_root(Some(app)) {
-        let path = root.join(TURN_CONTEXT_REL);
+        let path = resource_relative_path(&root, TURN_CONTEXT_REL);
         if path.exists() {
             let _ = std::fs::remove_file(&path);
             if bram_trace_enabled() {
@@ -24109,11 +24129,11 @@ mod agent_launch_tests {
     #[test]
     fn catch_up_exchanges_are_not_new_work() {
         use super::{catch_up_turn_text, drop_catch_up_exchanges};
-        let catch_up = catch_up_turn_text(
-            "Codex session 'X'",
-            4,
-            "resources/session-digests/codex-x.md",
+        let digest = super::bram_state_rel(
+            std::path::Path::new("/nonexistent-bram-469-root"),
+            "session-digests/codex-x.md",
         );
+        let catch_up = catch_up_turn_text("Codex session 'X'", 4, &digest);
         let turns = vec![
             serde_json::json!({"role": "user", "text": "real question"}),
             serde_json::json!({"role": "assistant", "text": "real answer"}),
@@ -25970,11 +25990,14 @@ fn session_digest_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> 
     project_resource_path(app, "session-digests")
 }
 
-fn session_digest_rel_path(provider: SessionProvider, id: &str) -> String {
-    format!(
-        "resources/session-digests/{}-{}.md",
-        session_provider_label(provider),
-        id
+fn session_digest_rel_path(root: &Path, provider: SessionProvider, id: &str) -> String {
+    bram_state_rel(
+        root,
+        &format!(
+            "session-digests/{}-{}.md",
+            session_provider_label(provider),
+            id
+        ),
     )
 }
 
@@ -26294,7 +26317,8 @@ fn write_session_digest<R: tauri::Runtime>(
             ),
         );
     }
-    Some((session_digest_rel_path(provider, id), take))
+    let root = project_root(Some(app))?;
+    Some((session_digest_rel_path(&root, provider, id), take))
 }
 
 // "Claude session '<title>'", or the id's first 8 characters when untitled.
@@ -29280,7 +29304,7 @@ fn bram_port_metadata_path(port_path: &Path) -> PathBuf {
 }
 
 fn write_bram_port_files(proj: &Path, port: u16, started_at_ms: i64) -> Result<(), String> {
-    let port_path = proj.join("resources/.bram-port");
+    let port_path = resource_relative_path(proj, ".bram-port");
     if let Some(parent) = port_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
@@ -29364,7 +29388,7 @@ fn publish_bram_port_files(
         .map_err(|e| format!("open {}: {}", lock_path.display(), e))?;
     lock.lock()
         .map_err(|e| format!("lock {}: {}", lock_path.display(), e))?;
-    let port_path = proj.join("resources/.bram-port");
+    let port_path = resource_relative_path(proj, ".bram-port");
     let recorded_port = std::fs::read_to_string(&port_path)
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
@@ -29402,8 +29426,8 @@ mod bram_port_publication_tests {
         }
         fn bytes(&self) -> (Vec<u8>, Vec<u8>) {
             (
-                std::fs::read(self.0.join("resources/.bram-port")).unwrap(),
-                std::fs::read(self.0.join("resources/.bram-port.json")).unwrap(),
+                std::fs::read(super::resource_relative_path(&self.0, ".bram-port")).unwrap(),
+                std::fs::read(super::resource_relative_path(&self.0, ".bram-port.json")).unwrap(),
             )
         }
     }
@@ -29526,10 +29550,14 @@ mod bram_port_publication_tests {
         let project = Project::new();
         let old = Server::project(&project);
         let new = Server::project(&project);
-        std::fs::create_dir_all(project.0.join("resources")).unwrap();
-        std::fs::write(project.0.join("resources/.bram-port"), old.port.to_string()).unwrap();
+        std::fs::create_dir_all(super::bram_state_dir(&project.0)).unwrap();
+        std::fs::write(
+            super::resource_relative_path(&project.0, ".bram-port"),
+            old.port.to_string(),
+        )
+        .unwrap();
         assert_eq!(project.publish(new.port).unwrap(), Some(old.port));
-        assert!(!project.0.join("resources/.bram-port.json").exists());
+        assert!(!super::resource_relative_path(&project.0, ".bram-port.json").exists());
     }
 
     #[test]
@@ -29619,7 +29647,7 @@ fn spawn_project_server(
     // bound while every request gets an empty reply — a half-dead orphan.
     // With a file, an orphan lingers HEALTHY: the next launch either
     // reuses it (port responsive) or reaps it via the sidecar below.
-    let log_path = project_root.join("resources/bram-traces/target-server.log");
+    let log_path = resource_relative_path(&project_root, "bram-traces/target-server.log");
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -29650,7 +29678,7 @@ fn spawn_project_server(
     );
     // issue-341 sidecar: enough identity for the next launch to reap a
     // verified orphan instead of printing a kill-it-yourself HINT.
-    let sidecar = project_root.join("resources/.target-server-pid");
+    let sidecar = resource_relative_path(&project_root, ".target-server-pid");
     let _ = std::fs::write(
         &sidecar,
         format!(
@@ -29767,7 +29795,7 @@ fn kill_server_group(pid: u32, root: Option<&Path>) {
     #[cfg(windows)]
     taskkill_tree(pid, true);
     if let Some(root) = root {
-        let _ = std::fs::remove_file(root.join("resources/.target-server-pid"));
+        let _ = std::fs::remove_file(resource_relative_path(&root, ".target-server-pid"));
     }
 }
 
@@ -29776,7 +29804,7 @@ fn kill_server_group(pid: u32, root: Option<&Path>) {
 // the recorded command (pid-reuse guard). Returns true when the port was
 // freed and a fresh spawn is safe.
 fn try_reap_orphan_server(cfg: &ServerConfig, root: &Path) -> bool {
-    let sidecar = root.join("resources/.target-server-pid");
+    let sidecar = resource_relative_path(root, ".target-server-pid");
     let Ok(text) = std::fs::read_to_string(&sidecar) else {
         return false;
     };
@@ -39879,7 +39907,7 @@ fn has_project_settings(dir: &Path) -> bool {
 // artifact that actually means "acknowledged". Accepting either is stricter
 // about intent, not looser: running Setup is a deliberate act on this project.
 fn project_is_managed(dir: &Path) -> bool {
-    has_project_settings(dir) || dir.join(WORKLIST_AUTH_REL).exists()
+    has_project_settings(dir) || resource_relative_path(dir, WORKLIST_AUTH_REL).exists()
 }
 
 const REPO_STARTUP_GREETING: &str = "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, or click Orient me for a guided tour: an overview and architecture diagrams of this repo, with every claim cited to the code.";
@@ -40204,14 +40232,20 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
                 // Name the root: on a machine with several managed checkouts,
                 // "which repo did it just set up" is not answerable from the
                 // window alone (#330's Windows validation asked for this).
-                let root_label = project_root(Some(app))
+                let setup_root = project_root(Some(app));
+                let root_label = setup_root
+                    .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "this repo".to_string());
+                let state_label = setup_root
+                    .as_ref()
+                    .map(|p| format!("{}/", bram_state_dir_name(p)))
+                    .unwrap_or_else(|| "Bram's state folder".to_string());
                 append_auto_setup_announcement(&format!(
                     "I also just set up agent coordination for {} \u{2014} Setup wrote \
-                     .claude/, AGENTS.md and resources/ (all visible in git status). If this \
+                     .claude/, AGENTS.md and {} (all visible in git status). If this \
                      repo shouldn't be managed by Bram, say so and I'll undo it.",
-                    root_label
+                    root_label, state_label
                 ));
             }
             emit_replayable_signal(app, "enhance-status-changed");
@@ -47940,7 +47974,11 @@ fn frame_outbound_turn<R: tauri::Runtime>(
         frame.push_str("skip-worklist: ");
     }
     frame.push_str(OUTBOUND_TURN_FRAME_PREFIX);
-    frame.push_str(&format!("resources/outbound-turns/{}.json", id));
+    let root = project_root(Some(app))?;
+    frame.push_str(&bram_state_rel(
+        &root,
+        &format!("outbound-turns/{}.json", id),
+    ));
     for img in &images {
         frame.push_str(&format!(" @{}", img));
     }
@@ -49262,7 +49300,7 @@ fn append_strand_forensics_line<R: tauri::Runtime>(app: &AppHandle<R>, body: &st
     let Some(root) = project_root(Some(app)) else {
         return;
     };
-    let dir = root.join("resources").join("bram-traces");
+    let dir = resource_relative_path(&root, "bram-traces");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("strand-forensics.log");
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -49397,7 +49435,7 @@ fn append_audit_record<R: tauri::Runtime>(app: &AppHandle<R>, record: serde_json
     };
     let line = audit_record_line(&record, unix_now_ms());
     let _guard = audit_ledger_cell().lock();
-    let dir = root.join("resources");
+    let dir = bram_state_dir(&root);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("[audit-ledger] create {} failed: {}", dir.display(), e);
         return;
@@ -50862,7 +50900,7 @@ mod project_managed_tests {
         // the search indexer held forever on a project the user had set up.
         let d = scratch("marker");
         assert!(!project_is_managed(&d), "bare dir must not read as managed");
-        let auth = d.join(WORKLIST_AUTH_REL);
+        let auth = super::resource_relative_path(&d, WORKLIST_AUTH_REL);
         std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
         std::fs::write(&auth, "{}\n").unwrap();
         assert!(!has_project_settings(&d), "no settings file was written");
@@ -54836,16 +54874,19 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 // folders as dynamic rows whose contents load on expand
 // (/__repo/tree/dir), because listing them up front would add ~15,750 rows
 // (worklist-history alone is 11,560) to a 272-row tree.
-const BRAM_STATE_FILES: &[&str] = &["resources/worklist.json"];
+//
+// These lists are relative to Bram's state folder; bram_state_rel turns
+// them into the repo-relative paths git and the tree use.
+const BRAM_STATE_FILES: &[&str] = &["worklist.json"];
 const BRAM_STATE_DIRS: &[&str] = &[
-    "resources/worklist-drafts",
-    "resources/worklist-history",
-    "resources/feedback-drafts",
-    "resources/feedback-history",
-    "resources/session-digests",
-    "resources/handoffs",
-    "resources/outbound-turns",
-    "resources/bram-traces",
+    "worklist-drafts",
+    "worklist-history",
+    "feedback-drafts",
+    "feedback-history",
+    "session-digests",
+    "handoffs",
+    "outbound-turns",
+    "bram-traces",
 ];
 // The state the content search also covers: everything but the traces
 // (1.4 GB of logs). History was first left out on a guess that it would be
@@ -54856,33 +54897,52 @@ const BRAM_STATE_DIRS: &[&str] = &[
 // Order is priority: results are capped (REPO_GREP_CAP), so the current
 // state comes before the histories. bram_state_grep_ordered sorts by it.
 const BRAM_STATE_GREP: &[&str] = &[
-    "resources/worklist.json",
-    "resources/worklist-drafts",
-    "resources/feedback-drafts",
-    "resources/session-digests",
-    "resources/handoffs",
-    "resources/worklist-history",
-    "resources/feedback-history",
-    "resources/outbound-turns",
+    "worklist.json",
+    "worklist-drafts",
+    "feedback-drafts",
+    "session-digests",
+    "handoffs",
+    "worklist-history",
+    "feedback-history",
+    "outbound-turns",
 ];
 // Each history entry is a .json and .md pair. The .json is a snapshot of the
 // whole board after the change, so a term in one long-lived item matches
 // every snapshot taken while it existed (on the demo board,
 // "talk-session-changed" hit 273 .json files and 119 .md). The .md records
 // what changed, which is what a search is looking for.
-const BRAM_STATE_GREP_EXCLUDE: &[&str] = &[":(exclude)resources/worklist-history/*.json"];
+// Globs relative to the state folder, each passed as `:(exclude)<state>/<glob>`.
+const BRAM_STATE_GREP_EXCLUDE: &[&str] = &["worklist-history/*.json"];
+
+// The pathspecs for the state search: BRAM_STATE_GREP, then the excludes.
+fn bram_state_grep_pathspecs(root: &Path) -> Vec<String> {
+    let mut specs: Vec<String> = BRAM_STATE_GREP
+        .iter()
+        .map(|r| bram_state_rel(root, r))
+        .collect();
+    specs.extend(
+        BRAM_STATE_GREP_EXCLUDE
+            .iter()
+            .map(|g| format!(":(exclude){}", bram_state_rel(root, g))),
+    );
+    specs
+}
 
 // Reorder `git grep -n -z` output from the state search before the cap:
 // files grouped by the BRAM_STATE_GREP root they fall under (in that
 // order), and within a root, timestamp-named files (names starting with a
 // digit) newest first, others alphabetically. git grep lists by path, which
 // put the OLDEST history first, so a capped search showed only stale lines.
-fn bram_state_grep_ordered(out: &str) -> String {
+fn bram_state_grep_ordered(root: &Path, out: &str) -> String {
+    let roots: Vec<String> = BRAM_STATE_GREP
+        .iter()
+        .map(|r| bram_state_rel(root, r))
+        .collect();
     let rank = |path: &str| {
-        BRAM_STATE_GREP
+        roots
             .iter()
-            .position(|r| path == *r || path.starts_with(&format!("{}/", r)))
-            .unwrap_or(BRAM_STATE_GREP.len())
+            .position(|r| path == r || path.starts_with(&format!("{}/", r)))
+            .unwrap_or(roots.len())
     };
     // Records are "path\0line\0text\n", contiguous per file.
     let mut files: Vec<(String, String)> = Vec::new();
@@ -54910,13 +54970,16 @@ fn bram_state_grep_ordered(out: &str) -> String {
 
 // May /__repo/tree/dir list this path? Only a state folder or a folder
 // beneath one, with no `..`, `.` or empty segments.
-fn bram_state_dir_allowed(dir: &str) -> bool {
+fn bram_state_dir_allowed(root: &Path, dir: &str) -> bool {
     if dir
         .split('/')
         .any(|s| s.is_empty() || s == "." || s == "..")
     {
         return false;
     }
+    let Some(dir) = bram_state_rel_strip(root, dir) else {
+        return false;
+    };
     BRAM_STATE_DIRS
         .iter()
         .any(|d| dir == *d || dir.starts_with(&format!("{}/", d)))
@@ -54959,13 +55022,13 @@ fn bram_state_dir_rows(dir: &str, subdirs: &[String], files: &[String]) -> Vec<s
 fn bram_state_present(root: &Path) -> (Vec<String>, Vec<String>) {
     let files = BRAM_STATE_FILES
         .iter()
-        .filter(|f| root.join(f).is_file())
-        .map(|f| f.to_string())
+        .filter(|f| resource_relative_path(root, f).is_file())
+        .map(|f| bram_state_rel(root, f))
         .collect();
     let dirs = BRAM_STATE_DIRS
         .iter()
-        .filter(|d| root.join(d).is_dir())
-        .map(|d| d.to_string())
+        .filter(|d| resource_relative_path(root, d).is_dir())
+        .map(|d| bram_state_rel(root, d))
         .collect();
     (files, dirs)
 }
@@ -55087,29 +55150,30 @@ mod repo_files_tests {
         bram_state_dir_allowed, bram_state_dir_rows, bram_state_grep_ordered, repo_grep_hits,
         repo_tree_rows_with_lazy,
     };
+    use crate::{test_state_rel as st, test_state_root};
 
     // files-tab-lists-bram-state-in-resources
     #[test]
     fn lazy_state_folders_are_dynamic_rows_with_their_ancestors() {
         let rows = repo_tree_rows_with_lazy(
-            &[
-                "resources/up.svg".to_string(),
-                "resources/worklist.json".to_string(),
-            ],
-            &["resources/worklist-history".to_string()],
+            &[st("up.svg"), st("worklist.json")],
+            &[st("worklist-history")],
         );
-        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(
             ids,
             vec![
-                "resources",
-                "resources/worklist-history",
-                "resources/up.svg",
-                "resources/worklist.json"
+                st(""),
+                st("worklist-history"),
+                st("up.svg"),
+                st("worklist.json")
             ]
         );
         assert_eq!(rows[1]["dynamic"], true);
-        assert_eq!(rows[1]["parentId"], "resources");
+        assert_eq!(rows[1]["parentId"], st(""));
         assert!(rows[0].get("dynamic").is_none());
         // A lazy folder the listing already fills is an ordinary folder.
         let filled = repo_tree_rows_with_lazy(&["a/b/c.txt".to_string()], &["a/b".to_string()]);
@@ -55118,47 +55182,47 @@ mod repo_files_tests {
 
     #[test]
     fn state_grep_puts_current_state_first_and_history_newest_first() {
-        let out = "resources/worklist-history/1700000000000.md\u{0}3\u{0}old\n\
-                   resources/worklist-history/1700000000000.md\u{0}9\u{0}old2\n\
-                   resources/worklist-history/1790000000000.md\u{0}1\u{0}new\n\
-                   resources/worklist-drafts/b.md\u{0}2\u{0}draft\n";
-        let ordered = bram_state_grep_ordered(out);
+        let old = st("worklist-history/1700000000000.md");
+        let new = st("worklist-history/1790000000000.md");
+        let draft = st("worklist-drafts/b.md");
+        let out = format!(
+            "{old}\u{0}3\u{0}old\n{old}\u{0}9\u{0}old2\n{new}\u{0}1\u{0}new\n{draft}\u{0}2\u{0}draft\n"
+        );
+        let ordered = bram_state_grep_ordered(test_state_root(), &out);
         let paths: Vec<&str> = ordered
             .lines()
             .map(|l| l.split('\u{0}').next().unwrap())
             .collect();
         assert_eq!(
             paths,
-            vec![
-                "resources/worklist-drafts/b.md",
-                "resources/worklist-history/1790000000000.md",
-                "resources/worklist-history/1700000000000.md",
-                "resources/worklist-history/1700000000000.md",
-            ]
+            vec![draft.as_str(), new.as_str(), old.as_str(), old.as_str()]
         );
         // A file's lines stay together and in order.
-        assert!(ordered.ends_with(
-            "\u{0}3\u{0}old\nresources/worklist-history/1700000000000.md\u{0}9\u{0}old2\n"
-        ));
+        assert!(ordered.ends_with(&format!("\u{0}3\u{0}old\n{old}\u{0}9\u{0}old2\n")));
     }
 
     #[test]
     fn state_dir_route_only_lists_state_folders() {
-        assert!(bram_state_dir_allowed("resources/worklist-history"));
-        assert!(bram_state_dir_allowed("resources/bram-traces/archive"));
-        assert!(!bram_state_dir_allowed("resources"));
-        assert!(!bram_state_dir_allowed("src-tauri"));
+        let root = test_state_root();
+        assert!(bram_state_dir_allowed(root, &st("worklist-history")));
+        assert!(bram_state_dir_allowed(root, &st("bram-traces/archive")));
+        assert!(!bram_state_dir_allowed(root, &st("")));
+        assert!(!bram_state_dir_allowed(root, "src-tauri"));
         assert!(!bram_state_dir_allowed(
-            "resources/worklist-history/../../etc"
+            root,
+            &st("worklist-history/../../etc")
         ));
-        assert!(!bram_state_dir_allowed("resources/worklist-historyX"));
-        assert!(!bram_state_dir_allowed("/resources/worklist-history"));
+        assert!(!bram_state_dir_allowed(root, &st("worklist-historyX")));
+        assert!(!bram_state_dir_allowed(
+            root,
+            &format!("/{}", st("worklist-history"))
+        ));
     }
 
     #[test]
     fn state_dir_rows_list_timestamps_newest_first() {
         let rows = bram_state_dir_rows(
-            "resources/worklist-history",
+            &st("worklist-history"),
             &["sub".to_string()],
             &[
                 "1791757368337.md".to_string(),
@@ -55177,12 +55241,9 @@ mod repo_files_tests {
             ]
         );
         assert_eq!(rows[0]["dynamic"], true);
-        assert_eq!(
-            rows[1]["id"],
-            "resources/worklist-history/1791828392077.json"
-        );
+        assert_eq!(rows[1]["id"], st("worklist-history/1791828392077.json"));
         let drafts = bram_state_dir_rows(
-            "resources/worklist-drafts",
+            &st("worklist-drafts"),
             &[],
             &["b-item.md".to_string(), "A-item.md".to_string()],
         );
@@ -55346,8 +55407,9 @@ Use the worklist for material file/code changes unless the user explicitly \
 opts out in a way the runtime guard allows. Mutations outside approved items \
 are blocked by a PreToolUse hook installed under ~/.bram. On approved:, drop:, \
 or iterate: turns, drive the Bram lifecycle through the filesystem channel: \
-write resources/.worklist-intent.json ({nonce, route, body}) and read the \
-host's reply from resources/.worklist-result.json, matching your nonce. Do \
+write .worklist-intent.json ({nonce, route, body}) in Bram's state folder \
+(.bram/ if it exists, else resources/) and read the host's reply from \
+.worklist-result.json in Bram's state folder, matching your nonce. Do \
 not silently continue after a missing result or an ok:false reply. The gate is \
 two-stage: an approved: on a proposed (TO APPLY) item means make the edits, \
 then advance via route worklist-mutate with body {op:advance, ids, \
@@ -55358,13 +55420,15 @@ not prune by hand. The exact routes, intent/result shapes, opt-out, and \
 transition rules are canonical in .claude/bram-conventions.md (relative to the \
 project root). Do not duplicate or guess those details from this abbreviated \
 instruction.";
-const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
+// This and the *_REL consts below are relative to Bram's state folder
+// (resource_relative_path / project_resource_path), not the project root.
+const WORKLIST_AUTH_REL: &str = ".worklist-authorization.json";
 // Codex filesystem lifecycle channel (#130). Codex writes the intent file;
 // the host watcher drains it and writes the result file. Coordination
 // dot-files, polled/written like the others above — not tracked changes.
-const WORKLIST_INTENT_REL: &str = "resources/.worklist-intent.json";
-const WORKLIST_RESULT_REL: &str = "resources/.worklist-result.json";
-const WORKLIST_PUSH_MIRROR_REL: &str = "resources/.worklist-push-mirror.json";
+const WORKLIST_INTENT_REL: &str = ".worklist-intent.json";
+const WORKLIST_RESULT_REL: &str = ".worklist-result.json";
+const WORKLIST_PUSH_MIRROR_REL: &str = ".worklist-push-mirror.json";
 // Host-managed inflight sentinel (#84). Written when /__worklist/resolve
 // serves an approved or drop record, OR when /__iterate/begin is
 // called. Approved/drop sentinels clear at host silence-detected
@@ -55372,12 +55436,12 @@ const WORKLIST_PUSH_MIRROR_REL: &str = "resources/.worklist-push-mirror.json";
 // Iterate sentinels clear via /__iterate/end. The iframe derives its
 // spinner state from this file and the [inflight-sentinel] trace makes
 // the lifecycle verifiable.
-const INFLIGHT_CLAIM_REL: &str = "resources/.inflight-claim.json";
+const INFLIGHT_CLAIM_REL: &str = ".inflight-claim.json";
 // Right-pane pty-intent relay (#86). Append-only JSONL queue persisted
 // to disk so right-pane clicks (toShell / toTurn / sendKeys / menuAnswer)
 // survive an iframe-reload-mid-click. Drained synchronously by queue_pty_intent;
 // startup cleanup deletes any stale queue from a prior session.
-const PTY_INTENT_REL: &str = "resources/.pty-intent.jsonl";
+const PTY_INTENT_REL: &str = ".pty-intent.jsonl";
 // Permission-menu surfacing hook (menus.hookDriven). Installed and registered
 // the same way as the worklist guard: bundle copied to
 // .claude/hooks/claude-permission-menu-hook.py, registered as PermissionRequest +
@@ -57308,8 +57372,11 @@ fn extract_marker_block<'a>(disk: &'a str, start: &str, end: &str) -> Option<&'a
 // to be hardcoded past in codex_agents_block_current's `is_source_repo`
 // branch, and that codex_agents_has_marker widens for in
 // compute_seed_currency_checks).
+const AGENTS_MD_INTRO_WORKLIST_PATH: &str = "resources/worklist.json"; // state-dir: literal ok (matches hand-authored AGENTS.md text)
+
 fn agents_md_has_worklist_gate_intro(disk: &str) -> bool {
-    disk.contains("This repo is driven through Bram") && disk.contains("resources/worklist.json")
+    disk.contains("This repo is driven through Bram")
+        && disk.contains(AGENTS_MD_INTRO_WORKLIST_PATH)
 }
 
 // issue-303: pure predicate, same reasoning as
@@ -57672,14 +57739,14 @@ fn record_own_guard_target<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(root) = project_root(Some(app)) else {
         return;
     };
-    if !root.join("resources").is_dir() {
+    if !bram_state_dir(&root).is_dir() {
         return;
     }
     let Some(guard_bin) = guard::own_guard_binary() else {
         return;
     };
     let want = format!("{}\n", guard_bin.display());
-    let path = root.join(guard::GUARD_TARGET_REL);
+    let path = resource_relative_path(&root, GUARD_TARGET_STATE_REL);
     if std::fs::read_to_string(&path).ok().as_deref() == Some(want.as_str()) {
         return;
     }
@@ -58243,7 +58310,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let codex_agents = proj.join(ENHANCE_CODEX_AGENTS_REL);
     let sidecar = proj.join(ENHANCE_SIDECAR_REL);
     let settings = claude_hook_settings_path(&proj);
-    let worklist_auth = proj.join(WORKLIST_AUTH_REL);
+    let worklist_auth = resource_relative_path(&proj, WORKLIST_AUTH_REL);
     let active_provider = current_provider(app);
     let is_source_repo = proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
     // issue-303: every branch below now runs its real, unbypassed check —
@@ -58811,8 +58878,13 @@ fn stray_home_scaffold_marker(home: &Path, root: &Path) -> Option<PathBuf> {
     if path_is_home_dir(root, home) {
         return None;
     }
-    let marker = home.join(WORKLIST_AUTH_REL);
-    marker.exists().then_some(marker)
+    // Not resource_relative_path: `~/.bram/` always exists (the guard link
+    // lives there), so the resolver would never look at the `~/resources/`
+    // scaffold this check exists to find. Either name's marker counts.
+    [BRAM_STATE_DIR_LEGACY, BRAM_STATE_DIR_NEW]
+        .iter()
+        .map(|d| home.join(d).join(WORKLIST_AUTH_REL))
+        .find(|m| m.exists())
 }
 
 // issue-445: Claude Code loads every ancestor CLAUDE.md, so a legacy
@@ -58909,7 +58981,7 @@ mod home_scaffold_tests {
         // No marker → nothing to report.
         assert!(stray_home_scaffold_marker(&home, &proj).is_none());
 
-        let marker = home.join(WORKLIST_AUTH_REL);
+        let marker = super::resource_relative_path(&home, WORKLIST_AUTH_REL);
         std::fs::create_dir_all(marker.parent().unwrap()).expect("create resources");
         std::fs::write(&marker, "{}").expect("write marker");
 
@@ -59007,7 +59079,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // latest structured `approved:` / `drop:` payload here so the desktop-side
     // watcher can enforce the two-stage worklist policy even when the active
     // provider has no native pre-tool hook support.
-    let worklist_auth_path = proj.join(WORKLIST_AUTH_REL);
+    let worklist_auth_path = resource_relative_path(&proj, WORKLIST_AUTH_REL);
     if let Some(parent) = worklist_auth_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
@@ -60891,7 +60963,7 @@ fn worklist_drafts_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
 }
 
 fn worklist_auth_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    project_relative_path(app, WORKLIST_AUTH_REL)
+    project_resource_path(app, WORKLIST_AUTH_REL)
 }
 
 // issue-352: direct-edit grants live in their OWN sidecar. The shared
@@ -60900,14 +60972,14 @@ fn worklist_auth_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> 
 // mid-window (op=clobber prior_kind=direct-edit, ~20s into a 1h TTL, the
 // authorized edit denied 25s later). The guards read this file first and
 // honor a legacy-located record for one release.
-const WORKLIST_DIRECT_EDIT_REL: &str = "resources/.worklist-direct-edit.json";
+const WORKLIST_DIRECT_EDIT_REL: &str = ".worklist-direct-edit.json";
 
 fn worklist_direct_edit_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    project_relative_path(app, WORKLIST_DIRECT_EDIT_REL)
+    project_resource_path(app, WORKLIST_DIRECT_EDIT_REL)
 }
 
 fn worklist_push_mirror_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    project_relative_path(app, WORKLIST_PUSH_MIRROR_REL)
+    project_resource_path(app, WORKLIST_PUSH_MIRROR_REL)
 }
 
 fn feedback_drafts_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -60918,15 +60990,70 @@ fn feedback_history_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
     project_resource_path(app, "feedback-history")
 }
 
-fn project_relative_path<R: tauri::Runtime, P: AsRef<Path>>(
-    app: &AppHandle<R>,
-    rel: P,
-) -> Option<PathBuf> {
-    project_root(Some(app)).map(|p| p.join(rel))
+// Bram's per-project state folder (judell/bram#469). The one place the host
+// names it: `.bram/` when that directory exists at the project root, else
+// the legacy `resources/`. Computed per root and per call, not cached, so a
+// nested instance can get a different answer from its parent and a folder
+// created mid-run is picked up. Every other site reaches the folder through
+// bram_state_dir / resource_relative_path / project_resource_path, or, for
+// repo-relative path strings, bram_state_rel / bram_state_rel_strip.
+// `state_dir_literals_go_through_the_resolver` keeps it that way.
+const BRAM_STATE_DIR_NEW: &str = ".bram";
+const BRAM_STATE_DIR_LEGACY: &str = "resources";
+
+// The guard-routing record (guard.rs's GUARD_TARGET_REL, which still spells
+// the legacy folder), relative to the state folder.
+const GUARD_TARGET_STATE_REL: &str = ".bram-guard-target";
+
+// `~/.bram` is the machine folder (it holds the bram-guard link), never a
+// project's state folder, so a root at the home directory resolves the
+// legacy name (the guard's guard_policy::state_dir rule, the same answer).
+fn bram_state_dir_name(root: &Path) -> &'static str {
+    if root.join(BRAM_STATE_DIR_NEW).is_dir()
+        && !home_dir().is_some_and(|home| path_is_home_dir(root, &home))
+    {
+        BRAM_STATE_DIR_NEW
+    } else {
+        BRAM_STATE_DIR_LEGACY
+    }
+}
+
+fn bram_state_dir(root: &Path) -> PathBuf {
+    root.join(bram_state_dir_name(root))
+}
+
+// Repo-relative, forward-slash path of `rel` inside the state folder
+// (resources/worklist.json today). An empty `rel` names the folder itself.
+fn bram_state_rel(root: &Path, rel: &str) -> String {
+    let name = bram_state_dir_name(root);
+    if rel.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", name, rel)
+    }
+}
+
+// The part of a repo-relative, forward-slash path below the state folder,
+// or None when the path is not inside it.
+fn bram_state_rel_strip<'a>(root: &Path, rel: &'a str) -> Option<&'a str> {
+    rel.strip_prefix(bram_state_dir_name(root))
+        .and_then(|r| r.strip_prefix('/'))
 }
 
 fn resource_relative_path<P: AsRef<Path>>(root: &Path, rel: P) -> PathBuf {
-    root.join("resources").join(rel)
+    bram_state_dir(root).join(rel)
+}
+
+// Tests that need a repo-relative state path as fixture data: a root with no
+// `.bram/`, so the answer is today's legacy folder.
+#[cfg(test)]
+fn test_state_root() -> &'static Path {
+    Path::new("/nonexistent-bram-469-root")
+}
+
+#[cfg(test)]
+fn test_state_rel(rel: &str) -> String {
+    bram_state_rel(test_state_root(), rel)
 }
 
 fn project_resource_path<R: tauri::Runtime, P: AsRef<Path>>(
@@ -61107,7 +61234,7 @@ fn worklist_history_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
 }
 
 fn inflight_claim_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    project_relative_path(app, INFLIGHT_CLAIM_REL)
+    project_resource_path(app, INFLIGHT_CLAIM_REL)
 }
 
 #[derive(Clone, Default)]
@@ -61153,17 +61280,18 @@ fn current_turn_completion_monitor() -> TurnCompletionMonitor {
 }
 
 fn worklist_intent_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    project_relative_path(app, WORKLIST_INTENT_REL)
+    project_resource_path(app, WORKLIST_INTENT_REL)
 }
 
 fn worklist_result_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    project_relative_path(app, WORKLIST_RESULT_REL)
+    project_resource_path(app, WORKLIST_RESULT_REL)
 }
 
 // Write the inflight sentinel (#84). Atomic via .tmp + rename so the
 // file is either absent or contains valid JSON. Caller has verified
 // `ids` is non-empty. `kind` is one of "approved", "drop", "iterate".
-const CLAIM_INTERVALS_REL: &str = "resources/.claim-intervals.json";
+// Relative to Bram's state folder.
+const CLAIM_INTERVALS_REL: &str = ".claim-intervals.json";
 
 // issue-327 claim-interval snapshots. Attribution needs BOUNDARIES, not writes.
 // Bram is single-claimant by construction (#269 -- a second claim write
@@ -61301,7 +61429,7 @@ fn record_claim_interval<R: tauri::Runtime>(
     };
     // Same refusal-to-create discipline the hook breadcrumbs apply: never
     // bring `resources/` into existence in a project Setup has not touched.
-    if !root.join("resources").is_dir() {
+    if !bram_state_dir(&root).is_dir() {
         return;
     }
     let prior: Vec<String> = inflight_claim_ids_and_claimed_at(app)
@@ -61345,7 +61473,7 @@ fn record_claim_interval<R: tauri::Runtime>(
         append_bram_trace_line(app, "claim-interval", "op=ref-failed");
         return;
     }
-    let sidecar = root.join(CLAIM_INTERVALS_REL);
+    let sidecar = resource_relative_path(&root, CLAIM_INTERVALS_REL);
     let mut doc = std::fs::read_to_string(&sidecar)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -61674,7 +61802,8 @@ fn claim_interval_diff<R: tauri::Runtime>(
     let Some(root) = project_root(Some(app)) else {
         return empty;
     };
-    let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
+    let Ok(text) = std::fs::read_to_string(resource_relative_path(&root, CLAIM_INTERVALS_REL))
+    else {
         return empty;
     };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -63527,7 +63656,8 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
             .collect();
         roster.sort();
         let intervals_raw =
-            std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)).unwrap_or_default();
+            std::fs::read_to_string(resource_relative_path(&root, CLAIM_INTERVALS_REL))
+                .unwrap_or_default();
         let mut hasher = DefaultHasher::new();
         head.hash(&mut hasher);
         diff.hash(&mut hasher);
@@ -63700,7 +63830,8 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
         trace_fail(app, spawns.get(), started, "now-tree-empty", None);
         return None;
     }
-    let intervals_raw = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)).unwrap_or_default();
+    let intervals_raw = std::fs::read_to_string(resource_relative_path(&root, CLAIM_INTERVALS_REL))
+        .unwrap_or_default();
     let (steps, holders) = membership_step_chain(&intervals_raw, &now_tree);
     let universe_paths: Vec<String> = universe.keys().cloned().collect();
     let credits = if steps.is_empty() {
@@ -65874,7 +66005,8 @@ fn claim_interval_independence<R: tauri::Runtime>(
     let Some(root) = project_root(Some(app)) else {
         return empty;
     };
-    let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
+    let Ok(text) = std::fs::read_to_string(resource_relative_path(&root, CLAIM_INTERVALS_REL))
+    else {
         return empty;
     };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -66049,7 +66181,7 @@ fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(root) = project_root(Some(app)) else {
         return;
     };
-    let sidecar = root.join(CLAIM_INTERVALS_REL);
+    let sidecar = resource_relative_path(&root, CLAIM_INTERVALS_REL);
     // Three outcomes, deliberately traced differently. NO sidecar is the honest
     // "nothing recorded yet" state: it fires on every prune in a project that
     // has never captured a boundary, so a line there would be noise forever in
@@ -68421,7 +68553,7 @@ fn cleanup_stale_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
 }
 
 fn pty_intent_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    project_relative_path(app, PTY_INTENT_REL)
+    project_resource_path(app, PTY_INTENT_REL)
 }
 
 // Serializes append + drain in queue_pty_intent so concurrent calls
@@ -68672,7 +68804,11 @@ fn resolve_worklist_record_items<R: tauri::Runtime>(
     }
 }
 
-fn base_worklist_doc_from_parsed(parsed_doc: Option<serde_json::Value>) -> serde_json::Value {
+// `worklist_rel` is the repo-relative worklist path the message names.
+fn base_worklist_doc_from_parsed(
+    parsed_doc: Option<serde_json::Value>,
+    worklist_rel: &str,
+) -> serde_json::Value {
     use serde_json::json;
 
     match parsed_doc {
@@ -68681,13 +68817,13 @@ fn base_worklist_doc_from_parsed(parsed_doc: Option<serde_json::Value>) -> serde
             "description": "",
             "items": [],
             "schemaError": "root-array",
-            "schemaErrorMessage": "resources/worklist.json must be an object with { \"description\": string, \"items\": [] }, not a bare JSON array",
+            "schemaErrorMessage": format!("{} must be an object with {{ \"description\": string, \"items\": [] }}, not a bare JSON array", worklist_rel),
         }),
         Some(_) => json!({
             "description": "",
             "items": [],
             "schemaError": "root-non-object",
-            "schemaErrorMessage": "resources/worklist.json must be a JSON object with { \"description\": string, \"items\": [] } at the root",
+            "schemaErrorMessage": format!("{} must be a JSON object with {{ \"description\": string, \"items\": [] }} at the root", worklist_rel),
         }),
         None => json!({ "description": "", "items": [] }),
     }
@@ -68708,7 +68844,10 @@ fn worklist_doc<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|raw| serde_json::from_str(&raw).ok());
-    let mut doc = base_worklist_doc_from_parsed(parsed_doc);
+    let worklist_rel = project_root(Some(app))
+        .map(|r| bram_state_rel(&r, "worklist.json"))
+        .unwrap_or_else(|| "worklist.json".to_string());
+    let mut doc = base_worklist_doc_from_parsed(parsed_doc, &worklist_rel);
     if let Some(obj) = doc.as_object_mut() {
         obj.insert("exists".to_string(), serde_json::Value::Bool(exists));
         obj.insert(
@@ -69638,9 +69777,9 @@ const UNTRACKED_UNDECLARED_WARN: usize = 1000;
 // outbound turns and drafts), so counting them would trip the .gitignore
 // suggestion for files the user never created. NOT all of resources/: a
 // project keeps its own content there too (tau tracks resources/review/...).
-fn is_bram_owned_path(path: &str) -> bool {
-    if let Some(rest) = path.strip_prefix("resources/") {
-        // Every dotfile directly under resources/ is a Bram sidecar.
+fn is_bram_owned_path(root: &Path, path: &str) -> bool {
+    if let Some(rest) = bram_state_rel_strip(root, path) {
+        // Every dotfile directly under the state folder is a Bram sidecar.
         if rest.starts_with('.') && !rest.contains('/') {
             return true;
         }
@@ -69667,6 +69806,7 @@ fn is_bram_owned_path(path: &str) -> bool {
 }
 
 fn untracked_undeclared_summary(
+    root: &Path,
     untracked: &[String],
     declared: &std::collections::HashMap<String, Vec<String>>,
 ) -> (usize, Vec<(String, usize)>, usize) {
@@ -69674,7 +69814,7 @@ fn untracked_undeclared_summary(
     let mut count = 0usize;
     let mut bram_owned = 0usize;
     for path in untracked {
-        if is_bram_owned_path(path) {
+        if is_bram_owned_path(root, path) {
             bram_owned += 1;
             continue;
         }
@@ -69946,8 +70086,9 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     .collect()
             })
             .unwrap_or_default();
+        let state_root = project_root_path.clone().unwrap_or_default();
         let (count, top, bram_owned) =
-            untracked_undeclared_summary(&untracked, &worklist_declared_files(app));
+            untracked_undeclared_summary(&state_root, &untracked, &worklist_declared_files(app));
         untracked_undeclared_row(count, &top, bram_owned)
     };
     let applied_integrity_row = if applied_items.is_empty() {
@@ -69969,7 +70110,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     };
     let port_file = project_root_path
         .as_ref()
-        .map(|p| p.join("resources/.bram-port"));
+        .map(|p| resource_relative_path(p, ".bram-port"));
     let port_meta_file = port_file.as_ref().map(|p| bram_port_metadata_path(p));
     let bound_port = LOOPBACK_PORT.get().copied();
     let file_port = port_file
@@ -72681,9 +72822,12 @@ mod worklist_doc_tests {
 
     #[test]
     fn bare_array_root_sets_schema_error() {
-        let doc = base_worklist_doc_from_parsed(Some(json!([
-            { "id": "x", "file": "foo.txt", "before": "", "after": "" }
-        ])));
+        let doc = base_worklist_doc_from_parsed(
+            Some(json!([
+                { "id": "x", "file": "foo.txt", "before": "", "after": "" }
+            ])),
+            &crate::test_state_rel("worklist.json"),
+        );
 
         assert_eq!(
             doc.get("schemaError").and_then(|v| v.as_str()),
@@ -72698,7 +72842,10 @@ mod worklist_doc_tests {
 
     #[test]
     fn scalar_root_sets_non_object_schema_error() {
-        let doc = base_worklist_doc_from_parsed(Some(json!("oops")));
+        let doc = base_worklist_doc_from_parsed(
+            Some(json!("oops")),
+            &crate::test_state_rel("worklist.json"),
+        );
 
         assert_eq!(
             doc.get("schemaError").and_then(|v| v.as_str()),
@@ -74159,7 +74306,8 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
 // (id, activityMarker): new activity on the thread moves the marker, so a
 // dismissed thread that gains a later comment correctly reappears — never
 // dismiss-forever.
-const NEEDS_YOU_DISMISSED_REL: &str = "resources/.needs-you-dismissed.json";
+// Relative to Bram's state folder.
+const NEEDS_YOU_DISMISSED_REL: &str = ".needs-you-dismissed.json";
 
 // needs-you-durable-dismissals: how long a dismissal outlives its thread's
 // absence from the fetch. Retirement is by marker movement (new activity)
@@ -74210,7 +74358,7 @@ fn needs_you_dismissed_pairs<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<(Stri
     let Some(root) = project_root(Some(app)) else {
         return Vec::new();
     };
-    std::fs::read_to_string(root.join(NEEDS_YOU_DISMISSED_REL))
+    std::fs::read_to_string(resource_relative_path(&root, NEEDS_YOU_DISMISSED_REL))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|d| d.get("dismissed").and_then(|v| v.as_array()).cloned())
@@ -74405,7 +74553,7 @@ fn write_needs_you_dismissed<R: tauri::Runtime>(
         .map(|(id, m, at)| serde_json::json!({ "id": id, "marker": m, "dismissedAtMs": at }))
         .collect();
     let doc = serde_json::json!({ "version": 2, "dismissed": arr });
-    let path = root.join(NEEDS_YOU_DISMISSED_REL);
+    let path = resource_relative_path(&root, NEEDS_YOU_DISMISSED_REL);
     if let Ok(body) = serde_json::to_string_pretty(&doc) {
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, format!("{}\n", body)).is_ok() {
@@ -76154,7 +76302,7 @@ fn stranded_approval_ids<R: tauri::Runtime>(
         return None;
     }
     let root = project_root(Some(app))?;
-    if root.join(INFLIGHT_CLAIM_REL).exists() {
+    if resource_relative_path(&root, INFLIGHT_CLAIM_REL).exists() {
         return None;
     }
     let issued = unix_now_ms().saturating_sub(age_ms);
@@ -76346,10 +76494,7 @@ fn iterate_feedback_draft_text<R: tauri::Runtime>(app: &AppHandle<R>, turn_text:
         if r.is_empty() || r.contains('/') || r.contains('\\') || r.contains("..") {
             continue;
         }
-        let path = root
-            .join("resources")
-            .join("feedback-drafts")
-            .join(format!("{}.md", r));
+        let path = resource_relative_path(&root, "feedback-drafts").join(format!("{}.md", r));
         if let Ok(text) = std::fs::read_to_string(&path) {
             out.push_str(&text);
             out.push('\n');
@@ -78142,7 +78287,7 @@ fn close_withdrawn_note_text(issue: u64, commit_sha: &str, via: &str) -> String 
     let how = if via == "pane" {
         "the user withdrew it from the Commits tab"
     } else {
-        "it was removed from resources/.worklist-issue-close.json by hand"
+        "it was removed from .worklist-issue-close.json in Bram's state folder (.bram/ if it exists, else resources/) by hand"
     };
     format!(
         "the queued close of #{} (commit {}) was withdrawn -- {}; it will NOT fire on Push, and #{} stays open",
@@ -80599,13 +80744,6 @@ fn route_request<R: tauri::Runtime>(
             }
         }
         let dir = dir.trim_end_matches('/').to_string();
-        if !bram_state_dir_allowed(&dir) {
-            return (
-                403,
-                "application/json; charset=utf-8",
-                br#"{"error":"not a Bram state folder"}"#.to_vec(),
-            );
-        }
         let Some(root) = project_root(Some(app)) else {
             return (
                 500,
@@ -80613,6 +80751,13 @@ fn route_request<R: tauri::Runtime>(
                 br#"{"error":"no project root"}"#.to_vec(),
             );
         };
+        if !bram_state_dir_allowed(&root, &dir) {
+            return (
+                403,
+                "application/json; charset=utf-8",
+                br#"{"error":"not a Bram state folder"}"#.to_vec(),
+            );
+        }
         let mut subdirs: Vec<String> = Vec::new();
         let mut files: Vec<String> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(root.join(&dir)) {
@@ -80687,10 +80832,15 @@ fn route_request<R: tauri::Runtime>(
                 &q,
                 "--",
             ];
-            state_args.extend(BRAM_STATE_GREP.iter().copied());
-            state_args.extend(BRAM_STATE_GREP_EXCLUDE.iter().copied());
+            let state_root = project_root(Some(app)).unwrap_or_default();
+            let state_specs = bram_state_grep_pathspecs(&state_root);
+            state_args.extend(state_specs.iter().map(|s| s.as_str()));
             let state_out = git_run_allow_exit(app, &state_args).unwrap_or_default();
-            let out = format!("{}{}", out, bram_state_grep_ordered(&state_out));
+            let out = format!(
+                "{}{}",
+                out,
+                bram_state_grep_ordered(&state_root, &state_out)
+            );
             let (hits, total) = repo_grep_hits(&out, &q, REPO_GREP_CAP);
             serde_json::json!({ "hits": hits, "total": total, "capped": total > REPO_GREP_CAP })
         };
@@ -82392,13 +82542,14 @@ fn route_request<R: tauri::Runtime>(
         let mut unclaimed: Vec<serde_json::Value> = Vec::new();
         let porcelain =
             git_run(app, &["status", "--porcelain", "--no-renames"]).unwrap_or_default();
+        let state_root = project_root(Some(app)).unwrap_or_default();
         for line in porcelain.lines() {
             if line.len() < 4 {
                 continue;
             }
             let path = line[2..].trim_start().trim_matches('"').to_string();
             if path.is_empty()
-                || path.starts_with("resources/")
+                || bram_state_rel_strip(&state_root, &path).is_some()
                 || path == ".bram.json"
                 || path == ".xmlui-desktop.json"
                 || claimed.contains(&path)
@@ -82445,7 +82596,9 @@ fn route_request<R: tauri::Runtime>(
             // issue-425-retire-replay: part of the precheck key below; the
             // interval patch is built from this record.
             let wc_intervals_raw = project_root(Some(app))
-                .and_then(|r| std::fs::read_to_string(r.join(CLAIM_INTERVALS_REL)).ok())
+                .and_then(|r| {
+                    std::fs::read_to_string(resource_relative_path(&r, CLAIM_INTERVALS_REL)).ok()
+                })
                 .unwrap_or_default();
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
                 // Begun the way the gate counts it (handle_worklist_commit's
@@ -83034,9 +83187,12 @@ fn route_request<R: tauri::Runtime>(
     // worklist.json is the worklist convention. Treat it as always-present
     // (empty when the project hasn't opted in) so the Workspace tool can
     // poll without flooding devtools with 404s in guest projects.
-    if path == "resources/worklist.json" {
+    // The URL keeps its name whatever the folder is called; the file is read
+    // from Bram's state folder.
+    const WORKLIST_URL_PATH: &str = "resources/worklist.json"; // state-dir: literal ok (URL route the pane fetches)
+    if path == WORKLIST_URL_PATH {
         let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
-        return match std::fs::read(proj.join(path)) {
+        return match std::fs::read(resource_relative_path(&proj, "worklist.json")) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(_) => (
                 200,
@@ -83366,11 +83522,11 @@ fn guard_selftest_fixture() -> Result<PathBuf, String> {
         std::fs::write(&p, body).map_err(|e| e.to_string())
     };
     w(
-        "resources/worklist.json",
+        &bram_state_rel(&dir, "worklist.json"),
         r#"{"version":1,"items":[{"id":"selftest-covered","status":"proposed","files":["src/covered.txt"]}]}"#,
     )?;
     w(
-        "resources/.worklist-authorization.json",
+        &bram_state_rel(&dir, WORKLIST_AUTH_REL),
         r#"{"kind":"","ids":[],"items":[]}"#,
     )?;
     w("src/covered.txt", "x\n")?;
@@ -83897,7 +84053,9 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
         .and_then(|l| std::fs::read_link(l).ok())
         .map(|t| t.to_string_lossy().to_string());
     let project_guard = project_root(Some(app))
-        .and_then(|root| std::fs::read_to_string(root.join(guard::GUARD_TARGET_REL)).ok())
+        .and_then(|root| {
+            std::fs::read_to_string(resource_relative_path(&root, GUARD_TARGET_STATE_REL)).ok()
+        })
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
     serde_json::json!({
@@ -86012,7 +86170,7 @@ fn item_interval_changed_paths<R: tauri::Runtime>(
         return None;
     }
     let root = project_root(Some(app))?;
-    let text = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)).ok()?;
+    let text = std::fs::read_to_string(resource_relative_path(&root, CLAIM_INTERVALS_REL)).ok()?;
     let doc = serde_json::from_str::<serde_json::Value>(&text).ok()?;
     let arr = doc.get("intervals").and_then(|v| v.as_array())?;
     let mut owned_any = false;
@@ -87248,7 +87406,8 @@ fn membership_joint_owners(
 // issue-432: when the joint set was approved, for the refusal message — the
 // latest claim interval whose ids are exactly these members.
 fn joint_click_at_ms(project_root: &Path, members: &[String]) -> Option<i64> {
-    let text = std::fs::read_to_string(project_root.join(CLAIM_INTERVALS_REL)).ok()?;
+    let text =
+        std::fs::read_to_string(resource_relative_path(&project_root, CLAIM_INTERVALS_REL)).ok()?;
     let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
     let mut want: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
     want.sort();
@@ -87908,7 +88067,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             "commit refused: Bram couldn't work out which lines belong to which item, so it \
              can't tell whether this commit would take another item's work. Nothing was \
              committed. If this repeats, retrying won't clear it: the trace line \
-             `op=membership … reason=` in resources/bram-traces/bram-trace.log says why."
+             `op=membership … reason=` in bram-traces/bram-trace.log, in Bram's state \
+             folder (.bram/ if it exists, else resources/), says why."
                 .to_string(),
         );
     };
@@ -89197,33 +89357,22 @@ mod worklist_authorization_tests {
         // issue-312 repro: an item declaring a directory staged 59 files and
         // committed 1, because the directory is never literally in git's
         // staged FILE list. Prefix matching carries it.
-        let staged = ids(&[
-            "resources/worklist.json",
-            "resources/worklist-drafts/a.md",
-            "resources/worklist-drafts/b.md",
-            "resources/worklist-history/2026.json",
-        ]);
-        assert!(staged_path_covered_by_any(
-            "resources/worklist.json",
-            &staged
-        ));
-        assert!(staged_path_covered_by_any(
-            "resources/worklist-drafts",
-            &staged
-        ));
-        assert!(staged_path_covered_by_any(
-            "resources/worklist-drafts/",
-            &staged
-        ));
-        assert!(staged_path_covered_by_any(
-            "resources/worklist-history",
-            &staged
-        ));
+        use crate::test_state_rel as st;
+        let staged = vec![
+            st("worklist.json"),
+            st("worklist-drafts/a.md"),
+            st("worklist-drafts/b.md"),
+            st("worklist-history/2026.json"),
+        ];
+        assert!(staged_path_covered_by_any(&st("worklist.json"), &staged));
+        assert!(staged_path_covered_by_any(&st("worklist-drafts"), &staged));
+        assert!(staged_path_covered_by_any(&st("worklist-drafts/"), &staged));
+        assert!(staged_path_covered_by_any(&st("worklist-history"), &staged));
         // A never-staged path stays excluded, so `git commit -- <path>` is
         // never handed a pathspec matching nothing.
-        assert!(!staged_path_covered_by_any("resources/gone.md", &staged));
+        assert!(!staged_path_covered_by_any(&st("gone.md"), &staged));
         // A prefix that is not a path boundary must not match.
-        assert!(!staged_path_covered_by_any("resources/worklist", &staged));
+        assert!(!staged_path_covered_by_any(&st("worklist"), &staged));
     }
 
     #[test]
@@ -89240,23 +89389,21 @@ mod worklist_authorization_tests {
 
     #[test]
     fn left_behind_detects_staged_paths_no_pathspec_covers() {
-        let staged = ids(&[
-            "resources/worklist.json",
-            "resources/worklist-drafts/a.md",
-            "resources/worklist-drafts/b.md",
-        ]);
+        use crate::test_state_rel as st;
+        let staged = vec![
+            st("worklist.json"),
+            st("worklist-drafts/a.md"),
+            st("worklist-drafts/b.md"),
+        ];
         // The pre-fix behavior: only the plain file in the pathspec.
-        let left = staged_paths_left_behind(&ids(&["resources/worklist.json"]), &staged);
+        let left = staged_paths_left_behind(&[st("worklist.json")], &staged);
         assert_eq!(
             left.len(),
             2,
             "both draft files should be reported: {left:?}"
         );
         // The fixed behavior: the directory covers its contents, nothing left.
-        let none = staged_paths_left_behind(
-            &ids(&["resources/worklist.json", "resources/worklist-drafts"]),
-            &staged,
-        );
+        let none = staged_paths_left_behind(&[st("worklist.json"), st("worklist-drafts")], &staged);
         assert!(none.is_empty(), "unexpected leftovers: {none:?}");
     }
 
@@ -89298,35 +89445,42 @@ mod worklist_authorization_tests {
     fn worklist_commit_accepts_files_under_declared_directory() {
         // #295: `git add` expands a declared directory to its contents;
         // the verification must agree instead of refusing what it staged.
-        let approved = ids(&["docs/a.md", "resources/worklist-drafts"]);
+        use crate::test_state_rel as st;
+        let approved = vec!["docs/a.md".to_string(), st("worklist-drafts")];
         ensure_no_unrelated_staged_files(
-            &ids(&[
-                "docs/a.md",
-                "resources/worklist-drafts/item-one.md",
-                "resources/worklist-drafts/nested/deep.md",
-            ]),
+            &[
+                "docs/a.md".to_string(),
+                st("worklist-drafts/item-one.md"),
+                st("worklist-drafts/nested/deep.md"),
+            ],
             &approved,
         )
         .expect("files under a declared directory are related");
 
         // A trailing slash on the declared entry behaves the same.
         ensure_no_unrelated_staged_files(
-            &ids(&["resources/worklist-drafts/item-one.md"]),
-            &ids(&["resources/worklist-drafts/"]),
+            &[st("worklist-drafts/item-one.md")],
+            &[st("worklist-drafts/")],
         )
         .expect("trailing slash on the declared entry is normalized");
 
         // Prefix match requires a path separator: `foo` is not `foobar`,
         // and a genuinely foreign staged file is still refused.
         let err = ensure_no_unrelated_staged_files(
-            &ids(&["resources/worklist-drafts-archive/old.md", "src/other.rs"]),
-            &ids(&["resources/worklist-drafts"]),
+            &[
+                st("worklist-drafts-archive/old.md"),
+                "src/other.rs".to_string(),
+            ],
+            &[st("worklist-drafts")],
         )
         .expect_err("sibling-prefix and foreign staged files are refused");
         assert_eq!(
             err,
-            "refusing worklist commit because unrelated files are staged: \
-             resources/worklist-drafts-archive/old.md, src/other.rs"
+            format!(
+                "refusing worklist commit because unrelated files are staged: \
+                 {}, src/other.rs",
+                st("worklist-drafts-archive/old.md")
+            )
         );
     }
 
@@ -89542,17 +89696,83 @@ mod worklist_authorization_tests {
 
     #[test]
     fn resource_relative_path_joins_under_resources() {
+        // judell/bram#469: no `.bram/` means the legacy folder, exactly as
+        // before the resolver existed.
+        let legacy = Path::new("/tmp/bram").join(super::BRAM_STATE_DIR_LEGACY);
+        assert_eq!(super::BRAM_STATE_DIR_LEGACY, "resources");
         assert_eq!(
             resource_relative_path(Path::new("/tmp/bram"), "worklist.json"),
-            Path::new("/tmp/bram")
-                .join("resources")
-                .join("worklist.json")
+            legacy.join("worklist.json")
         );
         assert_eq!(
             resource_relative_path(Path::new("/tmp/bram"), Path::new("feedback-drafts")),
-            Path::new("/tmp/bram")
-                .join("resources")
-                .join("feedback-drafts")
+            legacy.join("feedback-drafts")
+        );
+    }
+
+    #[test]
+    fn state_dir_resolver_prefers_dot_bram_when_present() {
+        let root = std::env::temp_dir().join(format!("bram-469-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = super::BRAM_STATE_DIR_LEGACY;
+        let legacy_wl = format!("{}/worklist.json", legacy);
+        assert_eq!(super::bram_state_dir(&root), root.join(legacy));
+        assert_eq!(super::bram_state_rel(&root, "worklist.json"), legacy_wl);
+        assert_eq!(super::bram_state_rel(&root, ""), legacy);
+        assert_eq!(
+            super::bram_state_rel_strip(&root, &legacy_wl),
+            Some("worklist.json")
+        );
+        assert_eq!(super::bram_state_rel_strip(&root, "resourcesX/a"), None);
+        // A `.bram` file is not the folder.
+        std::fs::write(root.join(".bram"), "").unwrap();
+        assert_eq!(super::bram_state_dir(&root), root.join(legacy));
+        std::fs::remove_file(root.join(".bram")).unwrap();
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        assert_eq!(super::bram_state_dir(&root), root.join(".bram"));
+        assert_eq!(
+            resource_relative_path(&root, ".bram-port"),
+            root.join(".bram").join(".bram-port")
+        );
+        assert_eq!(
+            super::bram_state_rel(&root, "worklist.json"),
+            ".bram/worklist.json"
+        );
+        assert_eq!(super::bram_state_rel_strip(&root, &legacy_wl), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // judell/bram#469: every construction of the state folder goes through
+    // the resolver. Scans this file and worklist_state.rs at test time; a
+    // line that must keep the literal carries the marker comment below, with
+    // a reason. The needles are assembled so this test's own lines don't
+    // match them.
+    #[test]
+    fn state_dir_literals_go_through_the_resolver() {
+        let needles = [
+            concat!("join(\"", "resources\")"),
+            concat!("\"resources", "/"),
+        ];
+        let marker = concat!("state-dir: ", "literal ok");
+        let mut offenders: Vec<String> = Vec::new();
+        for (name, src) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("worklist_state.rs", include_str!("worklist_state.rs")),
+        ] {
+            for (i, line) in src.lines().enumerate() {
+                if line.contains(marker) {
+                    continue;
+                }
+                if needles.iter().any(|n| line.contains(n)) {
+                    offenders.push(format!("{}:{}: {}", name, i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "state-folder literals outside the resolver (use bram_state_dir / \
+             resource_relative_path / bram_state_rel, or mark the line):\n{}",
+            offenders.join("\n")
         );
     }
 
@@ -95720,7 +95940,7 @@ pub fn run() {
             apply_launch_options(app.handle(), startup_project_root.as_deref());
             let previous_port = startup_project_root
                 .as_ref()
-                .and_then(|p| std::fs::read_to_string(p.join("resources/.bram-port")).ok())
+                .and_then(|p| std::fs::read_to_string(resource_relative_path(p, ".bram-port")).ok())
                 .and_then(|s| s.trim().parse::<u16>().ok())
                 .filter(|&p| (49152..=65535).contains(&p));
             let (server, sticky) = match previous_port {
@@ -95940,7 +96160,7 @@ pub fn run() {
             // Leave the old files in place until this decision: deleting them
             // at startup hides the owner and lets a second instance take over.
             if let Some(proj) = startup_project_root.as_ref() {
-                let port_path = proj.join("resources/.bram-port");
+                let port_path = resource_relative_path(proj, ".bram-port");
                 // issue-353: never scaffold the home directory. The port
                 // files are the write that creates ~/resources on a
                 // mis-launch, and everything under home then reads as
@@ -96369,8 +96589,9 @@ pub fn run() {
                         Err(RecvTimeoutError::Timeout) => continue,
                         Err(RecvTimeoutError::Disconnected) => break,
                     };
+                    let state_dir_name = bram_state_dir_name(&proj_root_path);
                     let in_ignored_dir = |p: &std::path::Path| {
-                        let igs = [".git", "target", "node_modules", "resources"];
+                        let igs = [".git", "target", "node_modules", state_dir_name];
                         p.components().any(|c| {
                             let name = c.as_os_str();
                             igs.iter().any(|ig| name == *ig)
@@ -96388,8 +96609,8 @@ pub fn run() {
                                     .unwrap_or("")
                                     .to_string()
                             });
-                        if rel == "resources/bram-traces/bram-trace.log"
-                            || is_bram_trace_archive_rel(&rel)
+                        if is_bram_trace_live_rel(&proj_root_path, &rel)
+                            || is_bram_trace_archive_rel(&proj_root_path, &rel)
                         {
                             None
                         } else {
@@ -96481,8 +96702,8 @@ pub fn run() {
                                         .unwrap_or("")
                                         .to_string()
                                 });
-                            if rel == "resources/bram-traces/bram-trace.log"
-                                || is_bram_trace_archive_rel(&rel)
+                            if is_bram_trace_live_rel(&proj_root_path, &rel)
+                                || is_bram_trace_archive_rel(&proj_root_path, &rel)
                             {
                                 continue;
                             }
@@ -96720,7 +96941,7 @@ pub fn run() {
                     // file, or anything under resources/worklist-history/. Workspace
                     // refetches its DataSources on this.
                     let is_worklist_change = event.paths.iter().any(|p| {
-                        let in_resources = p.components().any(|c| c.as_os_str() == "resources");
+                        let in_resources = p.components().any(|c| c.as_os_str() == state_dir_name);
                         let file = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         let in_history = p
                             .components()
@@ -96746,7 +96967,7 @@ pub fn run() {
                     // (once per iterate cycle), so no debounce needed.
                     let is_feedback_history_change = event.paths.iter().any(|p| {
                         p.components().any(|c| c.as_os_str() == "feedback-history")
-                            && p.components().any(|c| c.as_os_str() == "resources")
+                            && p.components().any(|c| c.as_os_str() == state_dir_name)
                     });
                     if is_feedback_history_change {
                         trace_dispatch("feedback-history", &[]);
@@ -96761,7 +96982,7 @@ pub fn run() {
                     // them.
                     let is_feedback_drafts_change = event.paths.iter().any(|p| {
                         p.components().any(|c| c.as_os_str() == "feedback-drafts")
-                            && p.components().any(|c| c.as_os_str() == "resources")
+                            && p.components().any(|c| c.as_os_str() == state_dir_name)
                     });
                     if is_feedback_drafts_change {
                         trace_dispatch("feedback-drafts", &[]);
@@ -96776,7 +96997,7 @@ pub fn run() {
                     // file, so duplicate events in one notify burst no-op.
                     let is_intent_event = event.paths.iter().any(|p| {
                         p.file_name().and_then(|n| n.to_str()) == Some(".worklist-intent.json")
-                            && p.components().any(|c| c.as_os_str() == "resources")
+                            && p.components().any(|c| c.as_os_str() == state_dir_name)
                     });
                     if is_intent_event
                         && matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
@@ -96796,7 +97017,7 @@ pub fn run() {
                     let is_close_queue_event = event.paths.iter().any(|p| {
                         p.file_name().and_then(|n| n.to_str())
                             == Some(".worklist-issue-close.json")
-                            && p.components().any(|c| c.as_os_str() == "resources")
+                            && p.components().any(|c| c.as_os_str() == state_dir_name)
                     });
                     if is_close_queue_event {
                         if let Some(ref cq_path) = close_queue_path {
@@ -96869,7 +97090,7 @@ pub fn run() {
                     // Detect them here, snapshot the prior contents, then
                     // fall through to the normal skip.
                     let is_worklist_event = event.paths.iter().any(|p| {
-                        let in_resources = p.components().any(|c| c.as_os_str() == "resources");
+                        let in_resources = p.components().any(|c| c.as_os_str() == state_dir_name);
                         let in_drafts = p
                             .components()
                             .any(|c| c.as_os_str() == "worklist-drafts");
@@ -98630,7 +98851,8 @@ mod untracked_undeclared_tests {
         for i in 0..2 {
             untracked.push(format!("build/out{}.o", i));
         }
-        let (count, top, bram_owned) = untracked_undeclared_summary(&untracked, &declared);
+        let (count, top, bram_owned) =
+            untracked_undeclared_summary(crate::test_state_root(), &untracked, &declared);
         assert_eq!(count, 8);
         assert_eq!(bram_owned, 0);
         assert_eq!(
@@ -98667,29 +98889,31 @@ mod untracked_undeclared_tests {
     // resources/review/...) or stops excluding Bram's churn.
     #[test]
     fn bram_owned_files_are_excluded_but_project_resources_count() {
-        let untracked = paths(&[
-            "resources/worklist.json",
-            "resources/worklist-drafts/a.md",
-            "resources/worklist-history/2026.json",
-            "resources/feedback-history/x.md",
-            "resources/outbound-turns/1-turn.json",
-            "resources/message-drafts/d.md",
-            "resources/bram-traces/bram-trace.log",
-            "resources/.host-notes.json",
-            ".claude/bram-reference/diagnostics.md",
-            ".claude/bram-conventions.md",
-            "resources/review/catalog.json",
-            "resources/sub/.hidden",
-            ".claude/my-notes.md",
-            "stray.txt",
-        ]);
-        let (count, top, bram_owned) = untracked_undeclared_summary(&untracked, &HashMap::new());
+        use crate::test_state_rel as st;
+        let untracked: Vec<String> = vec![
+            st("worklist.json"),
+            st("worklist-drafts/a.md"),
+            st("worklist-history/2026.json"),
+            st("feedback-history/x.md"),
+            st("outbound-turns/1-turn.json"),
+            st("message-drafts/d.md"),
+            st("bram-traces/bram-trace.log"),
+            st(".host-notes.json"),
+            ".claude/bram-reference/diagnostics.md".to_string(),
+            ".claude/bram-conventions.md".to_string(),
+            st("review/catalog.json"),
+            st("sub/.hidden"),
+            ".claude/my-notes.md".to_string(),
+            "stray.txt".to_string(),
+        ];
+        let (count, top, bram_owned) =
+            untracked_undeclared_summary(crate::test_state_root(), &untracked, &HashMap::new());
         assert_eq!(bram_owned, 10);
         assert_eq!(count, 4);
         assert_eq!(
             top,
             vec![
-                ("resources/".to_string(), 2),
+                (format!("{}/", st("")), 2),
                 ("(root)".to_string(), 1),
                 (".claude/".to_string(), 1),
             ]

@@ -4,6 +4,9 @@ Seeded by Bram Setup as `.claude/bram-reference/diagnostics.md`. Read
 the relevant section when a spinner sticks, something misbehaves, you
 are designing a mechanism, or you are citing evidence.
 
+`<state>/` below is Bram's state folder: `.bram/` if it exists, else
+`resources/`.
+
 Bram internals, for diagnosing Bram itself (source-repo docs, not
 seeded):
 
@@ -14,7 +17,7 @@ seeded):
 
 ## Inflight sentinel failure modes
 
-The Worklist spinner is keyed to `resources/.inflight-claim.json`,
+The Worklist spinner is keyed to `<state>/.inflight-claim.json`,
 which host-side HTTP handlers write and clear. A stuck spinner is the
 convention enforcing itself; there is no arbitrary live-session
 timeout. Bram does have host-side completion detectors that can clear a
@@ -164,7 +167,7 @@ The norms:
 Three forensics surfaces, used together. The first two are raw
 streams; the third is a dashboard that derives signals from them.
 
-**`resources/bram-traces/bram-trace.log`** — host-side rolling log of
+**`<state>/bram-traces/bram-trace.log`** — host-side rolling log of
 HTTP routes, iframe events, and inflight-sentinel writes / clears.
 **On by default**; switch it off per project through **Settings →
 Traces**, and `BRAM_TRACE` in the environment overrides the project
@@ -182,7 +185,7 @@ cap, so trace storage is intentionally unbounded. The active log is
 never an archive candidate during its session. Best for plumbing: stuck
 spinner, sentinel anomalies, route errors, agent-turn-end detection,
 heartbeat drift, close-cycle verification (`grep "[issue-close-queue]
-op=closed" resources/bram-traces/bram-trace.log` — one line per issue
+op=closed" <state>/bram-traces/bram-trace.log` — one line per issue
 the host auto-closed once its commit reached the default branch. The
 queue is checked on Push, on local ref changes, on the ~45 s issue
 refresh and at startup, so a close can land with no Push at all, for
@@ -302,7 +305,7 @@ the project's humans, never an automatic behavior.
 Worklist drafts follow the same rule: **plans cite inline in their
 prose** (typed, followable refs — `code:path:line`, commit SHAs, issue
 numbers, doc URLs, pinpointing `/__search` queries). Do not author
-`resources/worklist-citations/<id>.json` files; that plumbing is
+`<state>/worklist-citations/<id>.json` files; that plumbing is
 dormant. For handing a user a runnable query from the pane, use Search
 deep-linking: `navigate('/search', { queryParams: { q, mode, types } })`.
 

@@ -5,6 +5,9 @@ The always-loaded conventions (`.claude/bram-conventions.md`) point
 here when one of these situations arises. Everything here binds when
 it applies; the core conventions stay authoritative for ordinary turns.
 
+`<state>/` below is Bram's state folder: `.bram/` if it exists, else
+`resources/`.
+
 ## Opt-out plumbing
 
 How the two direct-edit opt-outs ("just do it" and `skip-worklist:`)
@@ -20,7 +23,7 @@ are honored. The user-facing contract is identical for every agent.
 - **Codex, prose opt-out.** Bram's host-side `toTurn` path matches the
   same phrase and writes a `direct-edit` record
   (`kind:"direct-edit"`, `paths:["*"]`, 1h TTL) to
-  `resources/.worklist-direct-edit.json` — the grant's own sidecar,
+  `<state>/.worklist-direct-edit.json` — the grant's own sidecar,
   separate from the single-slot `.worklist-authorization.json` that any
   gate click replaces. The single Codex `PreToolUse` hook reads it via
   `fresh_bypass()` (legacy records in `.worklist-authorization.json`
@@ -39,12 +42,12 @@ are honored. The user-facing contract is identical for every agent.
   `fresh_bypass()`. Only a message sent through Bram is seen.
 - **`skip-worklist:` prefix (every agent).** When the host's `toTurn`
   write path sees the prefix it writes the same `direct-edit`
-  record to `resources/.worklist-direct-edit.json`, then forwards the
+  record to `<state>/.worklist-direct-edit.json`, then forwards the
   entire turn text including the prefix. The PreToolUse hook allows the
   edits via the existing `fresh_bypass()` path.
 - Both opt-out matchers (guard-side and host-side) read the item-
   feedback drafts as well as inline text. Claude's guard also reads the
-  outbound-turn file a "Read and follow this Bram turn: @resources/
+  outbound-turn file a "Read and follow this Bram turn: @<state>/
   outbound-turns/<id>-turn.json" frame names, where a multi-line, long
   or image-carrying message's words live (#431); the host-side matcher
   sees the raw text before framing.
@@ -62,7 +65,7 @@ Item feedback is a message sent with Worklist items selected; it arrives
 as an `iterate:` turn.
 
 - A feedback item is `{id, feedbackRef}`; `feedbackRef` names
-  `resources/feedback-drafts/<feedbackRef>.md`, the user's full-fidelity
+  `<state>/feedback-drafts/<feedbackRef>.md`, the user's full-fidelity
   feedback text. Read that file directly: `toTurn`'s `\s+ → " "`
   collapse and the receiving TUI's bracketed-paste limits don't apply,
   because the text never rode the PTY paste channel.
@@ -192,14 +195,14 @@ invocations, and the approval is consumed exactly once, so a second
 request can't produce a second commit. It returns instead an error
 naming the completed commit ("this commit ALREADY RAN … verify with git
 log"); read that as success, not failure. Watch the phases in
-`resources/bram-traces/bram-trace.log` — `[worklist-commit] op=staging`,
+`<state>/bram-traces/bram-trace.log` — `[worklist-commit] op=staging`,
 `op=committing`, `op=committed` — to tell a long commit from a stuck one
 without touching git state.
 
 The Codex intent channel carries the same rule: **do not rewrite
-`resources/.worklist-intent.json` with a fresh nonce after a slow
+`<state>/.worklist-intent.json` with a fresh nonce after a slow
 commit.** That is the re-POST in another spelling. Read
-`resources/.worklist-result.json` and the git state first; a result
+`<state>/.worklist-result.json` and the git state first; a result
 whose nonce matches your original request is still coming, and the
 commit it describes may already exist.
 
@@ -269,7 +272,7 @@ coordination dot-files. Both transports dispatch through the same
 host-side handlers, so response kinds, consume-on-read, the inflight
 sentinel, and the auth checks are identical.
 
-1. **Write** `resources/.worklist-intent.json`:
+1. **Write** `<state>/.worklist-intent.json`:
 
    ```json
    { "nonce": "<unique-per-request>", "route": "<route>", "body": { ... } }
@@ -288,7 +291,7 @@ sentinel, and the auth checks are identical.
    Direct Drop, clear-landed, plan, and the retired iterate brackets
    also have no route in this dispatcher. Unknown routes fail.
 
-2. **Read** `resources/.worklist-result.json` for the record whose
+2. **Read** `<state>/.worklist-result.json` for the record whose
    `nonce` matches (ignore stale results from prior requests):
 
    ```json
@@ -306,7 +309,7 @@ sentinel, and the auth checks are identical.
 The Codex PreToolUse guard exempts `.worklist-intent.json` from
 worklist coverage — it's a coordination file, like the loopback curl is
 for Claude. Trace each drain by grepping `[worklist-intent]` in
-`resources/bram-traces/bram-trace.log`.
+`<state>/bram-traces/bram-trace.log`.
 
 ## Incremental claim and authorization retirement
 
@@ -719,7 +722,7 @@ messages and batch-Clear UI are not the current implementation.
 
 The structured `approved:` / `drop:` line is not authority by itself.
 The pane asks the host to record clicked ids in
-`resources/.worklist-authorization.json` with kind `approved` / `drop`.
+`<state>/.worklist-authorization.json` with kind `approved` / `drop`.
 Resolve delivers the recorded item bodies. The ordinary agent
 advance/prune channel is mutate:
 

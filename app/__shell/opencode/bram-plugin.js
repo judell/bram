@@ -39,6 +39,12 @@ const GUARD = join(
   process.platform === "win32" ? "bram-guard.exe" : "bram-guard",
 );
 const GUARD_TIMEOUT_MS = 15000;
+// Bram's per-project state folder: `.bram/` when it exists, else the older
+// `resources/` (issue #469). A path in `.bram/` wins only if that file is there.
+function statePath(name) {
+  const moved = join(ROOT, ".bram", name);
+  return existsSync(moved) ? moved : join(ROOT, "resources", name);
+}
 // Built-in tools that can't change the project. Everything else goes to the
 // guard, which allows what it has no rule for; MCP calls go as MCP calls
 // (mcpIdentity below), so its MCP rule applies.
@@ -65,7 +71,7 @@ function deny(message) {
 // guard itself does in an unmanaged repo. With the marker present a missing
 // guard is a broken install, and that denies.
 function bramManagedHere() {
-  return existsSync(join(ROOT, "resources", ".worklist-authorization.json"));
+  return existsSync(statePath(".worklist-authorization.json"));
 }
 
 // opencode-mcp-guard: OpenCode 2.1.4 runs MCP tools through code mode, and
@@ -211,7 +217,7 @@ const FORWARDED = new Set([
 // Read per event: Bram writes a new port each time it starts.
 function bramPort() {
   try {
-    return Number(readFileSync(join(ROOT, "resources", ".bram-port"), "utf8").trim()) || 0;
+    return Number(readFileSync(statePath(".bram-port"), "utf8").trim()) || 0;
   } catch {
     return 0;
   }

@@ -5,6 +5,9 @@ the relevant section when your project's markup talks to the agent,
 binds project SQLite, uses the forge CLI, runs heavy test suites, hits a
 Windows block, or coordinates with a session across a project boundary.
 
+`<state>/` below is Bram's state folder: `.bram/` if it exists, else
+`resources/`.
+
 ## Target app helpers
 
 Bram's own Worklist and Sessions tabs already use these helpers
@@ -82,7 +85,7 @@ response is a JSON array of column-keyed row objects:
 - **Scratch-pad pattern**: the agent can materialize an analysis (a
   normalized import, an aggregation, a cross-source join) as tables in a
   project-local scratch database — e.g. a gitignored
-  `resources/scratch.db` pointed at by `db` — and hand the user a live
+  `<state>/scratch.db` pointed at by `db` — and hand the user a live
   table or chart in three lines of markup. Analyses that prove out get
   promoted to project-owned data and, if the app ships, a project-owned
   endpoint.
@@ -164,7 +167,7 @@ hit, this is the advice protocol (user-facing twin: the Bram README's
   `bram-guard` hook binary (`~/.bram`, spawned on every hook event):
   hook invocations failing while the app runs fine — the signature is
   missing `claude-rs` / `codex-rs` breadcrumbs in
-  `resources/bram-traces/hook-events.log`, or hook timeouts/errors, with
+  `<state>/bram-traces/hook-events.log`, or hook timeouts/errors, with
   no visible launch failure.
 - **Verify before advising.** Confirm the block dialog actually names
   Smart App Control — Defender and SmartScreen blocks read differently,
@@ -234,7 +237,7 @@ It means: the user asked you to install what's missing. Handle it this way:
 - **Report what happened,** then ask the user to click 🎤 again.
 - **If it still fails,** read the trace: each click writes
   `[whisper] preflight binary=… model=… ffmpeg=… searched=… path=…` and
-  `[whisper] start convert=…` to `resources/bram-traces/bram-trace.log`,
+  `[whisper] start convert=…` to `<state>/bram-traces/bram-trace.log`,
   and the pane writes `[iframe] subkind=voice-setup` lines for the dialog.
   Those lines name what was found and where Bram looked.
 

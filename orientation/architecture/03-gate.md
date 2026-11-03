@@ -8,6 +8,8 @@ Click-through detail for 03-gate.mmd. Facts are as of commit `e8a38ac0` (2026-11
 
 An item can start from a forge issue. Its id then takes the form `issue-<N>-<slug>`, "paired with `closesIssues` when both apply". [`app/__shell/conventions.md:472-474`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L472-L474) `closesIssues` "declares which issues the commit resolves and drives the close-on-commit dialog", and is set conservatively: "only when the commit truly closes the issue". [`app/__shell/conventions.md:232-235`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L232-L235)
 
+![An issue opens in Bram's own issue view: here #466, which a contributor filed from their own Bram.](screenshots/worklist-00-issue.png "Issue #466")
+
 ## You or the agent
 
 <!-- read: app/__shell/conventions.md#Lifecycle: propose → triage → mechanical transitions -->
@@ -22,6 +24,12 @@ Without an issue, the item gets "a bare descriptive slug". [`app/__shell/convent
 The convention: "Default: every change request goes through `<state>/worklist.json`." The conventions define `<state>/` once: "Bram's state folder, written `<state>/` below, is `.bram/` if it exists, else `resources/`". [`app/__shell/conventions.md:45-46`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L45-L46) [`app/__shell/conventions.md:57-62`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L57-L62) A proposed item names files, with before/after prose in `<state>/worklist-drafts/<id>.md`. [`app/__shell/conventions.md:104-111`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L104-L111) Writing it is "*asking*, not approval". [`app/__shell/conventions.md:266-271`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L266-L271)
 
 The guard checks writes to `worklist.json`: inline `before`/`after` is denied with `worklist-inline-prose`, and a write whose `version` isn't the on-disk version plus one is denied with `stale-worklist-version`. [`src-tauri/src/guard_policy.rs:4035-4044`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard_policy.rs?plain=1#L4035-L4044) [`src-tauri/src/guard_policy.rs:4054-4084`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard_policy.rs?plain=1#L4054-L4084) Item order, ids and the draft layout are conventions, see [`app/__shell/conventions.md:209-225`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L209-L225).
+
+![The item from #466 as proposed: "for #466" beside its status, and the files it expects to change. "Shared with" counts the other items on the board that declare the same file.](screenshots/worklist-02a-files.png "Files expected to change")
+
+![Its Before: what is there now, checked against the code, and what a search of the project's history found.](screenshots/worklist-02b-before.png "Before")
+
+![Its After: what will change, and the design questions to settle before Start, each with a recommendation.](screenshots/worklist-02c-after.png "After")
 
 ## Worklist pane
 
@@ -58,6 +66,10 @@ The header comment of `guard_policy.rs` says the module "began as a shadow port"
 
 The convention allows edits only inside an authorized item, with stated opt-outs (an explicit `just do it` in the same turn, the `skip-worklist:` prefix, correcting code written in the current iteration, an uncommitted draft, issue-only forge work). [`app/__shell/conventions.md:63-97`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L63-L97) Unauthorized edits "land in someone else's commit". [`app/__shell/conventions.md:156-158`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L156-L158) Direct-edit grants are a separate sidecar with a one-hour lifetime. [`docs/authorization.md:194-208`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/authorization.md?plain=1#L194-L208)
 
+![The Start click arrives as a turn, and the agent begins by reading the code the change touches, narrating as it goes.](screenshots/worklist-04b-begins.png "Agent begins work")
+
+![The agent hands part of the work to a subagent. Its transcript opens as its own tab, so you can follow its reasoning and tool calls as they happen.](screenshots/worklist-04c-subagent.png "Agent dispatches a subagent")
+
 ## Applied item
 
 <!-- read: app/__shell/conventions.md#Schema and draft layout -->
@@ -69,6 +81,12 @@ A `status` of applied means changes are on disk and awaiting commit approval, an
 <!-- read: app/__shell/conventions.md#Lifecycle: propose → triage → mechanical transitions -->
 
 The second loop. With items selected, a message you send "is **feedback addressed to those items**, and arrives as an `iterate:` turn." [`app/__shell/conventions.md:285-288`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L285-L288) On a begun or applied item the agent will "edit on-disk files per the feedback". [`app/__shell/conventions.md:334-335`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L334-L335) The loop ends when you click Commit.
+
+![After the build, the new switch is under Settings, Worklist.](screenshots/worklist-05a-setting.png "The new Pause setting under Worklist")
+
+![Its info note: what pausing does, what still applies, and what to do before turning enforcement back on.](screenshots/worklist-05b-description.png "Description of the setting")
+
+![Switched on, a strip at the top of the pane says enforcement is paused, with a button to resume.](screenshots/worklist-05c-paused.png "Setting in action")
 
 ## Commit route
 
@@ -90,6 +108,10 @@ Two paths. The ordinary one is conventional: path-scoped `git add -A -- <path>` 
 
 After a successful commit the route prunes the committed ids by calling the same mutate handler with `op: prune`. [`src-tauri/src/lib.rs:89631-89637`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L89631-L89637) A filesystem watcher calls `maybe_snapshot_worklist` and writes `resources/worklist-history/<unix_ms>.json` and `.md`. [`docs/worklist-history.md:41-52`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/worklist-history.md?plain=1#L41-L52) [`src-tauri/src/lib.rs:78156-78162`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L78156-L78162) This repo's `.gitignore` opts out of committing those snapshots. [`.gitignore:44-46`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/.gitignore?plain=1#L44-L46) The conventions call the directory host-written: "the guard denies agent edits". [`app/__shell/conventions.md:206-207`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L206-L207)
 
+![The History tab lists each item's lifecycle: issue-466 went Proposed, Feedback, Applied, Feedback, Committed.](screenshots/worklist-08a-history.png "Worklist history shows item lifecycles")
+
+![The entry for issue-466: when it ran, its lifecycle, its files, a link to the commit, and the item's Before and After as they stood. Searchable, like the rest of the history.](screenshots/worklist-08b-history-entry.png "The issue-466 item recorded in searchable History")
+
 ## shown on the board
 
 <!-- read: app/__shell/conventions.md#Schema and draft layout -->
@@ -102,6 +124,8 @@ After a successful commit the route prunes the committed ids by calling the same
 <!-- read: docs/authorization.md#Where the implementation lives -->
 
 The pane records the action first, through the `record_worklist_action_authorization` Tauri command, and sends the turn only if that succeeds. [`app/__shell/helpers.js:743-748`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L743-L748) [`src-tauri/src/lib.rs:77041-77046`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L77041-L77046) The doc's summary: "Start click → host records approved ids + execution claim → apply turn". [`docs/authorization.md:124-125`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/authorization.md?plain=1#L124-L125) An `approved:` string typed in chat is not the authority-creation path: "Merely supplying an `approved:` or `drop:` string is not the normal authority-creation path." [`docs/authorization.md:36-39`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/authorization.md?plain=1#L36-L39)
+
+![With the item ticked, Start authorizes the work. "Applies to" names the items the click covers.](screenshots/worklist-04a-start.png "Click Start to authorize the work")
 
 ## starts claim
 
@@ -135,11 +159,15 @@ This step is the agent's to remember. After applying, the agent is told to call 
 
 Claude, OpenCode and Antigravity make this call with loopback curl: "Claude, OpenCode and Antigravity: loopback curl." [`app/__shell/conventions.md:416-416`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L416-L416) Codex writes intent and result files, and both reach the same handlers. [`app/__shell/reference/worklist-mechanics.md:268-275`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/reference/worklist-mechanics.md?plain=1#L268-L275)
 
+![The subagent hands back; the agent checks its work, advances the item and says what it verified and what you need to do to try it.](screenshots/worklist-04d-ready.png "Agent announces v1 ready to test")
+
 ## derived from
 
 <!-- read: app/__shell/conventions.md#Schema and draft layout -->
 
 Before the item is committable, the issue link is "an *association* (the pane renders \"for #N\")"; "closes #N" and the gate's ticks appear "only once committable". [`app/__shell/conventions.md:236-238`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L236-L238) The agent must "re-verify the claim against what the work became" before asking for commit approval. [`app/__shell/conventions.md:238-240`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L238-L240)
+
+![+ New item starts from an issue: here #466, with a note on why it's needed.](screenshots/worklist-01-new-item.png "New item from an issue")
 
 ## defined directly
 
@@ -153,6 +181,12 @@ Exploratory, cross-cutting or multi-issue items get "a bare descriptive slug". [
 
 The first loop. "Item feedback (`iterate:`) authorizes no state change." [`app/__shell/conventions.md:328-328`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L328-L328) On a "`proposed`, not yet begun" item the agent will "revise the draft's `before` / `after`; update `files` only if scope shifts. No project file edits." [`app/__shell/conventions.md:331-333`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L331-L333)
 
+![With the item ticked, the message box sends to it: the bar reads "Selected in Worklist", and Send as chat instead is the way out.](screenshots/worklist-03a-feedback.png "Feedback on the proposal")
+
+![The agent revised only the draft: the After now describes a narrower v1. No project files changed.](screenshots/worklist-03b-revised.png "The revised After")
+
+![The loop runs as many times as it takes: a second round of feedback narrowed v1 to Claude only. Still only the draft changed.](screenshots/worklist-03c-revised-again.png "Revised again")
+
 ## you try it
 
 <!-- read: app/__shell/conventions.md#Schema and draft layout -->
@@ -165,12 +199,24 @@ The changes are on disk and nothing is committed. See Applied item: a begun prop
 
 On a begun or applied item, feedback edits files on disk. "Either way the item keeps its status; iterate never advances or commits on its own." [`app/__shell/conventions.md:336-337`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L336-L337)
 
+![After testing, feedback goes to the begun item: the strip was too heavy, so ask for a light indicator in the header. Commit is already lit, but the loop continues.](screenshots/worklist-06a-feedback.png "First round of feedback")
+
+![The agent edited the files: the header now says Enforcement paused. Testing it prompts round two: use the standard pause icon instead.](screenshots/worklist-06b-round2.png "Testing round 1 and sending round 2")
+
+![Round two in place: the pause icon before the provider selector, with a tooltip and a link to the setting.](screenshots/worklist-06c-tested.png "Testing round 2")
+
+![Round three is a question, asked as chat with nothing selected, while enforcement is paused (the pause icon in the header). The item's files are all on the board, ready to commit.](screenshots/worklist-06d-round3.png "Round 3 feedback")
+
+![The agent answers: selection still decides whether a message is feedback on an item or chat, but while paused, chat can edit too. It offers three options and leans to the smallest.](screenshots/worklist-06e-round3-response.png "Round 3 response")
+
 ## Commit click
 
 <!-- read: app/__shell/conventions.md#Commit and apply-and-commit gates -->
 <!-- read: docs/worklist-gate-design.md#The selection gate -->
 
 The Commit button sends `approved:` with `gate: "to commit"` (or `"apply-and-commit"` on a begun proposed item), and the agent calls `worklist-commit { ids, message }`. [`app/__shell/conventions.md:305-307`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L305-L307) The authorization doc: "Start & commit uses one approval and skips the advance." [`docs/authorization.md:131-133`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/authorization.md?plain=1#L131-L133)
+
+![The row reads "closes #466". At Commit, the close checkbox is ticked and a comment for the issue rides along with the approval.](screenshots/worklist-07a-commit.png "Click Commit and send the issue-close message")
 
 ## checked by mutate and commit
 
@@ -190,6 +236,8 @@ See Git commit. Entangled means another begun item "**owns lines**" in a file th
 <!-- read: docs/worklist-history.md#Flow -->
 
 See Pruned, kept in history. The prune body is built in the commit route and handed to `handle_worklist_mutate`, which serializes concurrent mutates behind a lock. [`src-tauri/src/lib.rs:89631-89637`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L89631-L89637) [`src-tauri/src/lib.rs:87642-87649`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L87642-L87649) Queued issue closes are bound to the new SHA at commit time and fire on the user's next Push. [`src-tauri/src/lib.rs:89467-89467`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L89467-L89467) [`app/__shell/conventions.md:391-395`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L391-L395)
+
+![The commit is tagged with its item, and the close waits: "Push will close #466", pending until you push, with Withdraw if you change your mind.](screenshots/worklist-07b-close-on-push.png "Will close on push")
 
 ## Drop
 

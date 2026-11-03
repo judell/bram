@@ -3,6 +3,12 @@
      together-groups-beta and pwkm. Content lives in OVERVIEW.md and
      architecture/; the diagram list and caption in arch.js's SITE block.
      Markdown file via DataSource -> content: https://www.xmlui.org/docs/howto/render-markdown-content-as-a-page -->
+<!-- Line height 1.4 site-wide, for Markdown body text (lineHeight-Text-markdown,
+     the Text-markdown text family: Markdown.module.scss; see
+     https://www.xmlui.org/docs/howto/find-the-theme-variable-for-a-text), plain
+     Text and Link alike, so mixed rows share a baseline. Inline code
+     (Text variant "code", inline-block with padding and a border) gets 1.2 so
+     its box fits inside a 1.4 line instead of pushing lines apart. -->
 <Theme
   backgroundColor="#fbfaf7"
   backgroundColor-content-App="#fbfaf7"
@@ -10,7 +16,11 @@
   textColor-secondary="#5f5e58"
   borderColor="#e3e0d8"
   color-primary="#2f5d8a"
-  backgroundColor-primary="#ffffff">
+  backgroundColor-primary="#ffffff"
+  lineHeight-Text-markdown="1.4"
+  lineHeight-Text="1.4"
+  lineHeight-Link="1.4"
+  lineHeight-Text-code="1.2">
 <App defaultTone="light">
   <!-- One calm light palette, shared with the project homepage; the site
        doesn't follow the OS color scheme (defaultTone):
@@ -30,6 +40,23 @@
       <DataSource id="start" url="START.md" />
       <Markdown when="{start.loaded}" content="{start.value}" openLinkInNewTab="{true}" />
     </VStack>
+    <!-- Shared by the Diagrams and Overview pages. A citation: the cited lines of one file, fetched raw at the pin.
+         State-driven: it follows ?cite= in the URL, set by a citation link
+         in a detail, and clears it on close so the next click reopens it.
+         https://www.xmlui.org/docs/howto/choose-between-imperative-and-state-driven-modal-dialogs
+         https://www.xmlui.org/docs/howto/deep-link-to-a-tab-or-section -->
+    <ModalDialog
+      when="{!!$queryParams.cite}"
+      onClose="navigate($pathname)"
+      width="70vw" maxWidth="70vw"
+      title="{Arch.cite($queryParams.cite)?.label}">
+      <VStack gap="$space-3" padding="$space-2" paddingTop="0">
+        <DataSource id="citeDoc" when="{Arch.cite($queryParams.cite)}" url="{Arch.rawUrl(Arch.cite($queryParams.cite).path)}" />
+        <Text when="{!citeDoc.loaded}" variant="caption">Fetching from the repo at this site's pin…</Text>
+        <Markdown when="{citeDoc.loaded}" content="{Arch.citeExcerpt(citeDoc.value, $queryParams.cite)}" />
+        <HStack><Button label="Close" onClick="navigate($pathname)" /></HStack>
+      </VStack>
+    </ModalDialog>
     <VStack when="{Arch.page === 'diagrams'}">
       <!-- Mermaid diagrams from architecture/*.mmd, rendered once on mount:
            https://www.xmlui.org/docs/howto/run-a-one-time-action-on-page-load
@@ -48,23 +75,34 @@
             if (d) { detail = d; detailDialog.open(); } }" />
         <ModalDialog id="detailDialog" width="70vw" maxWidth="70vw" title="{detail?.title}">
           <VStack gap="$space-3" padding="$space-2" paddingTop="0">
-            <Markdown content="{detail?.body || ''}" openLinkInNewTab="{true}" />
+            <!-- Citations in the body are ?cite= links (arch.js citeLinks): the
+                 Markdown routes them in-app, so they must not open a new tab. -->
+            <Markdown content="{detail?.body || ''}" openLinkInNewTab="{false}" />
+            <!-- Screenshots in the section (arch.js: image-only lines): a
+                 thumbnail with its alt text as the caption beneath;
+                 a click toggles full width in place.
+                 https://www.xmlui.org/docs/reference/components/Image (click) -->
+            <Items items="{detail?.shots || []}">
+              <VStack var.big="{false}">
+                <Text when="{$item.title}" fontWeight="bold">{$item.title}</Text>
+                <Image src="{$item.src}" alt="{$item.alt}"
+                  tooltip="{big ? 'Click to shrink' : 'Click to enlarge'}"
+                  width="{big ? '100%' : '240px'}" onClick="big = !big" />
+                <Text variant="caption">{$item.alt}</Text>
+              </VStack>
+            </Items>
             <!-- The docs a section reads (arch.js: read directives), after the
                  prose, one line each: "Read <doc> here or on GitHub", the forge
                  link in a new tab, "here" the reader below, fetched at the pin. -->
             <Items items="{detail?.reads || []}">
-              <HStack gap="$space-1" verticalAlignment="baseline" wrapContent="{true}">
-                <Text>Read {$item.label}</Text>
-                <!-- Text has no click event; a Stack does (Stack#click), so the
-                     link-styled word sits in one. The dialog receives $item as
-                     $param: https://www.xmlui.org/docs/howto/pass-data-to-a-modal-dialog -->
-                <HStack cursor="pointer" onClick="readerDialog.open($item)">
-                  <Text color="$color-primary-500" textDecorationLine="underline">here</Text>
-                </HStack>
-                <Text>or on</Text>
-                <Link to="{$item.link}" target="_blank">{Arch.forgeLabel}</Link>
-                <Text>.</Text>
-              </HStack>
+              <!-- One link per doc the section reads: the whole label is the
+                   click target, opening the reader below (fetched at the pin).
+                   A Link's own text wraps like prose:
+                   https://www.xmlui.org/docs/howto/wrap-long-text-in-a-link
+                   With no `to` it renders as a span and still fires onClick
+                   (xmlui LinkReact.tsx); $item reaches the dialog as $param:
+                   https://www.xmlui.org/docs/howto/pass-data-to-a-modal-dialog -->
+              <Link label="{'Read ' + $item.label}" cursor="pointer" onClick="readerDialog.open($item)" />
             </Items>
             <HStack><Button label="Close" onClick="detailDialog.close()" /></HStack>
           </VStack>
@@ -101,6 +139,9 @@
             <IFrame when="{svgs &amp;&amp; svgs[$item.file] &amp;&amp; svgs[$item.file].srcdoc}"
               srcdoc="{svgs[$item.file].srcdoc}" title="{'Diagram: ' + $item.title}"
               width="100%" height="{svgs[$item.file].height + 'px'}" />
+            <!-- Key for the screenshot mark arch.js draws on boxes and arrows
+                 whose detail holds screenshots. Shown only when there are some. -->
+            <Text when="{svgs &amp;&amp; svgs[$item.file] &amp;&amp; svgs[$item.file].shotCount}" variant="caption">{Arch.shotMark} has screenshots: click it to see them</Text>
             <Text variant="caption">architecture/{$item.file}</Text>
           </VStack>
         </Items>
@@ -108,7 +149,9 @@
     </VStack>
     <VStack when="{Arch.page === 'overview'}">
       <DataSource id="overview" url="OVERVIEW.md" />
-      <Markdown when="{overview.loaded}" content="{overview.value}" openLinkInNewTab="{true}" />
+      <!-- Citations open the citation dialog in-app (Arch.pageLinks); other
+           external links carry their own target=_blank. -->
+      <Markdown when="{overview.loaded}" content="{Arch.pageLinks(overview.value)}" openLinkInNewTab="{false}" />
     </VStack>
   </VStack>
 </App>

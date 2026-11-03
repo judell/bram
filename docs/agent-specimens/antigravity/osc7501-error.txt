@@ -1,0 +1,48 @@
+# agy's OSC 7501 `state=error` marker (antigravity-error-state-surfaced)
+
+Seen on Windows 11, 2026-11-03 00:58Z, Bram 0.8.2 at b54f19d8, agy launched
+by Bram's PTY with AGY_CLI_OSC7501=on. Jon clicked "Catch Antigravity up" and
+then sent "just confirming the session" to a freshly started agy. For each
+send agy went `working`, then within a second `error`, then `idle`.
+
+The marker, as Bram's trace ([pty-in]) previewed it. The preview cut the
+base64 mid-field; `…` is the cut, not part of the bytes:
+
+    \x1b]7501;state=error:app=antigravity:msg=SW5kaXZpZHVhbCBxdW90YSByZWFjaGVkLiBQbGVhc…\x07
+
+The truncated base64 decodes to the message's prefix:
+
+    Individual quota reached. Plea
+
+The full text came from agy's own log for the same turn:
+
+    RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 125h7m40s.
+
+The marker's `msg=` carries the message after the status prefix (its decoded
+prefix starts at "Individual"). The complete marker, synthesized from that
+text for the unit test (`antigravity_turn_tests::
+error_marker_is_parsed_decoded_and_ends_the_turn_as_error`, src-tauri/src/lib.rs):
+
+    \x1b]7501;state=error:app=antigravity:msg=SW5kaXZpZHVhbCBxdW90YSByZWFjaGVkLiBQbGVhc2UgdXBncmFkZSB5b3VyIHN1YnNjcmlwdGlvbiB0byBpbmNyZWFzZSB5b3VyIGxpbWl0cy4gUmVzZXRzIGluIDEyNWg3bTQwcy4=\x07
+
+which decodes to:
+
+    Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 125h7m40s.
+
+The sequence of state bodies around it, in order:
+
+    working:app=antigravity
+    error:app=antigravity:msg=<base64 above>
+    idle:app=antigravity
+
+Before this item Bram read only `working` and `idle`, so the trace recorded
+`[antigravity-turn] op=end via=osc7501 state=idle` (a finished turn), and
+the send ledger, resolving against the Claude transcript because agy had not
+yet named a session, called both sends `stranded` (`reason=needle-absent`).
+Now the `error` traces as `[antigravity-turn] op=error via=osc7501 msg="…"`,
+the turn ends as `state=error`, and the sends land `via=osc-error
+cause=agent-error`.
+
+The marker shape is the same as `done`'s (`state=done:app=antigravity:msg=
+<base64 reply>`, docs/agent-specimens/antigravity/osc7501-turns.md): a state,
+`app=antigravity`, and an optional base64 `msg=`.

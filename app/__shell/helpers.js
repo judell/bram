@@ -9734,7 +9734,11 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
   var lastValue = null;
   var lastSig = null;
   var sigOf = function (v) {
-    return v ? [v.state, v.verb, v.provider, v.substate, v.source].join("|") : "";
+    if (!v) return "";
+    // antigravity-error-state-surfaced: agy's error rides the status payload
+    // as agentError {text, atMs}; a new one must reach the deduped consumers.
+    var err = v.agentError && v.agentError.atMs ? String(v.agentError.atMs) : "";
+    return [v.state, v.verb, v.provider, v.substate, v.source, err].join("|");
   };
   var notify = function (set) {
     set.forEach(function (fn) {
@@ -15439,10 +15443,45 @@ function __bramLatestResolvedLedgerEntry(payload) {
   return latest;
 }
 
+// antigravity-error-state-surfaced: the agent error the footer notice shows,
+// or null. The host puts agy's latest `state=error` message on /__send-ledger
+// (and on the agent-status payload) as agentError {text, atMs}, cleared when
+// the next turn starts. It outranks a resolved ledger entry when it is newer
+// than that entry's verdict, or when the entry's own verdict is that error
+// (landed, cause agent-error: the ledger's sweep resolves AFTER the marker).
+// The user moving on (a send injected after the error) retires it, as it
+// retires the ledger notices.
+function __bramAgentErrorToShow(payload) {
+  var err = payload && payload.agentError;
+  if (!err || !err.text || !err.atMs) return null;
+  var entries = (payload && payload.entries) || [];
+  for (var i = 0; i < entries.length; i++) {
+    var n = entries[i];
+    if (n && n.injectedAtMs > err.atMs) return null;
+  }
+  var latest = __bramLatestResolvedLedgerEntry(payload);
+  if (latest && latest.resolvedAtMs > err.atMs && latest.cause !== "agent-error") return null;
+  return err;
+}
+
+// The notice's words for agy's error. A quota refusal gets its own line,
+// since the remedy is outside Bram; anything else is reported as agy said it.
+window.__bramAgentErrorNotice = function (err) {
+  var text = String((err && err.text) || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (/quota/i.test(text)) {
+    return "Antigravity reports its quota is used up; its reply didn’t start: " + text;
+  }
+  return "Antigravity reported an error: " + text;
+};
+
 // Key identifying the current notice for dismissal: the producing
-// ledger entry's id. A dismissed key hides THAT notice only; a new
-// resolved entry (new id) notices normally.
+// ledger entry's id, or the agent error's time when that is the notice.
+// A dismissed key hides THAT notice only; a new resolved entry (new id)
+// or a new error (new atMs) notices normally.
 window.__bramSendLedgerNoticeKey = function (payload) {
+  var err = __bramAgentErrorToShow(payload);
+  if (err) return "agent-error:" + err.atMs;
   var latest = __bramLatestResolvedLedgerEntry(payload);
   return (latest && latest.id) || "";
 };
@@ -15922,6 +15961,15 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
   var entries = (payload && payload.entries) || [];
   var nowMs = (payload && payload.nowMs) || Date.now();
   var staleTerminalInput = !!(payload && payload.staleTerminalInput);
+  // antigravity-error-state-surfaced: agy took the send and refused it. Said
+  // here, in the footer notice, where the ledger used to call the same send
+  // "did not reach the agent" (2026-11-03). No age cutoff: the host clears
+  // the error when the next turn starts.
+  var agentError = __bramAgentErrorToShow(payload);
+  if (agentError) {
+    if (dismissedKey === "agent-error:" + agentError.atMs) return "";
+    return window.__bramAgentErrorNotice(agentError);
+  }
   var latest = __bramLatestResolvedLedgerEntry(payload);
   if (!latest) return "";
   if (dismissedKey && latest.id === dismissedKey) return "";
@@ -15958,6 +16006,9 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
     // in the TERMINAL input, unanswered — and the copy there prepends
     // onto the next terminal-submitted send if not cleared.
     return "Response interrupted — your message" + label + " is back in the terminal input, unanswered. Press Enter there to resend it, or clear it before sending anything new.";
+  }
+  if (latest.state === "landed" && latest.cause === "agent-error") {
+    return "Antigravity took your message" + label + " but reported an error instead of replying.";
   }
   if (latest.state === "landed" && latest.retried) {
     return "A lost send" + label + " was redelivered automatically.";

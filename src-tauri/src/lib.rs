@@ -11919,7 +11919,11 @@ fn maybe_emit_agent_status<R: tauri::Runtime>(app: &AppHandle<R>, payload: &Agen
         }
         return;
     }
-    emit_replayable_payload(app, "agent-status-changed", payload);
+    emit_replayable_payload(
+        app,
+        "agent-status-changed",
+        agent_status_with_error(payload),
+    );
 }
 
 // Clear the cached agent status (banner provider + verb) and push the idle
@@ -11933,6 +11937,7 @@ fn reset_agent_status<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Ok(mut guard) = agent_status_cell().lock() {
         *guard = AgentStatus::idle();
     }
+    antigravity_clear_error();
     emit_replayable_payload(app, "agent-status-changed", &idle);
 }
 
@@ -52552,6 +52557,9 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
     // sweep, for the second-candidate search below.
     let mut inject_session_texts: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // antigravity-error-state-surfaced: read once per sweep, and only when an
+    // entry needs it.
+    let mut antigravity_current: Option<bool> = None;
     if let Ok(mut ledger) = send_ledger_cell().lock() {
         for entry in ledger.iter_mut() {
             if entry.state != "injected" {
@@ -52619,6 +52627,34 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 inject_candidate,
                 anchor,
             );
+            // antigravity-error-state-surfaced: agy's own report of the send.
+            // A turn it opened after the inject means it took the send, even
+            // when no transcript Bram can read records it (a fresh partner's
+            // conversation is named only after a completed turn, so on
+            // 2026-11-03 the search ran against the Claude transcript and
+            // called two sends agy had refused on quota `stranded`); an error
+            // in that turn means it took the send and refused.
+            let osc_landing = if delivered.is_none() {
+                let is_antigravity = *antigravity_current.get_or_insert_with(|| {
+                    current_provider(app) == Some(SessionProvider::Antigravity)
+                });
+                if is_antigravity {
+                    antigravity_osc_landing(
+                        entry.injected_at_ms,
+                        ANTIGRAVITY_LAST_TURN_START_MS.load(std::sync::atomic::Ordering::SeqCst),
+                        antigravity_error_at_ms(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let delivered = if osc_landing.is_some() {
+                Some(false)
+            } else {
+                delivered
+            };
             // issue-335 phase 1: classified against the PRIMARY candidate only.
             // When the session re-anchored, `search_text` is the current
             // session and the inject session was searched as a fallback, so
@@ -52632,14 +52668,22 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 entry.state = "landed";
                 entry.resolved_at_ms = now;
                 entry.via_queue = via_queue;
+                if osc_landing == Some("osc-error") {
+                    entry.cause = "agent-error";
+                }
                 // A landing proves the composer path delivered clean —
                 // drop any stale-input latch from an earlier abort.
                 set_stale_terminal_input_latched_at(0);
                 transitions.push(format!(
-                    "op=transition id={} state=landed via_queue={} elapsed_ms={}",
+                    "op=transition id={} state=landed via_queue={} elapsed_ms={}{}",
                     entry.id,
                     entry.via_queue,
                     now - entry.injected_at_ms,
+                    match osc_landing {
+                        Some("osc-error") => " via=osc-error cause=agent-error",
+                        Some(_) => " via=osc-working",
+                        None => "",
+                    },
                 ));
                 // issue-305 phase 2a: this send's absence was transient — it
                 // landed after all, so the would-notice is withdrawn. These
@@ -53197,7 +53241,7 @@ fn send_ledger_status_rows() -> Vec<serde_json::Value> {
     for entry in ledger.iter().rev().take(5) {
         let age_s = (now - entry.injected_at_ms) / 1000;
         let mut state_label = entry.state.to_string();
-        if entry.state == "stranded" && !entry.cause.is_empty() {
+        if (entry.state == "stranded" || entry.cause == "agent-error") && !entry.cause.is_empty() {
             state_label = format!("{} ({})", state_label, entry.cause);
         }
         if entry.via_queue {
@@ -58349,8 +58393,23 @@ fn parse_cargo_package_version(text: &str) -> Option<String> {
 // bundle), which cannot disagree with its own version.
 fn checkout_version<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
     let root = resolve_app_root(Some(app))?;
-    let text = std::fs::read_to_string(root.parent()?.join("src-tauri/Cargo.toml")).ok()?;
+    let text = std::fs::read_to_string(checkout_cargo_toml_for_app_root(&root)?).ok()?;
     parse_cargo_package_version(&text)
+}
+
+// windows-checkout-version-through-junction: the checkout's Cargo.toml for a
+// served app root. On Windows the disk-serving launch reaches `app/` through
+// a directory junction (`target\<triple>\debug\app` -> `<repo>\app`), so the
+// root's lexical parent is `...\debug` and `checkoutVersion` read as null.
+// Resolve the junction first (canonicalize, then drop the `\\?\` prefix as
+// the rest of the host does), falling back to the lexical path when the
+// resolve fails. On macOS/Linux the `./bram` symlink already lands the
+// parent at the checkout, and canonicalizing `<repo>/app` leaves it there.
+fn checkout_cargo_toml_for_app_root(root: &std::path::Path) -> Option<PathBuf> {
+    let resolved = std::fs::canonicalize(root)
+        .map(strip_unc_prefix)
+        .unwrap_or_else(|_| root.to_path_buf());
+    Some(resolved.parent()?.join("src-tauri").join("Cargo.toml"))
 }
 
 fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
@@ -81927,7 +81986,7 @@ fn route_request<R: tauri::Runtime>(
             agent_status_emit_finished(app, "codex", None, None, "codex-stale");
         }
         let body = if let Ok(cur) = agent_status_cell().lock() {
-            serde_json::to_vec(&*cur).unwrap_or_default()
+            serde_json::to_vec(&agent_status_with_error(&*cur)).unwrap_or_default()
         } else {
             b"{}".to_vec()
         };
@@ -82536,7 +82595,8 @@ fn route_request<R: tauri::Runtime>(
             "entries": entries,
             "nowMs": unix_now_ms(),
             "staleTerminalInput": stale_terminal_input(),
-            "awaitingTurn": send_ledger_awaiting_turn()
+            "awaitingTurn": send_ledger_awaiting_turn(),
+            "agentError": antigravity_error_json()
         });
         return match serde_json::to_vec(&body) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
@@ -92745,6 +92805,9 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AntigravityMark {
     Working,
+    // `error:msg=<base64>`: the turn failed before its reply began (a quota
+    // refusal on 2026-11-03). An `idle` follows and ends the turn.
+    Error,
     // `done` (completed) or `idle` (interrupted, or between launches).
     Ended,
     // `blocked:kind=auth`, which every launch reports first.
@@ -92791,6 +92854,7 @@ fn antigravity_mark(body: &str) -> Option<AntigravityMark> {
     }
     Some(match state {
         "working" => AntigravityMark::Working,
+        "error" => AntigravityMark::Error,
         "done" | "idle" => AntigravityMark::Ended,
         "blocked" if rest.contains(&"kind=auth") => AntigravityMark::Launch,
         _ => AntigravityMark::Other,
@@ -92809,6 +92873,8 @@ fn antigravity_turn_step(
         AntigravityMark::Ended => (false, None),
         AntigravityMark::Launch if open => (false, Some(AntigravityTurnEvent::Reset)),
         AntigravityMark::Launch => (false, None),
+        // The error is reported mid-turn; the `idle` after it ends the turn.
+        AntigravityMark::Error => (open, None),
         AntigravityMark::Other => (open, None),
     }
 }
@@ -92817,6 +92883,160 @@ fn antigravity_turn_step(
 fn antigravity_turn_cell() -> &'static Mutex<Option<i64>> {
     static CELL: OnceLock<Mutex<Option<i64>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
+}
+
+// antigravity-error-state-surfaced. agy reports a turn that failed before its
+// reply began as `state=error:app=antigravity:msg=<base64>`, between `working`
+// and `idle` (2026-11-03, Windows: "Individual quota reached. Please upgrade
+// your subscription to increase your limits. Resets in 125h7m40s.";
+// docs/agent-specimens/antigravity/osc7501-error.txt). Bram used to read only
+// the `idle`, so the turn ended as finished and the send ledger, finding no
+// transcript record of a send agy had in fact taken, called it stranded. The
+// decoded message is kept here until the next turn starts: the pane's notice
+// and the ledger's verdict both read it.
+struct AntigravityError {
+    text: String,
+    at_ms: i64,
+}
+
+fn antigravity_error_cell() -> &'static Mutex<Option<AntigravityError>> {
+    static CELL: OnceLock<Mutex<Option<AntigravityError>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+// When agy last opened a turn (a `working` with no turn open), for the send
+// ledger: a send injected before it was taken by agy whether or not a
+// transcript Bram can read ever records it.
+static ANTIGRAVITY_LAST_TURN_START_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+fn antigravity_error_at_ms() -> i64 {
+    antigravity_error_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|e| e.at_ms))
+        .unwrap_or(0)
+}
+
+fn antigravity_clear_error() {
+    if let Ok(mut g) = antigravity_error_cell().lock() {
+        *g = None;
+    }
+}
+
+// The `msg=` field of an OSC 7501 body, base64-decoded (standard alphabet;
+// padding optional, so a marker cut mid-field still yields its prefix).
+// Lossy UTF-8; None when there is no field or it decodes to nothing.
+fn antigravity_marker_message(body: &str) -> Option<String> {
+    let b64 = body.split(':').find_map(|f| f.strip_prefix("msg="))?.trim();
+    let bytes = st_decode_base64(b64)?;
+    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+// What a turn ended as: `error` when agy reported one since the turn opened,
+// otherwise the ending marker's own state (`done` or `idle`).
+fn antigravity_end_state<'a>(state: &'a str, started_at: i64, error_at_ms: i64) -> &'a str {
+    if error_at_ms > 0 && error_at_ms >= started_at {
+        "error"
+    } else {
+        state
+    }
+}
+
+// The send ledger's verdict from agy's markers alone, for a send its
+// transcript search did not find: `osc-working` when agy opened a turn after
+// the send was injected (it took the send), `osc-error` when that turn then
+// reported an error (it took the send and refused). None when no turn opened
+// after the inject; an error from an earlier turn does not count.
+fn antigravity_osc_landing(
+    injected_at_ms: i64,
+    last_turn_start_ms: i64,
+    last_error_ms: i64,
+) -> Option<&'static str> {
+    if last_turn_start_ms <= injected_at_ms {
+        return None;
+    }
+    if last_error_ms >= last_turn_start_ms {
+        Some("osc-error")
+    } else {
+        Some("osc-working")
+    }
+}
+
+// A quoted trace field: quotes and backslashes escaped, control characters
+// spaced, capped in characters.
+fn antigravity_trace_quoted(text: &str, cap: usize) -> String {
+    let mut out = String::new();
+    for (i, c) in text.chars().enumerate() {
+        if i >= cap {
+            out.push('…');
+            break;
+        }
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+// The latest error as the pane reads it: `agentError` on
+// `agent-status-changed`, `/__agent-status` and `/__send-ledger`. Null once
+// the next turn starts.
+fn antigravity_error_json() -> serde_json::Value {
+    match antigravity_error_cell().lock() {
+        Ok(g) => match g.as_ref() {
+            Some(e) => serde_json::json!({ "text": e.text, "atMs": e.at_ms }),
+            None => serde_json::Value::Null,
+        },
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
+// The agent-status payload with `agentError` attached while one is on
+// record. Attached at the emit rather than carried on AgentStatus, whose
+// thirteen constructors would each need the field.
+fn agent_status_with_error(status: &AgentStatus) -> serde_json::Value {
+    let mut value = serde_json::to_value(status).unwrap_or(serde_json::Value::Null);
+    let error = antigravity_error_json();
+    if !error.is_null() {
+        if let Some(map) = value.as_object_mut() {
+            map.insert("agentError".to_string(), error);
+        }
+    }
+    value
+}
+
+// Records agy's error: the trace line, the cell, a status emit so the pane
+// hears it even if no `idle` follows, and a ledger refetch.
+fn antigravity_note_error<R: tauri::Runtime>(app: &AppHandle<R>, body: &str, now: i64) {
+    let text = antigravity_marker_message(body).unwrap_or_else(|| "(no message)".to_string());
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "antigravity-turn",
+            &format!(
+                "op=error via=osc7501 at={} msg=\"{}\"",
+                now,
+                antigravity_trace_quoted(&text, 300)
+            ),
+        );
+    }
+    if let Ok(mut g) = antigravity_error_cell().lock() {
+        *g = Some(AntigravityError { text, at_ms: now });
+    }
+    let status = agent_status_cell().lock().ok().map(|cur| (*cur).clone());
+    if let Some(status) = status {
+        maybe_emit_agent_status(app, &status);
+    }
+    emit_replayable_signal(app, "send-ledger-changed");
 }
 
 // The start of a marker split across PTY chunks, held for the next chunk.
@@ -93471,15 +93691,27 @@ fn note_antigravity_state_markers<R: tauri::Runtime>(app: &AppHandle<R>, chunk: 
         if let Ok(mut g) = antigravity_turn_cell().lock() {
             *g = if open { started.or(Some(now)) } else { None };
         }
+        if mark == AntigravityMark::Error {
+            antigravity_note_error(app, &state, now);
+        }
         match event {
-            Some(AntigravityTurnEvent::Start) => antigravity_turn_started(app, now),
+            Some(AntigravityTurnEvent::Start) => {
+                antigravity_clear_error();
+                ANTIGRAVITY_LAST_TURN_START_MS.store(now, std::sync::atomic::Ordering::SeqCst);
+                antigravity_turn_started(app, now)
+            }
             Some(AntigravityTurnEvent::End) => {
                 clear_antigravity_enrichment();
+                let started_at = started.unwrap_or(now);
                 antigravity_turn_ended(
                     app,
-                    started.unwrap_or(now),
+                    started_at,
                     now,
-                    state.split(':').next().unwrap_or("ended"),
+                    antigravity_end_state(
+                        state.split(':').next().unwrap_or("ended"),
+                        started_at,
+                        antigravity_error_at_ms(),
+                    ),
                 );
             }
             Some(AntigravityTurnEvent::Reset) => {
@@ -94995,8 +95227,9 @@ fn antigravity_turn_ended<R: tauri::Runtime>(
 #[cfg(test)]
 mod antigravity_turn_tests {
     use super::{
-        antigravity_mark, antigravity_turn_step, osc7501_state_bodies, AntigravityMark,
-        AntigravityTurnEvent,
+        antigravity_end_state, antigravity_mark, antigravity_marker_message,
+        antigravity_osc_landing, antigravity_trace_quoted, antigravity_turn_step,
+        osc7501_state_bodies, AntigravityMark, AntigravityTurnEvent,
     };
 
     fn marker(body: &str) -> Vec<u8> {
@@ -95077,6 +95310,93 @@ mod antigravity_turn_tests {
                 "done:app=antigravity:msg=REVNTy1UVVJOLTc3MzE=",
             ]),
             vec![Start, End]
+        );
+    }
+
+    // antigravity-error-state-surfaced. The 2026-11-03 Windows trace
+    // (docs/agent-specimens/antigravity/osc7501-error.txt): each send went
+    // `working`, then `error` with the quota message in base64, then `idle`.
+    // The trace preview cut the base64 mid-field; the full text is agy's
+    // log's, so the complete marker here is synthesized from it.
+    const QUOTA_TEXT: &str = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 125h7m40s.";
+    const QUOTA_B64: &str = "SW5kaXZpZHVhbCBxdW90YSByZWFjaGVkLiBQbGVhc2UgdXBncmFkZSB5b3VyIHN1YnNjcmlwdGlvbiB0byBpbmNyZWFzZSB5b3VyIGxpbWl0cy4gUmVzZXRzIGluIDEyNWg3bTQwcy4=";
+    const QUOTA_B64_AS_TRACED: &str = "SW5kaXZpZHVhbCBxdW90YSByZWFjaGVkLiBQbGVhc";
+
+    #[test]
+    fn error_marker_is_parsed_decoded_and_ends_the_turn_as_error() {
+        use AntigravityTurnEvent::*;
+        let body = format!("error:app=antigravity:msg={}", QUOTA_B64);
+        let stream = [b"screen ".as_slice(), &marker(&body)].concat();
+        let (bodies, rest) = osc7501_state_bodies(&stream);
+        assert_eq!(rest, stream.len());
+        assert_eq!(bodies, vec![body.clone()]);
+        assert_eq!(antigravity_mark(&body), Some(AntigravityMark::Error));
+        assert_eq!(
+            antigravity_marker_message(&body).as_deref(),
+            Some(QUOTA_TEXT)
+        );
+        // The trace's truncated copy still yields the message's prefix.
+        assert_eq!(
+            antigravity_marker_message(&format!(
+                "error:app=antigravity:msg={}",
+                QUOTA_B64_AS_TRACED
+            ))
+            .as_deref(),
+            Some("Individual quota reached. Plea")
+        );
+        assert_eq!(antigravity_marker_message("error:app=antigravity"), None);
+        // The error does not move the turn; the idle after it ends it.
+        assert_eq!(
+            events(&[
+                "working:app=antigravity",
+                body.as_str(),
+                "idle:app=antigravity"
+            ]),
+            vec![Start, End]
+        );
+        assert_eq!(
+            antigravity_turn_step(true, AntigravityMark::Error),
+            (true, None)
+        );
+        assert_eq!(
+            antigravity_turn_step(false, AntigravityMark::Error),
+            (false, None)
+        );
+        // ...and that end is recorded as `error`, not the idle's own state.
+        assert_eq!(antigravity_end_state("idle", 1_000, 1_500), "error");
+        assert_eq!(antigravity_end_state("idle", 1_000, 1_000), "error");
+        assert_eq!(antigravity_end_state("idle", 1_000, 0), "idle");
+        // An earlier turn's error does not colour this one.
+        assert_eq!(antigravity_end_state("done", 1_000, 900), "done");
+        assert_eq!(
+            antigravity_trace_quoted("say \"hi\"\n\\", 300),
+            "say \\\"hi\\\" \\\\"
+        );
+        assert_eq!(antigravity_trace_quoted("abcdef", 3), "abc…");
+    }
+
+    // The send ledger's verdict from the markers, for a send no transcript
+    // search found.
+    #[test]
+    fn osc_markers_land_a_send_agy_took() {
+        // No turn opened after the inject: nothing to say.
+        assert_eq!(antigravity_osc_landing(1_000, 0, 0), None);
+        assert_eq!(antigravity_osc_landing(1_000, 1_000, 0), None);
+        assert_eq!(antigravity_osc_landing(1_000, 900, 950), None);
+        // agy opened a turn after the inject: delivered.
+        assert_eq!(
+            antigravity_osc_landing(1_000, 1_200, 0),
+            Some("osc-working")
+        );
+        // ...and reported an error in that turn: delivered, refused.
+        assert_eq!(
+            antigravity_osc_landing(1_000, 1_200, 1_900),
+            Some("osc-error")
+        );
+        // An error from the turn before this send's is not this send's.
+        assert_eq!(
+            antigravity_osc_landing(1_000, 1_200, 1_100),
+            Some("osc-working")
         );
     }
 
@@ -100928,5 +101248,107 @@ mod setup_reason_tests {
         let t = "[dependencies]\nversion = \"9.9.9\"\n[package]\nname = \"bram\"\nversion = \"0.8.2\"\n";
         assert_eq!(parse_cargo_package_version(t).as_deref(), Some("0.8.2"));
         assert_eq!(parse_cargo_package_version("[package]\nname=\"x\"\n"), None);
+    }
+}
+
+// windows-checkout-version-through-junction: the served app root must lead
+// to the checkout's Cargo.toml whether it is the real `<repo>/app` or a
+// junction pointing at it.
+#[cfg(test)]
+mod checkout_version_root_tests {
+    use super::{checkout_cargo_toml_for_app_root, parse_cargo_package_version, strip_unc_prefix};
+    use std::path::PathBuf;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "bram-checkout-root-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // `<tmp>/repo/app` plus `<tmp>/repo/src-tauri/Cargo.toml` at 9.9.9.
+    fn checkout(tmp: &PathBuf) -> PathBuf {
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::create_dir_all(repo.join("src-tauri")).unwrap();
+        std::fs::write(
+            repo.join("src-tauri").join("Cargo.toml"),
+            "[package]\nname = \"bram\"\nversion = \"9.9.9\"\n",
+        )
+        .unwrap();
+        repo
+    }
+
+    // The checkout as the OS reports it: temp_dir may be spelled with short
+    // names (Windows) or through a symlink (macOS `/var`), and the function
+    // under test resolves those too.
+    fn expected_toml(repo: &PathBuf) -> PathBuf {
+        strip_unc_prefix(std::fs::canonicalize(repo).unwrap())
+            .join("src-tauri")
+            .join("Cargo.toml")
+    }
+
+    #[test]
+    fn plain_app_root_finds_the_checkout_cargo_toml() {
+        let tmp = scratch("plain");
+        let repo = checkout(&tmp);
+        let toml = checkout_cargo_toml_for_app_root(&repo.join("app")).unwrap();
+        assert_eq!(toml, expected_toml(&repo));
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert_eq!(parse_cargo_package_version(&text).as_deref(), Some("9.9.9"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn missing_app_root_falls_back_to_the_lexical_parent() {
+        let tmp = scratch("missing");
+        let root = tmp.join("nowhere").join("app");
+        let toml = checkout_cargo_toml_for_app_root(&root).unwrap();
+        assert_eq!(
+            toml,
+            tmp.join("nowhere").join("src-tauri").join("Cargo.toml")
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_app_root_resolves_to_the_checkout_cargo_toml() {
+        let tmp = scratch("junction");
+        let repo = checkout(&tmp);
+        let exe_dir = tmp.join("exe");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let link = exe_dir.join("app");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(repo.join("app"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+        // The lexical parent is `<tmp>\exe`, which holds no checkout: this
+        // is the shape that read as `checkoutVersion: null` on Windows.
+        assert!(!exe_dir.join("src-tauri").join("Cargo.toml").exists());
+
+        let toml = checkout_cargo_toml_for_app_root(&link).unwrap();
+        assert_eq!(toml, expected_toml(&repo));
+        assert!(!toml.to_string_lossy().starts_with(r"\\?\"));
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert_eq!(parse_cargo_package_version(&text).as_deref(), Some("9.9.9"));
+
+        // Remove the junction itself first so remove_dir_all never walks
+        // into the target through it.
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

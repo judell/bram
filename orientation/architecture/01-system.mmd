@@ -19,14 +19,14 @@ flowchart TD
   repo -.->|"conventions it should follow"| cli
 
 %% Hover text for boxes and arrow labels, keyed by the label exactly as drawn.
-%% tip: You :: Anyone who uses Claude Code, Codex or OpenCode, working from the root of a git repo.
+%% tip: You :: Anyone who uses Claude Code, Codex, OpenCode or Antigravity, working from the root of a git repo.
 %% tip: Agent pane :: Bram's own UI, an XMLUI app in an iframe: Worklist, Transcript, Sessions and more.
 %% tip: Tauri shell :: The Rust host (src-tauri/src/lib.rs): PTY, loopback server, scheme handlers, watchers.
-%% tip: Terminal and agent CLI :: xterm.js in the host page, wired to a PTY running claude, codex or opencode.
-%% tip: Loopback server :: An HTTP server on 127.0.0.1 inside the Rust host; its port is in resources/.bram-port. A common gate refuses foreign Origins on state changes and Hosts that are not loopback.
-%% tip: Worklist calls :: How an agent advances, prunes or commits an item. Claude and OpenCode use loopback curl; Codex writes intent and result files, because its sandbox refuses loopback.
+%% tip: Terminal and agent CLI :: xterm.js in the host page, wired to a PTY running claude, codex, opencode or agy (Antigravity).
+%% tip: Loopback server :: An HTTP server on 127.0.0.1 inside the Rust host; its port is in .bram-port in the state folder (resources/ unless .bram/ exists). A common gate refuses foreign Origins on state changes and Hosts that are not loopback.
+%% tip: Worklist calls :: How an agent advances, prunes or commits an item. Claude, OpenCode and Antigravity use loopback curl; Codex writes intent and result files, because its sandbox refuses loopback.
 %% tip: Target pane (optional) :: A display-only iframe for the project's own web UI. Off by default.
-%% tip: Project repo :: The git repo Bram was started in. State lives under resources/ and in refs/bram/.
+%% tip: Project repo :: The git repo Bram was started in. State lives in the state folder (resources/ unless .bram/ exists) and in refs/bram/.
 %% tip: clicks and messages :: Buttons and the message box call window helpers such as toTurn.
 %% tip: Tauri commands :: The pane invokes Rust commands (queue_pty_intent, record_worklist_action_authorization).
 %% tip: HTTP routes :: The pane and agents read and post to /__* routes on the loopback server.

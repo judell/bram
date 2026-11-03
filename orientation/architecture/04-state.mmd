@@ -14,6 +14,7 @@ flowchart TD
   pane["Agent pane"]
   store["Pane browser storage"]
   remote["Git remote"]
+  cur["Which session is current"]
 
   wl -->|"snapshot on change"| hist
   host -->|"records approval"| auth
@@ -27,6 +28,7 @@ flowchart TD
   auth -->|"read by guard"| guard
   pane -->|"saves decisions and focus"| store
   refs -.->|"shared only by explicit refspec"| remote
+  guard -->|"session hook names it"| cur
 
   %% Invisible links stack the nodes into short rows, top to bottom.
   claim ~~~ refs
@@ -37,8 +39,9 @@ flowchart TD
   trace ~~~ remote
   guard ~~~ wl
   remote ~~~ pane
+  store ~~~ cur
 
-%% tip: Bram host :: The Rust process. Most files below are written only by it; the agent writes worklist.json and drafts.
+%% tip: Bram host :: The Rust process. Its files live in the state folder (resources/ unless .bram/ exists), listed in BRAM_OWNED_ENTRIES. Most are written only by it; the agent writes worklist.json and drafts.
 %% tip: Worklist files :: resources/worklist.json (metadata) and resources/worklist-drafts/<id>.md (before/after prose). Gitignored in this repo.
 %% tip: Authorization record :: resources/.worklist-authorization.json. One slot, 30 minute TTL, gitignored.
 %% tip: Execution claim :: resources/.inflight-claim.json. Single slot; cleared at turn end and on startup if stale.
@@ -48,7 +51,9 @@ flowchart TD
 %% tip: State mirror :: SQLite shadow of the authorization and claim files. Files stay the truth in phase A.
 %% tip: Search index :: SQLite FTS5 outside the repo, one database per project, behind GET /__search.
 %% tip: Trace log :: resources/bram-traces/bram-trace.log, archived each run. On by default.
-%% tip: Provider transcripts :: Claude JSONL and Codex rollouts live under the user's home, not the repo.
+%% tip: Provider transcripts :: Claude JSONL, Codex rollouts, OpenCode's SQLite and Antigravity's store live under the user's home, not the repo.
+%% tip: Which session is current :: A session is current because something named it: the running CLI from this terminal, else Bram at launch, else newest. Sessions form groups, not pairs.
+%% tip: session hook names it :: bram-guard's session-hook modes post the running session to /__agent/session with this terminal's token.
 %% tip: bram-guard :: Reads resources/.worklist-authorization.json directly and uses its existence as the project-root marker.
 %% tip: Agent pane :: The XMLUI app. Page-local state is lost on tab switch; session state is held above the pages.
 %% tip: Pane browser storage :: localStorage for decisions, sessionStorage for focus; project-scoped keys carry a project suffix.

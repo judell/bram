@@ -26,7 +26,7 @@ flowchart TD
 %% tip: app/ served from disk :: Under the ./bram symlink, every app/** file is read from the checkout per request. Pane reload picks up edits.
 %% tip: Embedded app tree :: include_dir! bakes app/ into the binary at build time. Used when no app/ directory sits beside the executable.
 %% tip: Installed copies in source repo :: build.rs mirrors app/skills and app/__shell/reference into .claude/ so the source repo dogfoods Setup's layout.
-%% tip: Managed project :: A user's repo after Setup: conventions, reference docs, hook registrations, AGENTS.md block, OpenCode plugin.
+%% tip: Managed project :: A user's repo after Setup: conventions, reference docs, hook registrations, AGENTS.md block, OpenCode plugin, Antigravity hook group and rules, self-ignore files in .opencode/ and .agents/.
 %% tip: Release workflow :: .github/workflows/build.yml, workflow_dispatch only: verify, test, create release, build four targets, publish checksums.
 %% tip: GitHub release :: Archives of bram and bram-guard per platform, plus install scripts.
 %% tip: scripts/build.sh :: The same debug cargo build, with a line appended to resources/build-log.jsonl.

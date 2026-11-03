@@ -17,8 +17,8 @@
   // the page.
   const SITE = {
     name: "Bram",
-    commit: "b2eb8e0b",
-    date: "2026-10-31",
+    commit: "e8a38ac0",
+    date: "2026-11-02",
   };
   const ARCHITECTURE = [
     {file: "01-system.mmd", title: "System at a glance",
@@ -28,9 +28,9 @@
     {file: "03-gate.mmd", title: "The Worklist gate",
       note: "Propose, Start, claim, apply, commit, prune, with the guard. The dashed arrow (agent calls advance) depends on the agent remembering; everything else is host or hook behavior."},
     {file: "04-state.mmd", title: "State and data",
-      note: "Files under resources/, the authorization record, claim refs, traces, the state mirror and the search index. The dashed arrow depends on someone pushing refs on purpose."},
+      note: "Files in the state folder (resources/ unless .bram/ exists), the authorization record, claim refs, traces, the state mirror, the search index, and which session is current. Solid arrows are what code does on its own; the dashed arrow depends on someone pushing refs on purpose."},
     {file: "05-providers.mmd", title: "Providers",
-      note: "What Claude, Codex and OpenCode share and where they differ. Dashed arrows are instructions each model is asked to follow; solid arrows are registrations and transports."},
+      note: "What Claude, Codex, OpenCode and Antigravity share and where they differ. Dashed arrows are instructions each model is asked to follow; solid arrows are launches, registrations, transports and signals the host reads on its own."},
     {file: "06-build.mmd", title: "Build, run and release",
       note: "The ./bram launch, what serves from disk, seeded conventions and Setup, and the release workflow. Dashed arrows need a person to rebuild, relaunch or click Setup."},
   ];

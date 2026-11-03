@@ -8,7 +8,7 @@
   <Tabs>
     <TabItem label="Overview">
       <DataSource id="overview" url="OVERVIEW.md" />
-      <Markdown when="{overview.loaded}" content="{overview.value}" />
+      <Markdown when="{overview.loaded}" content="{overview.value}" openLinkInNewTab="{true}" />
     </TabItem>
     <TabItem label="Architecture">
       <!-- Mermaid diagrams from architecture/*.mmd, rendered once on mount:
@@ -28,7 +28,7 @@
             if (d) { detail = d; detailDialog.open(); } }" />
         <ModalDialog id="detailDialog" width="70vw" maxWidth="70vw" title="{detail?.title}">
           <VStack gap="$space-3" padding="$space-2" paddingTop="0">
-            <Markdown content="{detail?.body || ''}" />
+            <Markdown content="{detail?.body || ''}" openLinkInNewTab="{true}" />
             <HStack><Button label="Close" onClick="detailDialog.close()" /></HStack>
           </VStack>
         </ModalDialog>

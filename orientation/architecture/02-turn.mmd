@@ -23,8 +23,8 @@ flowchart TD
 %% tip: Draft files :: resources/feedback-drafts and resources/outbound-turns hold full-fidelity text so the PTY carries only a short frame.
 %% tip: Intent queue :: resources/.pty-intent.jsonl, drained by the host under a lock.
 %% tip: PTY :: The pseudo-terminal the agent CLI runs in.
-%% tip: Agent CLI :: claude, codex or opencode, reading the PTY like a person at a keyboard.
-%% tip: Provider transcript :: Claude and Codex write JSONL session files; OpenCode keeps sessions in SQLite.
+%% tip: Agent CLI :: claude, codex, opencode or agy, reading the PTY like a person at a keyboard.
+%% tip: Provider transcript :: Claude and Codex write JSONL session files; OpenCode and Antigravity keep their own stores, which Bram exports to Claude-shaped JSONL.
 %% tip: Turn-state spine :: The host's single record of what the turn is doing: phase, provider, pending menu, completion cursor.
 %% tip: Agent pane :: Footer status, Transcript and Worklist render from the spine and the projection.
 %% tip: toTurn via Tauri command :: window.toTurn invokes queue_pty_intent; nothing reaches the PTY from the pane directly.

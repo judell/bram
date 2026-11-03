@@ -27,7 +27,7 @@ flowchart TD
 %% tip: Worklist pane :: The board where the user ticks items and clicks Start, Start & commit, Commit or Drop.
 %% tip: Authorization record :: resources/.worklist-authorization.json: one slot, replaced by the next gate click, 30 minute TTL.
 %% tip: Execution claim :: resources/.inflight-claim.json: which items are being worked on during a turn. Ends with the turn.
-%% tip: bram-guard :: The Rust guard binary run as a PreToolUse hook (Claude, Codex) or plugin call (OpenCode). Fails closed on guard faults.
+%% tip: bram-guard :: The Rust guard binary run as a PreToolUse hook (Claude, Codex, Antigravity) or plugin call (OpenCode). Fails closed on guard faults.
 %% tip: Agent edits :: Edit, Write and shell writes by the agent, checked per call.
 %% tip: Applied item :: status applied: changes on disk, awaiting commit approval. A begun proposed item can be committed too.
 %% tip: Commit route :: worklist-commit: verifies approval, scope and message, then stages only the items' files or hunks.

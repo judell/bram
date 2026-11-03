@@ -20,6 +20,8 @@
     commit: "e8a38ac0",
     date: "2026-11-02",
     signature: "Jon's Claude (Bram 0.8.2, Fable 5.1, macOS) speaking from the Bram project (github.com/judell/bram):",
+    repo: "judell/bram",
+    commitFull: "e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05",
   };
   const ARCHITECTURE = [
     {file: "01-system.mmd", title: "System at a glance",
@@ -83,6 +85,75 @@
   // Click-through detail: {label: markdown} from the companion .md file.
   // Missing file = no clickable items; the mismatch check reports every
   // label. Text above the first "## " heading is ignored.
+
+  // ---- Reading the real doc -------------------------------------------------
+  // A section may open with directive lines `<!-- read: <path>#<heading> -->`
+  // (heading optional). The dialog shows a link line per directive and
+  // nothing is fetched up front; "Read here" opens the doc's section in a
+  // reader dialog, fetched from the forge at the pinned commit (Main.xmlui's
+  // DataSource on Arch.rawUrl, rendered through Arch.section), and the link
+  // opens the rendered page in a new tab. The site never copies a doc's
+  // text. The forge forbids framing, so the reader renders the Markdown
+  // itself. Rule: when a human-readable doc explains the thing, link it
+  // here and keep the code citations as the "where it lives" footnote.
+  const READ_RE = /^<!--\s*read:\s*([^#\s]+)(?:#(.+?))?\s*-->\s*$/;
+  const forgeBase = () => "https://" + (SITE.forgeHost || "github.com") + "/" + SITE.repo;
+  const rawUrl = (path) => (SITE.forgeHost || "github.com") === "github.com"
+    ? "https://raw.githubusercontent.com/" + SITE.repo + "/" + SITE.commitFull + "/" + path
+    : forgeBase() + "/-/raw/" + SITE.commitFull + "/" + path;
+  const blobUrl = (path) => (SITE.forgeHost || "github.com") === "github.com"
+    ? forgeBase() + "/blob/" + SITE.commitFull + "/" + path
+    : forgeBase() + "/-/blob/" + SITE.commitFull + "/" + path;
+  const anchorOf = (heading) => heading.toLowerCase().replace(/[`*_]/g, "").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-");
+  // The lines under `heading` (any level) up to the next heading of the same
+  // or a higher level; the whole file when no heading is given.
+  function sectionOf(text, heading) {
+    const lines = text.split("\n");
+    if (!heading) return lines;
+    const want = norm(heading);
+    let level = 0, start = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(lines[i]);
+      if (!m) continue;
+      if (start < 0) { if (norm(m[2]) === want) { level = m[1].length; start = i + 1; } continue; }
+      if (m[1].length <= level) return lines.slice(start, i);
+    }
+    return start < 0 ? null : lines.slice(start);
+  }
+  // Rewrite the doc's own links so they still work from here: relative paths
+  // become rendered URLs at the pin; bare anchors point into the rendered doc.
+  function rewriteLinks(md, path) {
+    const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    return md.replace(/\]\(([^)\s]+)\)/g, (whole, target) => {
+      if (/^(https?:|mailto:)/.test(target)) return whole;
+      if (target.startsWith("#")) return "](" + blobUrl(path) + target + ")";
+      const resolved = new URL(target, "https://x/" + dir).pathname.replace(/^\//, "");
+      return "](" + blobUrl(resolved) + ")";
+    });
+  }
+  // For the reader dialog: the Markdown of one doc section, from the fetched
+  // text. A missing heading says so rather than showing nothing.
+  function section(text, heading, path) {
+    if (text == null) return "";
+    const raw = typeof text === "string" ? text : String(text);
+    const lines = sectionOf(raw, heading);
+    if (lines == null) return "*No heading \"" + heading + "\" in " + path + " at this site's pin.*";
+    const head = heading ? "## " + heading + "\n\n" : "";
+    return head + rewriteLinks(lines.join("\n").trim(), path);
+  }
+  // Split a section body into its directives and the prose that follows.
+  function splitReads(body) {
+    const lines = body.split("\n");
+    const reads = [];
+    while (lines.length && READ_RE.test(lines[0].trim())) {
+      const m = READ_RE.exec(lines.shift().trim());
+      const path = m[1], heading = m[2] ? m[2].trim() : "";
+      reads.push({path, heading, label: path + (heading ? " § " + heading : ""),
+        link: blobUrl(path) + (heading ? "#" + anchorOf(heading) : "")});
+    }
+    return {reads, prose: lines.join("\n").trim()};
+  }
+
   const DETAILS = {};
   async function loadDetails(path) {
     const response = await fetch(path, {cache: "no-store"});
@@ -100,7 +171,9 @@
   // For the modal: {title, body} for a clicked box or arrow, or null.
   function detail(diagram, key) {
     const body = (DETAILS[diagram] || {})[key];
-    return body == null ? null : {title: key, body};
+    if (body == null) return null;
+    const {reads, prose} = splitReads(body);
+    return {title: key, body: prose, reads};
   }
 
   function parseTips(source) {
@@ -238,5 +311,8 @@
   // renders the section for Arch.page.
   const page = root.ORIENTATION_PAGE || "start";
 
-  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page};
+    // "GitHub" or the forge host, for the "Read on …" line under a detail.
+  const forgeLabel = (SITE.forgeHost || "github.com") === "github.com" ? "GitHub" : SITE.forgeHost;
+
+  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page, rawUrl, section, forgeLabel};
 })(globalThis);

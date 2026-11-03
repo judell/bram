@@ -49,7 +49,38 @@
         <ModalDialog id="detailDialog" width="70vw" maxWidth="70vw" title="{detail?.title}">
           <VStack gap="$space-3" padding="$space-2" paddingTop="0">
             <Markdown content="{detail?.body || ''}" openLinkInNewTab="{true}" />
+            <!-- The docs a section reads (arch.js: read directives), after the
+                 prose, one line each: "Read <doc> here or on GitHub", the forge
+                 link in a new tab, "here" the reader below, fetched at the pin. -->
+            <Items items="{detail?.reads || []}">
+              <HStack gap="$space-1" verticalAlignment="baseline" wrapContent="{true}">
+                <Text>Read {$item.label}</Text>
+                <!-- Text has no click event; a Stack does (Stack#click), so the
+                     link-styled word sits in one. The dialog receives $item as
+                     $param: https://www.xmlui.org/docs/howto/pass-data-to-a-modal-dialog -->
+                <HStack cursor="pointer" onClick="readerDialog.open($item)">
+                  <Text color="$color-primary-500" textDecorationLine="underline">here</Text>
+                </HStack>
+                <Text>or on</Text>
+                <Link to="{$item.link}" target="_blank">{Arch.forgeLabel}</Link>
+                <Text>.</Text>
+              </HStack>
+            </Items>
             <HStack><Button label="Close" onClick="detailDialog.close()" /></HStack>
+          </VStack>
+        </ModalDialog>
+        <!-- The reader: one doc section, fetched from the forge at the pin
+             (the forge forbids framing, so the Markdown renders here).
+             DataSource -> Markdown: https://www.xmlui.org/docs/howto/render-markdown-content-as-a-page -->
+        <ModalDialog id="readerDialog" width="70vw" maxWidth="70vw" title="{$param?.label}">
+          <VStack gap="$space-3" padding="$space-2" paddingTop="0">
+            <DataSource id="readerDoc" when="{$param}" url="{$param ? Arch.rawUrl($param.path) : ''}" />
+            <Text when="{$param &amp;&amp; !readerDoc.loaded}" variant="caption">Fetching from the repo at this site's pin…</Text>
+            <Markdown when="{readerDoc.loaded}" content="{Arch.section(readerDoc.value, $param.heading, $param.path)}" openLinkInNewTab="{true}" />
+            <HStack gap="$space-3">
+              <Link when="{$param}" to="{$param.link}" target="_blank">Open on {Arch.forgeLabel}</Link>
+              <Button label="Close" onClick="readerDialog.close()" />
+            </HStack>
           </VStack>
         </ModalDialog>
         <Text when="{Arch.site.signature}">{Arch.site.signature}</Text>

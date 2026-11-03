@@ -6,28 +6,43 @@ What every provider does, drawn once. Each loads the same conventions every sess
 
 ## Seeded conventions
 
+<!-- read: app/__shell/conventions.md -->
+<!-- read: README.md#How `conventions.md` governs each agent -->
+
 `app/__shell/conventions.md` is the one text. Setup copies it to `.claude/bram-conventions.md` and mirrors reference docs beside it. [`src-tauri/src/lib.rs:59169-59191`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L59169-L59191) The README lists the four loading paths in one paragraph. [`README.md:79-91`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L79-L91) The `AGENTS.md` block Setup writes addresses every agent: the conventions are what "each agent receives through its own channel (Claude: `CLAUDE.md`; Codex: `developer_instructions` in `~/.codex/config.toml`; OpenCode: `.opencode/opencode.json`; Antigravity: `.agents/rules/`)". [`app/shell/codex-startup-instructions.md:1-1`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/shell/codex-startup-instructions.md?plain=1#L1-L1) The conventions note that Setup refreshes these files and "Bram-bundled skills". [`app/__shell/conventions.md:36-40`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L36-L40)
 
 ## Claude
+
+<!-- read: docs/agent-specimens/claude/README.md#Seams -->
 
 Launched as `claude`. [`src-tauri/src/lib.rs:28412-28424`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L28412-L28424) Claude alone can be given a pre-allocated session id: "A pre-allocated `session_id` (Claude only, #274) rides along as `--session-id`". [`src-tauri/src/lib.rs:28425-28430`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L28425-L28430) Bundled skills are a Claude-only surface: "Codex has no skills concept". [`src-tauri/src/lib.rs:59193-59201`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L59193-L59201) A user Esc marks an interrupt at the keystroke. [`docs/authorization.md:184-187`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/authorization.md?plain=1#L184-L187) In the turn-end classifier Claude contributes `stop_reason: "end_turn"`. [`docs/spine.md:52-54`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L52-L54) Claude's subagents are directories of JSONL under `<sid>/subagents/`. [`docs/subagents.md:21-23`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/subagents.md?plain=1#L21-L23)
 
 ## Codex
 
+<!-- read: docs/agent-specimens/codex/README.md#Seams -->
+
 Launched as `codex`; Bram adds `--no-daemon` when Codex's help lists it, "so hooks and plugins run with this instance's environment rather than a shared server's." [`docs/authorization.md:63-66`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/authorization.md?plain=1#L63-L66) The code appends the flag when the help output mentions it. [`src-tauri/src/lib.rs:23773-23782`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L23773-L23782) Windows differs in the composer-clear byte sent before a paste: Codex 0.165.0 under ConPTY needed Ctrl-U alone because "ESC + Ctrl-U inserts a literal 'u'". [`src-tauri/src/lib.rs:23284-23291`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L23284-L23291) Codex turn end is `task_complete` and `final_answer`. [`docs/spine.md:52-56`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L52-L56) An aborted Codex turn emits `turn_aborted` instead of `task_complete`. [`src-tauri/src/lib.rs:15927-15929`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L15927-L15929) A Codex child agent's rollout replays its parent's history first, and Codex stores the child's task encrypted so it can't be shown. [`docs/subagents.md:54-56`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/subagents.md?plain=1#L54-L56) Setup tells the user that Codex "may ask you to review and approve the hook". [`docs/setup.md:13-15`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/setup.md?plain=1#L13-L15)
 
 ## OpenCode
+
+<!-- read: docs/agent-specimens/opencode/README.md#Seams -->
 
 Launched as `opencode`, with `--standalone` added when its help lists the flag (see *launches, answers menus*). [`src-tauri/src/lib.rs:28412-28424`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L28412-L28424) [`src-tauri/src/lib.rs:23818-23827`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L23818-L23827) The `SessionProvider` enum comment says of OpenCode: "Its sessions live in SQLite, not transcript files. Bram exports each one to a Claude-shaped JSONL, which file discovery then reads". [`src-tauri/src/lib.rs:32513-32516`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32513-L32516) A single Esc interrupts nothing; "OpenCode stops a running turn only on a second Esc within 5 s". [`docs/authorization.md:186-188`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/authorization.md?plain=1#L186-L188) Subagent transcripts are marked `(gap)` in the provider table. [`docs/subagents.md:21-23`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/subagents.md?plain=1#L21-L23) The OpenCode column "rests on one captured run (2.1.4)". [`docs/subagents.md:31-33`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/subagents.md?plain=1#L31-L33)
 
 ## Antigravity
 
+<!-- read: docs/agent-specimens/antigravity/README.md#Seams -->
+
 Launched as `agy` for the provider named `antigravity`, pinned to "Antigravity CLI 1.4.12", with the warning that "It self-updates, so a behaviour change may arrive without a Bram release." [`src-tauri/src/lib.rs:28412-28424`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L28412-L28424) The README names it as the fourth agent: "Anyone who uses Claude Code, Codex, OpenCode and/or Antigravity." [`README.md:11-13`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L11-L13) Its seams were captured at `agy 1.4.12` on 2026-10-30. [`docs/agent-specimens/README.md:16-16`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/agent-specimens/README.md?plain=1#L16-L16) Setup seeds its hooks and rules only where it is wanted: where `agy` is on the `PATH`, where Bram's group is already installed, or when Antigravity is the current provider. [`src-tauri/src/lib.rs:60275-60287`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L60275-L60287) It differs from the others in four places: a hook group in the project's own `.agents/hooks.json`, conventions as always-on rules, transcripts exported from its own store, and turn state and permission menus read from the terminal.
 
 ## others
 
+<!-- read: docs/agent-specimens/README.md -->
+
 Not a provider yet. A fifth one would be another wrapped CLI on the same flows, with its own channel for each. The specimen packs already include Cursor (agent 2026.10.22). [`docs/agent-specimens/README.md:15-15`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/agent-specimens/README.md?plain=1#L15-L15)
 ## bram-guard
+
+<!-- read: app/__shell/reference/diagnostics.md#Guards, retired hooks, and bundled skills -->
 
 One binary, four registrations: `claude-worklist`, `codex-worklist`, `opencode-worklist` and `antigravity-worklist` call the same `authority_worklist_hook`; the OpenCode payload is first translated by `opencode_policy_payload`, and the Antigravity payload is checked for its captured shape and then translated by `antigravity_policy_payload`. [`src-tauri/src/guard.rs:48-93`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L48-L93) [`src-tauri/src/guard.rs:580-610`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L580-L610) Two dispatch arms also name the running session: Codex's worklist guard and `antigravity-session` (diagram 4). [`src-tauri/src/guard.rs:58-70`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L58-L70) [`src-tauri/src/guard.rs:94-97`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L94-L97) An after-edit advisory, `opencode-after`, exists only for OpenCode. [`src-tauri/src/guard.rs:80-82`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L80-L82) It is "Advisory only: it never blocks." [`app/__shell/opencode/bram-plugin.js:18-21`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/opencode/bram-plugin.js?plain=1#L18-L21) Menu hooks differ in posture: they "stay deliberately fail-open, exit 0 always". [`src-tauri/src/guard.rs:6-9`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L6-L9)
 
@@ -37,15 +52,23 @@ The host launches each CLI: `claude`, `codex`, `opencode` and, for the provider 
 
 ## Turn records
 
+<!-- read: docs/turn-transport-redesign.md#3. One host projection is the single source of truth (Projection) -->
+<!-- read: docs/subagents.md#The provider seam -->
+
 Where each provider records turns. Claude: `~/.claude/projects/<encoded path>`. [`src-tauri/src/lib.rs:32844-32844`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32844-L32844) Codex: `~/.codex/sessions`, with child rollouts found by `parent_thread_id`. [`src-tauri/src/lib.rs:26705-26705`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L26705-L26705) [`docs/subagents.md:23-24`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/subagents.md?plain=1#L23-L24) OpenCode: rows in SQLite, exported by Bram to Claude-shaped JSONL under its cache. [`src-tauri/src/lib.rs:32513-32516`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32513-L32516) [`src-tauri/src/lib.rs:33966-33973`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L33966-L33973) Antigravity "stores the project association in conversation_summaries.db; the per-conversation brain directory contains the transcript, not a cwd." Both are opened read-only, and because the records "are unlike Claude's JSONL", Bram writes "a disposable Claude-shaped projection in Bram's cache". [`src-tauri/src/lib.rs:34427-34433`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L34427-L34433) The project's conversations are read from that database by `antigravity_summary_rows_from_db`, and the exports are what `discover_antigravity_sessions` lists. [`src-tauri/src/lib.rs:34630-34640`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L34630-L34640) [`src-tauri/src/lib.rs:35126-35129`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L35126-L35129) The `SessionProvider` enum's own comment is older: it still says "the conversation-to-project mapping is unidentified", so every file-discovery site answers none for Antigravity. [`src-tauri/src/lib.rs:32517-32524`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32517-L32524) Antigravity subagent transcripts were "not captured; no subagent turn was run". [`docs/agent-specimens/README.md:34-34`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/agent-specimens/README.md?plain=1#L34-L34)
 
 The turn projection that the Transcript tab reads normalizes "JSONL + outbound envelopes". [`docs/turn-transport-redesign.md:48-52`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L48-L52) The export comment says the Sessions list, the Transcript, titles and search read the export through the paths they use for Claude; `/__turns` does too: it accepts `provider=opencode`, and `sessions_for_provider` has an OpenCode arm that calls `discover_opencode_sessions` and an Antigravity arm that calls `discover_antigravity_sessions`. [`src-tauri/src/lib.rs:33966-33973`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L33966-L33973) [`src-tauri/src/lib.rs:54703-54727`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L54703-L54727) [`src-tauri/src/lib.rs:36378-36392`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L36378-L36392) Without a `provider` it uses the active provider, and the route's own comment still lists only "claude|codex". [`src-tauri/src/lib.rs:54698-54698`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L54698-L54698) `session_turns` takes a `SessionProvider`. [`src-tauri/src/lib.rs:26046-26051`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L26046-L26051)
 
 ## State folder
 
+<!-- read: docs/decisions/2026-11-02-bram-state-folder-is-dot-bram.md#Bram's per-project state folder becomes `.bram/`, moved in three releases -->
+<!-- read: docs/state-folder-migration.md#Release sequence -->
+
 The diagram's note describes what the folder holds. Two of its files are cited here. Bram writes its port to `<state>/.bram-port`. [`app/__shell/conventions.md:416-419`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L416-L419) Codex's channel is a pair of files in it: the agent writes `<state>/.worklist-intent.json` with `{nonce, route, body}`, the host dispatches it, and the agent reads `<state>/.worklist-result.json` for the matching nonce. [`app/__shell/reference/worklist-mechanics.md:275-279`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/reference/worklist-mechanics.md?plain=1#L275-L279) [`app/__shell/reference/worklist-mechanics.md:294-300`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/reference/worklist-mechanics.md?plain=1#L294-L300)
 
 ## loaded each session
+
+<!-- read: README.md#How `conventions.md` governs each agent -->
 
 Each provider loads the conventions through its own channel, and obeying them is up to the model.
 
@@ -55,6 +78,8 @@ Each provider loads the conventions through its own channel, and obeying them is
 - **Antigravity.** Always-on rules in `.agents/rules`: the rules load, and following them is up to the model. Setup cuts the conventions into `.agents/rules/bram-conventions-<n>.md`, each file under "agy's per-rule limit", `ANTIGRAVITY_RULE_MAX_BYTES` = 24,000; two slices normally suffice. [`src-tauri/src/lib.rs:60585-60597`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L60585-L60597) `seed_antigravity_rules` refreshes Bram's own slices, keeps a user's same-named rule, and removes stale higher-numbered slices. [`src-tauri/src/lib.rs:60716-60724`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L60716-L60724) Setup calls it beside the hook group. [`src-tauri/src/lib.rs:59365-59387`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L59365-L59387) The reference: Setup "rewrites them when the core changes". [`app/__shell/reference/worklist-mechanics.md:260-262`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/reference/worklist-mechanics.md?plain=1#L260-L262)
 
 ## launches, answers menus
+
+<!-- read: docs/agent-specimens/README.md#Seams -->
 
 The host starts each CLI in the PTY, and for some it adds a flag or variable. [`src-tauri/src/lib.rs:28412-28424`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L28412-L28424)
 
@@ -67,6 +92,8 @@ Menus. Claude and Codex report permission menus through a menu hook and OpenCode
 
 ## each tool call
 
+<!-- read: docs/security.md#Guard coverage -->
+
 Each provider registers `bram-guard` as a hook or plugin that runs before tool calls that can change the project, and all four registrations reach the same decider. [`src-tauri/src/guard.rs:48-93`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L48-L93) Only the registration differs:
 
 - **Claude: a hook in project-local settings.** Claude's hook registration goes to the ignored `.claude/settings.local.json`: "Hook registration is installed state, even when the POSIX command is portable." [`src-tauri/src/lib.rs:55501-55507`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L55501-L55507) Setup prunes Bram's registrations from tracked settings and merges the worklist guard and menu hook into the local file. [`src-tauri/src/lib.rs:59273-59302`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L59273-L59302) The ignored file: [`.gitignore:30-31`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/.gitignore?plain=1#L30-L31).
@@ -76,6 +103,9 @@ Each provider registers `bram-guard` as a hook or plugin that runs before tool c
 
 ## allow or deny
 
+<!-- read: docs/agent-specimens/claude/README.md#Guard deny and what the model sees (2026-10-28) -->
+<!-- read: docs/agent-specimens/codex/README.md#Guard deny, pasted images, loopback (2026-10-28) -->
+
 The answer goes back through the same registration that asked. The decider is shared (see *bram-guard*); how a deny is enforced differs:
 
 - **OpenCode.** The plugin "throws when the answer is not an allow". [`app/__shell/opencode/bram-plugin.js:5-10`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/opencode/bram-plugin.js?plain=1#L5-L10) Its after-edit advisory, `opencode-after`, is "Advisory only: it never blocks." [`src-tauri/src/guard.rs:80-82`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/guard.rs?plain=1#L80-L82) [`app/__shell/opencode/bram-plugin.js:18-21`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/opencode/bram-plugin.js?plain=1#L18-L21)
@@ -84,9 +114,14 @@ The answer goes back through the same registration that asked. The decider is sh
 
 ## reads coverage
 
+<!-- read: docs/authorization.md#Exceptions and enforcement gaps -->
+
 The guard decides whether an edit is covered from the state folder, through the one decider described under *bram-guard*; this file cites no line for which state files it reads.
 
 ## resolve, mutate, commit, end
+
+<!-- read: app/__shell/conventions.md#Transports -->
+<!-- read: app/__shell/reference/worklist-mechanics.md#Codex transport: filesystem intent/result files -->
 
 The lifecycle routes, reached by one of two transports; "Both transports dispatch through the same host-side handlers, so response kinds, consume-on-read, the inflight sentinel, and the auth checks are identical." [`app/__shell/reference/worklist-mechanics.md:271-274`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/reference/worklist-mechanics.md?plain=1#L271-L274)
 
@@ -95,9 +130,14 @@ The lifecycle routes, reached by one of two transports; "Both transports dispatc
 
 ## writes
 
+<!-- read: docs/decisions/2026-11-02-bram-state-folder-is-dot-bram.md#Bram's per-project state folder becomes `.bram/`, moved in three releases -->
+
 The diagram's note lists what the host writes into the state folder. The one host write this file cites there: "Bram writes its port to `<state>/.bram-port`". [`app/__shell/conventions.md:416-419`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L416-L419)
 
 ## each turn
+
+<!-- read: docs/subagents.md#The provider seam -->
+<!-- read: docs/turn-transport-redesign.md#3. One host projection is the single source of truth (Projection) -->
 
 Each provider's own record of its turns, which Bram projects into one shape. [`docs/turn-transport-redesign.md:48-52`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L48-L52)
 
@@ -107,6 +147,9 @@ Each provider's own record of its turns, which Bram projects into one shape. [`d
 - **Antigravity: its own store under `~/.gemini/antigravity-cli`.** Antigravity "stores the project association in conversation_summaries.db; the per-conversation brain directory contains the transcript, not a cwd." [`src-tauri/src/lib.rs:34427-34433`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L34427-L34433)
 
 ## read for turn state and the Transcript
+
+<!-- read: docs/spine.md#Inputs -->
+<!-- read: docs/turn-transport-redesign.md#3. One host projection is the single source of truth (Projection) -->
 
 The host reads the records into one projection, "JSONL + outbound envelopes", and each provider gives it a different signal for turn state. [`docs/turn-transport-redesign.md:48-52`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L48-L52) The export comment says the Sessions list, the Transcript, titles and search read the export through the paths they use for Claude. [`src-tauri/src/lib.rs:33966-33973`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L33966-L33973)
 

@@ -4,15 +4,22 @@ Click-through detail for 02-turn.mmd. Facts are as of commit `e8a38ac0` (2026-11
 
 ## Pane action
 
+<!-- read: README.md#Workflow -->
+
 A gate button or the message box. Gate buttons run `submitAuthorizedWorklistTurn`: record the authorization first, and only if that succeeds send the turn text. [`app/__shell/helpers.js:729-749`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L729-L749) The message box and other controls call `toTurn` directly. The README describes the user side: tick items, click Start, Commit or Drop; with items selected a message "addresses that item". Otherwise "it's open-ended chat". [`README.md:76-76`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L76-L76) The buttons are described at [`README.md:52-62`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L52-L62).
 
 ## Draft files
+
+<!-- read: docs/turn-transport-redesign.md#1. One canonical authored turn (Persistence) -->
+<!-- read: docs/turn-transport-redesign.md#2. Minimal agent injection (Transport) -->
 
 Two kinds of files let the PTY carry only a short message. Feedback drafts: `queueFeedbackDraft` writes `resources/feedback-drafts/<feedbackId>.md`, because "long Iterate feedback can lose structure or get truncated" in a bracketed paste; the turn then carries "only a small feedbackRef". [`app/__shell/helpers.js:528-535`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L528-L535) Outbound envelopes: `frame_outbound_turn` writes `resources/outbound-turns/<id>.json` for substantial, image-bearing or multi-line sends and returns a compact frame; if the write fails "inline is always the safe fallback". [`src-tauri/src/lib.rs:47973-47984`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L47973-L47984) [`src-tauri/src/lib.rs:47975-47979`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L47975-L47979) [`src-tauri/src/lib.rs:23203-23213`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L23203-L23213) Both directories are gitignored. [`.gitignore:48-55`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/.gitignore?plain=1#L48-L55)
 
 The envelope comment and the send path agree: the comment says "send path writes these (doc step 6, 69f027bd)" [`src-tauri/src/lib.rs:47796-47799`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L47796-L47799) and the send path at lines 22484-22494 calls `frame_outbound_turn`. [`src-tauri/src/lib.rs:23203-23213`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L23203-L23213) `docs/turn-transport-redesign.md` is titled a plan of record [`docs/turn-transport-redesign.md:1-1`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L1-L1) and orders seven steps [`docs/turn-transport-redesign.md:74-90`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L74-L90); it also carries a status block, "Status, read from the code on 2026-10-31": steps 1 to 3, 6 and 7 shipped, step 4 half, step 5 not done as written. [`docs/turn-transport-redesign.md:92-99`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L92-L99)
 
 ## Intent queue
+
+<!-- read: CLAUDE.md#The host helpers (cross-target) -->
 
 `queue_pty_intent` accepts four kinds (`toShell`, `toTurn`, `sendKeys`, `menuAnswer`) and appends a line to `resources/.pty-intent.jsonl`. [`src-tauri/src/lib.rs:21901-21940`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L21901-L21940) The reason for the disk hop: it "keeps each click durably recorded even if the iframe context is unsettled when the IPC fires". [`app/__shell/helpers.js:515-519`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L515-L519) The queue file is gitignored. [`.gitignore:63-63`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/.gitignore?plain=1#L63-L63)
 
@@ -22,25 +29,37 @@ The pseudo-terminal opened by `pty_spawn`. [`src-tauri/src/lib.rs:20306-20314`](
 
 ## Agent CLI
 
+<!-- read: docs/agent-specimens/README.md#Seams -->
+
 `claude`, `codex`, `opencode` or `agy` (Antigravity). [`src-tauri/src/lib.rs:28412-28424`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L28412-L28424) Bram doesn't parse the CLI's answer into a reply; it watches signals around it (see the terminal output and JSONL turn-end scan arrows). Bram pins no expected model for each CLI. The versions it knows are those of the captured specimens: Claude Code 2.1.312, codex-cli 0.165.0, OpenCode 2.1.4 and a Cursor agent, captured on 2026-10-28, and Antigravity CLI `agy 1.4.12`, captured on 2026-10-30, each with a "Model and version" row saying where the version shows. [`docs/agent-specimens/README.md:12-16`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/agent-specimens/README.md?plain=1#L12-L16) [`docs/agent-specimens/README.md:52-52`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/agent-specimens/README.md?plain=1#L52-L52) Antigravity updates itself: "It self-updates, so a behaviour change may arrive without a Bram release." [`src-tauri/src/lib.rs:28418-28420`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L28418-L28420)
 
 ## Provider transcript
+
+<!-- read: docs/subagents.md#The provider seam -->
 
 Claude's sessions live under `~/.claude/projects/<encoded project path>`. [`src-tauri/src/lib.rs:32837-32848`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32837-L32848) Codex's under `~/.codex/sessions`. [`src-tauri/src/lib.rs:26705-26705`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L26705-L26705) OpenCode's live in SQLite, and Bram exports each to a Claude-shaped JSONL under its cache: "Its sessions live in SQLite, not transcript files." [`src-tauri/src/lib.rs:32513-32516`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L32513-L32516) "so the Sessions list, the Transcript, titles and search read it through the paths they already use for Claude." [`src-tauri/src/lib.rs:33966-33973`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L33966-L33973) Antigravity's live under `~/.gemini/antigravity-cli`, with the project association in `conversation_summaries.db`; Bram builds "a disposable Claude-shaped projection in Bram's cache" from them. [`src-tauri/src/lib.rs:34427-34433`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L34427-L34433) The transcript is the provider's own record; Bram reads it and never writes it.
 
 ## Agent pane
 
+<!-- read: docs/spine.md#Consumers -->
+
 The consumer. The spine doc lists them: "The toolbar uses agent status and turn state", and "The Worklist and Transcript panes use the spine to decide when an action cycle is awaiting a response". [`docs/spine.md:92-99`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L92-L99) The pane subscribes to host events rather than polling. [`docs/developing-bram.md:332-335`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/developing-bram.md?plain=1#L332-L335) Footer status, Transcript and Worklist are separate XMLUI components under `app/tools/components/`. [`app/tools/Main.xmlui:1051-1055`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/tools/Main.xmlui?plain=1#L1051-L1055)
 
 ## Turn-state spine
+
+<!-- read: docs/spine.md#State carried -->
 
 "The spine is Bram's host-owned record of what the agent turn is doing right now." [`docs/spine.md:3-4`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L3-L4) It exists because "no single signal is authoritative enough to drive the agent pane by itself." [`docs/spine.md:6-11`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L6-L11) The carried fields are `provider`, `phase`, `turnStamp`, `pendingMenu`, activity clocks, and a completion cursor that "prevents older PTY activity from relighting `working`". [`docs/spine.md:73-88`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L73-L88) The update function is `update_turn_state`. [`src-tauri/src/lib.rs:9251-9257`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9251-L9257) Entering `working` while an authorization is live re-establishes the execution claim, which links this diagram to diagram 3. [`src-tauri/src/lib.rs:9299-9307`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9299-L9307)
 
 ## toTurn via Tauri command
 
+<!-- read: CLAUDE.md#The host helpers (cross-target) -->
+
 `window.toTurn` logs, then invokes the `queue_pty_intent` command with kind `toTurn`. [`app/__shell/helpers.js:655-691`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L655-L691) If there is no Tauri invoke (as in the target pane) it records `no-invoke` and returns, so the call does nothing. [`app/__shell/helpers.js:673-679`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L673-L679) CLAUDE.md states the consequence: the helpers "no-op inside an embedded target app". [`CLAUDE.md:132-139`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/CLAUDE.md?plain=1#L132-L139)
 
 ## writes feedback draft
+
+<!-- read: app/__shell/reference/worklist-mechanics.md#Feedback payload details -->
 
 See Draft files. The pane sends `iterate:` turns that name a `feedbackRef`; the example at `helpers.js:588` builds the payload. [`app/__shell/helpers.js:536-536`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L536-L536) [`app/__shell/helpers.js:588-588`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/helpers.js?plain=1#L588-L588) The draft is also what the conventions tell the agent to read: "read the user's full-fidelity text from `<state>/feedback-drafts/<feedbackRef>.md`", where `<state>/` is the state folder. [`app/__shell/conventions.md:348-353`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L348-L353)
 
@@ -54,24 +73,36 @@ The bytes above, written to the PTY master by `pty_write_internal`. [`src-tauri/
 
 ## appends session log
 
+<!-- read: docs/spine.md#Inputs -->
+
 The CLI writes its own transcript. Bram only observes; for Claude, the subagent doc says "Bram doesn't spawn subagents. It only reads what the provider recorded." [`docs/subagents.md:16-17`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/subagents.md?plain=1#L16-L17) The repo doesn't say when each CLI flushes to disk; the spine doc only says JSONL "can lag or be observed after the next turn has already begun". [`docs/spine.md:55-57`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L55-L57)
 
 ## terminal output
+
+<!-- read: docs/spine.md#Inputs -->
 
 PTY activity: "the fastest signal. It sees spinner glyphs, terminal title updates, permission menus, Esc/cancel output, and natural-end status banners." [`docs/spine.md:46-51`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L46-L51) The cost: "prone to stale redraws and partial screen state". [`docs/spine.md:49-50`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L49-L50) Permission menus are a hybrid: provider hooks post the structured menu and the xterm.js grid confirms which one is on screen. [`docs/spine.md:59-64`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L59-L64)
 
 ## JSONL turn-end scan
 
+<!-- read: docs/spine.md#Inputs -->
+
 `check_jsonl_for_turn_end` classifies the tail of a session file. It is called from a Codex poll that compares file mtimes and from a file watcher. [`src-tauri/src/lib.rs:68857-68857`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L68857-L68857) [`src-tauri/src/lib.rs:41444-41464`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L41444-L41464) [`src-tauri/src/lib.rs:98085-98091`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L98085-L98091) Claude contributes `stop_reason: "end_turn"`; Codex contributes `task_complete` and `final_answer`. [`docs/spine.md:52-56`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/spine.md?plain=1#L52-L56) A Codex turn that is aborted emits `turn_aborted` instead of `task_complete`. [`src-tauri/src/lib.rs:15927-15929`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L15927-L15929)
 
 ## turn-state-changed event
+
+<!-- read: docs/spine.md#Consumers -->
 
 The Tauri event fires only when "user-visible state changed: phase, pending_menu, provider, or turn_stamp"; source-only re-confirmations used to cause a "refetch storm". [`src-tauri/src/lib.rs:9267-9276`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9267-L9276) The emit is `emit_replayable_payload(app, "turn-state-changed", ...)`. [`src-tauri/src/lib.rs:9310-9312`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L9310-L9312) The pane also fetches `/__turn-state`. [`src-tauri/src/lib.rs:81937-81937`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L81937-L81937)
 
 ## projected turns
 
+<!-- read: docs/turn-transport-redesign.md#3. One host projection is the single source of truth (Projection) -->
+
 `/__turns` returns a session's turns for a provider and id, and `read_subagent_turns` for a subagent. [`src-tauri/src/lib.rs:82551-82571`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L82551-L82571) The design intent in the transport plan: "One host route returns normalized turns from JSONL + outbound envelopes", with UI surfaces as "pure consumers of this projection". [`docs/turn-transport-redesign.md:48-60`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L48-L60) By the doc's own status block not every surface is on it (step 4 half, step 5 not done as written) [`docs/turn-transport-redesign.md:92-99`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L92-L99); the plan's step 7 is "Remove client raw-JSONL parsing from primary UI paths". [`docs/turn-transport-redesign.md:90-90`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/turn-transport-redesign.md?plain=1#L90-L90)
 
 ## reads draft by reference
+
+<!-- read: app/__shell/reference/worklist-mechanics.md#Feedback payload details -->
 
 The agent is instructed to open the draft; nothing makes it do so. Feedback arrives as `{id, feedbackRef}` and the conventions say to read the user's text from the draft; an inline `{id, feedback}` "appears only as a degradation fallback". [`app/__shell/conventions.md:348-353`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L348-L353)

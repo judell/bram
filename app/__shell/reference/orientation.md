@@ -88,6 +88,18 @@ Then stop and wait for **Start**.
     once in the overview that links can't be built.
 - **Quote, don't paraphrase,** where a short phrase from the repo carries
   the point.
+- **Read the doc, don't retell it.** When a human-readable document explains
+  the thing a box or arrow names (a conventions file, a decision note, a
+  design doc), open the section's body with a directive line,
+  `<!-- read: <path>#<heading> -->`, naming that doc and its most specific
+  heading at the pin. The dialog shows one link line per directive, to the
+  rendered page on the forge, and a "Read here" button that opens that
+  section in a reader dialog, fetched from the forge at the pinned commit
+  (the forge forbids framing, so the reader renders the Markdown itself).
+  Nothing is copied, and nothing is fetched until asked. Keep the code
+  citations below as the "where it lives" footnote. Verify every heading exists at
+  the pin (`git show <sha>:<path> | grep '^#* <heading>$'`). Set `repo` and
+  `commitFull` in the `SITE` block so the fetch has a forge and a commit.
 - **Draw what happens; don't encode it in the line style.** Where a step
   depends on a person or a model doing what they're asked (a convention the
   agent must follow, a click, a push), say so in that arrow's tip and detail

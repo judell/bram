@@ -56,10 +56,11 @@
     DETAILS[diagram] = details;
     const {svg} = await m.render("mermaid-" + (++mermaidSeq), source);
     const labels = new Set();
-    const sized = sizedSvg(decorate(svg, parseTips(source), details, labels));
+    const shotted = new Set();
+    const sized = sizedSvg(decorate(svg, parseTips(source), details, labels, shotted));
     const height = +(sized.match(/<svg[^>]*\sheight="(\d+)"/) || [0, 200])[1];
     return {srcdoc: diagramDocument(sized, diagram), height: height + 24,
-      mismatches: mismatches(labels, details)};
+      mismatches: mismatches(labels, details), shotCount: shotted.size};
   }
 
   // The structural check the playbook asks for: every box and arrow label has
@@ -166,7 +167,15 @@
     const body = (DETAILS[diagram] || {})[key];
     if (body == null) return null;
     const {reads, prose} = splitReads(body);
-    return {title: key, body: prose, reads};
+    // A line that is only a Markdown image, ![caption](src "Title"), becomes a shot: the dialog shows it
+    // as a thumbnail that expands in place, not as inline full-width Markdown.
+    const shots = [];
+    const text = prose.split("\n").filter((line) => {
+      const m = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)\s*$/.exec(line.trim());
+      if (m) shots.push({alt: m[1], src: m[2], title: m[3] || ""});
+      return !m;
+    }).join("\n").trim();
+    return {title: key, body: pageLinks(text), reads, shots};
   }
 
   function parseTips(source) {
@@ -182,7 +191,60 @@
   // attach tips as SVG <title> (native tooltip), mark items that have detail,
   // collect every label drawn, and add headroom so a raised label can't be
   // clipped.
-  function decorate(svg, tips, details, labels) {
+  // Citations open in the site, not on the forge: a forge blob link with a
+  // line anchor (GitHub #L10-L20, GitLab #L10-20) becomes a relative
+  // ?cite=<path>:<from>-<to> link, which the
+  // Markdown component routes in-app; Main.xmlui's citation dialog follows
+  // $queryParams.cite and shows the cited lines, fetched raw at the pin. (The
+  // forge won't render very large files such as lib.rs at all.)
+  const CITE_LINK = /\]\(https?:\/\/[^)\s]*?\/blob\/[0-9a-f]{40}\/([^?#)\s]+)(?:\?plain=1)?#L(\d+)(?:-L?(\d+))?\)/g;
+  function citeLinks(md) {
+    return md.replace(CITE_LINK, (m, path, from, to) =>
+      "](?cite=" + encodeURIComponent(path + ":" + from + "-" + (to || from)) + ")");
+  }
+  // For a page or a detail section: citations as above, and every other
+  // external link opens in a new tab. That needs Markdown's per-link
+  // "label|target=_blank" form, which works only on a plain-text label, so a
+  // code-styled label (a commit SHA) is unwrapped to plain text.
+  const EXTERNAL_LINK = /\[`?([^\]`|]+)`?\]\((https?:\/\/[^)\s]+)\)/g;
+  function pageLinks(md) {
+    if (md == null) return "";
+    return citeLinks(String(md)).replace(EXTERNAL_LINK, (m, label, url) => "[" + label + "|target=_blank](" + url + ")");
+  }
+  function cite(spec) {
+    const m = /^(.+):(\d+)-(\d+)$/.exec(spec || "");
+    if (!m) return null;
+    return {path: m[1], from: +m[2], to: +m[3], label: m[1] + ":" + m[2] + (m[3] !== m[2] ? "-" + m[3] : ""),
+      link: blobUrl(m[1]) + "?plain=1#L" + m[2] + "-L" + m[3]};
+  }
+  const FENCE_LANG = {rs: "rust", js: "js", ts: "ts", md: "markdown", json: "json", toml: "toml",
+    xmlui: "xml", xml: "xml", html: "html", sh: "bash", py: "python", ps1: "powershell", yml: "yaml", yaml: "yaml"};
+  // The cited lines, numbered, as a fenced block. A range past the end of the
+  // file says so rather than showing nothing.
+  function citeExcerpt(text, spec) {
+    const c = cite(spec);
+    if (!c || text == null) return "";
+    const lines = (typeof text === "string" ? text : String(text)).split("\n");
+    if (c.from > lines.length) return "*Line " + c.from + " is past the end of " + c.path + " (" + lines.length + " lines) at this site's pin.*";
+    const last = Math.min(c.to, lines.length);
+    const width = String(last).length;
+    const body = lines.slice(c.from - 1, last).map((l, i) => String(c.from + i).padStart(width) + "  " + l).join("\n");
+    const ext = (c.path.split(".").pop() || "").toLowerCase();
+    return "```" + (FENCE_LANG[ext] || "") + "\n" + body + "\n```";
+  }
+
+  // How many screenshots a detail section holds: its image-only lines, the
+  // same lines detail() turns into thumbnails.
+  const SHOT_LINE = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)\s*$/;
+  function shotsIn(body) {
+    return body == null ? 0 : body.split("\n").filter((l) => SHOT_LINE.test(l.trim())).length;
+  }
+  const SHOT_MARK = "\u25A3"; // ▣ a framed square: "has screenshots"
+  const SHOT_GAP = 6;         // px between an arrow label's right edge and its mark
+  const SHOT_PAD = 6;         // px between a box's top-right corner and its mark
+  const SHOT_ROOM = 20;       // px added at the right of the drawing for marks
+
+  function decorate(svg, tips, details, labels, shotted) {
     // Mermaid draws a box with line breaks as HTML in a foreignObject, and
     // HTML's <br> is not closed; the XML parser below rejects it ("Unexpected
     // closing tag"). Close it before parsing. Other void tags don't occur in
@@ -203,11 +265,43 @@
     };
     const annotate = (el, text) => {
       labels.add(text);
+      const shots = shotsIn(details[text]);
       if (tips[text]) {
         const title = doc.createElementNS("http://www.w3.org/2000/svg", "title");
         title.textContent = tips[text] + (details[text] != null ? "  (click for more)" : "");
         el.insertBefore(title, el.firstChild);
         el.setAttribute("class", el.getAttribute("class") + " has-tip");
+      }
+      // The screenshot mark ▣, drawn in the rect's own coordinates. Boxes: inside
+      // the top-right corner, padded. Arrow labels: to the right of the label,
+      // centred on it, with a gap. Its own hover tip says only "N screenshots";
+      // a click on it falls through to the label, which opens the detail.
+      const rect = shots && el.querySelector("rect");
+      if (rect) {
+        const x = +rect.getAttribute("x"), y = +rect.getAttribute("y");
+        const w = +rect.getAttribute("width"), h = +rect.getAttribute("height");
+        if ([x, y, w, h].every(Number.isFinite)) {
+          const arrow = (el.getAttribute("class") || "").includes("edgeLabel");
+          const mark = doc.createElementNS("http://www.w3.org/2000/svg", "text");
+          if (arrow) {
+            mark.setAttribute("x", String(x + w + SHOT_GAP));
+            mark.setAttribute("y", String(y + h / 2));
+            mark.setAttribute("text-anchor", "start");
+          } else {
+            mark.setAttribute("x", String(x + w - SHOT_PAD));
+            mark.setAttribute("y", String(y + SHOT_PAD + 7));
+            mark.setAttribute("text-anchor", "end");
+          }
+          mark.setAttribute("dominant-baseline", "central");
+          mark.setAttribute("fill", "#2f5d8a");
+          mark.setAttribute("class", "shot-mark");
+          mark.textContent = SHOT_MARK;
+          const tip = doc.createElementNS("http://www.w3.org/2000/svg", "title");
+          tip.textContent = shots + (shots === 1 ? " screenshot" : " screenshots");
+          mark.appendChild(tip);
+          rect.parentNode.appendChild(mark);
+          shotted.add(text);
+        }
       }
       if (details[text] != null) {
         el.setAttribute("data-key", text);
@@ -239,7 +333,7 @@
     const vb = (svgRoot.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
     if (vb.length === 4 && vb.every(Number.isFinite)) {
       svgRoot.setAttribute("viewBox",
-        [vb[0], vb[1] - LABEL_HEADROOM, vb[2], vb[3] + LABEL_HEADROOM].join(" "));
+        [vb[0], vb[1] - LABEL_HEADROOM, vb[2] + (shotted.size ? SHOT_ROOM : 0), vb[3] + LABEL_HEADROOM].join(" "));
     }
     return new XMLSerializer().serializeToString(svgRoot);
   }
@@ -253,6 +347,7 @@
     + "svg{max-width:100%;height:auto;display:block}"
     + "g.has-tip{cursor:help}"
     + "g.edgeLabel.has-tip rect{stroke:#8a8a8a;stroke-dasharray:2 2;stroke-width:1}"
+    + "text.shot-mark{font-size:14px;fill:#2f5d8a !important;cursor:pointer}"
     + "g.has-detail{cursor:pointer}"
     + "g.node.has-detail:hover rect,g.node.has-detail:hover path,g.node.has-detail:hover polygon{stroke-width:2.5px}"
     + "g.edgeLabel.has-detail:hover text{text-decoration:underline}"
@@ -307,5 +402,5 @@
     // "GitHub" or the forge host, for the "Read on …" line under a detail.
   const forgeLabel = (SITE.forgeHost || "github.com") === "github.com" ? "GitHub" : SITE.forgeHost;
 
-  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page, rawUrl, section, forgeLabel};
+  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page, rawUrl, section, forgeLabel, shotMark: SHOT_MARK, cite, citeExcerpt, pageLinks};
 })(globalThis);

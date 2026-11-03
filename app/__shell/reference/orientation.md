@@ -74,6 +74,15 @@ Then stop and wait for **Start**.
    - in the `.md`, one `## <label>` section per box **and** per arrow
      label, headed by the label as drawn. Every box and arrow opens its
      detail, so none is left without a section.
+5. Screenshots, if the owner wants them: put each image under
+   `orientation/screenshots/` (shrunk to at most 1600 px on the long side, for
+   example with `sips -Z 1600` on macOS) and add it to the section for the box
+   or arrow it shows, on a line by itself:
+   `![<caption>](screenshots/<file>.png "<title>")`. The title shows above the
+   thumbnail, the caption below, and a click expands it in place. A box or
+   arrow with screenshots gets a small ▣ mark. Take them from a real run of
+   the thing the diagram describes; anything in the frame is published, so
+   crop what isn't meant for the public.
 
 ### 4. Evidence rules
 
@@ -86,16 +95,22 @@ Then stop and wait for **Start**.
   - GitLab: `https://gitlab.com/G/R/-/blob/<sha>/<path>#L10-20`;
   - other forges or no remote: `` `<path>:10-20` `` as plain text, and say
     once in the overview that links can't be built.
+
+  On the site, a GitHub or GitLab citation opens in place: a dialog shows the
+  cited lines, fetched raw at the pin, so a citation into a file too large for
+  the forge to render (a big `lib.rs`) still works. Write the link in the
+  forge form above; the site rewrites it. Other external links open in a new
+  tab.
 - **Quote, don't paraphrase,** where a short phrase from the repo carries
   the point.
 - **Read the doc, don't retell it.** When a human-readable document explains
   the thing a box or arrow names (a conventions file, a decision note, a
   design doc), open the section's body with a directive line,
   `<!-- read: <path>#<heading> -->`, naming that doc and its most specific
-  heading at the pin. The dialog shows one link line per directive, to the
-  rendered page on the forge, and a "Read here" button that opens that
-  section in a reader dialog, fetched from the forge at the pinned commit
-  (the forge forbids framing, so the reader renders the Markdown itself).
+  heading at the pin. The dialog shows one "Read <doc> § <heading>" link per
+  directive, which opens that section in a reader dialog, fetched from the
+  forge at the pinned commit (the forge forbids framing, so the reader
+  renders the Markdown itself).
   Nothing is copied, and nothing is fetched until asked. Keep the code
   citations below as the "where it lives" footnote. Verify every heading exists at
   the pin (`git show <sha>:<path> | grep '^#* <heading>$'`). Set `repo` and

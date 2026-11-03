@@ -182,7 +182,7 @@
       if (m) shots.push({alt: m[1], src: m[2], title: m[3] || ""});
       return !m;
     }).join("\n").trim();
-    return {title: key, body: citeLinks(text), reads, shots};
+    return {title: key, body: pageLinks(text), reads, shots};
   }
 
   function parseTips(source) {
@@ -199,16 +199,17 @@
   // collect every label drawn, and add headroom so a raised label can't be
   // clipped.
   // Citations open in the site, not on the forge: a forge blob link with a
-  // line anchor becomes a relative ?cite=<path>:<from>-<to> link, which the
+  // line anchor (GitHub #L10-L20, GitLab #L10-20) becomes a relative
+  // ?cite=<path>:<from>-<to> link, which the
   // Markdown component routes in-app; Main.xmlui's citation dialog follows
   // $queryParams.cite and shows the cited lines, fetched raw at the pin. (The
   // forge won't render very large files such as lib.rs at all.)
-  const CITE_LINK = /\]\(https?:\/\/[^)\s]*?\/blob\/[0-9a-f]{40}\/([^?#)\s]+)(?:\?plain=1)?#L(\d+)(?:-L(\d+))?\)/g;
+  const CITE_LINK = /\]\(https?:\/\/[^)\s]*?\/blob\/[0-9a-f]{40}\/([^?#)\s]+)(?:\?plain=1)?#L(\d+)(?:-L?(\d+))?\)/g;
   function citeLinks(md) {
     return md.replace(CITE_LINK, (m, path, from, to) =>
       "](?cite=" + encodeURIComponent(path + ":" + from + "-" + (to || from)) + ")");
   }
-  // For a whole page (the Overview): citations as above, and every other
+  // For a page or a detail section: citations as above, and every other
   // external link opens in a new tab. That needs Markdown's per-link
   // "label|target=_blank" form, which works only on a plain-text label, so a
   // code-styled label (a commit SHA) is unwrapped to plain text.

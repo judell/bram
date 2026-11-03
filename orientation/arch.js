@@ -23,7 +23,7 @@
   };
   const ARCHITECTURE = [
     {file: "01-system.mmd", title: "System at a glance",
-      note: "The Tauri shell, the agent CLI in its PTY, the agent pane, the loopback server and the optional target pane. Solid arrows are what code does on its own; the dashed arrow depends on the agent following seeded instructions. Click a box or arrow for detail."},
+      note: "What you are looking at when Bram is open. A Rust shell runs the agent CLI in a terminal and provides a UI over it; the pane and the agent both talk to a small HTTP server on your machine; a target-app pane is optional. The one dashed arrow is the agent reading the conventions Bram seeds into the repo: everything else is wiring that works on its own. Click a box or arrow for detail."},
     {file: "02-turn.mmd", title: "A turn's lifecycle",
       note: "From a pane action to the PTY, the agent and its transcript, and back to the pane as turn state. The dashed arrow depends on the agent opening a referenced draft file."},
     {file: "03-gate.mmd", title: "The Worklist gate",

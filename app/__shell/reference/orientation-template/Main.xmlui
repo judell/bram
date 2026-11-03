@@ -4,7 +4,22 @@
      architecture/; the diagram list and caption in arch.js's SITE block.
      Tabs/TabItem: https://www.xmlui.org/docs/reference/components/Tabs
      Markdown file via DataSource -> content: https://www.xmlui.org/docs/howto/render-markdown-content-as-a-page -->
-<App>
+<Theme
+  backgroundColor="#fbfaf7"
+  backgroundColor-content-App="#fbfaf7"
+  textColor="#1d1d1b"
+  textColor-secondary="#5f5e58"
+  borderColor="#e3e0d8"
+  color-primary="#2f5d8a"
+  backgroundColor-primary="#ffffff">
+<App defaultTone="light">
+  <!-- One calm light palette, shared with the project homepage; the site
+       doesn't follow the OS color scheme (defaultTone):
+       https://www.xmlui.org/docs/howto/implement-a-dark-mode-toggle
+       https://www.xmlui.org/docs/howto/create-a-custom-color-theme -->
+  <!-- Browser tab title; without it XMLUI shows "XMLUI app":
+       https://www.xmlui.org/docs/howto/set-the-page-title-dynamically -->
+  <PageMetaTitle value="PROJECT" noSuffix="{true}" />
   <Tabs>
     <TabItem label="Start">
       <!-- The owner's own words, from START.md. The agent never writes or
@@ -63,3 +78,4 @@
     </TabItem>
   </Tabs>
 </App>
+</Theme>

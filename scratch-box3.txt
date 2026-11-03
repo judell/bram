@@ -1,0 +1,1 @@
+Scratch file created by Antigravity on Windows to verify #471 box 3 hook guard and apply-and-commit flow.

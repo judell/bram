@@ -169,19 +169,44 @@ hit, this is the advice protocol (user-facing twin: the Bram README's
   missing `claude-rs` / `codex-rs` breadcrumbs in
   `<state>/bram-traces/hook-events.log`, or hook timeouts/errors, with
   no visible launch failure.
-- **Verify before advising.** Confirm the block dialog actually names
-  Smart App Control — Defender and SmartScreen blocks read differently,
-  and their remedies differ.
-- **State the trade-off honestly, then let the user decide.** Disabling
-  SAC is currently the only workaround short of a signed executable
-  (signing is not currently planned). Windows Defender remains fully
-  active with SAC off — if the user deems Defender sufficient
-  protection, disabling is the supported path. Name the UI path:
-  **Windows Security → App & browser control → Smart App Control
-  settings**, and point at Microsoft's Smart App Control FAQ
-  (https://support.microsoft.com/en-us/windows/smart-app-control-frequently-asked-questions-285ea03d-fa88-4d56-882e-6698afdb7003) —
-  including that the switch is effectively one-way on current Windows
-  builds (re-enabling has required a Windows reset).
+- **Verify before advising.**
+  - Confirm the block dialog actually names Smart App Control. Defender
+    and SmartScreen blocks read differently, and their remedies differ.
+  - Check the machine's state. It needs no admin rights:
+    `(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy').VerifiedAndReputablePolicyState`
+    returns `0` for Off, `1` for On (enforcing) and `2` for Evaluation.
+    Only `1` blocks.
+  - A refusal leaves events 3077 in the Code Integrity log (Event
+    Viewer → Microsoft → Windows → CodeIntegrity → Operational).
+- **Each release is judged on its own.** For an unsigned file, SAC's
+  verdict is Microsoft's cloud reputation for that exact file. So "the
+  last version worked" says nothing about the next one: on
+  judell/bram#470, v0.8.0 was allowed and v0.8.1 and v0.8.2 were refused
+  on the same machine, minutes apart.
+- **State the trade-off honestly, then let the user decide.** Use
+  Microsoft's own words, from the Microsoft Support page
+  [What is Smart App Control](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003):
+  - **Developer default.** Windows turns SAC off on its own when it
+    detects "a corporate user, developer, or similar", "so you can work
+    with fewer interruptions". It is also off when "Your device is
+    enterprise-managed or developer-mode has been configured".
+  - **Two remedies.** "There is currently no way to bypass Smart App
+    Control protection for individual apps." Microsoft's remedies are to
+    turn SAC off or to use a signed build. Signing is not currently
+    planned (judell/bram#6 holds the plan).
+  - **Defender is unaffected.** "Smart App Control works alongside your
+    other security software, such as Microsoft Defender."
+  - **Reversible, mostly.** The support page says "Recent Windows
+    updates allow Smart App Control to be re‑enabled without requiring
+    a clean installation" (since the April 2026 update for 25H2). Its
+    developer page,
+    [Test App Signatures with Smart App Control](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/test-your-app-with-smart-app-control),
+    still calls the switch "a one-way operation". Say both.
+  - **The October 2026 bug.** The October 2026 update (KB5127648) can
+    grey out the toggle on 24H2, 25H2 and 26H2.
+
+  Name the UI path: **Windows Security → App & browser control → Smart
+  App Control settings**.
 - **Never flip the setting on the user's behalf.** It is a machine-level
   security decision; the agent names the control and the consequences,
   the user clicks.

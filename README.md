@@ -143,7 +143,24 @@ Downloads `bram-windows-amd64.zip`, verifies its SHA256, extracts `bram.exe` to 
 
 #### Smart App Control
 
-On some Windows 11 setups, Smart App Control may block the unsigned binary — most users report no problem. If you do hit a block, you can disable SAC under **Windows Security → App & browser control → Smart App Control settings**. Before flipping the switch, read Microsoft's [Smart App Control FAQ](https://support.microsoft.com/en-us/windows/smart-app-control-frequently-asked-questions-285ea03d-fa88-4d56-882e-6698afdb7003) so you understand the consequences for your machine — the re-enable path has changed across Windows updates.
+Bram's Windows binaries are unsigned. On a machine where Smart App Control (SAC) is on, Windows may refuse to run them. Most users never see this.
+
+Smart App Control is a reputation filter that Windows turns off on its own for developer and enterprise-managed machines ("so you can work with fewer interruptions," per Microsoft). If it's on and blocks Bram, Microsoft's documented remedies are to turn it off or to use a signed build ("There is currently no way to bypass Smart App Control protection for individual apps"). Defender keeps protecting the machine either way ("Smart App Control works alongside your other security software, such as Microsoft Defender"), and current Windows builds can turn SAC back on later. Because SAC judges each file by its reputation, one Bram release can be allowed and the next refused.
+
+To check your machine (0 = Off, 1 = On, 2 = Evaluation):
+
+```powershell
+(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy').VerifiedAndReputablePolicyState
+```
+
+To turn it off: **Windows Security → App & browser control → Smart App Control settings**.
+
+Two caveats:
+
+- **Turning it back on.** Microsoft's support page says "Recent Windows updates allow Smart App Control to be re‑enabled without requiring a clean installation" (since the April 2026 update for 25H2). Its developer page still calls the switch "a one-way operation".
+- **The October 2026 update.** KB5127648 can grey out the toggle on 24H2, 25H2 and 26H2, until Microsoft fixes it.
+
+Sources: [What is Smart App Control](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003) (Microsoft Support); [Test App Signatures with Smart App Control](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/test-your-app-with-smart-app-control) (Microsoft Learn); [re-enabling without reinstalling](https://blog-en.topedia.com/2026/04/smart-app-control-in-windows-11-can-now-be-re-enabled-without-reinstalling/) (topedia); [KB5127648 greys out the toggle](https://www.it-connect.tech/windows-11-kb5127648-breaks-smart-app-control-in-october-2026-update/) (IT-Connect).
 
 ### First-run setup
 

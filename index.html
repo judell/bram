@@ -3,50 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>target app</title>
-    <script>
-      // Bram's demo target-app shim. Loaded only when ui.showTargetApp is on;
-      // main.js otherwise leaves the pane at about:blank and never fetches this.
-      //
-      // config.json is fetched ASYNCHRONOUSLY and its absence is a normal
-      // state, not an error to recover from. It was a synchronous
-      // XMLHttpRequest (`open(..., false)`) that blocked the main thread on a
-      // request which 404s in every project that has no target app of its own
-      // -- see judell/bram#275 A3(ii). A blocking request for a file that is
-      // absent by construction is wrong even when the pane is enabled.
-      //
-      // document.write is gone with it: the scripts are injected in order via
-      // onload, which is what lets the config arrive first without blocking.
-      (function () {
-        function inject(src, onload) {
-          var s = document.createElement("script");
-          s.src = src;
-          s.onload = onload || null;
-          document.head.appendChild(s);
-        }
-        function log(stage) {
-          if (typeof window.logToHost === "function") {
-            window.logToHost({ kind: "boot", stage: stage, at: new Date().toISOString() });
-          }
-        }
-        function boot(cfg) {
-          cfg = cfg || {};
-          window.APP_CONFIG = cfg;
-          window.appGlobals = cfg.appGlobals || {};
-          window.APP_VERSION = "dev-" + Date.now();
-          inject("/__shell/helpers.js", function () {
-            log("before-xmlui-load");
-            inject("/__vendor/xmlui-standalone.umd.js?v=" + Date.now(), function () {
-              log("after-xmlui-load");
-            });
-          });
-        }
-        fetch("config.json?_=" + Date.now())
-          .then(function (r) { return r.ok ? r.json() : {}; })
-          .then(boot)
-          .catch(function () { boot({}); });
-      })();
-    </script>
+    <title>Bram: overview and architecture</title>
+    <!-- This repo's target app is its orientation site. Bram's Open app link
+         needs a root index.html (target_app_browser_url in lib.rs). -->
+    <meta http-equiv="refresh" content="0; url=orientation/index.html" />
   </head>
-  <body></body>
+  <body>
+    <a href="orientation/index.html">Overview and architecture</a>
+  </body>
 </html>

@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "orientation/**"
       - "app/vendor/xmlui-standalone.umd.js"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -34,6 +35,10 @@ jobs:
       # than commit a second 5 MB copy (site/extras/.gitignore).
       - name: Copy the XMLUI engine for site/extras
         run: mkdir -p site/extras/vendor && cp app/vendor/xmlui-standalone.umd.js site/extras/vendor/
+      # The orientation site lives at the repo root because it's this repo's
+      # target app. It publishes at /orientation/.
+      - name: Copy the orientation site
+        run: cp -R orientation site/orientation
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site

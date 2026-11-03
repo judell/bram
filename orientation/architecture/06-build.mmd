@@ -1,0 +1,39 @@
+flowchart TD
+  src["Source checkout"]
+  bin["Debug binary"]
+  disk["app/ served from disk"]
+  emb["Embedded app tree"]
+  copies["Installed copies in source repo"]
+  proj["Managed project"]
+  rel["Release workflow"]
+  gh["GitHub release"]
+
+  src -->|"scripts/build.sh"| bin
+  src -.->|"rebuild and relaunch for Rust"| bin
+  bin -->|"launched via ./bram"| disk
+  bin -->|"raw binary launch"| emb
+  src -->|"build.rs sync"| copies
+  bin -.->|"Setup click seeds"| proj
+  src -->|"scripts/bump.sh"| rel
+  rel -->|"builds and attaches binaries"| gh
+
+  %% Invisible links stack the outcomes into rows.
+  disk ~~~ proj
+  copies ~~~ emb
+
+%% tip: Source checkout :: app/ (the pane and shell page), src-tauri/ (Rust), docs/, scripts/.
+%% tip: Debug binary :: Debug is the shipping format. A bram-guard binary is built beside it.
+%% tip: app/ served from disk :: Under the ./bram symlink, every app/** file is read from the checkout per request. Pane reload picks up edits.
+%% tip: Embedded app tree :: include_dir! bakes app/ into the binary at build time. Used when no app/ directory sits beside the executable.
+%% tip: Installed copies in source repo :: build.rs mirrors app/skills and app/__shell/reference into .claude/ so the source repo dogfoods Setup's layout.
+%% tip: Managed project :: A user's repo after Setup: conventions, reference docs, hook registrations, AGENTS.md block, OpenCode plugin.
+%% tip: Release workflow :: .github/workflows/build.yml, workflow_dispatch only: verify, test, create release, build four targets, publish checksums.
+%% tip: GitHub release :: Archives of bram and bram-guard per platform, plus install scripts.
+%% tip: scripts/build.sh :: The same debug cargo build, with a line appended to resources/build-log.jsonl.
+%% tip: rebuild and relaunch for Rust :: Dashed: nothing rebuilds src-tauri/ for you, and a running process keeps the inode it started with.
+%% tip: launched via ./bram :: The symlink at the repo root keeps the executable's parent at the repo root, where app/ lives.
+%% tip: raw binary launch :: With no app/ beside it, everything serves from the embedded tree baked at the last build.
+%% tip: build.rs sync :: Runs on every build; copies canonical files to their installed twins.
+%% tip: Setup click seeds :: Dashed: Setup runs when the user clicks it (or calls the enhance route); a banner appears when installed files are stale, and /__enhance/status says which check failed.
+%% tip: scripts/bump.sh :: Bumps the version in Cargo.toml and tauri.conf.json, builds, commits, tags, pushes and dispatches the workflow.
+%% tip: builds and attaches binaries :: Debug builds for linux-amd64, macos-arm64, macos-intel and windows-amd64.

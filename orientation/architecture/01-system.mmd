@@ -1,0 +1,38 @@
+flowchart TD
+  user["You"]
+  pane["Agent pane"]
+  shell["Tauri shell"]
+  cli["Terminal and agent CLI"]
+  loop["Loopback server"]
+  target["Target pane (optional)"]
+  repo["Project repo"]
+
+  user -->|"clicks and messages"| pane
+  pane -->|"Tauri commands"| shell
+  pane -->|"HTTP routes"| loop
+  shell -->|"spawns PTY"| cli
+  shell -->|"hosts"| loop
+  shell -->|"Tauri events"| pane
+  cli -->|"edits, gated by hooks"| repo
+  cli -->|"Worklist calls"| loop
+  loop -->|"serves project content"| target
+  repo -.->|"conventions it should follow"| cli
+
+%% Hover text for boxes and arrow labels, keyed by the label exactly as drawn.
+%% tip: You :: Anyone who uses Claude Code, Codex or OpenCode, working from the root of a git repo.
+%% tip: Agent pane :: Bram's own UI, an XMLUI app in an iframe: Worklist, Transcript, Sessions and more.
+%% tip: Tauri shell :: The Rust host (src-tauri/src/lib.rs): PTY, loopback server, scheme handlers, watchers.
+%% tip: Terminal and agent CLI :: xterm.js in the host page, wired to a PTY running claude, codex or opencode.
+%% tip: Loopback server :: An HTTP server on 127.0.0.1 inside the Rust host; its port is in resources/.bram-port. A common gate refuses foreign Origins on state changes and Hosts that are not loopback.
+%% tip: Worklist calls :: How an agent advances, prunes or commits an item. Claude and OpenCode use loopback curl; Codex writes intent and result files, because its sandbox refuses loopback.
+%% tip: Target pane (optional) :: A display-only iframe for the project's own web UI. Off by default.
+%% tip: Project repo :: The git repo Bram was started in. State lives under resources/ and in refs/bram/.
+%% tip: clicks and messages :: Buttons and the message box call window helpers such as toTurn.
+%% tip: Tauri commands :: The pane invokes Rust commands (queue_pty_intent, record_worklist_action_authorization).
+%% tip: HTTP routes :: The pane and agents read and post to /__* routes on the loopback server.
+%% tip: spawns PTY :: pty_spawn opens a pseudo-terminal and runs the agent command in it.
+%% tip: hosts :: The Rust host binds and serves the loopback server on a thread.
+%% tip: Tauri events :: The host pushes events such as turn-state-changed; the pane refetches on them.
+%% tip: edits, gated by hooks :: Agent file edits pass through bram-guard, which allows or denies them.
+%% tip: serves project content :: handle_target_scheme proxies project files to the target pane at a separate origin.
+%% tip: conventions it should follow :: Dashed: seeded instructions bind the agent only if it reads and obeys them.

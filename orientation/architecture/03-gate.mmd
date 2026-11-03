@@ -1,0 +1,47 @@
+flowchart TD
+  prop["Proposed item"]
+  pane["Worklist pane"]
+  auth["Authorization record"]
+  claim["Execution claim"]
+  guard["bram-guard"]
+  edits["Agent edits"]
+  applied["Applied item"]
+  route["Commit route"]
+  commit["Git commit"]
+  done["Pruned, kept in history"]
+
+  prop -->|"shown on the board"| pane
+  pane -->|"Start records approval"| auth
+  auth -->|"starts claim"| claim
+  prop -->|"coverage read by guard"| guard
+  guard -->|"allow or deny"| edits
+  claim -->|"boundary trees"| edits
+  edits -.->|"agent calls advance"| applied
+  applied -->|"Commit click"| route
+  auth -->|"checked by mutate and commit"| route
+  route -->|"stages and commits"| commit
+  commit -->|"prune and snapshot"| done
+  pane -->|"Drop"| done
+
+%% tip: Proposed item :: An entry in resources/worklist.json plus before/after prose in resources/worklist-drafts/<id>.md. Writing it is asking, not approval.
+%% tip: Worklist pane :: The board where the user ticks items and clicks Start, Start & commit, Commit or Drop.
+%% tip: Authorization record :: resources/.worklist-authorization.json: one slot, replaced by the next gate click, 30 minute TTL.
+%% tip: Execution claim :: resources/.inflight-claim.json: which items are being worked on during a turn. Ends with the turn.
+%% tip: bram-guard :: The Rust guard binary run as a PreToolUse hook (Claude, Codex) or plugin call (OpenCode). Fails closed on guard faults.
+%% tip: Agent edits :: Edit, Write and shell writes by the agent, checked per call.
+%% tip: Applied item :: status applied: changes on disk, awaiting commit approval. A begun proposed item can be committed too.
+%% tip: Commit route :: worklist-commit: verifies approval, scope and message, then stages only the items' files or hunks.
+%% tip: Git commit :: A path-scoped git commit, or a plumbing commit built from claim-interval patches when items share a file.
+%% tip: Pruned, kept in history :: The row leaves worklist.json; the host snapshots each change under resources/worklist-history/.
+%% tip: shown on the board :: Bram merges draft prose into the board payload so the pane sees one combined item.
+%% tip: Start records approval :: The pane records the action through a Tauri command before the turn is sent.
+%% tip: starts claim :: Recording an approval also writes the execution claim for those ids.
+%% tip: coverage read by guard :: An edit is allowed when a proposed or applied item declares the path. Coverage is weaker than approval.
+%% tip: allow or deny :: Exit code and stderr: the model reads the deny reason.
+%% tip: boundary trees :: Each claim change captures a tree of the whole project, so changes can be attributed to intervals.
+%% tip: agent calls advance :: Dashed: the agent must call mutate op advance after applying. Nothing but the conventions makes it.
+%% tip: Commit click :: Records a fresh approval; Start & commit skips the advance.
+%% tip: checked by mutate and commit :: Routes check kind, ids and freshness against the stored record, not the button label.
+%% tip: stages and commits :: Path-scoped add and commit, or hunk-by-hunk when another item owns lines in the same file.
+%% tip: prune and snapshot :: The commit route prunes through the mutate handler; history snapshots follow.
+%% tip: Drop :: Removes the row, not the bytes on disk.

@@ -10,7 +10,7 @@ Bram runs agents mindfully.
 
 ## Who is it for?
 
-Anyone who uses Claude Code, Codex and/or OpenCode.
+Anyone who uses Claude Code, Codex, OpenCode and/or Antigravity.
 
 <a href="https://judell.github.io/bram/"><img alt="Bram demo video: a six-minute tour of Bram tackling and completing a GitHub issue. Click to watch on the Bram homepage." src="site/poster.jpg" /></a>
 
@@ -18,7 +18,7 @@ Anyone who uses Claude Code, Codex and/or OpenCode.
 
 ### Terminal (optional)
 
-A terminal where you run `claude`, `codex` or `opencode`. It starts closed, in favor of the
+A terminal where you run `claude`, `codex`, `opencode` or `agy` (Antigravity). It starts closed, in favor of the
 agent pane's Worklist, Transcript, and Queue views. The **terminal** button in
 the toolbar opens and closes it for the current session; to have it open every
 time Bram launches, turn on **Terminal open at startup** in the Settings tab's
@@ -84,8 +84,9 @@ live in [`app/__shell/conventions.md`](./app/__shell/conventions.md). Each agent
 loads that file automatically: Claude through `CLAUDE.md` and the installed
 `.claude` hook/config path, Codex through a repo-local `AGENTS.md` block that
 setup installs, OpenCode through an `instructions` entry in
-`.opencode/opencode.json`. These aren't merely advisory: a `PreToolUse` hook
-(for OpenCode, a plugin) on each agent enforces the core rule, rejecting file edits that aren't covered by an approved
+`.opencode/opencode.json`, Antigravity through always-on rules in
+`.agents/rules/`. These aren't merely advisory: a `PreToolUse` hook
+(for OpenCode, a plugin; for Antigravity, a hook group in `.agents/hooks.json`) on each agent enforces the core rule, rejecting file edits that aren't covered by an approved
 Worklist item — so the convention enforces itself rather than relying on the
 agent's goodwill.
 
@@ -146,13 +147,14 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 
 ### First-run setup
 
-The first time you launch `claude`, `codex` or `opencode` in a repo, Bram checks what that provider needs and prompts once if anything is missing — no prompt on later launches. Accepting Bram's setup prompt installs the Worklist conventions the agent reads each session plus provider-specific hooks that enforce the Worklist and show permission menus. A provider-neutral authorization record and watcher-revert fallback back up those hooks.
+The first time you launch `claude`, `codex`, `opencode` or `agy` in a repo, Bram checks what that provider needs and prompts once if anything is missing — no prompt on later launches. Accepting Bram's setup prompt installs the Worklist conventions the agent reads each session plus provider-specific hooks that enforce the Worklist and show permission menus. A provider-neutral authorization record and watcher-revert fallback back up those hooks.
 
 The agents differ in the trust step you see after Bram writes those files:
 
 - **Claude setup** is repo-local. Bram writes `.claude/bram-conventions.md` and `.claude/settings.json` hook registrations that point at `~/.bram/bram-guard`. Claude reads that project config on launch; there is no separate Codex-style hook trust menu. The Claude `PreToolUse` hook is the safety gate for `Write`, `Edit`, and `Bash`; the permission hook shows Claude permission and AskUserQuestion prompts in Bram's agent pane.
 - **Codex setup** has an explicit trust/approval step. Bram updates `~/.codex/config.toml` with hook registrations that point at `~/.bram/bram-guard`, writes Bram `developer_instructions`, and adds a repo-local `AGENTS.md` block. Codex then shows its hook approval screen; approve it only when it points at Bram-owned paths such as `~/.bram/bram-guard`, `~/.codex/config.toml`, and this repo's `AGENTS.md`. The Codex `PreToolUse` hook gates `apply_patch`, `Bash`, `Write`, `Edit`, and mutation-shaped MCP tools; the Codex permission hook shows `PermissionRequest` / `PostToolUse` menus in Bram's agent pane.
 - **OpenCode setup** is repo-local, with no trust screen. Bram writes `.opencode/plugins/bram.js` and adds an `instructions` entry to `.opencode/opencode.json` so OpenCode loads the conventions every session. It does this only where OpenCode can run: its CLI is on your PATH, it is the active agent, or the plugin is already installed. The plugin is OpenCode's counterpart of the `PreToolUse` hook: before each tool call that can change the project, it asks `~/.bram/bram-guard`, and it refuses the call unless the answer is an allow, including when the guard can't be reached. It also forwards OpenCode's turns and permission prompts to Bram's agent pane. Setup keeps a `.opencode/plugins/bram.js` you wrote yourself (one without Bram's marker) and reports that it did.
+- **Antigravity setup** is repo-local; the trust screen you see is agy's own folder-trust prompt the first time it opens a workspace. Bram merges a `bram-worklist-guard` group into `.agents/hooks.json`, keeping your own groups, and writes the conventions as always-on rules in `.agents/rules/bram-conventions-<n>.md`. It does this only where Antigravity can run: `agy` is on your PATH, it is the active agent, or Bram's group is already installed. The group runs `~/.bram/bram-guard` as a `PreToolUse` hook before agy's `write_file`, `edit_file`, `run_command` and `call_mcp_tool`, and the call is refused unless the answer is an allow. Setup keeps a rule you wrote yourself under one of those names, and leaves alone a `.agents/hooks.json` that isn't JSON; it reports both. Where `.agents/` has no tracked files and no `.gitignore`, Setup writes a `.agents/.gitignore` naming what it seeded.
 - **Do not approve unexpected Codex paths.** If the Codex approval screen lists hook commands other than `~/.bram/bram-guard` or config changes somewhere other than the expected Codex/project files, stop and inspect them first.
 
 Hook names mean the same thing in Claude and Codex:
@@ -176,6 +178,8 @@ Current behavior:
 - **Codex in a repo where setup has already run** — no prompt. The repo and user-global Codex setup artifacts are already in place.
 - **OpenCode in a fresh repo** — prompt once. Setup installs the provider-neutral core, the OpenCode plugin, and the `instructions` entry in `.opencode/opencode.json`.
 - **OpenCode in a repo where setup has already run** — no prompt.
+- **Antigravity in a fresh repo** — prompt once. Setup installs the provider-neutral core, Bram's hook group in `.agents/hooks.json`, and the always-on rules in `.agents/rules/`.
+- **Antigravity in a repo where setup has already run** — no prompt.
 
 When the prompt runs, Bram installs two layers:
 
@@ -187,7 +191,8 @@ Every hook is the same compiled Rust binary, `bram-guard`, built from
 `src-tauri/src/bin/bram-guard.rs` (the logic lives in
 `src-tauri/src/guard.rs`) and shipped beside the `bram` executable. The
 first argument after `guard` picks the hook: `claude-worklist`,
-`claude-permission-menu`, `codex-worklist`, or `codex-permission-menu`.
+`claude-permission-menu`, `codex-worklist`, `codex-permission-menu`,
+`opencode-worklist` or `antigravity-worklist`.
 Hook configs never reference the binary's own location. They reference
 `~/.bram/bram-guard`, which Bram re-points at its own `bram-guard` on
 every launch: a symlink on macOS and Linux, a hardlink (or copy) of
@@ -197,34 +202,37 @@ orphans the registration. Earlier releases installed Python hook scripts
 no Claude settings file (or, for the Codex scripts, `~/.codex/config.toml`)
 still references it.
 
-PreToolUse hooks are the generic extension point — both Claude Code and codex expose them — so the two adapters share the same shape: each runs *before* the agent invokes a tool, receives a JSON payload describing the pending call on stdin, and can exit 0 to allow, return a deny decision to block (stderr/permissionDecisionReason goes back to the agent as a tool error), or fail to launch. OpenCode has no such hook, so its adapter is a plugin (`.opencode/plugins/bram.js`) whose `execute.before` tool hook asks the same guard (`~/.bram/bram-guard guard opencode-worklist`) and throws to refuse the call; OpenCode's model reads the message as the refusal. The plugin fails closed: no guard, no answer, or an unreadable answer is a deny.
+PreToolUse hooks are the generic extension point — both Claude Code and codex expose them — so the two adapters share the same shape: each runs *before* the agent invokes a tool, receives a JSON payload describing the pending call on stdin, and can exit 0 to allow, return a deny decision to block (stderr/permissionDecisionReason goes back to the agent as a tool error), or fail to launch. OpenCode has no such hook, so its adapter is a plugin (`.opencode/plugins/bram.js`) whose `execute.before` tool hook asks the same guard (`~/.bram/bram-guard guard opencode-worklist`) and throws to refuse the call; OpenCode's model reads the message as the refusal. The plugin fails closed: no guard, no answer, or an unreadable answer is a deny. Antigravity does expose `PreToolUse`, in `.agents/hooks.json`; its group runs `~/.bram/bram-guard guard antigravity-worklist`, which maps agy's tools onto Claude's before the shared policy decides. Because agy runs a call when a hook exits 0 with empty output, the registered command turns empty output into a deny.
 
-That means first-run setup is provider-aware in when it prompts but provider-symmetric in what it installs: launching either `claude` or `codex` and accepting the prompt sets up the shared core, the Codex-side `AGENTS.md` guidance block, the Codex `developer_instructions`, the Worklist guard hooks, and the permission-menu surfacing hooks. The OpenCode plugin and its `instructions` entry are the exception: Setup writes them only where OpenCode can run, so projects whose users never run OpenCode get no `.opencode/` directory.
+That means first-run setup is provider-aware in when it prompts but provider-symmetric in what it installs: launching either `claude` or `codex` and accepting the prompt sets up the shared core, the Codex-side `AGENTS.md` guidance block, the Codex `developer_instructions`, the Worklist guard hooks, and the permission-menu surfacing hooks. The OpenCode plugin and its `instructions` entry are the exception: Setup writes them only where OpenCode can run, so projects whose users never run OpenCode get no `.opencode/` directory. Antigravity's hook group and rules are the same kind of exception: projects whose users never run `agy` get no `.agents/hooks.json` or `.agents/rules/`.
 
 #### How `conventions.md` governs each agent
 
 `app/__shell/conventions.md` is the canonical project convention file.
-It governs Claude, Codex and OpenCode in different ways:
+It governs Claude, Codex, OpenCode and Antigravity in different ways:
 
 - **Claude: direct prompt binding plus enforcement.** Setup copies that file to `.claude/bram-conventions.md`, adds an `@`-import block to `CLAUDE.md`, and registers the `bram-guard` PreToolUse hook. A new Claude session therefore reads the conventions file directly and is also mechanically blocked from unsafe worklist edits. Existing projects with the legacy `.claude/xmlui-desktop-conventions.md` path are migrated to the new name on the next Setup run.
 - **Codex: repo-local AGENTS.md plus native hook enforcement.** Setup writes a marked Bram block into repo-root `AGENTS.md`, installs top-level `developer_instructions` in `~/.codex/config.toml`, and registers the Codex Worklist guard as a native `PreToolUse` hook. Codex launches also receive the same concise Worklist guidance as a startup seed. The app reinforces that with the shared local authorization record in `resources/.worklist-authorization.json` and the watcher-revert fallback as defense in depth.
 - **OpenCode: an `instructions` entry plus plugin enforcement.** Setup adds the conventions to the `instructions` list in `.opencode/opencode.json`, which OpenCode loads every session, and seeds the plugin described above as the Worklist guard.
+- **Antigravity: always-on rules plus hook enforcement.** Setup cuts the conventions into always-on rules (`.agents/rules/bram-conventions-<n>.md`, each under agy's 24,000-byte rule limit), which agy loads every session, and registers the hook group described above as the Worklist guard.
 
 So the practical rule is: every agent is governed by the same Worklist
 conventions, with Claude reading the imported conventions file directly,
 Codex receiving the equivalent guidance through AGENTS, top-level
-`developer_instructions`, and its native hook adapter, and OpenCode
-loading them as instructions under its plugin.
+`developer_instructions`, and its native hook adapter, OpenCode
+loading them as instructions under its plugin, and Antigravity loading
+them as always-on rules under its hook group.
 
 The agents also differ in how they *call* Bram's Worklist
-lifecycle routes. Claude and OpenCode use the loopback HTTP endpoints directly.
+lifecycle routes. Claude, OpenCode and Antigravity use the loopback HTTP endpoints directly
+(for Antigravity, behind agy's own command permission).
 Codex's sandbox refuses loopback connections (`curl: (7)` even when
 Bram is listening, #130), so it drives the identical lifecycle over a
 filesystem channel instead — writing `resources/.worklist-intent.json`
 and reading `resources/.worklist-result.json`, which the host
 dispatches through the same handlers as the HTTP routes.
 
-The provider hooks validate direct edits to `resources/worklist.json`. Proposal authoring and iterate-time prose refinement are allowed there; mechanical prune / status-advance operations are expected to go through `POST /__worklist/mutate` instead. Both providers now reject direct Worklist edits that remove items or change their `status`, which keeps the shared backend endpoint as the canonical state machine for `advance` / `prune`. The watcher-based fallback (compare old/new worklist snapshots, consult `resources/.worklist-authorization.json`, restore prior contents if the prune wasn't authorized) remains as defense-in-depth — it fires later than a native hook, but it covers the case where a hook fails to launch (e.g., the `~/.bram/bram-guard` link is missing or points at a deleted build) or where a future provider integration lacks a comparable extension point.
+The provider hooks validate direct edits to `resources/worklist.json`. Proposal authoring and iterate-time prose refinement are allowed there; mechanical prune / status-advance operations are expected to go through `POST /__worklist/mutate` instead. Every provider's guard rejects direct Worklist edits that remove items or change their `status`, which keeps the shared backend endpoint as the canonical state machine for `advance` / `prune`. The watcher-based fallback (compare old/new worklist snapshots, consult `resources/.worklist-authorization.json`, restore prior contents if the prune wasn't authorized) remains as defense-in-depth — it fires later than a native hook, but it covers the case where a hook fails to launch (e.g., the `~/.bram/bram-guard` link is missing or points at a deleted build) or where a future provider integration lacks a comparable extension point.
 
 The guard has no runtime dependencies: no Python, no interpreter on PATH. If `~/.bram/bram-guard` is missing, Bram's Setup status reports the project as needing Setup, because the expected hook commands are derived from that link.
 
@@ -248,10 +256,11 @@ Bram autostarts an agent in the terminal at launch. Configure it under
 }
 ```
 
-- `agent` — which provider to launch, `claude`, `codex` or `opencode` (defaults to `claude`).
+- `agent` — which provider to launch, `claude`, `codex`, `opencode` or `antigravity` (defaults to `claude`).
 - `args` — optional extra arguments appended to the launch command.
 - `continueLast` — when `true`, resume the most recent session
-  (`claude --continue` / `codex resume --last` / `opencode --continue`)
+  (`claude --continue` / `codex resume --last` / `opencode --continue` /
+  `agy --continue`)
   instead of starting fresh.
 - `firstCommand` — optional command typed into the agent once it's ready.
 

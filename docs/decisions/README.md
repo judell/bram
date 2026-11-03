@@ -30,6 +30,7 @@ Status: decided YYYY-MM-DD · revisit <when>
 
 ## Index
 
+- [2026-11-02 — Bram's per-project state folder becomes `.bram/`, moved in three releases](2026-11-02-bram-state-folder-is-dot-bram.md)
 - [2026-10-30 — Bram finds subagent transcripts from each provider's own parent link](2026-10-30-subagent-transcript-provider-discovery.md)
 - [2026-10-27 — Bram chooses the session; nothing else names it](2026-10-27-bram-chooses-the-session.md)
 - [2026-10-21 — Authorization becomes one pipeline, designed for a cooperative agent that makes mistakes](2026-10-21-authorization-one-pipeline.md)

@@ -107,7 +107,11 @@
   // collect every label drawn, and add headroom so a raised label can't be
   // clipped.
   function decorate(svg, tips, details, labels) {
-    const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+    // Mermaid draws a box with line breaks as HTML in a foreignObject, and
+    // HTML's <br> is not closed; the XML parser below rejects it ("Unexpected
+    // closing tag"). Close it before parsing. Other void tags don't occur in
+    // labels.
+    const doc = new DOMParser().parseFromString(svg.replace(/<br\s*>/gi, "<br/>"), "image/svg+xml");
     const svgRoot = doc.documentElement;
     const num = "(-?[\\d.]+)";
     const translate = new RegExp("translate\\(\\s*" + num + "[ ,]+" + num + "\\s*\\)");
@@ -217,5 +221,12 @@
     + " (" + SITE.date + "). Each diagram is a file in architecture/. Hover a box or"
     + " arrow for a tip; click it, or Tab to it and press Enter, for detail that cites the code.";
 
-  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail};
+  // The site is three plain pages, the web's own mechanism, no router: the
+  // folder root is Start, and diagrams/ and overview/ hold a copied
+  // index.html with <base href="../">. Each index.html names its page in
+  // window.ORIENTATION_PAGE and carries the nav as plain HTML; Main.xmlui
+  // renders the section for Arch.page.
+  const page = root.ORIENTATION_PAGE || "start";
+
+  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page};
 })(globalThis);

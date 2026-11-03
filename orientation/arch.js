@@ -27,13 +27,13 @@
     {file: "02-turn.mmd", title: "A turn's lifecycle",
       note: "From a pane action to the PTY, the agent and its transcript, and back to the pane as turn state. The dashed arrow depends on the agent opening a referenced draft file."},
     {file: "03-gate.mmd", title: "The Worklist gate",
-      note: "Propose, Start, claim, apply, commit, prune, with the guard. The dashed arrow (agent calls advance) depends on the agent remembering; everything else is host or hook behavior."},
+      note: "How a change gets into the repo. An agent proposes an item; you click Start, which records your approval and opens a claim; the guard lets the agent edit only what the item covers; you click Commit, and the host stages, commits and keeps the record. The one dashed arrow is the agent telling the board it has finished editing: everything else happens whether or not anyone remembers."},
     {file: "04-state.mmd", title: "State and data",
-      note: "Files in the state folder (resources/ unless .bram/ exists), the authorization record, claim refs, traces, the state mirror, the search index, and which session is current. Solid arrows are what code does on its own; the dashed arrow depends on someone pushing refs on purpose."},
+      note: "Where Bram keeps what it knows. Everything per project lives in one state folder (resources/ today, .bram/ once it exists): the worklist and its drafts, the record of what you approved, the claim marking which lines an item wrote, traces, a mirror of the board's history, and the search index over all of it. Git holds the claim refs. The one dashed arrow is a person pushing those refs on purpose."},
     {file: "05-providers.mmd", title: "Providers",
-      note: "What Claude, Codex, OpenCode and Antigravity share and where they differ. Dashed arrows are instructions each model is asked to follow; solid arrows are launches, registrations, transports and signals the host reads on its own."},
+      note: "The four providers are one kind of thing. The top is what every provider does, drawn once: the seeded conventions it loads (dashed: the model must follow them), the guard it runs before every tool call, the Worklist routes it reaches, the transcript the host reads. The bottom row is the providers; each box lists only where it differs. A new provider is one more box."},
     {file: "06-build.mmd", title: "Build, run and release",
-      note: "The ./bram launch, what serves from disk, seeded conventions and Setup, and the release workflow. Dashed arrows need a person to rebuild, relaunch or click Setup."},
+      note: "How Bram is built, started and shipped. A debug build is the shipping build; launched through the ./bram symlink, the pane is served from the source tree so edits show on reload, while the Rust host needs a rebuild and relaunch. Setup seeds each managed repo with the conventions and the hooks. A release is one script that bumps, tags, pushes and starts the build. Dashed arrows need a person to rebuild, relaunch or click Setup."},
   ];
   // ------------------------------------------------------------------------
 
@@ -117,7 +117,11 @@
   // collect every label drawn, and add headroom so a raised label can't be
   // clipped.
   function decorate(svg, tips, details, labels) {
-    const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+    // Mermaid draws a box with line breaks as HTML in a foreignObject, and
+    // HTML's <br> is not closed; the XML parser below rejects it ("Unexpected
+    // closing tag"). Close it before parsing. Other void tags don't occur in
+    // labels.
+    const doc = new DOMParser().parseFromString(svg.replace(/<br\s*>/gi, "<br/>"), "image/svg+xml");
     const svgRoot = doc.documentElement;
     const num = "(-?[\\d.]+)";
     const translate = new RegExp("translate\\(\\s*" + num + "[ ,]+" + num + "\\s*\\)");
@@ -227,5 +231,12 @@
     + " (" + SITE.date + "). Each diagram is a file in architecture/. Hover a box or"
     + " arrow for a tip; click it, or Tab to it and press Enter, for detail that cites the code.";
 
-  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail};
+  // The site is three plain pages, the web's own mechanism, no router: the
+  // folder root is Start, and diagrams/ and overview/ hold a copied
+  // index.html with <base href="../">. Each index.html names its page in
+  // window.ORIENTATION_PAGE and carries the nav as plain HTML; Main.xmlui
+  // renders the section for Arch.page.
+  const page = root.ORIENTATION_PAGE || "start";
+
+  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page};
 })(globalThis);

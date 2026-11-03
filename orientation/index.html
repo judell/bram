@@ -18,8 +18,21 @@
          arch.js loads first: the engine snapshots window at boot, so Arch
          must exist by then. -->
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11.12.1/dist/mermaid.min.js"></script>
+    <script>window.ORIENTATION_PAGE = "start";</script>
     <script src="arch.js"></script>
     <script src="https://judell.github.io/bram/extras/vendor/xmlui-standalone.umd.js"></script>
+    <style>
+      /* The nav is plain HTML outside the XMLUI root, so its links are the
+         web's own: relative hrefs, full page loads, no router. Colors match
+         the site's palette in Main.xmlui. */
+      body { margin: 0; background: #fbfaf7; color: #1d1d1b; }
+      nav.site-nav { font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+        padding: 14px 24px 0; }
+      nav.site-nav a { color: #2f5d8a; }
+    </style>
   </head>
-  <body></body>
+  <body>
+    <nav class="site-nav"><strong>Start</strong> · <a href="diagrams/">Diagrams</a> · <a href="overview/">Overview</a></nav>
+    <div id="root"></div>
+  </body>
 </html>

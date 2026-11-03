@@ -3,8 +3,9 @@
 Seeded by Bram Setup as `.claude/bram-reference/orientation.md`. Read this
 when the user clicks **Orient me** on Bram's startup greeting, or
 asks you to orient them in, survey, or map a repo. It is how to build an
-**orientation site**: a small static XMLUI app with a Start tab for the
-owner's own words, a Diagrams tab of Mermaid diagrams, and an Overview tab. Every box and arrow in a diagram opens
+**orientation site**: a small static XMLUI app of three pages, each a real
+URL: Start (the folder root) for the owner's own words, `diagrams/` of Mermaid
+diagrams, and `overview/`. Every box and arrow in a diagram opens
 detail that cites the code at a pinned commit. The pattern was built by hand
 three times (tau-hub, together-groups-beta, pwkm) before it became this
 playbook. The template you copy is beside this file, in
@@ -47,7 +48,11 @@ Then stop and wait for **Start**.
 ### 3. Build
 
 1. Copy the template: `cp -R .claude/bram-reference/orientation-template
-   orientation` (on Windows, `Copy-Item -Recurse`).
+   orientation` (on Windows, `Copy-Item -Recurse`). It is three pages with no
+   router: the folder root is Start, and `diagrams/index.html` and
+   `overview/index.html` are copies of the root `index.html` with
+   `<base href="../">`, so they share every file in the folder. A new page is
+   a new folder with the same copy.
 2. Edit only the `SITE` block at the top of `orientation/arch.js`: the
    project name, the pinned commit and its date, your signature line in the
    forge form (`<owner>'s <Agent> (Bram <version>, <thread>, <model>, <os>,
@@ -56,7 +61,7 @@ Then stop and wait for **Start**.
    may be left out, while the forge convention for issues and comments stays
    as it is),
    and the diagram list. Leave `orientation/START.md` alone:
-   the Start tab is the owner's, in their own words, and you never write or
+   the Start page is the owner's, in their own words, and you never write or
    edit it.
 3. Write `orientation/OVERVIEW.md`: what the project is, how it runs, where
    to start reading, and open questions. Keep the template's headings unless
@@ -92,7 +97,7 @@ Then stop and wait for **Start**.
 
 All three, before you call it done:
 
-- **Structure.** Serve the site, open the Diagrams tab in a real
+- **Structure.** Serve the site, open the diagrams page in a real
   browser, and look at what the page draws. Under each diagram, the template
   lists every label with no section and every section matching nothing
   drawn. There must be none. Comparing the source files doesn't count: that

@@ -2,7 +2,6 @@
      From Bram's orientation template, first built for tau-hub,
      together-groups-beta and pwkm. Content lives in OVERVIEW.md and
      architecture/; the diagram list and caption in arch.js's SITE block.
-     Tabs/TabItem: https://www.xmlui.org/docs/reference/components/Tabs
      Markdown file via DataSource -> content: https://www.xmlui.org/docs/howto/render-markdown-content-as-a-page -->
 <Theme
   backgroundColor="#fbfaf7"
@@ -20,14 +19,18 @@
   <!-- Browser tab title; without it XMLUI shows "XMLUI app":
        https://www.xmlui.org/docs/howto/set-the-page-title-dynamically -->
   <PageMetaTitle value="Bram" noSuffix="{true}" />
-  <Tabs>
-    <TabItem label="Start">
+  <!-- Three pages, three real URLs (the folder root, diagrams/, overview/):
+       the web's own mechanism, no router. The nav is plain HTML in each
+       index.html, outside this root; arch.js names the current page
+       (Arch.page) and this file renders that page's section. -->
+  <VStack gap="$space-4">
+    <VStack when="{Arch.page === 'start'}">
       <!-- The owner's own words, from START.md. The agent never writes or
            edits this file; everything after this tab is the agent's. -->
       <DataSource id="start" url="START.md" />
       <Markdown when="{start.loaded}" content="{start.value}" openLinkInNewTab="{true}" />
-    </TabItem>
-    <TabItem label="Diagrams">
+    </VStack>
+    <VStack when="{Arch.page === 'diagrams'}">
       <!-- Mermaid diagrams from architecture/*.mmd, rendered once on mount:
            https://www.xmlui.org/docs/howto/run-a-one-time-action-on-page-load
            Each renders as live SVG in an IFrame so labels can carry hover text:
@@ -71,11 +74,11 @@
           </VStack>
         </Items>
       </VStack>
-    </TabItem>
-    <TabItem label="Overview">
+    </VStack>
+    <VStack when="{Arch.page === 'overview'}">
       <DataSource id="overview" url="OVERVIEW.md" />
       <Markdown when="{overview.loaded}" content="{overview.value}" openLinkInNewTab="{true}" />
-    </TabItem>
-  </Tabs>
+    </VStack>
+  </VStack>
 </App>
 </Theme>

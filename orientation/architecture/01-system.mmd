@@ -16,7 +16,7 @@ flowchart TD
   cli -->|"edits, gated by hooks"| repo
   cli -->|"Worklist calls"| loop
   loop -->|"serves project content"| target
-  repo -.->|"conventions it should follow"| cli
+  repo -->|"conventions it should follow"| cli
 
 %% Hover text for boxes and arrow labels, keyed by the label exactly as drawn.
 %% tip: You :: Anyone who uses Claude Code, Codex, OpenCode or Antigravity, working from the root of a git repo.
@@ -35,4 +35,4 @@ flowchart TD
 %% tip: Tauri events :: The host pushes events such as turn-state-changed; the pane refetches on them.
 %% tip: edits, gated by hooks :: Agent file edits pass through bram-guard, which allows or denies them.
 %% tip: serves project content :: handle_target_scheme proxies project files to the target pane at a separate origin.
-%% tip: conventions it should follow :: Dashed: seeded instructions bind the agent only if it reads and obeys them.
+%% tip: conventions it should follow :: Seeded instructions bind the agent only if it reads and obeys them.

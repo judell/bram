@@ -1,6 +1,6 @@
 # System at a glance: detail
 
-Click-through detail for 01-system.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). Solid arrows are what code does on its own; the dashed arrow depends on the agent reading and following instructions. Where a claim is not backed by a cited line, the text says the repo is silent.
+Click-through detail for 01-system.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). One arrow, the conventions, depends on the agent reading and following instructions; the rest is what code does on its own. Where a claim is not backed by a cited line, the text says the repo is silent.
 
 ## You
 
@@ -78,4 +78,4 @@ The target-app scheme proxies `/__project/*` to the project's upstream, which is
 
 ## conventions it should follow
 
-Dashed because it relies on the agent. Setup seeds `.claude/bram-conventions.md` and the README says each agent loads the conventions: "Claude through `CLAUDE.md`... Codex through a repo-local `AGENTS.md` block... OpenCode through an `instructions` entry... Antigravity through always-on rules". [`README.md:79-91`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L79-L91) The README adds that these "aren't merely advisory" because hooks enforce the core rule, so part of this arrow is solid; the part that isn't hook-enforced is the prose guidance. [`README.md:86-91`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L86-L91) Setup writes the sidecar in [`src-tauri/src/lib.rs:59169-59191`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L59169-L59191).
+This arrow relies on the agent. Setup seeds `.claude/bram-conventions.md` and the README says each agent loads the conventions: "Claude through `CLAUDE.md`... Codex through a repo-local `AGENTS.md` block... OpenCode through an `instructions` entry... Antigravity through always-on rules". [`README.md:79-91`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L79-L91) The README adds that these "aren't merely advisory" because hooks enforce the core rule, so part of what this arrow carries is enforced; the rest is prose guidance the agent follows. [`README.md:86-91`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/README.md?plain=1#L86-L91) Setup writes the sidecar in [`src-tauri/src/lib.rs:59169-59191`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L59169-L59191).

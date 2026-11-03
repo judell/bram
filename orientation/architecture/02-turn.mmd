@@ -17,7 +17,7 @@ flowchart TD
   log -->|"JSONL turn-end scan"| spine
   spine -->|"turn-state-changed event"| pane
   log -->|"projected turns"| pane
-  cli -.->|"reads draft by reference"| drafts
+  cli -->|"reads draft by reference"| drafts
 
 %% tip: Pane action :: A click on Start, Commit or Drop, or a message typed in the message box.
 %% tip: Draft files :: resources/feedback-drafts and resources/outbound-turns hold full-fidelity text so the PTY carries only a short frame.
@@ -36,4 +36,4 @@ flowchart TD
 %% tip: JSONL turn-end scan :: Structured, authoritative for completion, but delayed.
 %% tip: turn-state-changed event :: Emitted only when phase, provider, turn stamp or menu changes.
 %% tip: projected turns :: The /__turns route normalizes transcripts and outbound envelopes into one list.
-%% tip: reads draft by reference :: Dashed: only works if the agent opens the referenced file.
+%% tip: reads draft by reference :: Only works if the agent opens the referenced file.

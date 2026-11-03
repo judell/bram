@@ -16,7 +16,7 @@ flowchart TD
   prop -->|"coverage read by guard"| guard
   guard -->|"allow or deny"| edits
   claim -->|"boundary trees"| edits
-  edits -.->|"agent calls advance"| applied
+  edits -->|"agent calls advance"| applied
   applied -->|"Commit click"| route
   auth -->|"checked by mutate and commit"| route
   route -->|"stages and commits"| commit
@@ -39,7 +39,7 @@ flowchart TD
 %% tip: coverage read by guard :: An edit is allowed when a proposed or applied item declares the path. Coverage is weaker than approval.
 %% tip: allow or deny :: Exit code and stderr: the model reads the deny reason.
 %% tip: boundary trees :: Each claim change captures a tree of the whole project, so changes can be attributed to intervals.
-%% tip: agent calls advance :: Dashed: the agent must call mutate op advance after applying. Nothing but the conventions makes it.
+%% tip: agent calls advance :: The agent must call mutate op advance after applying. Nothing but the conventions makes it.
 %% tip: Commit click :: Records a fresh approval; Start & commit skips the advance.
 %% tip: checked by mutate and commit :: Routes check kind, ids and freshness against the stored record, not the button label.
 %% tip: stages and commits :: Path-scoped add and commit, or hunk-by-hunk when another item owns lines in the same file.

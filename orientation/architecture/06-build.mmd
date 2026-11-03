@@ -9,11 +9,11 @@ flowchart TD
   gh["GitHub release"]
 
   src -->|"scripts/build.sh"| bin
-  src -.->|"rebuild and relaunch for Rust"| bin
+  src -->|"rebuild and relaunch for Rust"| bin
   bin -->|"launched via ./bram"| disk
   bin -->|"raw binary launch"| emb
   src -->|"build.rs sync"| copies
-  bin -.->|"Setup click seeds"| proj
+  bin -->|"Setup click seeds"| proj
   src -->|"scripts/bump.sh"| rel
   rel -->|"builds and attaches binaries"| gh
 
@@ -30,10 +30,10 @@ flowchart TD
 %% tip: Release workflow :: .github/workflows/build.yml, workflow_dispatch only: verify, test, create release, build four targets, publish checksums.
 %% tip: GitHub release :: Archives of bram and bram-guard per platform, plus install scripts.
 %% tip: scripts/build.sh :: The same debug cargo build, with a line appended to resources/build-log.jsonl.
-%% tip: rebuild and relaunch for Rust :: Dashed: nothing rebuilds src-tauri/ for you, and a running process keeps the inode it started with.
+%% tip: rebuild and relaunch for Rust :: Nothing rebuilds src-tauri/ for you, and a running process keeps the inode it started with.
 %% tip: launched via ./bram :: The symlink at the repo root keeps the executable's parent at the repo root, where app/ lives.
 %% tip: raw binary launch :: With no app/ beside it, everything serves from the embedded tree baked at the last build.
 %% tip: build.rs sync :: Runs on every build; copies canonical files to their installed twins.
-%% tip: Setup click seeds :: Dashed: Setup runs when the user clicks it (or calls the enhance route); a banner appears when installed files are stale, and /__enhance/status says which check failed.
+%% tip: Setup click seeds :: Setup runs when the user clicks it (or calls the enhance route); a banner appears when installed files are stale, and /__enhance/status says which check failed.
 %% tip: scripts/bump.sh :: Bumps the version in Cargo.toml and tauri.conf.json, builds, commits, tags, pushes and dispatches the workflow.
 %% tip: builds and attaches binaries :: Debug builds for linux-amd64, macos-arm64, macos-intel and windows-amd64.

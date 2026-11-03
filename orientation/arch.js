@@ -23,17 +23,17 @@
   };
   const ARCHITECTURE = [
     {file: "01-system.mmd", title: "System at a glance",
-      note: "What you are looking at when Bram is open. A Rust shell runs the agent CLI in a terminal and provides a UI over it; the pane and the agent both talk to a small HTTP server on your machine; a target-app pane is optional. The one dashed arrow is the agent reading the conventions Bram seeds into the repo: everything else is wiring that works on its own. Click a box or arrow for detail."},
+      note: "What you are looking at when Bram is open. A Rust shell runs the agent CLI in a terminal and provides a UI over it; the pane and the agent both talk to a small HTTP server on your machine; a target-app pane is optional. The conventions Bram seeds into the repo are instructions the agent reads and follows; everything else is wiring that works on its own. Click a box or arrow for detail."},
     {file: "02-turn.mmd", title: "A turn's lifecycle",
-      note: "From a pane action to the PTY, the agent and its transcript, and back to the pane as turn state. The dashed arrow depends on the agent opening a referenced draft file."},
+      note: "From a pane action to the PTY, the agent and its transcript, and back to the pane as turn state. A referenced draft file is read only if the agent opens it."},
     {file: "03-gate.mmd", title: "The Worklist gate",
-      note: "How a change gets into the repo. An agent proposes an item; you click Start, which records your approval and opens a claim; the guard lets the agent edit only what the item covers; you click Commit, and the host stages, commits and keeps the record. The one dashed arrow is the agent telling the board it has finished editing: everything else happens whether or not anyone remembers."},
+      note: "How a change gets into the repo. An agent proposes an item; you click Start, which records your approval and opens a claim; the guard lets the agent edit only what the item covers; you click Commit, and the host stages, commits and keeps the record. Telling the board it has finished editing is the agent's to remember; everything else happens on its own."},
     {file: "04-state.mmd", title: "State and data",
-      note: "Where Bram keeps what it knows. Everything per project lives in one state folder (resources/ today, .bram/ once it exists): the worklist and its drafts, the record of what you approved, the claim marking which lines an item wrote, traces, a mirror of the board's history, and the search index over all of it. Git holds the claim refs. The one dashed arrow is a person pushing those refs on purpose."},
+      note: "Where Bram keeps what it knows. Everything per project lives in one state folder (resources/ today, .bram/ once it exists): the worklist and its drafts, the record of what you approved, the claim marking which lines an item wrote, traces, a mirror of the board's history, and the search index over all of it. Git holds the claim refs. The claim refs leave the machine only when a person pushes them on purpose."},
     {file: "05-providers.mmd", title: "Providers",
       note: "A provider wraps an agentic CLI. Each wrapped CLI is influenced by the same set of soft conventions and hard enforcement."},
     {file: "06-build.mmd", title: "Build, run and release",
-      note: "How Bram is built, started and shipped. A debug build is the shipping build; launched through the ./bram symlink, the pane is served from the source tree so edits show on reload, while the Rust host needs a rebuild and relaunch. Setup seeds each managed repo with the conventions and the hooks. A release is one script that bumps, tags, pushes and starts the build. Dashed arrows need a person to rebuild, relaunch or click Setup."},
+      note: "How Bram is built, started and shipped. A debug build is the shipping build; launched through the ./bram symlink, the pane is served from the source tree so edits show on reload, while the Rust host needs a rebuild and relaunch. Setup seeds each managed repo with the conventions and the hooks. A release is one script that bumps, tags, pushes and starts the build. Rebuilding, relaunching and Setup each need a person."},
   ];
   // ------------------------------------------------------------------------
 

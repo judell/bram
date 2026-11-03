@@ -88,9 +88,11 @@ Then stop and wait for **Start**.
     once in the overview that links can't be built.
 - **Quote, don't paraphrase,** where a short phrase from the repo carries
   the point.
-- **Solid arrows** (`-->`) are what code does on its own. **Dashed arrows**
-  (`-.->`) are what happens only if a person or agent remembers to do it.
-  Say which is which in the diagram's note.
+- **Draw what happens; don't encode it in the line style.** Where a step
+  depends on a person or a model doing what they're asked (a convention the
+  agent must follow, a click, a push), say so in that arrow's tip and detail
+  and in the diagram's note. A dashed-versus-solid convention was tried and
+  read as a quirk: one dashed arrow per diagram, each explained differently.
 - **Say where the repo is silent.** "The repo doesn't say" beats a guess.
 
 ### 5. Done means checked

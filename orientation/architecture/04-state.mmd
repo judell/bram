@@ -27,7 +27,7 @@ flowchart TD
   tx -->|"read by host"| host
   auth -->|"read by guard"| guard
   pane -->|"saves decisions and focus"| store
-  refs -.->|"shared only by explicit refspec"| remote
+  refs -->|"shared only by explicit refspec"| remote
   guard -->|"session hook names it"| cur
 
   %% Invisible links stack the nodes into short rows, top to bottom.
@@ -69,4 +69,4 @@ flowchart TD
 %% tip: read by host :: The host watches and projects transcripts for turn state and the Transcript tab.
 %% tip: read by guard :: Per-call, from a separate process.
 %% tip: saves decisions and focus :: Decisions persist; focus dies with the session.
-%% tip: shared only by explicit refspec :: Dashed: claim refs are machine-local unless someone pushes them on purpose.
+%% tip: shared only by explicit refspec :: Claim refs are machine-local unless someone pushes them on purpose.

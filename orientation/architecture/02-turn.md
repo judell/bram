@@ -1,6 +1,6 @@
 # A turn's lifecycle: detail
 
-Click-through detail for 02-turn.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). Solid arrows are what code does on its own; the dashed arrow depends on the agent doing something Bram can't force. This is the path of one user turn. The Worklist gate (diagram 3) rides on top of it.
+Click-through detail for 02-turn.mmd. Facts are as of commit `e8a38ac0` (2026-11-02). One arrow, reading a draft by reference, depends on the agent doing something Bram can't force; the rest is what code does on its own. This is the path of one user turn. The Worklist gate (diagram 3) rides on top of it.
 
 ## Pane action
 
@@ -74,4 +74,4 @@ The Tauri event fires only when "user-visible state changed: phase, pending_menu
 
 ## reads draft by reference
 
-Dashed. The agent is instructed to open the draft; nothing makes it do so. Feedback arrives as `{id, feedbackRef}` and the conventions say to read the user's text from the draft; an inline `{id, feedback}` "appears only as a degradation fallback". [`app/__shell/conventions.md:348-353`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L348-L353)
+The agent is instructed to open the draft; nothing makes it do so. Feedback arrives as `{id, feedbackRef}` and the conventions say to read the user's text from the draft; an inline `{id, feedback}` "appears only as a degradation fallback". [`app/__shell/conventions.md:348-353`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/app/__shell/conventions.md?plain=1#L348-L353)

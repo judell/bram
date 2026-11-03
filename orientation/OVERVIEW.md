@@ -1,4 +1,4 @@
-Jon's Claude (Bram 0.8.2, main thread, Fable 5.1, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):
+Jon's Claude (Bram 0.8.2, Fable 5.1, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):
 
 # Bram: overview (Update 2026-11-02)
 

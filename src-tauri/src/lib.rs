@@ -47756,21 +47756,45 @@ mod subagent_state_tests {
     }
 }
 
+// How far into a subagent sidecar st_subagent_model reads for the first
+// assistant record. Until Claude Code 2.1.316 the dispatch prompt was the
+// only record ahead of it and 128 KB was plenty. From 2.1.316 the dispatch
+// record is followed by `attachment` records (one measured at 245 KB) and
+// `api-request-shape` / `api-request-blob` / `api-request` records (~200 KB
+// together), so the first assistant record sat at ~512 KB in all three
+// sidecars examined (subagent-model-read-past-attachments). 8 MB leaves
+// generous headroom while still bounding a pathological file.
+const SUBAGENT_MODEL_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
 // Model a subagent ran on: the first assistant record's message.model in
-// its transcript. Head-bounded read — the dispatch prompt (first user
-// record) is KBs, so 128 KB comfortably reaches the first assistant line.
+// its transcript. Reads line by line, up to SUBAGENT_MODEL_SCAN_BYTES.
 fn st_subagent_model(jsonl_path: &Path) -> String {
-    use std::io::Read;
+    st_subagent_model_bounded(jsonl_path, SUBAGENT_MODEL_SCAN_BYTES)
+}
+
+fn st_subagent_model_bounded(jsonl_path: &Path, max_bytes: u64) -> String {
+    use std::io::{BufRead, Read};
     let Ok(f) = std::fs::File::open(jsonl_path) else {
         return String::new();
     };
-    let mut buf = Vec::new();
-    let _ = f.take(128 * 1024).read_to_end(&mut buf);
-    let text = String::from_utf8_lossy(&buf);
-    for line in text.lines() {
+    let mut reader = std::io::BufReader::new(f.take(max_bytes));
+    let mut line: Vec<u8> = Vec::new();
+    const NEEDLE: &[u8] = b"\"assistant\"";
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        // Cheap prefilter: a line that never mentions "assistant" can't be
+        // an assistant record, so the large attachment / api-request
+        // records skip the JSON parse. The parse below is the real test.
+        if !line.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
+            continue;
+        }
         // The last line may be truncated by the byte cap; parse failures
         // just skip.
-        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(r) = serde_json::from_slice::<serde_json::Value>(&line) else {
             continue;
         };
         if r.get("type").and_then(|v| v.as_str()) == Some("assistant") {
@@ -47778,12 +47802,76 @@ fn st_subagent_model(jsonl_path: &Path) -> String {
                 .get("message")
                 .and_then(|m| m.get("model"))
                 .and_then(|v| v.as_str())
+                .filter(|m| !m.is_empty())
             {
                 return m.to_string();
             }
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod subagent_model_tests {
+    use super::{st_subagent_model, st_subagent_model_bounded};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_sidecar(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bram-subagent-model-test-{}-{}-{}",
+            label,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("agent-test.jsonl")
+    }
+
+    // A sidecar in Claude Code 2.1.316's shape: dispatch, a large
+    // attachment, a large api-request-blob, then the first assistant record.
+    fn write_2_1_316_sidecar(path: &PathBuf) {
+        let mut f = std::fs::File::create(path).unwrap();
+        let dispatch = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "do the thing"},
+        });
+        let attachment = serde_json::json!({
+            "type": "attachment",
+            "attachment": {"content": "a".repeat(300 * 1024)},
+        });
+        let blob = serde_json::json!({
+            "type": "api-request-blob",
+            "blob": "b".repeat(250 * 1024),
+        });
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "model": "claude-test-model", "content": []},
+        });
+        for r in [dispatch, attachment, blob, assistant] {
+            writeln!(f, "{}", serde_json::to_string(&r).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn finds_model_past_large_attachment_and_request_records() {
+        let path = temp_sidecar("found");
+        write_2_1_316_sidecar(&path);
+        assert_eq!(st_subagent_model(&path), "claude-test-model");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn empty_when_no_assistant_record_within_bound() {
+        let path = temp_sidecar("bounded");
+        write_2_1_316_sidecar(&path);
+        // The assistant record starts past 512 KB; a 400 KB bound stops
+        // inside the blob record.
+        assert_eq!(st_subagent_model_bounded(&path, 400 * 1024), "");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }
 
 // Tag Agent/Task tool entries in the MAIN projection with the agentId of

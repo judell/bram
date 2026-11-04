@@ -17358,13 +17358,25 @@ window.__bramStateDirPlanLiveClaimLine = function (p) {
 // issue-469-mixed-folder-dialog: the mixed-folder banner (Main.xmlui) and the
 // Status tab's "Move at next launch", from the plan's `pending` / `decision`.
 // Parts: show (banner visible), chosen (Move already chosen), text, stays
-// (tooltip naming what stays), offer (Status button visible).
-window.__bramStateMoveBanner = function (p, part) {
+// (tooltip naming what stays), offer (Status button visible), pending.
+// `last` is the decision call's lastResult ({choice, atMs}): the newer of it
+// and the plan's recorded decision wins, so a click changes the banner when
+// its POST returns instead of after the plan refetch, which took 30 s on
+// Windows (issue-469-state-move-pane-fixes; APICall lastResult:
+// https://www.xmlui.org/docs/reference/components/APICall#lastresult).
+window.__bramStateMoveBanner = function (p, part, last) {
+  if (part === "pending") return !!(p && p.pending);
   if (!p || !p.pending) return part === "text" || part === "stays" ? "" : false;
-  var choice = (p.decision || {}).choice || "";
+  var recorded = p.decision || {};
+  var latest = last && last.choice && (last.atMs || 0) >= (recorded.atMs || 0) ? last : recorded;
+  var choice = latest.choice || "";
   if (part === "show") return choice !== "not-now";
   if (part === "chosen") return choice === "move";
-  if (part === "offer") return choice !== "move";
+  if (part === "offer") {
+    var offer = choice !== "move";
+    window.__bramStateMoveTraceOffer(offer, choice);
+    return offer;
+  }
   if (part === "stays") {
     var names = (p.foreign || []).map(function (f) { return f.name + (f.isDir ? "/" : ""); });
     return "Stays in " + p.stateDir + "/: " + (names.join(", ") || "tracked files") + ".";
@@ -17373,6 +17385,65 @@ window.__bramStateMoveBanner = function (p, part) {
   return "Bram's folder " + p.stateDir + "/ also holds files that aren't Bram's" +
     (p.pending === "tracked" ? " or are tracked by git" : "") +
     ", so it can move only its own files to .bram/, at the next launch.";
+};
+
+// The banner's and Status's Move / Not now: a plain fetch, like the subagent
+// Release, instead of an APICall. The host answers in under 1 ms and pushes
+// `state-dir-changed`, on which both surfaces refetch the plan; the APICall
+// path completed ~30 s late in the pane on macOS and Windows
+// (issue-469-state-move-pane-fixes). Traced click and done, with elapsed ms.
+window.__bramStateMoveDecide = function (choice) {
+  var started = Date.now();
+  var trace = function (op, extra) {
+    try {
+      if (typeof window.logToHost !== "function") return;
+      var payload = {
+        kind: "iframe-trace",
+        subkind: "state-move-decide",
+        at: new Date().toISOString(),
+        op: op,
+        choice: choice,
+        ms: Date.now() - started,
+      };
+      if (extra) Object.assign(payload, extra);
+      window.logToHost(payload);
+    } catch (e) {}
+  };
+  trace("click");
+  return window
+    .fetch("/__state-dir/decision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ choice: choice }),
+    })
+    .then(function (r) { trace("done", { status: r.status }); })
+    .catch(function (e) { trace("failed", { error: String(e) }); });
+};
+
+// Status's plan, kept across a refetch: a value that is briefly empty while a
+// refetch is in flight (or slow to render) must not hide the Move row, the
+// only way back from Not now (Windows check, 2026-11-04 21:28:36).
+window.__bramStateDirPlanKept = function (value) {
+  if (value && value.stateDir) window.__bramStateDirPlanLast = value;
+  return window.__bramStateDirPlanLast || value || null;
+};
+
+// One pane trace line each time Status's Move button flips, so a
+// disappearance leaves evidence of what the helper saw.
+window.__bramStateMoveTraceOffer = function (offer, choice) {
+  if (window.__bramStateMoveOfferLast === offer) return;
+  window.__bramStateMoveOfferLast = offer;
+  try {
+    if (typeof window.logToHost === "function") {
+      window.logToHost({
+        kind: "iframe-trace",
+        subkind: "state-move-offer",
+        at: new Date().toISOString(),
+        offer: offer,
+        choice: choice || null,
+      });
+    }
+  } catch (e) {}
 };
 
 window.__bramLandedNote = function (board) {

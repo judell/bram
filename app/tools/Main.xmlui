@@ -939,19 +939,16 @@
        Bram's (or are tracked), so Bram can't move the folder whole. The
        answer is written to resources/.state-move and acted on at the next
        launch, never on click; Not now hides the banner for good (Status
-       offers the move later). Fetched on load, refetched after the answer,
-       no polling. APICall onSuccess refetch, with invalidates="{[]}" so no
-       other DataSource refetches:
-       https://www.xmlui.org/docs/howto/chain-a-refetch
-       https://www.xmlui.org/docs/howto/control-cache-invalidation -->
+       offers the move later). Fetched on load; the buttons call
+       window.__bramStateMoveDecide (a plain fetch) and the plan refetches on
+       the host's state-dir-changed push, no polling. Not an APICall: its
+       completion reached the pane ~30 s late on macOS and Windows
+       (issue-469-state-move-pane-fixes). -->
   <DataSource id="stateMovePlan" url="/__state-dir/plan" />
-  <APICall
-    id="stateMoveDecision"
-    method="post"
-    url="/__state-dir/decision"
-    body="{$param}"
-    invalidates="{[]}"
-    onSuccess="stateMovePlan.refetch()" />
+  <PushSource id="stateMovePlanEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('state-dir-changed')}" />
+  <ChangeListener listenTo="{stateMovePlanEvt.value &amp;&amp; stateMovePlanEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(stateMovePlanEvt.value, stateMovePlan)" />
   <HStack
     when="{window.__bramStateMoveBanner(stateMovePlan.value, 'show')}"
     backgroundColor="$color-warn-100"
@@ -969,13 +966,13 @@
       label="Move Bram's files"
       size="xs"
       tooltip="{window.__bramStateMoveBanner(stateMovePlan.value, 'stays')}"
-      onClick="stateMoveDecision.execute({ choice: 'move' })" />
+      onClick="window.__bramStateMoveDecide('move')" />
     <Button
       when="{!window.__bramStateMoveBanner(stateMovePlan.value, 'chosen')}"
       label="Not now"
       variant="ghost"
       size="xs"
-      onClick="stateMoveDecision.execute({ choice: 'not-now' })" />
+      onClick="window.__bramStateMoveDecide('not-now')" />
   </HStack>
 
   <!-- issue-320: gate on providerNeedsSetup ALONE, not activeProvider. The

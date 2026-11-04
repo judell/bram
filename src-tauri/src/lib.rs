@@ -100077,6 +100077,12 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
                     String::from_utf8_lossy(&out.2)
                 ),
             );
+            // The banner and Status refetch on this push, rather than waiting
+            // on an APICall's completion, which the pane delivered ~30 s late
+            // on both platforms (issue-469-state-move-pane-fixes).
+            if out.0 == 200 {
+                emit_replayable_signal(app, "state-dir-changed");
+            }
             out
         } else {
             (

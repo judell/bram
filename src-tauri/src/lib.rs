@@ -63868,14 +63868,15 @@ fn interval_stage_commit<R: tauri::Runtime>(
     // commit-tree ignores the index (it takes a tree + parent), so no
     // GIT_INDEX_FILE — it must use the real repo, and it never touches the
     // worktree or the real index.
-    let sha = match git_run(app, &["commit-tree", &tree, "-p", &head, "-m", message]) {
-        Ok(s) => s.trim().to_string(),
-        Err(e) => {
-            cleanup();
-            return Err(format!("commit-tree failed: {}", e));
-        }
-    };
-    if let Err(e) = git_run(app, &["update-ref", "HEAD", &sha]) {
+    let sha =
+        match worklist_git_lock_retry(app, &["commit-tree", &tree, "-p", &head, "-m", message]) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => {
+                cleanup();
+                return Err(format!("commit-tree failed: {}", e));
+            }
+        };
+    if let Err(e) = worklist_git_lock_retry(app, &["update-ref", "HEAD", &sha]) {
         cleanup();
         return Err(format!("update-ref failed: {}", e));
     }
@@ -63893,7 +63894,7 @@ fn interval_stage_commit<R: tauri::Runtime>(
     {
         let mut args: Vec<&str> = vec!["reset", "-q", "--"];
         args.extend(committed.iter().map(|s| s.as_str()));
-        if let Err(e) = git_run(app, &args) {
+        if let Err(e) = worklist_git_lock_retry(app, &args) {
             append_bram_trace_line(
                 app,
                 "worklist-commit",
@@ -87662,6 +87663,88 @@ fn git_run_owned<R: tauri::Runtime>(app: &AppHandle<R>, args: &[String]) -> Resu
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+// worklist-commit-waits-out-index-lock: another git process (an editor's
+// background status, a hook, a second Bram) can hold `.git/index.lock` for a
+// few milliseconds. The gate used to answer 500 to that. These helpers wait
+// out the collision (100 ms steps, ~2 s total) before failing. git refuses
+// before it changes anything when it cannot take the lock, so the retry is
+// safe.
+const INDEX_LOCK_RETRY_STEP_MS: u64 = 100;
+const INDEX_LOCK_RETRY_MAX_WAIT_MS: u64 = 2000;
+const INDEX_LOCK_GAVE_UP_PREFIX: &str =
+    "another git process holds .git/index.lock (an editor?); retry when it's gone. \
+     Never delete the lock while a git process is running (pgrep -x git); if none \
+     is, it is stale: tell the user before removing it. Git said: ";
+
+fn git_error_is_index_lock_collision(text: &str) -> bool {
+    text.contains("Unable to create") && text.contains("index.lock")
+}
+
+fn index_lock_gave_up(e: &str) -> bool {
+    e.starts_with(INDEX_LOCK_GAVE_UP_PREFIX)
+}
+
+// Pure retry core. `on_wait(n)` is called before the n-th sleep. When the
+// wait budget runs out on an index.lock collision, the error is prefixed with
+// INDEX_LOCK_GAVE_UP_PREFIX so callers can say what happened.
+fn retry_on_index_lock(
+    mut run: impl FnMut() -> Result<String, String>,
+    step: std::time::Duration,
+    max_wait: std::time::Duration,
+    mut on_wait: impl FnMut(u32),
+) -> Result<String, String> {
+    let mut waited = std::time::Duration::ZERO;
+    let mut attempt = 0u32;
+    loop {
+        match run() {
+            Err(e) if git_error_is_index_lock_collision(&e) => {
+                if waited >= max_wait {
+                    return Err(format!("{}{}", INDEX_LOCK_GAVE_UP_PREFIX, e.trim()));
+                }
+                attempt += 1;
+                on_wait(attempt);
+                std::thread::sleep(step);
+                waited += step;
+            }
+            other => return other,
+        }
+    }
+}
+
+// Run a git command for the worklist-commit route with the index.lock wait,
+// tracing each wait and a give-up under `[worklist-commit]`.
+fn worklist_git_lock_retry<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    args: &[&str],
+) -> Result<String, String> {
+    let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let verb = args.first().copied().unwrap_or("").to_string();
+    let result = retry_on_index_lock(
+        || git_run_owned(app, &owned),
+        std::time::Duration::from_millis(INDEX_LOCK_RETRY_STEP_MS),
+        std::time::Duration::from_millis(INDEX_LOCK_RETRY_MAX_WAIT_MS),
+        |attempt| {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!("op=index-lock-wait attempt={} cmd={}", attempt, verb),
+                );
+            }
+        },
+    );
+    if let Err(e) = &result {
+        if index_lock_gave_up(e) && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!("op=index-lock-gave-up cmd={}", verb),
+            );
+        }
+    }
+    result
+}
+
 fn worklist_json_error(status: u16, message: impl Into<String>) -> (u16, &'static str, Vec<u8>) {
     (
         status,
@@ -89931,7 +90014,19 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         let mut skipped_unmatched: Vec<String> = Vec::new();
         for file in &files {
             let add_args = worklist_commit_add_args(std::slice::from_ref(file));
-            if let Err(e) = git_run_owned(app, &add_args) {
+            let add_refs: Vec<&str> = add_args.iter().map(|a| a.as_str()).collect();
+            if let Err(e) = worklist_git_lock_retry(app, &add_refs) {
+                if index_lock_gave_up(&e) {
+                    // Files staged earlier in this loop stay staged; the
+                    // next attempt re-adds them and is idempotent.
+                    return worklist_json_error(
+                        500,
+                        format!(
+                            "git add failed: {}. Nothing was committed; files this request already staged stay staged, and a retry picks them up.",
+                            e.trim()
+                        ),
+                    );
+                }
                 if e.contains("did not match any files") {
                     skipped_unmatched.push(file.clone());
                     continue;
@@ -90020,7 +90115,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         if let Some((reason, drift)) = drift_check {
             let mut unstage = vec!["reset".to_string(), "-q".to_string(), "--".to_string()];
             unstage.extend(staged_after.iter().cloned());
-            let _ = git_run_owned(app, &unstage);
+            let unstage_refs: Vec<&str> = unstage.iter().map(|a| a.as_str()).collect();
+            let _ = worklist_git_lock_retry(app, &unstage_refs);
             append_bram_trace_line(
                 app,
                 "worklist-commit",
@@ -90106,7 +90202,17 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         if bram_trace_enabled() {
             append_bram_trace_line(app, "worklist-commit", "op=committing");
         }
-        if let Err(e) = git_run_owned(app, &commit_args) {
+        let commit_refs: Vec<&str> = commit_args.iter().map(|a| a.as_str()).collect();
+        if let Err(e) = worklist_git_lock_retry(app, &commit_refs) {
+            if index_lock_gave_up(&e) {
+                return worklist_json_error(
+                    500,
+                    format!(
+                        "git commit failed: {}. Nothing was committed; the items' files are staged, and a retry commits them.",
+                        e.trim()
+                    ),
+                );
+            }
             return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
         }
         sha = match git_run(app, &["rev-parse", "HEAD"]) {
@@ -90154,14 +90260,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         // the worktree or index, so moving the ref back to head_before cleanly
         // discards the empty commit and leaves no staged residue.
         if sha != head_before {
-            let _ = git_run_owned(
-                app,
-                &[
-                    "update-ref".to_string(),
-                    "HEAD".to_string(),
-                    head_before.clone(),
-                ],
-            );
+            let _ = worklist_git_lock_retry(app, &["update-ref", "HEAD", &head_before]);
         }
         if bram_trace_enabled() {
             append_bram_trace_line(app, "worklist-commit", "op=refuse-empty-commit");
@@ -98158,7 +98257,6 @@ pub fn run() {
             // switch-matrix-harness: test-drive routes, only on request.
             if test_drive_enabled() {
                 let _ = TEST_DRIVE_APP.set(app.handle().clone());
-                append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");
             }
             // issue-405: SIGTERM/SIGINT/SIGHUP run shutdown_children, so a
             // `kill` hangs up the terminal's jobs instead of orphaning them.
@@ -98212,7 +98310,14 @@ pub fn run() {
                 // hook rename — no Bram-spawned session exists yet.
                 prune_legacy_claude_hooks(proj);
             }
+            // Must run before the first `append_bram_trace_line` of the
+            // process: the first trace caches the log's file handle, and the
+            // archive rename below would carry that handle into the archive
+            // (test-drive-trace-before-archive).
             prepare_bram_trace_log(app.handle());
+            if test_drive_enabled() {
+                append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");
+            }
             trace_whisper_env(app.handle());
             // issue-230 unified search: background Claude-session indexer.
             start_search_indexer(app.handle().clone());
@@ -102155,5 +102260,117 @@ mod orientation_scaffolding_tests {
                 f
             );
         }
+    }
+}
+
+// worklist-commit-waits-out-index-lock: the retry core against a real repo
+// whose `.git/index.lock` is held by a second thread, like an editor's git.
+#[cfg(test)]
+mod index_lock_retry_tests {
+    use super::{index_lock_gave_up, retry_on_index_lock};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::Duration;
+
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-index-lock-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git")
+            .current_dir(&root)
+            .args(["init", "-q", "-b", "main", "."])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        root
+    }
+
+    fn git_add(root: &Path) -> Result<String, String> {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(["add", "--", "a.txt"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(String::new())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        }
+    }
+
+    fn hold_lock(root: &Path, ms: u64) -> std::thread::JoinHandle<()> {
+        let lock = root.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(ms));
+            let _ = std::fs::remove_file(&lock);
+        })
+    }
+
+    #[test]
+    fn add_succeeds_after_a_short_lock_is_released() {
+        let root = scratch_repo("short");
+        let holder = hold_lock(&root, 300);
+        let mut waits = 0u32;
+        let out = retry_on_index_lock(
+            || git_add(&root),
+            Duration::from_millis(100),
+            Duration::from_millis(2000),
+            |_| waits += 1,
+        );
+        holder.join().unwrap();
+        assert!(out.is_ok(), "{:?}", out);
+        assert!(waits >= 1, "expected at least one traced wait");
+        let staged = Command::new("git")
+            .current_dir(&root)
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "a.txt");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn add_gives_up_when_the_lock_outlasts_the_budget() {
+        let root = scratch_repo("long");
+        let holder = hold_lock(&root, 3000);
+        let started = std::time::Instant::now();
+        let out = retry_on_index_lock(
+            || git_add(&root),
+            Duration::from_millis(100),
+            Duration::from_millis(2000),
+            |_| {},
+        );
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+        let err = out.expect_err("lock held past the budget must fail");
+        assert!(index_lock_gave_up(&err), "{}", err);
+        assert!(err.contains("index.lock"));
+        assert!(elapsed >= Duration::from_millis(1900), "{:?}", elapsed);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn other_git_errors_are_not_retried() {
+        let mut calls = 0;
+        let out = retry_on_index_lock(
+            || {
+                calls += 1;
+                Err("fatal: pathspec 'x' did not match any files".to_string())
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(2000),
+            |_| {},
+        );
+        assert_eq!(calls, 1);
+        assert!(!index_lock_gave_up(&out.unwrap_err()));
     }
 }

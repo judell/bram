@@ -245,6 +245,12 @@ Flag rationale:
   transport upholds. Refusal-shaped failures return 4xx, which curl
   doesn't retry, so a 5xx from a Bram route is genuinely a server fault,
   and seeing one repeat four times is expected rather than a second bug.
+  The one 5xx the retry is expected to clear is an `index.lock` collision
+  (another git process, such as an editor, holding the index); the route now
+  waits that out itself for about 2 s first, so you see the 500 only when the
+  lock outlasts that. **Never delete `.git/index.lock` while a git process is
+  running** (`pgrep -x git`): removing a live lock can corrupt the index. If
+  none is running the lock is stale; tell the user before removing it.
 
 **If the port keeps refusing** after fresh re-reads, treat it as a
 stale-port / restarting-server diagnostic — don't continue without the

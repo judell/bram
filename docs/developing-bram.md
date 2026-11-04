@@ -518,6 +518,10 @@ and the caller. `scripts/build-timings.sh` times synthetic edits on a
 quiet tree; this log catches the slow real builds it can't (#452:
 2m55s and 1m38s builds the same day the synthetic rows read 25–34 s).
 Read it by sorting on `seconds` and looking at the slow rows' context.
+On Windows, build through `scripts/build.ps1`
+(`powershell -NoProfile -File scripts\build.ps1`): it runs VsDevCmd
+itself, builds the `x86_64-pc-windows-msvc` target the Windows launch
+uses, and logs the same line with `platform: "windows"`.
 
 ### Formatting is enforced, so run `cargo fmt`
 
@@ -665,6 +669,33 @@ because a clean forces a full rebuild. Earlier build-time numbers in this
 section, and any profile or crate-split argument resting on them, were
 measured on the polluted directory: re-measure on a clean one before
 relying on them.
+
+That warning missed the next incident. On 2026-11-03 a Windows rebuild
+failed with `There is not enough space on the disk. (os error 112)`, at
+0.2 GB free of 476 GB, while `deps` held 1,713 files. The space was in
+bytes, not files: lib-test PDBs of 92 to 167 MB from earlier tips, seven
+renamed exes, and 10.5 GB in a stale `target/debug` tree. And the check
+was bash-only, so the Windows build never ran it, and it looked only at
+`deps`. Both `scripts/build.sh` and `scripts/build.ps1` now log
+`target_bytes`, `free_bytes` and `stale_debug_tree_days`, and warn before
+building when free space is under 5 GB (`BRAM_DISK_WARN_GB`) or the
+target dir is over 20 GB (`BRAM_TARGET_WARN_GB`).
+
+On Windows the stale tree is `src-tauri\target\debug`. The Windows launch
+builds and runs `target\x86_64-pc-windows-msvc\debug`, so nothing uses
+the plain `debug` tree and it is safe to delete outright.
+
+`build.ps1` also moves a running Bram's exe aside, and it has to move
+both names. Cargo links `deps\bram.exe` and uplifts it to
+`debug\bram.exe`. On 2026-11-03, with only the `debug` name moved, the
+`deps` name still mapped the running image and the link failed twice
+with `LNK1104: cannot open file '…\deps\bram.exe'`. Moving both let it
+link in 10 s. The moved copies are `bram.exe.old-<timestamp>`; each run
+deletes the ones no process holds. It refuses to move anything when free
+space is under 2 GB, or under the largest `free_bytes_used` a logged
+build recorded, because a build that then fails for space would leave no
+exe to relaunch. If a build fails anyway with the exe gone, it moves the
+copies back.
 
 ## Hand-testing the Worklist gate
 
@@ -960,8 +991,8 @@ scripts/demo-instance.sh stop
 ```
 
 On Windows, use the same verbs through
-`scripts\demo-instance.ps1`. Run the established `build.ps1` from a VS
-Developer PowerShell first. The launcher refuses a debug binary older
+`scripts\demo-instance.ps1`. Build first with `scripts\build.ps1`, which
+sets up the VS developer environment itself. The launcher refuses a debug binary older
 than its Rust sources (see below) or a half-build where `bram-guard.exe`
 is newer than a locked `bram.exe`; it names existing Bram PIDs rather than killing them. On
 every launch it verifies a directory junction named `app` beside the

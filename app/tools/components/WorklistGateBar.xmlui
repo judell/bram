@@ -243,6 +243,12 @@
        (helpers.js, bramSubscribeGateCaution). Same warn styling as the
        close-contradiction row above. -->
   <PushSource id="gateCaution" subscribe="{window.bramSubscribeGateCaution()}" />
+  <!-- gate-click-queues-behind-running-turn: a Start / Start & commit /
+       Commit click taken mid-turn is queued and delivered when the turn ends
+       (helpers.js, bramSubscribeGateQueue). It replaces #368's ask-twice
+       caution for those kinds. The queued button is disabled; the row's
+       Cancel is the only control. Stopping the turn delivers it sooner. -->
+  <PushSource id="gateQueue" subscribe="{window.bramSubscribeGateQueue()}" />
   <!-- issue-368-addressed-turn-context, rung 2: when the RUNNING turn is
        addressed to an id in the selection (an approved:/iterate:/drop: turn
        naming it, per the host's turn-context events), the commit-emitting
@@ -264,15 +270,21 @@
       value="{window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value)}" />
   </HStack>
   <HStack
-    when="{!!gateCaution.value}"
+    when="{!!gateQueue.value}"
     horizontalAlignment="center"
+    verticalAlignment="center"
     gap="$space-2"
     paddingHorizontal="$space-2"
     paddingTop="$space-1">
     <Text
       fontSize="$fontSize-sm"
       color="$color-warn-700"
-      value="{window.__bramGateCautionMessage(gateCaution.value)}" />
+      value="{window.__bramGateQueueMessage(gateQueue.value)}" />
+    <Button
+      size="xs"
+      variant="outlined"
+      label="Cancel"
+      onClick="window.__bramGateQueueCancel()" />
   </HStack>
   <!-- locked-board-names-its-own-exit: the escape, stated where the dead
        buttons are. Deliberately NOT gated on a selection, unlike the button
@@ -363,25 +375,25 @@
          So this is deliberately a bounded signal that points, not a complete
          one that describes. -->
     <Button
-      label="{window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      label="{window.__bramGateQueuedLabel('start', window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value), gateQueue.value)}"
       tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start')}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <!-- gate-one-way-to-continue-one-to-finish: dimmed whenever Commit can be
          lit. On a begun `proposed` item both send apply-and-commit, so the row
          offers one way to continue (Resume) and one way to finish (Commit). -->
     <Button
-      label="{window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit'}"
+      label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
       tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch)}"
       onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <Button
-      label="Commit"
+      label="{window.__bramGateQueuedLabel('commit', 'Commit', gateQueue.value)}"
       tooltipMarkdown="{window.__bramGateCommitTooltip(gateSel.value, gateGit.value &amp;&amp; gateGit.value.branch, gateWorklist.value.items, gateClaim.value, gateTurnCtx.value)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <!-- switch-to-transcript-on-action: Refine retired. It was never an
          authorization — the other gate buttons write auth records; Refine

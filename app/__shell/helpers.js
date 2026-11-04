@@ -3109,7 +3109,13 @@ window.__bramDismissPlan = function () {
     .catch(function () {});
 };
 
-window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
+window.__bramGateAct = function (kind, items, sel, shareMode, claim, opt) {
+  // gate-click-queues-behind-running-turn: `opt.now` delivers a queued click
+  // (at turn end, or Commit now) with the composer text it was made with
+  // (`opt.text`); `opt.delivery` keeps that delivery from clearing the
+  // composer, changing the selection or switching tabs, since the user may
+  // have moved on.
+  opt = opt || {};
   // Selection is literal user intent. Shared-file handling may change how the
   // agent prepares the commit, but never which ids this action authorizes.
   var ids0 = sel || [];
@@ -3125,14 +3131,20 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
   // consult the live turn state before acting. `cautioned` rides the click
   // trace (computed before it, per the trace-comes-first rule above) so the
   // soak can count how often the guard fired and what the user chose.
-  var cautioned;
-  if (kind === "commit" || kind === "start-commit") {
-    if (!window.__bramAgentTurnActive()) {
-      cautioned = "not-needed";
-    } else if (window.__bramGateCautionArmed(kind)) {
-      cautioned = "bypassed";
-    } else {
-      cautioned = "shown";
+  // gate-click-queues-behind-running-turn: a Start, Start & commit or Commit
+  // click taken while the agent's turn is in flight is queued, not executed:
+  // nothing is recorded and nothing is typed until the turn ends, so the
+  // approval's TTL starts at delivery and the commit is taken after the agent
+  // stops editing (#368's torn-commit window). This replaces #368's
+  // ask-twice caution for these kinds. The queued button is disabled; the
+  // queue row's Cancel clears it, and stopping the turn delivers it sooner.
+  var queueable = kind === "start" || kind === "start-commit" || kind === "commit";
+  var queueOp = "";
+  if (queueable && !opt.now && ids0.length) {
+    if (window.__bramGateQueued(kind)) {
+      queueOp = "cancel";
+    } else if (window.__bramAgentTurnInFlight()) {
+      queueOp = "queue";
     }
   }
   window.__bramIframeTrace("click", {
@@ -3140,17 +3152,29 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
     count: ids0.length,
     op: ids0.length ? "act" : "empty-selection",
     store: (window.__bramW2Selection || []).length,
-    cautioned: cautioned,
+    queue: queueOp || (opt.delivery ? "delivered" : (queueable ? "not-needed" : undefined)),
   });
   if (!ids0.length) return;
-  if (cautioned === "shown") {
-    window.__bramGateCautionSet(kind, ids0.length);
+  if (queueOp === "cancel") {
+    window.__bramGateQueueClear("cancelled");
     return;
   }
-  if (cautioned === "bypassed") {
-    window.__bramGateCautionClear("bypassed");
+  if (queueOp === "queue") {
+    // Plain copies, not the binding's values: XMLUI hands bindings out as
+    // reactive proxies, and reading a stale one after the board refreshes
+    // throws ("Proxy handler's 'get' result…", the 2026-11-04 02:51:38 demo
+    // run, where delivery died before recording anything).
+    window.__bramGateQueueSet({
+      kind: kind,
+      items: window.__bramPlainCopy(items),
+      sel: ids0.slice(),
+      shareMode: shareMode,
+      text: String(window.__bramMessageAgentText || ""),
+    });
+    window.__bramClearComposer();
+    return;
   }
-  var text = String(window.__bramMessageAgentText || "");
+  var text = opt.now && opt.text != null ? String(opt.text) : String(window.__bramMessageAgentText || "");
   // issue-345: this trace is the soak evidence that the user SAW the
   // don't-close warning and submitted the commit anyway -- fires only when
   // the detector still returns a contradiction for THIS submission (i.e.
@@ -3228,6 +3252,13 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
   // was ticked is released, so the addressee line names exactly what is being
   // worked on. Every other kind clears: Start & commit, Commit and Drop rows
   // leave the board.
+  if (opt.delivery) {
+    // A queued click delivered at turn end: the user may have typed or
+    // ticked something else meanwhile, so leave the composer, selection and
+    // tab alone.
+    window.__bramWorklistActApply(r);
+    return;
+  }
   var keep = (kind === "start") ? ids : [];
   window.__bramW2SetSelection(keep);
   window.__bramIframeTrace("click", {
@@ -6184,6 +6215,7 @@ window.__bramW2ResetStartMode = function () {
   // selection's commit. Folded here (rather than a second statement in the
   // gate bar's ChangeListener) so the markup handler stays a single call.
   if (window.__bramGateCautionClear) window.__bramGateCautionClear("selection-changed");
+  if (window.__bramGateQueueClear) window.__bramGateQueueClear("selection-changed");
   return "together";
 };
 
@@ -9798,6 +9830,13 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
     ensureSubscribed();
     return !!(lastValue && lastValue.state === "working");
   };
+  // gate-click-queues-behind-running-turn: a turn is still in flight while
+  // the agent waits at a permission menu, so the gate queue counts both.
+  window.__bramAgentTurnInFlight = function () {
+    ensureSubscribed();
+    var st = lastValue && lastValue.state;
+    return st === "working" || st === "waiting-for-permission";
+  };
 })();
 
 // Host suspicious-silence + parent terminal-visibility join. The Rust host
@@ -12739,6 +12778,138 @@ window.bramSubscribeW2Selection = (function () {
     };
     return factory;
   };
+})();
+
+// gate-click-queues-behind-running-turn: one queued gate click (Start,
+// Start & commit or Commit) taken while the agent's turn was in flight. It is
+// delivered through __bramGateAct when the agent's status leaves "working",
+// so the approval is recorded at delivery. Focus state: it lives in memory,
+// with a project-scoped sessionStorage marker only so that a pane reload
+// can say the queued click was dropped rather than losing it silently.
+(function () {
+  var subscribers = new Set();
+  var factory = null;
+  var watching = false;
+  var notify = function () {
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bramSubscribeGateQueue] subscriber threw:", e); }
+    });
+  };
+  var markerKey = function () {
+    return window.__bramProjectScopedKey ? window.__bramProjectScopedKey("bram.gateQueueMarker") : null;
+  };
+  var setMarker = function (q) {
+    var k = markerKey();
+    if (!k) return;
+    try {
+      if (q) window.sessionStorage.setItem(k, JSON.stringify({ kind: q.kind, ids: q.sel, atMs: q.atMs }));
+      else window.sessionStorage.removeItem(k);
+    } catch (e) {}
+  };
+  window.__bramW2GateQueue = null;
+  window.__bramPlainCopy = function (v) {
+    try { return v == null ? v : JSON.parse(JSON.stringify(v)); } catch (e) { return null; }
+  };
+  // Delivery reads the board as it is now (the latest accepted /__worklist
+  // payload, plain JSON), falling back to the copy saved at click time. No
+  // claim: the turn the click waited for has ended, and the host checks the
+  // real record at commit.
+  var deliveryItems = function (q) {
+    var b = typeof __bramWlAccepted !== "undefined" ? __bramWlAccepted : null;
+    return (b && Array.isArray(b.items)) ? b.items : (q.items || []);
+  };
+  var deliver = function () {
+    var q = window.__bramW2GateQueue;
+    if (!q) return;
+    window.__bramW2GateQueue = null;
+    setMarker(null);
+    window.__bramIframeTrace("gate-click", {
+      op: "delivered", kind: q.kind, ids: q.sel, queued_ms: Date.now() - q.atMs,
+    });
+    notify();
+    try {
+      window.__bramGateAct(q.kind, deliveryItems(q), q.sel, q.shareMode, null,
+        { now: true, delivery: true, text: q.text });
+    } catch (e) {
+      window.__bramIframeTrace("gate-click", {
+        op: "delivery-failed", kind: q.kind, ids: q.sel, error: String((e && e.message) || e),
+      });
+    }
+  };
+  var watchTurnEnd = function () {
+    if (watching) return;
+    watching = true;
+    window.bramSubscribeAgentStatus()(function (status) {
+      // Only a turn that is over delivers: "waiting-for-permission" is a
+      // menu mid-turn, not the end of it.
+      var st = status && status.state;
+      if (window.__bramW2GateQueue && (st === "finished" || st === "idle")) deliver();
+    });
+  };
+  window.__bramGateQueueSet = function (q) {
+    q.atMs = Date.now();
+    window.__bramW2GateQueue = q;
+    setMarker(q);
+    window.__bramIframeTrace("gate-click", { op: "queued", kind: q.kind, ids: q.sel });
+    watchTurnEnd();
+    notify();
+    return q;
+  };
+  window.__bramGateQueueClear = function (reason) {
+    var q = window.__bramW2GateQueue;
+    if (!q) return null;
+    window.__bramW2GateQueue = null;
+    setMarker(null);
+    window.__bramIframeTrace("gate-click", { op: reason || "cancelled", kind: q.kind, ids: q.sel });
+    notify();
+    return reason || null;
+  };
+  window.__bramGateQueued = function (kind) {
+    var q = window.__bramW2GateQueue;
+    return !!(q && (!kind || q.kind === kind));
+  };
+  // For bindings: takes the pushed queue value (gateQueue.value) so XMLUI
+  // re-evaluates the binding when the queue changes; a bare window read
+  // would never refresh.
+  window.__bramGateQueuedAs = function (q, kind) {
+    return !!(q && q.kind === kind);
+  };
+  window.__bramGateQueuedLabel = function (kind, base, q) {
+    return q && q.kind === kind ? base + " queued" : base;
+  };
+  // One line, one control: the queued button is disabled and says
+  // "… queued"; the row says when it runs and offers Cancel. To have it run
+  // sooner, stop the agent's turn: the turn ending is what delivers it.
+  window.__bramGateQueueMessage = function (q) {
+    return q ? "Runs when the agent finishes its current turn." : "";
+  };
+  window.__bramGateQueueCancel = function () {
+    window.__bramGateQueueClear("cancelled");
+  };
+  window.bramSubscribeGateQueue = function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramW2GateQueue || null); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+  // A marker left by a previous load means a queued click was lost to a
+  // reload: say so, then forget it. Deferred so the project key is set.
+  setTimeout(function () {
+    var k = markerKey();
+    if (!k) return;
+    try {
+      var raw = window.sessionStorage.getItem(k);
+      if (raw) {
+        var m = JSON.parse(raw);
+        window.sessionStorage.removeItem(k);
+        window.__bramIframeTrace("gate-click", { op: "dropped", reason: "reload", kind: m.kind, ids: m.ids });
+      }
+    } catch (e) {}
+  }, 0);
 })();
 
 // issue-368-addressed-turn-context: the active turn's addressed worklist ids,

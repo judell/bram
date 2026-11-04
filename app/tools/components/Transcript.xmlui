@@ -157,9 +157,10 @@
          registers them and runs the mount work, with an enter trace. -->
     onMount="window.__bramTranscriptOnMount(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); })"
     onUnmount="window.__bramTranscriptUnmount(atBottom, events.length, $props.agentId)"
-    var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
+    var.events="{window.__bramLiveTranscriptEvents($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
     var.expanded="{[]}"
+    var.compactToggled="{[]}"
     var.atBottom="{!window.__bramVisibleRange || window.__bramVisibleRange.atBottom !== false}"
     var.repinArmed="{false}"
     var.settleArmed="{false}"
@@ -335,6 +336,41 @@
           content="{$item.text}"
           highlightText="{window.__bramSearchTerms($item.__needle)}"
           highlightActiveIndex="{$item.__activeOcc}" />
+        <!-- issue-470-compaction-summary-collapsed: Claude Code's compaction
+             hand-off summary (helpers.js __bramLiveTranscriptEvents) renders
+             as one muted line instead of a "You" turn, the full text one
+             click away. Open/closed is keyed by the row's content-derived id
+             in compactToggled (rows flipped from the Settings default), the
+             same id-keyed when-gated fold the tool rows use above, never
+             ExpandableItem's own positional state in a List
+             (docs/developing-bram.md §Failure modes).
+             https://www.xmlui.org/docs/reference/components/Link
+             https://www.xmlui.org/docs/reference/components/List -->
+        <VStack when="{$item.kind === 'compaction'}" gap="$space-0_5">
+          <Link noIndicator="true" onClick="compactToggled = window.__bramToggleInArray(compactToggled, $item.id)">
+            <Text
+              fontSize="$fontSize-sm"
+              fontStyle="italic"
+              color="$textColor-secondary"
+              value="{(window.__bramCompactionOpen(compactToggled, $item) ? '▾ ' : '▸ ') + window.__bramCompactionLabel($item) + (window.__bramCompactionOpen(compactToggled, $item) ? ' · Hide' : ' · Show')}" />
+          </Link>
+          <Text
+            when="{$item.__findPreview}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{$item.__findPreview}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
+          <VStack
+            when="{window.__bramCompactionOpen(compactToggled, $item)}"
+            backgroundColor="$color-surface-50"
+            padding="$space-2"
+            borderRadius="$borderRadius">
+            <Markdown
+              content="{window.__bramHardBreaks($item.text)}"
+              interpolateBindings="false" allowHtml="false" />
+          </VStack>
+        </VStack>
         <!-- task notification: quiet system-note row (host-reclassified
              subagent completion report — never rendered as "You") -->
         <Text

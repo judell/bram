@@ -347,6 +347,16 @@
           labelPosition="end"
           initialValue="{window.__bramSearchBadgesInitialAllOn ? window.__bramSearchBadgesInitialAllOn() : true}"
           onDidChange="(v) => window.__bramSetSearchBadgesInitialAllOn(v)" />
+        <!-- issue-470-compaction-summary-collapsed: per-user (localStorage,
+             bram.compactSummaryExpanded). Off: the Transcript shows Claude
+             Code's compaction summary as one line with a Show toggle; on:
+             those rows start expanded. Same shape as the switches above.
+             https://www.xmlui.org/docs/reference/components/Switch -->
+        <Switch
+          label="Show compaction summaries in full"
+          labelPosition="end"
+          initialValue="{window.__bramCompactSummaryExpanded ? window.__bramCompactSummaryExpanded() : false}"
+          onDidChange="(v) => window.__bramSetCompactSummaryExpanded(v)" />
       </VStack>
 
       <ContentSeparator />

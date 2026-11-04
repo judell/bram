@@ -20345,8 +20345,33 @@ fn pty_spawn(
     } else if let Some(home) = home_dir() {
         command.cwd(home);
     }
+    // windows-pty-path-from-registry: CommandBuilder::new read the registry's
+    // PATH into its base env; the loop below replaces it with the inherited
+    // one, so take it first and merge it back in after.
+    #[cfg(windows)]
+    let registry_path = command.get_env("PATH").map(|v| v.to_os_string());
     for (k, v) in std::env::vars() {
         command.env(k, v);
+    }
+    #[cfg(windows)]
+    {
+        let composed = windows_path_with_registry(registry_path.as_deref());
+        let added = composed.as_ref().map(|(_, n)| *n).unwrap_or(0);
+        if let Some((path, _)) = composed {
+            // Keep the inherited key's spelling (normally `Path`).
+            let key = std::env::vars_os()
+                .map(|(k, _)| k)
+                .find(|k| k.eq_ignore_ascii_case("path"))
+                .unwrap_or_else(|| "Path".into());
+            command.env(key, path);
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "pty",
+                &format!("op=path-compose added={} source=registry", added),
+            );
+        }
     }
     command.env("TERM", "xterm-256color");
     // antigravity-turn-lifecycle: agy reports its turn state over OSC 7501
@@ -23720,6 +23745,30 @@ fn launch_exit_tail(raw: &[u8]) -> String {
     out
 }
 
+// windows-pty-path-from-registry: when the launch's own command wasn't found,
+// the pane says so plainly instead of quoting the shell. Read from the whole
+// stripped tail, not launch_exit_tail's last three lines: PowerShell 5.1's
+// "is not recognized" line is followed by four more. Shapes: PowerShell
+// ("The term 'agy' is not recognized as the name of a cmdlet…",
+// CommandNotFoundException), cmd.exe ("'agy' is not recognized as an internal
+// or external command"), bash/zsh ("agy: command not found", "zsh: command
+// not found: agy"). The message must name the launched command, so another
+// command's error earlier in the tail doesn't count.
+fn launch_command_not_found(raw: &[u8], command: &str) -> Option<String> {
+    let head = command.split_whitespace().next()?;
+    let stripped = strip_ansi(raw);
+    let text = String::from_utf8_lossy(&stripped);
+    let quoted = format!("'{}'", head);
+    let found = text.lines().any(|line| {
+        let line = line.trim();
+        ((line.contains("is not recognized as") || line.contains("CommandNotFoundException"))
+            && (line.contains(&quoted) || line.contains(&format!("({}:String)", head))))
+            || line.ends_with(&format!("{}: command not found", head))
+            || line.ends_with(&format!("command not found: {}", head))
+    });
+    found.then(|| head.to_string())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LaunchPhase {
     // The gate passed; the command is about to be written.
@@ -23911,6 +23960,8 @@ fn emit_launch_outcome<R: tauri::Runtime>(
     outcome: &str,
     status: Option<i32>,
     tail: &str,
+    // The launched command, when the shell said it wasn't found.
+    not_found: Option<&str>,
 ) {
     // agent-launch-failure-in-pane: replayable, because a cross-provider
     // launch reloads the pane ~2.5 s later and an exit is reported ~0.2 s in;
@@ -23924,6 +23975,7 @@ fn emit_launch_outcome<R: tauri::Runtime>(
             "outcome": outcome,
             "status": status,
             "tail": tail,
+            "notFound": not_found,
             "atMs": unix_now_ms(),
         }),
     );
@@ -23963,7 +24015,7 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
                     l.provider, l.source, waited
                 ));
                 (l.hook)(app, LaunchPhase::Timeout);
-                emit_launch_outcome(&l, "timeout", None, "");
+                emit_launch_outcome(&l, "timeout", None, "", None);
                 return;
             }
             Ok((waited, via)) => trace(format!(
@@ -23995,7 +24047,7 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
             "op=launch-error provider={} source={} error={}",
             l.provider, l.source, error
         ));
-        emit_launch_outcome(&l, "error", None, &error);
+        emit_launch_outcome(&l, "error", None, &error, None);
         return;
     }
     shell_foreground_note_launch_written(written_from);
@@ -24018,15 +24070,17 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
                     Err(e) => e.into_inner().clone(),
                 };
                 let tail = launch_exit_tail(&raw);
+                let not_found = launch_command_not_found(&raw, &l.command);
                 trace(format!(
-                    "op=launch-exited provider={} source={} status={} after_ms={} tail=\"{}\"",
+                    "op=launch-exited provider={} source={} status={} after_ms={} not_found={} tail=\"{}\"",
                     l.provider,
                     l.source,
                     status.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
                     elapsed,
+                    not_found.as_deref().unwrap_or("-"),
                     tail
                 ));
-                emit_launch_outcome(&l, "exited", status, &tail);
+                emit_launch_outcome(&l, "exited", status, &tail, not_found.as_deref());
                 return;
             }
             LaunchConfirm::Pending if elapsed < AGENT_LAUNCH_CONFIRM_MS => {}
@@ -24042,7 +24096,7 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
                     "op=launch-confirmed provider={} source={} via={} exec_seen={}",
                     l.provider, l.source, via, exec_seen
                 ));
-                emit_launch_outcome(&l, "confirmed", None, "");
+                emit_launch_outcome(&l, "confirmed", None, "", None);
                 (l.hook)(app, LaunchPhase::Confirmed);
                 break;
             }
@@ -24077,9 +24131,44 @@ fn usable_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<C
 #[cfg(test)]
 mod agent_launch_tests {
     use super::{
-        codex_pin_usable, launch_confirm_state as confirm, launch_exit_tail, launch_line,
-        CodexReloadTarget, LaunchConfirm, ShellForeground,
+        codex_pin_usable, launch_command_not_found, launch_confirm_state as confirm,
+        launch_exit_tail, launch_line, CodexReloadTarget, LaunchConfirm, ShellForeground,
     };
+
+    #[test]
+    fn command_not_found_names_the_launched_command() {
+        // PowerShell 5.1: the recognizable line is five lines above the prompt.
+        let ps = b"agy : The term 'agy' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\r\nAt line:1 char:1\r\n+ agy\r\n+ ~~~\r\n    + CategoryInfo          : ObjectNotFound: (agy:String) [], CommandNotFoundException\r\n    + FullyQualifiedErrorId : CommandNotFoundException\r\n \r\nPS C:\\Users\\jon\\bram> ";
+        assert_eq!(
+            launch_command_not_found(ps, "agy --continue"),
+            Some("agy".to_string())
+        );
+        // PowerShell 7, only the CategoryInfo line left in the tail.
+        let ps7 = b"    + CategoryInfo          : ObjectNotFound: (agy:String) [], CommandNotFoundException\r\nPS> ";
+        assert_eq!(launch_command_not_found(ps7, "agy"), Some("agy".into()));
+        let cmd = b"'codex' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";
+        assert_eq!(launch_command_not_found(cmd, "codex"), Some("codex".into()));
+        let bash = b"bash: opencode: command not found\r\nbash-3.2$ ";
+        assert_eq!(
+            launch_command_not_found(bash, "opencode --continue"),
+            Some("opencode".into())
+        );
+        let zsh = b"zsh: command not found: claude\r\n% ";
+        assert_eq!(
+            launch_command_not_found(zsh, "claude"),
+            Some("claude".into())
+        );
+    }
+
+    #[test]
+    fn other_exits_and_other_commands_are_not_command_not_found() {
+        let other = b"No conversation found to continue\r\nPS C:\\> ";
+        assert_eq!(launch_command_not_found(other, "claude --continue"), None);
+        // A different command's error earlier in the tail doesn't count.
+        let earlier = b"The term 'foo' is not recognized as the name of a cmdlet\r\nPS C:\\> ";
+        assert_eq!(launch_command_not_found(earlier, "agy"), None);
+        assert_eq!(launch_command_not_found(b"", ""), None);
+    }
 
     #[test]
     fn unix_launches_clear_the_shell_line_first() {
@@ -24987,7 +25076,20 @@ fn session_title_by_id<R: tauri::Runtime>(
 // Bram's export, which lags OpenCode until discovery re-exports it. Read the
 // newest assistant message's model from OpenCode's database instead, like the
 // title (opencode_session_title_from_db); the export tail is the fallback.
+//
+// footer-model-follows-requested-provider (Windows, 2026-11-02): the footer
+// read "ANTIGRAVITY (Fable 5.1)". Antigravity's transcript records carry no
+// model (docs/agent-specimens/antigravity/*.jsonl), so its model is unknown,
+// and a wrong model is worse than none: return empty for its exports rather
+// than whatever a `model` key elsewhere in the file might say. The roster
+// also reports `mainProvider` (the label of the path this model came from) so
+// the pane can refuse a model from another provider's session, which is what
+// active_session_path's freshest-session fallback hands back when the active
+// provider has no session file yet.
 fn main_session_model<R: tauri::Runtime>(app: &AppHandle<R>, session_path: &Path) -> String {
+    if projected_turns_provider_label(session_path) == "antigravity" {
+        return String::new();
+    }
     let is_opencode = opencode_export_dir(app)
         .ok()
         .is_some_and(|dir| is_opencode_export_path(session_path, &dir));
@@ -25086,6 +25188,51 @@ mod opencode_model_tests {
             Some("gpt-5.6-luna")
         );
         assert_eq!(opencode_session_model_in(&conn, "ses_none"), None);
+    }
+}
+
+#[cfg(test)]
+mod footer_model_provider_tests {
+    use super::{
+        antigravity_transcript_jsonl, projected_turns_provider_label, st_last_session_model,
+        ANTIGRAVITY_EXPORT_DIR,
+    };
+    use std::path::Path;
+
+    // footer-model-follows-requested-provider: an Antigravity export has no
+    // model to report, so the footer must show none rather than another
+    // session's. The specimen is a real Antigravity CLI 1.4.12 transcript.
+    #[test]
+    fn antigravity_export_reports_no_model() {
+        let source =
+            include_str!("../../docs/agent-specimens/antigravity/transcript-record-tools.jsonl");
+        let (jsonl, _) = antigravity_transcript_jsonl("agy-test", source).unwrap();
+        assert!(
+            jsonl.contains("\"assistant\""),
+            "specimen converted to turns"
+        );
+        let tmp =
+            std::env::temp_dir().join(format!("bram-footer-model-{}.jsonl", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, &jsonl).unwrap();
+        assert_eq!(st_last_session_model(&tmp), "");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // `mainProvider` labels the roster's session path, so the pane can tell a
+    // Claude session's model from the requested provider's.
+    #[test]
+    fn main_provider_labels_each_providers_session_path() {
+        let claude = Path::new("/home/me/.claude/projects/-home-me-bram/a.jsonl");
+        let codex = Path::new("/home/me/.codex/sessions/2026/11/02/rollout-x.jsonl");
+        let opencode = Path::new("/cache/opencode-sessions/-home-me-bram/ses_1.jsonl");
+        let agy = Path::new("/cache")
+            .join(ANTIGRAVITY_EXPORT_DIR)
+            .join("-home-me-bram")
+            .join("3c7851eb.jsonl");
+        assert_eq!(projected_turns_provider_label(claude), "claude");
+        assert_eq!(projected_turns_provider_label(codex), "codex");
+        assert_eq!(projected_turns_provider_label(opencode), "opencode");
+        assert_eq!(projected_turns_provider_label(&agy), "antigravity");
     }
 }
 
@@ -40253,7 +40400,13 @@ fn append_auto_setup_announcement(text: &str) {
 // switch providers only when the configured CLI is missing AND the other is
 // found; never suppress work because neither was found.
 fn agent_cli_on_path(name: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
+    // windows-pty-path-from-registry: on Windows, probe the same PATH the PTY
+    // gets, so a CLI installed after Bram launched is seen here too.
+    #[cfg(windows)]
+    let paths = Some(windows_probe_path());
+    #[cfg(not(windows))]
+    let paths = std::env::var_os("PATH");
+    let Some(paths) = paths else {
         return false;
     };
     for dir in std::env::split_paths(&paths) {
@@ -40269,6 +40422,145 @@ fn agent_cli_on_path(name: &str) -> bool {
         }
     }
     false
+}
+
+// windows-pty-path-from-registry: a Windows process's PATH is a snapshot taken
+// when it started. A CLI installed while Bram runs (or before Bram was
+// launched from an older terminal) lands in the registry's PATH but not in
+// Bram's, so the PTY's PowerShell answered `agy` with CommandNotFound
+// (2026-11-02). portable-pty's CommandBuilder::new already reads the
+// registry's machine and user Path (expanding REG_EXPAND_SZ references with
+// ExpandEnvironmentStringsW) into its base environment, in-process: no
+// reg.exe, no new crate. pty_spawn then overwrote it with the inherited
+// PATH. The merge keeps the inherited entries first, in order, and appends
+// registry entries not already present, so nothing the launching terminal
+// added is lost or reordered. Returns the merged list and how many entries it
+// appended. A registry read failure leaves portable-pty's PATH equal to the
+// inherited one, so the merge adds nothing: fail open.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn merge_path_lists(inherited: &str, registry: &str) -> (String, usize) {
+    fn key(entry: &str) -> String {
+        entry
+            .trim()
+            .trim_matches('"')
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+    }
+    let mut seen: std::collections::HashSet<String> = inherited
+        .split(';')
+        .map(key)
+        .filter(|k| !k.is_empty())
+        .collect();
+    let mut merged = inherited.trim_end_matches(';').to_string();
+    let mut added = 0;
+    for entry in registry.split(';') {
+        let entry = entry.trim();
+        let k = key(entry);
+        if k.is_empty() || !seen.insert(k) {
+            continue;
+        }
+        if !merged.is_empty() {
+            merged.push(';');
+        }
+        merged.push_str(entry);
+        added += 1;
+    }
+    (merged, added)
+}
+
+// The inherited PATH merged with `registry` (portable-pty's base-env PATH).
+// A non-Unicode PATH on either side is left alone: the inherited one wins.
+#[cfg(windows)]
+fn windows_path_with_registry(
+    registry: Option<&std::ffi::OsStr>,
+) -> Option<(std::ffi::OsString, usize)> {
+    let inherited = std::env::var_os("PATH");
+    let inherited_str = match &inherited {
+        Some(v) => v.to_str()?,
+        None => "",
+    };
+    let registry = registry.and_then(|r| r.to_str()).unwrap_or("");
+    let (merged, added) = merge_path_lists(inherited_str, registry);
+    if merged.is_empty() {
+        return None;
+    }
+    Some((merged.into(), added))
+}
+
+// The probe's PATH, cached briefly: installed_agent_flags probes every
+// provider in one call, and each fresh composition re-reads the registry.
+#[cfg(windows)]
+fn windows_probe_path() -> std::ffi::OsString {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(5);
+    static CACHE: OnceLock<Mutex<Option<(std::time::Instant, std::ffi::OsString)>>> =
+        OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = match cell.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some((at, path)) = guard.as_ref() {
+        if at.elapsed() < TTL {
+            return path.clone();
+        }
+    }
+    let base = CommandBuilder::new("cmd.exe");
+    let path = windows_path_with_registry(base.get_env("PATH"))
+        .map(|(p, _)| p)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    *guard = Some((std::time::Instant::now(), path.clone()));
+    path
+}
+
+#[cfg(test)]
+mod merge_path_lists_tests {
+    use super::merge_path_lists as merge;
+
+    #[test]
+    fn registry_entries_missing_from_the_inherited_path_are_appended() {
+        let (merged, added) = merge(
+            r"C:\Windows\system32;C:\Windows",
+            r"C:\Windows\system32;C:\Windows;C:\Users\jon\AppData\Local\agy\bin",
+        );
+        assert_eq!(
+            merged,
+            r"C:\Windows\system32;C:\Windows;C:\Users\jon\AppData\Local\agy\bin"
+        );
+        assert_eq!(added, 1);
+    }
+
+    #[test]
+    fn inherited_entries_keep_their_order_and_come_first() {
+        let (merged, added) = merge(r"C:\b;C:\a", r"C:\a;C:\c;C:\b");
+        assert_eq!(merged, r"C:\b;C:\a;C:\c");
+        assert_eq!(added, 1);
+    }
+
+    #[test]
+    fn dedupe_ignores_case_trailing_slashes_and_quotes() {
+        let (merged, added) = merge(
+            r"C:\Tools\Bin\;C:\Other",
+            r#"c:\tools\bin;"C:\OTHER\";C:\Tools\Bin\\"#,
+        );
+        assert_eq!(merged, r"C:\Tools\Bin\;C:\Other");
+        assert_eq!(added, 0);
+    }
+
+    #[test]
+    fn registry_duplicates_are_added_once() {
+        let (merged, added) = merge(r"C:\a", r"C:\new;C:\NEW\;C:\new");
+        assert_eq!(merged, r"C:\a;C:\new");
+        assert_eq!(added, 1);
+    }
+
+    #[test]
+    fn empty_and_missing_values_fail_open() {
+        assert_eq!(merge(r"C:\a;C:\b", ""), (r"C:\a;C:\b".to_string(), 0));
+        assert_eq!(merge(r"C:\a;;C:\b;", ";;"), (r"C:\a;;C:\b".to_string(), 0));
+        assert_eq!(merge("", r"C:\a;C:\b"), (r"C:\a;C:\b".to_string(), 2));
+        assert_eq!(merge("", ""), (String::new(), 0));
+    }
 }
 
 // first-run-sequence-greeting-vs-setup: Setup runs automatically, before the
@@ -46398,6 +46690,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
     // expansion can explain what it is actually monitoring.
     let mut codex_background_commands: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut pending_compact_meta: Option<serde_json::Value> = None;
     for line in jsonl_text.lines() {
         if line.is_empty() {
             continue;
@@ -46406,6 +46699,27 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             continue;
         };
         let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        // issue-470: Claude Code writes a `system` record with subtype
+        // `compact_boundary` (its `compactMetadata` carries trigger and
+        // token counts) just before the `isCompactSummary` user record that
+        // holds the summary. Remember the metadata; it never becomes a turn.
+        if typ == "system" {
+            if r.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary") {
+                pending_compact_meta = Some(
+                    r.get("compactMetadata")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            continue;
+        }
+        let compact_summary =
+            typ == "user" && r.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true);
+        let compact_meta = if compact_summary {
+            pending_compact_meta.take()
+        } else {
+            None
+        };
         // isMeta user records are CLI machinery, not user turns — e.g. the
         // Read-tool image companion ("[Image: original 3212x704, displayed
         // at…]") written beside every image tool_result. Claude Code's own
@@ -46921,12 +47235,34 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             continue;
         }
 
-        turns.push(serde_json::json!({
+        let mut turn = serde_json::json!({
             "role": role,
             "text": text_joined,
             "entries": entries,
             "images": images,
-        }));
+        });
+        if compact_summary {
+            if let Some(obj) = turn.as_object_mut() {
+                obj.insert("compactSummary".to_string(), serde_json::Value::Bool(true));
+                if let Some(meta) = compact_meta.as_ref() {
+                    if let Some(t) = meta.get("trigger").and_then(|v| v.as_str()) {
+                        obj.insert(
+                            "compactTrigger".to_string(),
+                            serde_json::Value::String(t.to_string()),
+                        );
+                    }
+                    for (src, dst) in [
+                        ("preTokens", "compactPreTokens"),
+                        ("postTokens", "compactPostTokens"),
+                    ] {
+                        if let Some(n) = meta.get(src).filter(|v| v.is_number()) {
+                            obj.insert(dst.to_string(), n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        turns.push(turn);
     }
     turns
 }
@@ -47647,6 +47983,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
             "sid": sid,
             "agents": [],
             "mainModel": main_session_model(app, &session_path),
+            "mainProvider": projected_turns_provider_label(&session_path),
         }))
         .map_err(|e| e.to_string())
     };
@@ -47682,6 +48019,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
             "sid": sid,
             "agents": agents,
             "mainModel": main_session_model(app, &session_path),
+            "mainProvider": projected_turns_provider_label(&session_path),
         });
         return serde_json::to_vec(&body).map_err(|e| e.to_string());
     }
@@ -47732,6 +48070,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         "sid": sid,
         "agents": agents,
         "mainModel": main_session_model(app, &session_path),
+        "mainProvider": projected_turns_provider_label(&session_path),
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
@@ -73821,6 +74160,49 @@ mod session_turn_tests {
             Some("456-turn".to_string())
         );
         assert_eq!(super::outbound_turn_id_from_frame("hello"), None);
+    }
+
+    // issue-470: shape from Claude Code's own JSONL (session 6b0e2dba…,
+    // trimmed): a `compact_boundary` system record, then the
+    // `isCompactSummary` user record holding the summary.
+    #[test]
+    fn compact_summary_turn_carries_boundary_metadata() {
+        let boundary = r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","level":"info","compactMetadata":{"trigger":"auto","preTokens":969184,"postTokens":7372}}"#;
+        let summary = r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. stuff"}}"#;
+        let after = r#"{"type":"user","message":{"role":"user","content":"next prompt"}}"#;
+        let turns = st_parse_lines_to_turns(&format!("{boundary}\n{summary}\n{after}"));
+        assert_eq!(turns.len(), 2, "the boundary record is not a turn");
+        let t = &turns[0];
+        assert_eq!(t["role"], "user");
+        assert_eq!(t["compactSummary"], true);
+        assert_eq!(t["compactTrigger"], "auto");
+        assert_eq!(t["compactPreTokens"], 969184);
+        assert_eq!(t["compactPostTokens"], 7372);
+        assert!(t["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("This session is being continued"));
+        // The metadata is used once: an ordinary turn after it gets none.
+        assert!(turns[1].get("compactSummary").is_none());
+        assert!(turns[1].get("compactTrigger").is_none());
+    }
+
+    #[test]
+    fn compact_summary_without_boundary_is_flagged_without_metadata() {
+        let summary = r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation."}}"#;
+        let turns = st_parse_lines_to_turns(summary);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["compactSummary"], true);
+        assert!(turns[0].get("compactTrigger").is_none());
+        assert!(turns[0].get("compactPreTokens").is_none());
+        assert!(turns[0].get("compactPostTokens").is_none());
+        // A boundary not followed by a summary leaves later turns untouched.
+        let boundary = r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":5,"postTokens":1}}"#;
+        let plain = r#"{"type":"user","message":{"role":"user","content":"hello"}}"#;
+        let turns = st_parse_lines_to_turns(&format!("{boundary}\n{plain}"));
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].get("compactSummary").is_none());
+        assert!(turns[0].get("compactTrigger").is_none());
     }
 
     #[test]

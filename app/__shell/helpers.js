@@ -1022,6 +1022,20 @@ window.__bramSwitchAgent = function (provider) {
     if (!p || (p.outcome !== "exited" && p.outcome !== "timeout")) return null;
     if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
     var name = providerName(p.provider);
+    if (p.outcome === "exited" && p.notFound) {
+      // windows-pty-path-from-registry: the host recognized the shell's
+      // "command not found" for the launched command; say that, not the shell.
+      return {
+        kind: "exited",
+        provider: p.provider,
+        atMs: p.atMs,
+        message: name + " didn't start: \"" + p.notFound + "\" isn't on this terminal's PATH. " +
+          "Install " + name + "'s CLI, or if you just installed it, relaunch Bram so its terminal picks up the new PATH.",
+        tail: "",
+        actionLabel: "Start " + name + " fresh",
+        actionTooltip: "Starts " + p.provider + " as a new session, without resuming and without extra arguments.",
+      };
+    }
     if (p.outcome === "exited") {
       var hasStatus = p.status !== null && p.status !== undefined;
       return {
@@ -14442,7 +14456,18 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
         });
       } else if (t.role === "user") {
         if (t.text && String(t.text).trim()) {
-          slice.push({ id: baseId + "-u", kind: "user", text: t.text });
+          var uev = { id: baseId + "-u", kind: "user", text: t.text };
+          // issue-470: the host flags a Claude compaction summary and carries
+          // its boundary metadata. Plain extra fields on a kind:"user" event,
+          // so SessionDetail/SubagentPeek (which render only "user") still
+          // show it; only the live Transcript reclassifies it.
+          if (t.compactSummary === true) {
+            uev.compactSummary = true;
+            if (t.compactTrigger) uev.compactTrigger = t.compactTrigger;
+            if (t.compactPreTokens) uev.compactPreTokens = t.compactPreTokens;
+            if (t.compactPostTokens) uev.compactPostTokens = t.compactPostTokens;
+          }
+          slice.push(uev);
         }
       } else {
         var entries = t.entries || [];
@@ -14498,6 +14523,109 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
   window.__bramLastTranscriptEvents = events;
   }
   return window.__bramAppendMenuEvents(events, menu);
+};
+
+// issue-470-compaction-summary-collapsed: when Claude Code auto-compacts, it
+// writes the hand-off summary as a `user` record ("This session is being
+// continued from a previous conversation…", isCompactSummary:true), which the
+// host projects as an ordinary user turn, so the live Transcript showed a
+// screen of summary as a "You" turn. The host projection keeps only
+// The host projection (st_parse_lines_to_turns) now flags such turns
+// `compactSummary: true` and copies the preceding compact_boundary's
+// trigger/preTokens/postTokens as compactTrigger/compactPreTokens/
+// compactPostTokens; the shared adapter passes them onto the user event.
+// The flag is authoritative. Claude Code's fixed opening sentence (stable
+// since the 2026-06-02 prior art, 9f8a61f) remains the fallback for an older
+// host that sends no flag; the label then omits the metadata. Codex/other
+// providers never write this sentence, so they're unchanged.
+var __BRAM_COMPACT_SUMMARY_PREFIX = "This session is being continued from a previous conversation";
+window.__bramIsCompactSummaryText = function (text) {
+  return String(text || "").replace(/^\s+/, "").indexOf(__BRAM_COMPACT_SUMMARY_PREFIX) === 0;
+};
+
+// Content-derived id (djb2 over the summary text). The row's expand state is
+// keyed by this id, never by position: a sliding transcript window renumbers
+// the host turn indices that the adapter's "pt<N>" ids are built from.
+function __bramCompactSummaryId(text) {
+  var s = String(text || "");
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return "compact-" + h.toString(36) + "-" + s.length.toString(36);
+}
+
+// Turn a "user" event that is a compaction summary into a "compaction" event:
+// { id, kind:"compaction", text, lines, trigger, preTokens, postTokens }.
+// trigger/preTokens/postTokens come from the host's compact* fields, and are
+// "" / 0 when the host sent none (older host, or no boundary record).
+window.__bramCompactionEvent = function (ev) {
+  var text = String((ev && ev.text) || "");
+  var lines = text.replace(/\s+$/, "").split(/\r?\n/).length;
+  return {
+    id: __bramCompactSummaryId(text),
+    kind: "compaction",
+    text: text,
+    lines: lines,
+    trigger: String((ev && ev.compactTrigger) || ""),
+    preTokens: Number((ev && ev.compactPreTokens) || 0),
+    postTokens: Number((ev && ev.compactPostTokens) || 0),
+  };
+};
+
+// The live Transcript's event stream: the shared adapter's output with
+// compaction summaries reclassified. Kept out of __bramTranscriptEventsFromTurns
+// itself because SessionDetail and SubagentPeek share that adapter (and its
+// per-turn cache) and render only kind "user"; a new kind there would make the
+// summary vanish from those views. Replaced in place, so the adapter's
+// __bramLastTranscriptEvents snapshot (index-aligned for the describe pump)
+// stays aligned. Converted events are cached by source-event identity so an
+// unchanged row keeps an identical object across refetches.
+window.__bramCompactionEventCache = (typeof WeakMap === "function") ? new WeakMap() : null;
+window.__bramLiveTranscriptEvents = function (payload, menu) {
+  var events = window.__bramTranscriptEventsFromTurns(payload, menu);
+  for (var i = 0; i < events.length; i++) {
+    var ev = events[i];
+    if (!ev || ev.kind !== "user") continue;
+    if (ev.compactSummary !== true && !window.__bramIsCompactSummaryText(ev.text)) continue;
+    var cache = window.__bramCompactionEventCache;
+    var conv = cache && cache.get(ev);
+    if (!conv) {
+      conv = window.__bramCompactionEvent(ev);
+      if (cache) cache.set(ev, conv);
+    }
+    events[i] = conv;
+  }
+  return events;
+};
+
+// Token counts as "969k" / "7k" / "1.2M".
+function __bramCompactTokens(n) {
+  n = Number(n) || 0;
+  if (n >= 1e6) return (Math.round(n / 1e5) / 10) + "M";
+  if (n >= 1e3) return Math.round(n / 1e3) + "k";
+  return String(n);
+}
+
+// "Context compacted (auto, 969k → 7k tokens) · 42 lines" — the parenthetical
+// only when the boundary metadata is present.
+window.__bramCompactionLabel = function (item) {
+  var it = item || {};
+  var meta = [];
+  if (it.trigger) meta.push(String(it.trigger));
+  if (it.preTokens && it.postTokens) {
+    meta.push(__bramCompactTokens(it.preTokens) + " → " + __bramCompactTokens(it.postTokens) + " tokens");
+  }
+  var n = Number(it.lines) || 0;
+  return "Context compacted" + (meta.length ? " (" + meta.join(", ") + ")" : "") +
+    " · " + n + (n === 1 ? " line" : " lines");
+};
+
+// Whether a compaction row is open. `toggled` is the Transcript's id-keyed
+// list of rows the user flipped away from the default; the default is the
+// per-user "Show compaction summaries in full" setting. XOR keeps both the
+// setting and each row's own click meaningful.
+window.__bramCompactionOpen = function (toggled, item) {
+  var flipped = (toggled || []).indexOf(item && item.id) >= 0;
+  return window.__bramCompactSummaryExpanded() ? !flipped : flipped;
 };
 
 // Pure consumer shim for the Sessions tab: unwrap the /__turns envelope.
@@ -15571,9 +15699,29 @@ window.__bramRunningSubagentCount = function (roster) {
 // describes the session only, and doesn't change with the transcript viewed:
 // the chips carry selection (subagent-chips-show-selection). "Session:" types
 // the title, which is otherwise a freeform phrase beside the freeform chips.
+// footer-model-follows-requested-provider (Windows, 2026-11-02): after
+// switching to a new Antigravity session the footer read "ANTIGRAVITY (Fable
+// 5.1) · … requested — session not yet confirmed". The provider name came from
+// the requested session; the model came from the roster, which still described
+// the Claude session just left. The model shows only when it belongs to the
+// session the line names: none while that session is pending (the same check
+// as __bramRosterForSession), and none when the roster's session is another
+// provider's (`mainProvider`, host-labelled from the roster's session path). A
+// roster without `mainProvider` (an older host) is taken as matching.
+window.__bramFooterModelLabel = function (session, roster) {
+  if (session && session.pending) return "";
+  var m = roster && roster.mainModel;
+  if (!m) return "";
+  var rp = String(roster.mainProvider || "").toLowerCase();
+  var sp = String((session && session.provider) || "").toLowerCase();
+  if (rp && sp && rp !== sp) return "";
+  return window.__bramPrettyModel(m);
+};
+
 window.__bramFooterSessionLine = function (session, roster) {
   var meta = window.__bramSessionMetaLine(session) || "";
-  var model = roster && roster.mainModel ? " (" + window.__bramPrettyModel(roster.mainModel) + ")" : "";
+  var label = window.__bramFooterModelLabel(session, roster);
+  var model = label ? " (" + label + ")" : "";
   if (!meta) return model.trim();
   if (!session.provider) return "Session: " + meta;
   var sp = meta.indexOf(" ");
@@ -18295,6 +18443,17 @@ window.__bramSearchBadgesInitialAllOn = function () {
 };
 window.__bramSetSearchBadgesInitialAllOn = function (on) {
   __bramWriteLS('bram.searchBadgesInitialAllOn', on ? '1' : '0');
+  return !!on;
+};
+
+// issue-470-compaction-summary-collapsed: whether the Transcript's compaction
+// rows start expanded. Default OFF (collapsed to one line). DECISION, per-user
+// and unscoped: a reading preference that holds in any project.
+window.__bramCompactSummaryExpanded = function () {
+  return __bramReadLS('bram.compactSummaryExpanded', '0') === '1';
+};
+window.__bramSetCompactSummaryExpanded = function (on) {
+  __bramWriteLS('bram.compactSummaryExpanded', on ? '1' : '0');
   return !!on;
 };
 

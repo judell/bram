@@ -401,6 +401,18 @@ Parallelize the *work*; serialize the *gates*.
   host. The check keys on the payload's `agent_id`, populated only for
   subagent-originated tool calls. Enforcement claims need a *fire*
   behind them (a deliberate violation), not an inspection.
+- **The host holds delegated rows until the subagent stops (Claude).** A
+  subagent spawned while your turn holds a claim is bound to that
+  claim's items. When your turn ends, the claim is held on those items
+  instead of cleared, so their rows stay locked and the subagent's
+  lines are credited to them, not to "no item". `SubagentStop`, the
+  session ending or a Bram restart releases the binding. While it's
+  live, commit, drop and prune of those ids answer 409
+  `refuse-delegated-live`. The user can release it from the row. So you
+  no longer need to commit delegated items together to place their
+  lines, and you can advance and commit once the subagent has returned.
+  Other providers don't bind yet, so for them the old advice stands:
+  commit delegated items together.
 
 ## Serializing entangled items approved together
 

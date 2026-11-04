@@ -3235,6 +3235,12 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim, opt) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: ids }),
       })
+      .then(function (r) {
+        // delegated-work-action-gates: the host refuses a bound id
+        // (409 refuse-delegated-live). The button is disabled for it, so this
+        // only fires on a stale pane; record it rather than fail silently.
+        if (r && r.status === 409) window.__bramIframeTrace("gate-click", { op: "drop-refused", status: r.status, ids: ids });
+      })
       .catch(function () {});
     window.__bramW2SetSelection([]);
     window.__bramClearComposer();
@@ -4027,7 +4033,9 @@ var BRAM_ECHO_MAX_TICKS = 15; // ~30 s at the 2 s tick
 window.__bramItemInflightKind = function (claim, itemId, echoItemId, echoKind, echoTick) {
   if (!itemId) return "";
   var ids = (claim && claim.ids) || [];
-  if (ids.indexOf(itemId) !== -1) return claim.kind || "";
+  // delegated-work-action-gates: a delegation-only claim is not an agent
+  // working on the item in the main turn; the strip names the subagent.
+  if (ids.indexOf(itemId) !== -1 && !(claim && claim.heldByDelegation)) return claim.kind || "";
   if (!echoItemId || echoItemId !== itemId || !echoKind) return "";
   if ((echoTick || 0) >= BRAM_ECHO_MAX_TICKS) {
     // Host never claimed this item. Stop asserting it is in flight; the row
@@ -4043,8 +4051,101 @@ window.__bramItemInflightKind = function (claim, itemId, echoItemId, echoKind, e
 // ids, not a boolean: when parallel agent work later brings multi-claim
 // host state, the evolution happens here and call sites stay put.
 window.__bramInflightBlocker = function (claim) {
+  // delegated-work-action-gates: a claim held ONLY by bound subagents (no main
+  // turn running) is not "a turn is running": no global dim, no gate-click
+  // queue, no frozen checkboxes. Those rows are handled by the
+  // selection-scoped __bramDelegatedBlocker below instead.
+  if (claim && claim.heldByDelegation) return "";
   var ids = (claim && claim.ids) || [];
   return ids.length ? ids[0] : "";
+};
+
+// delegated-work-action-gates: the host's live subagent bindings, served on
+// /__inflight as `delegated: [{agentId, ids, agentType, description,
+// boundAtMs}]`. Plain-array copy so callers can loop without proxy surprises.
+window.__bramDelegatedBindings = function (claim) {
+  var d = (claim && claim.delegated) || [];
+  var out = [];
+  for (var i = 0; i < d.length; i++) {
+    if (d[i] && d[i].agentId) out.push(d[i]);
+  }
+  return out;
+};
+
+// The bindings whose ids intersect `sel` (an array of item ids).
+window.__bramDelegatedBindingsFor = function (claim, sel) {
+  var chosen = sel || [];
+  var out = [];
+  window.__bramDelegatedBindings(claim).forEach(function (b) {
+    var ids = b.ids || [];
+    for (var i = 0; i < ids.length; i++) {
+      if (chosen.indexOf(ids[i]) !== -1) { out.push(b); return; }
+    }
+  });
+  return out;
+};
+
+// The selection-scoped blocker: the first selected id that a live binding
+// covers, else "". Unrelated selections return "" and act normally.
+window.__bramDelegatedBlocker = function (claim, sel) {
+  var chosen = sel || [];
+  var bs = window.__bramDelegatedBindings(claim);
+  for (var i = 0; i < bs.length; i++) {
+    var ids = bs[i].ids || [];
+    for (var j = 0; j < ids.length; j++) {
+      if (chosen.indexOf(ids[j]) !== -1) return ids[j];
+    }
+  }
+  return "";
+};
+
+window.__bramDelegatedLabel = function (b) {
+  if (!b) return "";
+  return String(b.description || b.agentType || b.agentId || "subagent");
+};
+
+// "A subagent (<label>) is still working on <id>" for the tooltips and the
+// gate-bar line. Empty when the selection touches no binding.
+window.__bramDelegatedWhy = function (claim, sel) {
+  var id = window.__bramDelegatedBlocker(claim, sel);
+  if (!id) return "";
+  var bs = window.__bramDelegatedBindingsFor(claim, [id]);
+  var label = bs.length ? window.__bramDelegatedLabel(bs[0]) : "subagent";
+  var more = bs.length > 1 ? " (+" + (bs.length - 1) + " more)" : "";
+  return "A subagent (" + label + ")" + more + " is still working on " + id +
+    "; it unlocks when the subagent stops.";
+};
+
+// The binding that covers one item (for the row strip), or null.
+window.__bramDelegatedForItem = function (claim, itemId) {
+  var bs = window.__bramDelegatedBindingsFor(claim, [itemId]);
+  return bs.length ? bs[0] : null;
+};
+
+// Release every binding covering the selection (the user knows the subagent
+// is gone, or its stop never arrived). The host emits inflight-claim-changed
+// and worklist-changed on the change, which refetch the gate bar and rows.
+window.__bramDelegatedRelease = function (claim, sel) {
+  var bs = window.__bramDelegatedBindingsFor(claim, sel);
+  var agentIds = [];
+  bs.forEach(function (b) {
+    if (agentIds.indexOf(b.agentId) === -1) agentIds.push(b.agentId);
+  });
+  window.__bramIframeTrace("delegated-release", { op: "click", agentIds: agentIds, ids: (sel || []).slice() });
+  agentIds.forEach(function (agentId) {
+    window
+      .fetch("/__agent/subagent/release", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: agentId }),
+      })
+      .then(function (r) {
+        window.__bramIframeTrace("delegated-release", { op: "done", agentIds: [agentId], status: r.status });
+      })
+      .catch(function (e) {
+        window.__bramIframeTrace("delegated-release", { op: "failed", agentIds: [agentId], error: String(e) });
+      });
+  });
 };
 
 // strip-label-tense-for-applied-items: the Worklist2 summary strip's
@@ -4446,6 +4547,8 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
   if (!chosen.length) return "";
   var blocker = window.__bramInflightBlocker(claim);
   if (blocker) return "Unavailable while Bram is working on " + blocker + "; it unlocks when that turn ends.";
+  var delegatedWhy = window.__bramDelegatedWhy(claim, chosen);
+  if (delegatedWhy) return delegatedWhy;
   var addressed = window.__bramAddressedBlockMessage ? window.__bramAddressedBlockMessage(chosen, ctx) : "";
   if (addressed) return addressed;
   if (window.__bramSelectionAllCommittable(items, chosen, claim)) return "";
@@ -5636,6 +5739,12 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
     return base + " · " + (asClaim ? "closes " : "for ") + closesList;
   };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
+  // delegated-work-action-gates: a live subagent binding names who is working
+  // and replaces "Start again, or Drop" / any "stopped" reading.
+  if (!kind) {
+    var delegatedTo = window.__bramDelegatedForItem(claim, item.id);
+    if (delegatedTo) return withCloses("Subagent working: " + window.__bramDelegatedLabel(delegatedTo), true);
+  }
   // issue-430-dependent-commit-offer: a refused commit used to reach only the
   // agent's HTTP response, and the row kept offering it ("bram does not tell
   // me that!"). The host keeps the last refusal until HEAD moves.
@@ -6317,7 +6426,7 @@ window.__bramPushWithheldNote = function (status) {
   return "These commits ride " + b + "; they reach " + (status.pushWithheld.defaultBranch || "main") + " through its PR.";
 };
 
-window.__bramGateScopeTooltip = function (sel, kind, branch) {
+window.__bramGateScopeTooltip = function (sel, kind, branch, claim) {
   // gate-tooltips-multiline: Markdown lines, joined like the Worklist strip
   // tooltip (__bramWorklist2StripTooltip) -- one long single-line tooltip ran
   // past its edge. Rendered via tooltipMarkdown on the gate buttons.
@@ -6340,6 +6449,10 @@ window.__bramGateScopeTooltip = function (sel, kind, branch) {
   if ((kind === "commit" || kind === "start-commit") && branch) {
     lines.push("→ `" + branch + "`");
   }
+  // delegated-work-action-gates: why the button is off, when a subagent holds
+  // a selected item.
+  var delegatedWhy = window.__bramDelegatedWhy(claim, ids);
+  if (delegatedWhy) lines.push("**Why it's off:** " + delegatedWhy);
   return lines.join("\n\n");
 };
 

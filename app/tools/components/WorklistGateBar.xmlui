@@ -33,6 +33,16 @@
   <ChangeListener
     listenTo="{gateWorklistChanged.value}"
     onDidChange="() => { gateWorklist.refetch(); gateClaim.refetch(); }" />
+  <!-- delegated-work-action-gates: a subagent binding or release changes the
+       claim without a worklist write, so refetch on the claim event too.
+       Same PushSource + ChangeListener idiom as Worklist.xmlui:90-96. -->
+  <PushSource
+    id="gateClaimEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('inflight-claim-changed')}" />
+  <ChangeListener
+    listenTo="{gateClaimEvt.value &amp;&amp; gateClaimEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(gateClaimEvt.value, gateClaim)" />
   <!-- item-last-session-switch-there: the current session, for the "Last
        worked on in" line. The footer's small list fetch, refetched on the
        same event, so a switch updates the line without a board refetch. -->
@@ -271,6 +281,7 @@
   </HStack>
   <HStack
     when="{!!gateQueue.value}"
+    wrapContent="true"
     horizontalAlignment="center"
     verticalAlignment="center"
     gap="$space-2"
@@ -285,6 +296,32 @@
       variant="outlined"
       label="Cancel"
       onClick="window.__bramGateQueueCancel()" />
+  </HStack>
+  <!-- delegated-work-action-gates: shown only while the selection touches an
+       item a bound subagent is still working on. Mirrors the queued-click row
+       above: one line saying why the buttons are off, one control. Release
+       frees the binding when the subagent's stop never arrived. -->
+  <!-- wrapContent: in a narrow pane the reason and Release must wrap, or the
+       button runs off the edge unseen (Jon, 2026-11-04 demo).
+       https://www.xmlui.org/docs/reference/components/Stack#wrapcontent -->
+  <HStack
+    when="{!!window.__bramDelegatedBlocker(gateClaim.value, gateSel.value)}"
+    wrapContent="true"
+    horizontalAlignment="center"
+    verticalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-2"
+    paddingTop="$space-1">
+    <Text
+      fontSize="$fontSize-sm"
+      color="$color-warn-700"
+      value="{window.__bramDelegatedWhy(gateClaim.value, gateSel.value)}" />
+    <Button
+      size="xs"
+      variant="outlined"
+      label="Release"
+      tooltip="Release the subagent's hold, e.g. if it was cancelled and never reported stopping"
+      onClick="window.__bramDelegatedRelease(gateClaim.value, gateSel.value)" />
   </HStack>
   <!-- locked-board-names-its-own-exit: the escape, stated where the dead
        buttons are. Deliberately NOT gated on a selection, unlike the button
@@ -376,9 +413,9 @@
          one that describes. -->
     <Button
       label="{window.__bramGateQueuedLabel('start', window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value), gateQueue.value)}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start')}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start', null, gateClaim.value)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <!-- gate-one-way-to-continue-one-to-finish: dimmed whenever Commit can be
          lit. On a begun `proposed` item both send apply-and-commit, so the row
@@ -386,14 +423,14 @@
     <Button
       label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch, gateClaim.value)}"
       onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <Button
       label="{window.__bramGateQueuedLabel('commit', 'Commit', gateQueue.value)}"
       tooltipMarkdown="{window.__bramGateCommitTooltip(gateSel.value, gateGit.value &amp;&amp; gateGit.value.branch, gateWorklist.value.items, gateClaim.value, gateTurnCtx.value)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <!-- switch-to-transcript-on-action: Refine retired. It was never an
          authorization — the other gate buttons write auth records; Refine
@@ -406,9 +443,9 @@
          Start / Start & commit / Commit / Drop. -->
     <Button
       label="Drop"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'drop')}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'drop', null, gateClaim.value)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value)}"
       onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
   </HStack>
 </Component>

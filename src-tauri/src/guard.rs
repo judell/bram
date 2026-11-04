@@ -354,6 +354,48 @@ fn session_report(provider: &str, payload: &serde_json::Value) {
     }
 }
 
+// delegated-work-action-gates: the /__agent/subagent body for a Claude
+// SubagentStart / SubagentStop payload. None without an agent_id or a token
+// (an agent Bram didn't launch), which the route would refuse anyway.
+fn subagent_report_body(payload: &serde_json::Value, token: &str) -> Option<serde_json::Value> {
+    let agent_id = str_field(payload, "agent_id");
+    if agent_id.is_empty() || token.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "event": str_field(payload, "hook_event_name"),
+        "agent_id": agent_id,
+        "agent_type": str_field(payload, "agent_type"),
+        "session_id": str_field(payload, "session_id"),
+        // A subagent that backgrounds a command and ends its turn fires
+        // SubagentStop with that task still pending; it resumes when the task
+        // finishes. The host keeps the binding while this list is non-empty
+        // (delegated-work-action-gates; seen live 2026-11-04).
+        "background_tasks": payload
+            .get("background_tasks")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+        "bram_token": token,
+    }))
+}
+
+// The port from this terminal's environment (the Bram that launched this
+// agent), falling back to the root-local port file like the menu hooks.
+fn subagent_report(root: &Path, payload: &serde_json::Value) -> &'static str {
+    let token = std::env::var("BRAM_MENU_TOKEN").unwrap_or_default();
+    let Some(body) = subagent_report_body(payload, &token) else {
+        return "skipped=no-agent-or-token";
+    };
+    let port = std::env::var("BRAM_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .or_else(|| read_port(root));
+    let Some(port) = port else {
+        return "skipped=no-port";
+    };
+    post_json_outcome(port, "/__agent/subagent", &body.to_string())
+}
+
 // The [hook] decision line, shipped exactly the way the Python guards ship
 // theirs (POST /__hook-trace; the host writes it through the standard
 // bram-trace path, gated on the LIVE Traces setting).
@@ -1132,6 +1174,27 @@ fn authority_menu_hook(
         }
         return 0;
     }
+    // delegated-work-action-gates: report subagent start/stop so the host can
+    // bind the subagent to the claim it was spawned under and release it when
+    // it finishes. Fail-open like the session report: always exit 0 and print
+    // nothing. SubagentStop's exit 2 would PREVENT the subagent stopping, and
+    // its stdout `decision: block` would too, so neither is ever produced.
+    if provider == "claude-rs" && matches!(event.as_str(), "SubagentStart" | "SubagentStop") {
+        let root = resolve_project_root(provider, payload);
+        let outcome = subagent_report(&root, payload);
+        append_breadcrumb(
+            &root,
+            provider,
+            &event,
+            "",
+            &format!(
+                "post=/__agent/subagent {} ms={}",
+                outcome,
+                started.elapsed().as_millis()
+            ),
+        );
+        return 0;
+    }
     let tool = str_field(payload, "tool_name");
     let root = resolve_project_root(provider, payload);
     let Some(path) = menu_would_action(provider, &event, &tool) else {
@@ -1406,6 +1469,49 @@ pub fn guard_hook_command(link: &Path, hook: &str) -> String {
 #[cfg(test)]
 mod guard_mode_tests {
     use super::*;
+
+    #[test]
+    fn subagent_report_carries_agent_identity_and_never_blocks() {
+        // Shape from docs/agent-specimens/claude/hooks/SubagentStop.json.
+        let stop = serde_json::json!({
+            "session_id": "4f97c209",
+            "agent_id": "ae3fb2df9de52ea71",
+            "agent_type": "",
+            "hook_event_name": "SubagentStop",
+            "stop_hook_active": false,
+        });
+        let body = subagent_report_body(&stop, "tok").unwrap();
+        assert_eq!(body["event"], "SubagentStop");
+        assert_eq!(body["agent_id"], "ae3fb2df9de52ea71");
+        assert_eq!(body["session_id"], "4f97c209");
+        assert_eq!(body["bram_token"], "tok");
+        // No background_tasks in the payload: an empty list, so the host releases.
+        assert_eq!(body["background_tasks"], serde_json::json!([]));
+        // A pause with a pending background task is forwarded as-is, so the
+        // host can keep the binding until the subagent's final stop.
+        let mut paused = stop.clone();
+        paused["background_tasks"] = serde_json::json!([{ "id": "bdv5odlm8" }]);
+        let body = subagent_report_body(&paused, "tok").unwrap();
+        assert_eq!(
+            body["background_tasks"].as_array().map(|a| a.len()),
+            Some(1)
+        );
+        // No token (not launched by Bram) or no agent_id: nothing to send.
+        assert!(subagent_report_body(&stop, "").is_none());
+        let no_agent = serde_json::json!({ "hook_event_name": "SubagentStart" });
+        assert!(subagent_report_body(&no_agent, "tok").is_none());
+        // Both events exit 0 (exit 2 on SubagentStop would keep the subagent
+        // from stopping). No agent_id here on purpose: a test run inside a
+        // Bram terminal inherits BRAM_PORT/BRAM_MENU_TOKEN, and a real POST
+        // would bind a fake agent in that live instance.
+        for event in ["SubagentStart", "SubagentStop"] {
+            let p = serde_json::json!({ "hook_event_name": event });
+            assert_eq!(
+                authority_menu_hook("claude-rs", &p, std::time::Instant::now()),
+                0
+            );
+        }
+    }
 
     #[test]
     fn session_report_skips_subagents_and_foreign_terminals() {

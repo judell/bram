@@ -9326,7 +9326,10 @@ fn turn_state_transition_rearms_claim(prev: &TurnState, next: &TurnState) -> boo
 // consumed, interrupted (the Escape path) and past-TTL records, so a
 // cancelled approval can never re-arm itself.
 fn rearm_claim_for_live_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
-    if inflight_claim_ids_and_claimed_at(app).is_some() {
+    // delegated-work-action-gates: a claim that survives only as a delegated
+    // hold is not this turn's, so it doesn't stop the re-arm; the write
+    // unions the still-bound ids back in.
+    if inflight_claim_ids_and_claimed_at(app).is_some() && !claim_is_delegated_hold(app) {
         return;
     }
     let Some((kind, _age_ms, ids)) = worklist_active_authorization_summary(app) else {
@@ -51328,6 +51331,14 @@ fn shell_marker_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         }
         markers
     };
+    // delegated-work-action-gates: a prompt edge means the shell has its
+    // foreground back, so the agent that spawned any bound subagent has
+    // exited and no SubagentStop will come. Tool shells are non-interactive
+    // and emit no markers, so this is the agent's own exit (or Bram's
+    // relaunch typing over it). One stat of the bindings file per prompt edge.
+    if markers.iter().any(|m| matches!(m, ShellMarker::Prompt(_))) {
+        delegated_release_on_shell_prompt(app);
+    }
     if !bram_trace_enabled() {
         return;
     }
@@ -56418,6 +56429,8 @@ fn settings_has_permission_menu_hook(
         && event_has_menu_hook("PreToolUse")
         && event_has_menu_hook("SessionStart")
         && event_has_menu_hook("UserPromptSubmit")
+        && event_has_menu_hook("SubagentStart")
+        && event_has_menu_hook("SubagentStop")
 }
 
 // Remove any PreToolUse hook entries whose `command` contains
@@ -56831,6 +56844,10 @@ fn merge_guard_menu_hook_into_settings(
         // current-session-from-events: the guard reports the session id.
         ("SessionStart", ".*"),
         ("UserPromptSubmit", ".*"),
+        // delegated-work-action-gates: the guard reports subagent start and
+        // stop so the host can bind and release delegated claims.
+        ("SubagentStart", ".*"),
+        ("SubagentStop", ".*"),
     ] {
         changed |= merge_command_hook_into_event(hooks_obj, event, matcher, shadow_command, marker);
     }
@@ -56979,13 +56996,15 @@ mod guard_shadow_registration_tests {
     const MENU_AUTHORITY: &str =
         "\"/Users/x/.bram/bram-guard\" guard claude-permission-menu --authority";
     const MENU_PY: &str = "\"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"";
-    const MENU_EVENTS: [&str; 6] = [
+    const MENU_EVENTS: [&str; 8] = [
         "PermissionRequest",
         "PostToolUse",
         "PermissionDenied",
         "PreToolUse",
         "SessionStart",
         "UserPromptSubmit",
+        "SubagentStart",
+        "SubagentStop",
     ];
 
     fn events_with_command(path: &Path, command: &str) -> Vec<String> {
@@ -57032,6 +57051,39 @@ mod guard_shadow_registration_tests {
         assert!(merge_guard_menu_hook_into_settings(&path, MENU_SHADOW).unwrap());
         assert_eq!(events_with_command(&path, MENU_SHADOW), want);
         assert!(events_with_command(&path, MENU_AUTHORITY).is_empty());
+    }
+
+    #[test]
+    fn menu_hook_currentness_requires_the_subagent_events() {
+        // delegated-work-action-gates: an install registered before
+        // SubagentStart/SubagentStop existed must read as not current, or it
+        // would never re-merge and the host would never hear subagents.
+        let marker = "guard claude-permission-menu";
+        let mut hooks = serde_json::Map::new();
+        for ev in MENU_EVENTS.iter().filter(|e| !e.starts_with("Subagent")) {
+            hooks.insert(
+                ev.to_string(),
+                serde_json::json!([
+                    { "matcher": ".*", "hooks": [{ "type": "command", "command": MENU_AUTHORITY }] }
+                ]),
+            );
+        }
+        let seeded = serde_json::json!({ "hooks": hooks });
+        let path = temp_settings("menu-subagent-current", Some(&seeded.to_string()));
+        assert!(!settings_has_permission_menu_hook(
+            &path,
+            marker,
+            Some(MENU_AUTHORITY)
+        ));
+        assert!(merge_guard_menu_hook_into_settings(&path, MENU_AUTHORITY).unwrap());
+        assert!(settings_has_permission_menu_hook(
+            &path,
+            marker,
+            Some(MENU_AUTHORITY)
+        ));
+        let events = events_with_command(&path, MENU_AUTHORITY);
+        assert!(events.contains(&"SubagentStart".to_string()));
+        assert!(events.contains(&"SubagentStop".to_string()));
     }
 
     #[test]
@@ -62360,6 +62412,7 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         owned(".bram-queue.json", File),
         owned(".bram-message-draft.json", File),
         owned(".inflight-claim.json", File),
+        owned(".delegated-bindings.json", File),
         owned(".claim-intervals.json", File),
         owned(".pty-intent.jsonl", File),
         owned(".worklist-authorization.json", File),
@@ -67857,6 +67910,35 @@ fn write_inflight_claim_sentinel_inner<R: tauri::Runtime>(
     let Some(path) = inflight_claim_file(app) else {
         return;
     };
+    // delegated-work-action-gates: a new claim written while a subagent is
+    // still bound keeps the bound ids in it, so the subagent's later writes
+    // stay credited to its items (they become joint with the new claim's,
+    // which errs safe). Not on the no-snapshot path: the drop-policy
+    // validator writes and immediately clears by its own ids, and a union
+    // there would turn that clear partial and strand the claim.
+    let bound = if snapshot {
+        delegated_bound_ids_union(app)
+    } else {
+        Vec::new()
+    };
+    let unioned;
+    let ids: &[String] = if bound.is_empty() {
+        ids
+    } else {
+        unioned = union_sorted_ids(ids, &bound);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "delegated",
+                &format!(
+                    "op=union-on-write new={} bound={}",
+                    ids_json_str(ids),
+                    ids_json_str(&bound)
+                ),
+            );
+        }
+        &unioned
+    };
     if snapshot {
         record_claim_interval(app, ids, kind, unix_now_ms());
     }
@@ -68328,6 +68410,11 @@ fn clear_active_sentinel<R: tauri::Runtime>(app: &AppHandle<R>) {
     // deliberately untouched — it is what keeps a legitimate multi-turn apply
     // attributed (#286).
     if let Some((ids, _claimed_at)) = inflight_claim_ids_and_claimed_at(app) {
+        // delegated-work-action-gates: live bindings hold the claim instead.
+        // This function's one caller is the PTY-silence turn-end path.
+        if reconcile_claim_with_bindings(app, "silence") {
+            return;
+        }
         clear_inflight_claim_sentinel(app, &ids);
     }
 }
@@ -70070,6 +70157,12 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // Authorization is the durable half and is untouched here: `advance` and
     // `worklist-commit` read the auth record, not the claim, so a later turn
     // completes the lifecycle exactly as before.
+    //
+    // delegated-work-action-gates: a subagent still bound to this claim's
+    // items holds it past the turn end (shrunk to the bound ids) instead.
+    if reconcile_claim_with_bindings(app, "turn-end") {
+        return;
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -70088,17 +70181,941 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
 // session that didn't complete (Bram killed mid-cycle, agent crashed
 // before mutate, etc.).
 fn cleanup_stale_inflight_claim<R: tauri::Runtime>(app: &AppHandle<R>) {
+    // delegated-work-action-gates: a restart starts with no bindings. The
+    // subagents that held them died with the session that spawned them.
+    delegated_release_all(app, "restart");
     let Some(path) = inflight_claim_file(app) else {
         return;
     };
     if !path.exists() {
         return;
     }
+    // delegated-work-action-gates: cut the unowned boundary a stale claim
+    // never got. Removing the file bare left the dead claim's interval open,
+    // so every edit after the restart was credited to it until the next claim
+    // write. Called while the file is still present: record_claim_interval
+    // reads the PRIOR claim as the boundary's left edge, and with the file
+    // gone the empty->empty transition would be skipped as unchanged. It runs
+    // a scoped temp-index capture synchronously at startup, but only when a
+    // stale claim exists (Bram quit mid-claim), and fails open: no git, no
+    // repo, or a failed capture records nothing and startup proceeds.
+    record_claim_interval(app, &[], "cleared", unix_now_ms());
     let _ = std::fs::remove_file(&path);
     if bram_trace_enabled() {
         append_bram_trace_line(app, "inflight-sentinel", "op=stale-startup-clear");
     }
     emit_replayable_signal(app, "inflight-claim-changed");
+}
+
+// --- delegated-work-action-gates ---------------------------------------------
+//
+// Decision: docs/decisions/2026-11-04-delegated-work-binds-to-the-spawning-claim.md.
+// Claude only. A subagent inherits the claim it was spawned under: on
+// `SubagentStart` (reported by the guard's menu hook to /__agent/subagent) the
+// host binds the subagent's agent_id to the live claim's item ids. While any
+// binding is live:
+//   - the claim is HELD at turn end (shrunk to the bound ids instead of
+//     cleared), so the subagent's writes stay inside an interval owned by its
+//     items rather than landing as unowned;
+//   - commit, drop and prune refuse the bound ids (409 refuse-delegated-live).
+// A binding is released only on evidence: SubagentStop, the spawning session
+// ending (PTY replaced, or the agent exiting to the shell prompt), a Bram
+// restart, or a manual Release. Never on a timeout.
+//
+// agent_id format: Claude's hook `agent_id` is the bare id (specimen
+// docs/agent-specimens/claude/hooks/SubagentStop.json: "ae3fb2df9de52ea71",
+// beside agent_transcript_path .../subagents/agent-ae3fb2df9de52ea71.jsonl),
+// which is exactly the roster's `agentId` (the transcript filename minus
+// `agent-` and `.jsonl`). normalize_delegated_agent_id strips an `agent-`
+// prefix anyway, so either spelling keys the same binding.
+const DELEGATED_BINDINGS_REL: &str = ".delegated-bindings.json";
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct DelegatedBinding {
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(rename = "boundAtMs", default)]
+    bound_at_ms: i64,
+    #[serde(rename = "sessionId", default)]
+    session_id: String,
+    #[serde(rename = "agentType", default)]
+    agent_type: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct DelegatedBindings {
+    #[serde(default)]
+    bindings: std::collections::BTreeMap<String, DelegatedBinding>,
+}
+
+fn sorted_unique_ids<'a>(ids: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let set: std::collections::BTreeSet<String> = ids.into_iter().cloned().collect();
+    set.into_iter().collect()
+}
+
+impl DelegatedBindings {
+    fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+
+    // Returns true when the store changed. An empty id set binds nothing.
+    fn bind(
+        &mut self,
+        agent: &str,
+        ids: &[String],
+        now_ms: i64,
+        session_id: &str,
+        agent_type: &str,
+    ) -> bool {
+        if agent.is_empty() || ids.is_empty() {
+            return false;
+        }
+        let next = DelegatedBinding {
+            ids: sorted_unique_ids(ids.iter()),
+            bound_at_ms: now_ms,
+            session_id: session_id.to_string(),
+            agent_type: agent_type.to_string(),
+        };
+        if self.bindings.get(agent).map(|b| &b.ids) == Some(&next.ids) {
+            return false;
+        }
+        self.bindings.insert(agent.to_string(), next);
+        true
+    }
+
+    fn release(&mut self, agent: &str) -> Option<DelegatedBinding> {
+        self.bindings.remove(agent)
+    }
+
+    fn union_ids(&self) -> Vec<String> {
+        sorted_unique_ids(self.bindings.values().flat_map(|b| b.ids.iter()))
+    }
+
+    // The requested ids a live binding holds, and the agents holding them.
+    // None when nothing requested is bound.
+    fn refusal(&self, requested: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut agents: Vec<String> = Vec::new();
+        for (agent, b) in &self.bindings {
+            let mut hit = false;
+            for id in requested {
+                if b.ids.iter().any(|x| x == id) {
+                    hit = true;
+                    if !ids.contains(id) {
+                        ids.push(id.clone());
+                    }
+                }
+            }
+            if hit {
+                agents.push(agent.clone());
+            }
+        }
+        if ids.is_empty() {
+            return None;
+        }
+        ids.sort();
+        Some((ids, agents))
+    }
+}
+
+fn normalize_delegated_agent_id(raw: &str) -> String {
+    let t = raw.trim();
+    t.strip_prefix("agent-").unwrap_or(t).to_string()
+}
+
+// The id becomes a JSON key and a trace token, never a path, but keep it to
+// the shape Claude emits so nothing odd rides through.
+fn delegated_agent_id_is_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn read_delegated_bindings_at(path: &Path) -> DelegatedBindings {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<DelegatedBindings>(&s).ok())
+        .unwrap_or_default()
+}
+
+// Atomic write; an empty store removes the file, so "no file" is the common
+// idle state and the hot-path reads below cost one failed open. Never creates
+// the state folder: a binding needs a live claim, whose file already put it
+// there.
+fn write_delegated_bindings_at(path: &Path, bindings: &DelegatedBindings) -> bool {
+    if bindings.is_empty() {
+        return match std::fs::remove_file(path) {
+            Ok(()) => true,
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        };
+    }
+    let Ok(body) = serde_json::to_string_pretty(&serde_json::json!({
+        "version": 1,
+        "bindings": bindings.bindings,
+    })) else {
+        return false;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, format!("{}\n", body)).is_err() {
+        return false;
+    }
+    std::fs::rename(&tmp, path).is_ok()
+}
+
+fn union_sorted_ids(a: &[String], b: &[String]) -> Vec<String> {
+    sorted_unique_ids(a.iter().chain(b.iter()))
+}
+
+fn same_id_set(a: &[String], b: &[String]) -> bool {
+    sorted_unique_ids(a.iter()) == sorted_unique_ids(b.iter())
+}
+
+// What a claim should become once bindings change.
+#[derive(Debug, PartialEq, Eq)]
+enum DelegatedClaimAction {
+    /// Do nothing to the claim.
+    Leave,
+    /// Clear it the normal way (records the cleared boundary).
+    Clear,
+    /// Hold it on exactly these ids, marked as held by delegation.
+    Hold(Vec<String>),
+}
+
+// At a turn-end clear (jsonl end_turn, PTY silence): with bindings live, hold
+// the claim on their union instead of clearing it.
+fn delegated_turn_end_action(bound_union: &[String]) -> DelegatedClaimAction {
+    if bound_union.is_empty() {
+        DelegatedClaimAction::Clear
+    } else {
+        DelegatedClaimAction::Hold(bound_union.to_vec())
+    }
+}
+
+// After a binding is released. THE RECONCILE RULE (kept conservative): only a
+// claim that is currently a delegated hold -- the main turn ended and the
+// claim survives only for bindings -- is touched here. It shrinks to the
+// remaining bindings' union, or clears when none remain. A claim that is NOT
+// a hold belongs to a running main turn (or was freshly written by one, with
+// the bound ids unioned in); it is left alone, and that turn's own end
+// reconciles it against whatever bindings are still live then. So a main
+// claim never loses ids mid-turn because a subagent stopped.
+fn delegated_release_action(
+    claim_is_hold: bool,
+    remaining_union: &[String],
+) -> DelegatedClaimAction {
+    if !claim_is_hold {
+        DelegatedClaimAction::Leave
+    } else if remaining_union.is_empty() {
+        DelegatedClaimAction::Clear
+    } else {
+        DelegatedClaimAction::Hold(remaining_union.to_vec())
+    }
+}
+
+// Serializes every read-modify-write of the bindings file.
+fn delegated_bindings_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn delegated_bindings_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_resource_path(app, DELEGATED_BINDINGS_REL)
+}
+
+fn read_delegated_bindings<R: tauri::Runtime>(app: &AppHandle<R>) -> DelegatedBindings {
+    delegated_bindings_file(app)
+        .map(|p| read_delegated_bindings_at(&p))
+        .unwrap_or_default()
+}
+
+fn delegated_bound_ids_union<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    read_delegated_bindings(app).union_ids()
+}
+
+fn ids_json_str(ids: &[String]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn trace_token(s: &str) -> String {
+    let t: String = s
+        .trim()
+        .chars()
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect();
+    if t.is_empty() {
+        "-".to_string()
+    } else {
+        t
+    }
+}
+
+fn emit_delegated_changed<R: tauri::Runtime>(app: &AppHandle<R>) {
+    emit_replayable_signal(app, "inflight-claim-changed");
+    emit_replayable_signal(app, "worklist-changed");
+}
+
+// Read the live claim: (ids, delegatedHold). None when there is no claim.
+fn inflight_claim_ids_and_hold<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(Vec<String>, bool)> {
+    let path = inflight_claim_file(app)?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let claim: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let ids = worklist_json_ids(&claim, "ids");
+    let hold = claim
+        .get("delegatedHold")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some((ids, hold))
+}
+
+fn claim_is_delegated_hold<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    inflight_claim_ids_and_hold(app)
+        .map(|(_, hold)| hold)
+        .unwrap_or(false)
+}
+
+// SubagentStart: bind to the main turn's live claim, if there is one. A held
+// claim is not the main turn's -- a subagent spawned while only a delegated
+// hold is live came from a chat turn and binds to nothing.
+fn delegated_bind_to_live_claim<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    agent: &str,
+    agent_type: &str,
+    session_id: &str,
+) -> Option<Vec<String>> {
+    let skipped = |reason: &str| {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "delegated",
+                &format!("op=bind-skipped agent={} reason={}", agent, reason),
+            );
+        }
+    };
+    let Some((ids, hold)) = inflight_claim_ids_and_hold(app) else {
+        skipped("no-claim");
+        return None;
+    };
+    if ids.is_empty() {
+        skipped("no-claim");
+        return None;
+    }
+    if hold {
+        skipped("held-claim-only");
+        return None;
+    }
+    let Some(path) = delegated_bindings_file(app) else {
+        skipped("no-project");
+        return None;
+    };
+    let changed = {
+        let _g = delegated_bindings_lock().lock();
+        let mut b = read_delegated_bindings_at(&path);
+        let changed = b.bind(agent, &ids, unix_now_ms(), session_id, agent_type);
+        if changed && !write_delegated_bindings_at(&path, &b) {
+            drop(_g);
+            skipped("write-failed");
+            return None;
+        }
+        changed
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "delegated",
+            &format!(
+                "op=bind agent={} ids={} type={}",
+                agent,
+                ids_json_str(&ids),
+                trace_token(agent_type)
+            ),
+        );
+    }
+    if changed {
+        emit_delegated_changed(app);
+    }
+    Some(ids)
+}
+
+// Release one binding. Does NOT reconcile the claim; callers that want the
+// claim to follow call delegated_reconcile_claim_after_release.
+fn delegated_release<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str, reason: &str) -> bool {
+    let Some(path) = delegated_bindings_file(app) else {
+        return false;
+    };
+    let released = {
+        let _g = delegated_bindings_lock().lock();
+        let mut b = read_delegated_bindings_at(&path);
+        let released = b.release(agent);
+        if released.is_some() {
+            let _ = write_delegated_bindings_at(&path, &b);
+        }
+        released
+    };
+    if bram_trace_enabled() {
+        let detail = match &released {
+            Some(rel) => format!(
+                "op=release agent={} reason={} ids={}",
+                agent,
+                reason,
+                ids_json_str(&rel.ids)
+            ),
+            None => format!("op=release-miss agent={} reason={}", agent, reason),
+        };
+        append_bram_trace_line(app, "delegated", &detail);
+    }
+    if released.is_some() {
+        emit_delegated_changed(app);
+        true
+    } else {
+        false
+    }
+}
+
+// Release every binding (session end, restart, manual all). Returns how many
+// were released. Does NOT reconcile the claim.
+fn delegated_release_all<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) -> usize {
+    let Some(path) = delegated_bindings_file(app) else {
+        return 0;
+    };
+    if !path.exists() {
+        return 0;
+    }
+    let released = {
+        let _g = delegated_bindings_lock().lock();
+        let b = read_delegated_bindings_at(&path);
+        let _ = write_delegated_bindings_at(&path, &DelegatedBindings::default());
+        b
+    };
+    if bram_trace_enabled() {
+        for (agent, rel) in &released.bindings {
+            append_bram_trace_line(
+                app,
+                "delegated",
+                &format!(
+                    "op=release agent={} reason={} ids={}",
+                    agent,
+                    reason,
+                    ids_json_str(&rel.ids)
+                ),
+            );
+        }
+    }
+    let n = released.bindings.len();
+    if n > 0 {
+        emit_delegated_changed(app);
+    }
+    n
+}
+
+// Rewrite the live claim to hold exactly `target` ids, marked delegatedHold.
+// Keeps kind and claimedAt (the soft clears' freshness gates read claimedAt).
+// Records a boundary only when the id set changes, and is a silent no-op when
+// the claim is already a hold on these ids -- turn-end detectors re-fire.
+fn hold_claim_for_delegation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    target: &[String],
+    agents: usize,
+    via: &str,
+) -> bool {
+    let Some(path) = inflight_claim_file(app) else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(mut claim) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let claimed = worklist_json_ids(&claim, "ids");
+    let already_hold = claim
+        .get("delegatedHold")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let unchanged_ids = same_id_set(&claimed, target);
+    if unchanged_ids && already_hold {
+        return false;
+    }
+    let target = sorted_unique_ids(target.iter());
+    if !unchanged_ids {
+        // Before the file is rewritten, so the boundary's left edge is the
+        // claim being shrunk -- the same discipline as the shrink path.
+        record_claim_interval(app, &target, "delegated", unix_now_ms());
+    }
+    let Some(obj) = claim.as_object_mut() else {
+        return false;
+    };
+    obj.insert("ids".into(), serde_json::json!(target));
+    obj.insert("delegatedHold".into(), serde_json::json!(true));
+    let Ok(body) = serde_json::to_string_pretty(&claim) else {
+        return false;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, format!("{}\n", body)).is_err() {
+        return false;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        return false;
+    }
+    if !unchanged_ids {
+        let resolved: Vec<String> = claimed
+            .iter()
+            .filter(|c| !target.contains(c))
+            .cloned()
+            .collect();
+        let remaining = target.clone();
+        let at_ms = unix_now_ms();
+        worklist_state_apply(app, "claim-shrink", move |conn| {
+            worklist_state::mirror_claim_shrink(
+                conn,
+                &resolved,
+                &remaining,
+                at_ms,
+                "delegated-hold",
+            )
+        });
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "delegated",
+            &format!(
+                "op=hold ids={} agents={} via={}",
+                ids_json_str(&target),
+                agents,
+                via
+            ),
+        );
+    }
+    emit_replayable_signal(app, "inflight-claim-changed");
+    true
+}
+
+// Called where a turn-end detector would CLEAR the claim. Returns true when
+// live bindings took over (the claim is now a hold, or already was) and the
+// caller must not clear; false when there are no bindings and the caller
+// clears as before.
+fn reconcile_claim_with_bindings<R: tauri::Runtime>(app: &AppHandle<R>, via: &str) -> bool {
+    let bindings = read_delegated_bindings(app);
+    let union = bindings.union_ids();
+    match delegated_turn_end_action(&union) {
+        DelegatedClaimAction::Hold(ids) => {
+            hold_claim_for_delegation(app, &ids, bindings.bindings.len(), via);
+            true
+        }
+        _ => false,
+    }
+}
+
+// After a release: follow delegated_release_action (see the rule above it).
+fn delegated_reconcile_claim_after_release<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some((claim_ids, hold)) = inflight_claim_ids_and_hold(app) else {
+        return;
+    };
+    let bindings = read_delegated_bindings(app);
+    match delegated_release_action(hold, &bindings.union_ids()) {
+        DelegatedClaimAction::Leave => {}
+        DelegatedClaimAction::Clear => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "delegated",
+                    &format!("op=hold-end ids={}", ids_json_str(&claim_ids)),
+                );
+            }
+            clear_inflight_claim_sentinel(app, &claim_ids);
+        }
+        DelegatedClaimAction::Hold(ids) => {
+            hold_claim_for_delegation(app, &ids, bindings.bindings.len(), "release");
+        }
+    }
+}
+
+// The 409 a lifecycle route returns for ids a live binding holds. `category`
+// is the trace category of the refusing route.
+fn delegated_refusal_response<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    requested: &[String],
+    category: &str,
+) -> Option<(u16, &'static str, Vec<u8>)> {
+    let bindings = read_delegated_bindings(app);
+    let (ids, agents) = bindings.refusal(requested)?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            category,
+            &format!(
+                "op=refuse-delegated-live ids={} agents={}",
+                ids_json_str(&ids),
+                ids_json_str(&agents)
+            ),
+        );
+    }
+    Some((
+        409,
+        "application/json; charset=utf-8",
+        serde_json::json!({
+            "error": format!(
+                "a subagent is still working on {}; wait for it to finish or Release it from the row",
+                ids.join(", ")
+            ),
+            "op": "refuse-delegated-live",
+            "ids": ids,
+            "agents": agents,
+        })
+        .to_string()
+        .into_bytes(),
+    ))
+}
+
+// /__worklist/mutate's prune refusal, applied at the route (not inside
+// handle_worklist_mutate, which the commit route also calls for its own
+// post-commit prune).
+fn delegated_prune_refusal<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> Option<(u16, &'static str, Vec<u8>)> {
+    let req: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if req.get("op").and_then(|v| v.as_str()) != Some("prune") {
+        return None;
+    }
+    delegated_refusal_response(app, &worklist_json_ids(&req, "ids"), "worklist-mutate")
+}
+
+// The agent exited to the shell: the session that spawned the bindings is
+// gone, and nothing will send their SubagentStop.
+// Called from the PTY read path, so the common case (no bindings) is one
+// failed stat, and the release itself -- whose claim clear may run a git
+// capture -- moves off that thread.
+fn delegated_release_on_shell_prompt<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if !delegated_bindings_file(app).map_or(false, |p| p.exists()) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if delegated_release_all(&app, "session-end") > 0 {
+            delegated_reconcile_claim_after_release(&app);
+        }
+    });
+}
+
+// /__inflight's `delegated` array: one row per live binding, labelled from
+// the subagent's meta.json sidecar when it can be found cheaply (the flat
+// <session>/subagents/agent-<id>.meta.json; workflow-nested agents go
+// unlabelled rather than walking the tree on every claim refetch).
+fn delegated_inflight_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_json::Value> {
+    let bindings = read_delegated_bindings(app);
+    if bindings.is_empty() {
+        return Vec::new();
+    }
+    let sessions_dir = claude_sessions_dir_lookup(app).ok().map(|l| l.chosen);
+    bindings
+        .bindings
+        .iter()
+        .map(|(agent, b)| {
+            let meta = sessions_dir.as_ref().and_then(|dir| {
+                if b.session_id.is_empty() || !session_id_is_safe(&b.session_id) {
+                    return None;
+                }
+                st_read_subagent_meta(&dir.join(&b.session_id).join("subagents"), agent)
+            });
+            let description = meta
+                .as_ref()
+                .and_then(|m| m.get("description"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let agent_type = if b.agent_type.is_empty() {
+                meta.as_ref()
+                    .and_then(|m| m.get("agentType"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                b.agent_type.clone()
+            };
+            serde_json::json!({
+                "agentId": agent,
+                "ids": b.ids,
+                "agentType": agent_type,
+                "description": description,
+                "boundAtMs": b.bound_at_ms,
+            })
+        })
+        .collect()
+}
+
+// POST /__agent/subagent — the guard's SubagentStart / SubagentStop report.
+// Token-checked exactly like /__agent/session. Always answers 200 for a
+// well-formed authenticated report: the hook is fail-open and reads nothing.
+fn handle_agent_subagent<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let Some(value) = authenticated_menu_payload(body, menu_session_token()) else {
+        return (403, JSON, b"{\"error\":\"bad token\"}".to_vec());
+    };
+    let field = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let event = field("event");
+    let agent = normalize_delegated_agent_id(&field("agent_id"));
+    if !delegated_agent_id_is_safe(&agent) {
+        return (400, JSON, b"{\"error\":\"bad agent_id\"}".to_vec());
+    }
+    let agent_type = field("agent_type");
+    let session = field("session_id");
+    match event.as_str() {
+        "SubagentStart" => {
+            if current_provider(app) != Some(SessionProvider::Claude) {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "delegated",
+                        &format!("op=bind-skipped agent={} reason=provider", agent),
+                    );
+                }
+                return (200, JSON, b"{\"ok\":true,\"bound\":[]}".to_vec());
+            }
+            let bound = delegated_bind_to_live_claim(app, &agent, &agent_type, &session)
+                .unwrap_or_default();
+            (
+                200,
+                JSON,
+                serde_json::json!({ "ok": true, "bound": bound })
+                    .to_string()
+                    .into_bytes(),
+            )
+        }
+        "SubagentStop" => {
+            // A stop with background tasks still pending is a pause, not the
+            // end: the subagent resumes when they finish and keeps writing.
+            // Keep the binding; its final stop (no pending tasks) releases it.
+            // Seen live 2026-11-04: a subagent backgrounded `sleep 600`, ended
+            // its turn, and the binding was released ten minutes early.
+            let pending = value
+                .get("background_tasks")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            if pending > 0 {
+                // Only a bound agent's pause is a deferral; another agent's
+                // (one spawned with no claim) is traced as the miss it is.
+                let bound = read_delegated_bindings(app).bindings.contains_key(&agent);
+                if bram_trace_enabled() {
+                    let line = if bound {
+                        format!("op=stop-deferred agent={} tasks={}", agent, pending)
+                    } else {
+                        format!("op=release-miss agent={} reason=stop-paused", agent)
+                    };
+                    append_bram_trace_line(app, "delegated", &line);
+                }
+                return (
+                    200,
+                    JSON,
+                    serde_json::json!({ "ok": true, "released": false, "deferred": pending })
+                        .to_string()
+                        .into_bytes(),
+                );
+            }
+            let released = delegated_release(app, &agent, "stop");
+            if released {
+                delegated_reconcile_claim_after_release(app);
+            }
+            (
+                200,
+                JSON,
+                serde_json::json!({ "ok": true, "released": released })
+                    .to_string()
+                    .into_bytes(),
+            )
+        }
+        _ => (400, JSON, b"{\"error\":\"unknown event\"}".to_vec()),
+    }
+}
+
+// POST /__agent/subagent/release — the row's Release control: `{agentId}` or
+// `{all:true}`. Pane-called, so it carries no token; like the other pane POST
+// routes it is protected by the common loopback gate (loopback_gate_refusal:
+// loopback Host, no foreign Origin). Traced reason=manual.
+fn handle_agent_subagent_release<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let Ok(req) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return (400, JSON, b"{\"error\":\"invalid JSON\"}".to_vec());
+    };
+    let released: usize = if req.get("all").and_then(|v| v.as_bool()) == Some(true) {
+        delegated_release_all(app, "manual")
+    } else {
+        let agent =
+            normalize_delegated_agent_id(req.get("agentId").and_then(|v| v.as_str()).unwrap_or(""));
+        if !delegated_agent_id_is_safe(&agent) {
+            return (
+                400,
+                JSON,
+                b"{\"error\":\"agentId or all:true required\"}".to_vec(),
+            );
+        }
+        usize::from(delegated_release(app, &agent, "manual"))
+    };
+    if released > 0 {
+        delegated_reconcile_claim_after_release(app);
+    }
+    (
+        200,
+        JSON,
+        serde_json::json!({ "ok": true, "released": released })
+            .to_string()
+            .into_bytes(),
+    )
+}
+
+#[cfg(test)]
+mod delegated_binding_tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    fn temp_bindings_path(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-delegated-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(DELEGATED_BINDINGS_REL)
+    }
+
+    #[test]
+    fn bind_on_start_with_a_claim_records_its_ids() {
+        let mut b = DelegatedBindings::default();
+        assert!(b.bind("a1", &s(&["x", "y"]), 10, "sess", "general-purpose"));
+        assert_eq!(b.union_ids(), s(&["x", "y"]));
+        let got = &b.bindings["a1"];
+        assert_eq!(got.bound_at_ms, 10);
+        assert_eq!(got.session_id, "sess");
+        // A repeat with the same ids is not a change.
+        assert!(!b.bind("a1", &s(&["y", "x"]), 20, "sess", "general-purpose"));
+    }
+
+    #[test]
+    fn bind_without_a_claim_binds_nothing() {
+        let mut b = DelegatedBindings::default();
+        assert!(!b.bind("a1", &[], 10, "sess", "t"));
+        assert!(b.is_empty());
+        assert!(b.union_ids().is_empty());
+    }
+
+    #[test]
+    fn release_on_stop_removes_only_that_agent() {
+        let mut b = DelegatedBindings::default();
+        b.bind("a1", &s(&["x"]), 1, "", "");
+        b.bind("a2", &s(&["y"]), 2, "", "");
+        assert_eq!(b.release("a1").map(|r| r.ids), Some(s(&["x"])));
+        assert_eq!(b.union_ids(), s(&["y"]));
+        assert!(b.release("a1").is_none());
+    }
+
+    #[test]
+    fn turn_end_with_a_live_binding_holds_instead_of_clearing() {
+        assert_eq!(
+            delegated_turn_end_action(&s(&["x"])),
+            DelegatedClaimAction::Hold(s(&["x"]))
+        );
+        assert_eq!(delegated_turn_end_action(&[]), DelegatedClaimAction::Clear);
+    }
+
+    #[test]
+    fn last_release_clears_a_held_claim_and_leaves_a_main_claim() {
+        // Held claim, nothing left bound: clear.
+        assert_eq!(
+            delegated_release_action(true, &[]),
+            DelegatedClaimAction::Clear
+        );
+        // Held claim, another subagent still bound: shrink to it.
+        assert_eq!(
+            delegated_release_action(true, &s(&["y"])),
+            DelegatedClaimAction::Hold(s(&["y"]))
+        );
+        // A main turn's claim is never touched by a release.
+        assert_eq!(
+            delegated_release_action(false, &[]),
+            DelegatedClaimAction::Leave
+        );
+        assert_eq!(
+            delegated_release_action(false, &s(&["y"])),
+            DelegatedClaimAction::Leave
+        );
+    }
+
+    #[test]
+    fn union_on_write_keeps_bound_ids_in_the_new_claim() {
+        assert_eq!(
+            union_sorted_ids(&s(&["new"]), &s(&["bound", "new"])),
+            s(&["bound", "new"])
+        );
+        assert!(same_id_set(&s(&["b", "a"]), &s(&["a", "b", "a"])));
+        assert!(!same_id_set(&s(&["a"]), &s(&["a", "b"])));
+    }
+
+    #[test]
+    fn release_all_empties_the_store_and_removes_the_file() {
+        let path = temp_bindings_path("release-all");
+        let mut b = DelegatedBindings::default();
+        b.bind("a1", &s(&["x"]), 1, "s", "t");
+        b.bind("a2", &s(&["y", "z"]), 2, "s", "t");
+        assert!(write_delegated_bindings_at(&path, &b));
+        let back = read_delegated_bindings_at(&path);
+        assert_eq!(back, b);
+        assert_eq!(back.union_ids(), s(&["x", "y", "z"]));
+        assert!(write_delegated_bindings_at(
+            &path,
+            &DelegatedBindings::default()
+        ));
+        assert!(!path.exists());
+        assert!(read_delegated_bindings_at(&path).is_empty());
+        // Removing an absent file is still success.
+        assert!(write_delegated_bindings_at(
+            &path,
+            &DelegatedBindings::default()
+        ));
+    }
+
+    #[test]
+    fn refusal_names_the_bound_ids_and_their_agents() {
+        let mut b = DelegatedBindings::default();
+        b.bind("a1", &s(&["x", "y"]), 1, "", "");
+        b.bind("a2", &s(&["z"]), 2, "", "");
+        let (ids, agents) = b.refusal(&s(&["y", "free", "x"])).unwrap();
+        assert_eq!(ids, s(&["x", "y"]));
+        assert_eq!(agents, s(&["a1"]));
+        assert!(b.refusal(&s(&["free"])).is_none());
+        assert!(DelegatedBindings::default().refusal(&s(&["x"])).is_none());
+    }
+
+    #[test]
+    fn agent_ids_normalize_to_the_roster_form() {
+        assert_eq!(
+            normalize_delegated_agent_id("agent-ae3fb2df9de52ea71"),
+            "ae3fb2df9de52ea71"
+        );
+        assert_eq!(
+            normalize_delegated_agent_id("ae3fb2df9de52ea71"),
+            "ae3fb2df9de52ea71"
+        );
+        assert!(delegated_agent_id_is_safe("ae3fb2df9de52ea71"));
+        assert!(!delegated_agent_id_is_safe(""));
+        assert!(!delegated_agent_id_is_safe("../x y"));
+    }
 }
 
 // Delete any leftover Codex lifecycle intent/result files from a prior
@@ -84637,6 +85654,24 @@ fn route_request<R: tauri::Runtime>(
             serde_json::to_string(&claim).ok()
         })()
         .unwrap_or(body);
+        // delegated-work-action-gates: live subagent bindings, and whether the
+        // claim survives only because of them (the main turn has ended).
+        // Always present so the pane reads one shape.
+        let body = (|| -> Option<String> {
+            let mut v: serde_json::Value = serde_json::from_str(&body).ok()?;
+            let held = v
+                .get("delegatedHold")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            let obj = v.as_object_mut()?;
+            obj.insert(
+                "delegated".into(),
+                serde_json::json!(delegated_inflight_rows(app)),
+            );
+            obj.insert("heldByDelegation".into(), serde_json::json!(held));
+            serde_json::to_string(&v).ok()
+        })()
+        .unwrap_or(body);
         return (200, "application/json; charset=utf-8", body.into_bytes());
     }
 
@@ -86554,10 +87589,43 @@ fn handle_iterate_end<R: tauri::Runtime>(
             .map(|(claim_ids, claimed_at)| !claim_ids.is_empty() && unix_now_ms() >= claimed_at)
             .unwrap_or(false),
     );
+    // delegated-work-action-gates: ids a live subagent binding holds are not
+    // retired by an explicit end; the claim keeps them until the subagent
+    // stops. The rest retire as before.
+    let bound = delegated_bound_ids_union(app);
+    let (held, ids): (Vec<String>, Vec<String>) =
+        ids.into_iter().partition(|id| bound.contains(id));
+    if !held.is_empty() && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "delegated",
+            &format!(
+                "op=hold ids={} agents={} via=end",
+                ids_json_str(&held),
+                read_delegated_bindings(app).bindings.len()
+            ),
+        );
+    }
+    if ids.is_empty() {
+        let remaining = inflight_claim_ids_and_claimed_at(app)
+            .map(|(r, _)| r)
+            .unwrap_or_default();
+        let body = serde_json::json!({
+            "ok": true,
+            "cleared": false,
+            "remaining": remaining,
+            "heldByDelegation": held,
+        });
+        return (
+            200,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"ok":true}"#.to_vec()),
+        );
+    }
     // Report what actually happened. This returned a bare {"ok":true} whether
     // or not anything was cleared, so a caller ending one id of a two-id claim
     // got success, a still-live claim, and a spinner it could not explain.
-    let body = match shrink_inflight_claim_sentinel(app, &ids) {
+    let mut body = match shrink_inflight_claim_sentinel(app, &ids) {
         ClaimShrink::Cleared => serde_json::json!({ "ok": true, "cleared": true }),
         ClaimShrink::Shrunk { remaining } => serde_json::json!({
             "ok": true,
@@ -86570,6 +87638,9 @@ fn handle_iterate_end<R: tauri::Runtime>(
             "remaining": [],
         }),
     };
+    if !held.is_empty() {
+        body["heldByDelegation"] = serde_json::json!(held);
+    }
     (
         200,
         "application/json; charset=utf-8",
@@ -87810,6 +88881,10 @@ fn handle_worklist_drop_direct<R: tauri::Runtime>(
     let ids = worklist_json_ids(&req, "ids");
     if ids.is_empty() {
         return worklist_json_error(400, "ids[] required");
+    }
+    // delegated-work-action-gates: refuse before recording any grant.
+    if let Some(refusal) = delegated_refusal_response(app, &ids, "worklist-drop") {
+        return refusal;
     }
     // Record the drop authorization (the pane click IS the authorization),
     // so resolve/prune are self-contained and race-free — no dependency on a
@@ -89587,6 +90662,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
              public artifacts'."
                 .to_string(),
         );
+    }
+    // delegated-work-action-gates: a subagent still bound to any requested id
+    // is still writing its files; committing now would ship half its work.
+    if let Some(refusal) = delegated_refusal_response(app, &ids, "worklist-commit") {
+        return refusal;
     }
 
     let Some(auth_path) = worklist_auth_file(app) else {
@@ -97315,7 +98395,10 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         } else {
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
-            handle_worklist_mutate(app, &buf)
+            // delegated-work-action-gates: prune refuses ids a live subagent
+            // binding holds. Checked here rather than in the handler, which
+            // the commit route also calls for its own post-commit prune.
+            delegated_prune_refusal(app, &buf).unwrap_or_else(|| handle_worklist_mutate(app, &buf))
         }
     } else if path == "__worklist/drop" {
         // issue-340: a host-direct drop. A drop is pure host work
@@ -97395,6 +98478,24 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_agent_session(app, &buf)
+        }
+    } else if path == "__agent/subagent" {
+        // delegated-work-action-gates: the guard's SubagentStart/Stop report.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_agent_subagent(app, &buf)
+        }
+    } else if path == "__agent/subagent/release" {
+        // delegated-work-action-gates: the row's Release control.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_agent_subagent_release(app, &buf)
         }
     } else if path == "__menu/permission/clear" {
         if method != "POST" {
@@ -99767,6 +100868,9 @@ fn hangup_replaced_pty<R: tauri::Runtime>(_app: &AppHandle<R>, pty: PtyState) {
 // the header's working status and turn state, and the shell-foreground
 // record, which the new shell's first prompt marker re-establishes.
 fn reset_state_after_pty_replace<R: tauri::Runtime>(app: &AppHandle<R>) {
+    // delegated-work-action-gates: the spawning session is gone, and its
+    // subagents with it; release their bindings before the claim clears.
+    delegated_release_all(app, "session-end");
     if let Some((ids, _)) = inflight_claim_ids_and_claimed_at(app) {
         append_bram_trace_line(
             app,

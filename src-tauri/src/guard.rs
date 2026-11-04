@@ -341,17 +341,33 @@ fn session_report_body(
     }))
 }
 
-// The port comes from this terminal's environment, not resources/.bram-port,
-// which names whichever instance wrote it last. Never affects the hook's
-// outcome: agy blocks on a failing hook, and this only informs.
-fn session_report(provider: &str, payload: &serde_json::Value) {
-    let port = std::env::var("BRAM_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok());
+// POST a token-authenticated report to the Bram that launched this agent. The
+// port comes from this terminal's environment, not resources/.bram-port,
+// which names whichever instance wrote it last; the token is per terminal, so
+// any other instance would refuse it anyway. `body` builds the request from
+// the token and returns None when there is nothing to report. Never affects
+// the hook's outcome: agy blocks on a failing hook, and this only informs.
+fn post_terminal_report(
+    path: &str,
+    body: impl FnOnce(&str) -> Option<serde_json::Value>,
+) -> &'static str {
     let token = std::env::var("BRAM_MENU_TOKEN").unwrap_or_default();
-    if let (Some(port), Some(body)) = (port, session_report_body(provider, payload, &token)) {
-        let _ = post_json_outcome(port, "/__agent/session", &body.to_string());
-    }
+    let Some(body) = body(&token) else {
+        return "skipped=no-agent-or-token";
+    };
+    let Some(port) = std::env::var("BRAM_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+    else {
+        return "skipped=no-port";
+    };
+    post_json_outcome(port, path, &body.to_string())
+}
+
+fn session_report(provider: &str, payload: &serde_json::Value) {
+    let _ = post_terminal_report("/__agent/session", |token| {
+        session_report_body(provider, payload, token)
+    });
 }
 
 // delegated-work-action-gates: the /__agent/subagent body for a Claude
@@ -379,21 +395,10 @@ fn subagent_report_body(payload: &serde_json::Value, token: &str) -> Option<serd
     }))
 }
 
-// The port from this terminal's environment (the Bram that launched this
-// agent), falling back to the root-local port file like the menu hooks.
-fn subagent_report(root: &Path, payload: &serde_json::Value) -> &'static str {
-    let token = std::env::var("BRAM_MENU_TOKEN").unwrap_or_default();
-    let Some(body) = subagent_report_body(payload, &token) else {
-        return "skipped=no-agent-or-token";
-    };
-    let port = std::env::var("BRAM_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .or_else(|| read_port(root));
-    let Some(port) = port else {
-        return "skipped=no-port";
-    };
-    post_json_outcome(port, "/__agent/subagent", &body.to_string())
+fn subagent_report(payload: &serde_json::Value) -> &'static str {
+    post_terminal_report("/__agent/subagent", |token| {
+        subagent_report_body(payload, token)
+    })
 }
 
 // The [hook] decision line, shipped exactly the way the Python guards ship
@@ -1181,7 +1186,7 @@ fn authority_menu_hook(
     // its stdout `decision: block` would too, so neither is ever produced.
     if provider == "claude-rs" && matches!(event.as_str(), "SubagentStart" | "SubagentStop") {
         let root = resolve_project_root(provider, payload);
-        let outcome = subagent_report(&root, payload);
+        let outcome = subagent_report(payload);
         append_breadcrumb(
             &root,
             provider,

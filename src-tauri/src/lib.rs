@@ -9304,6 +9304,10 @@ fn update_turn_state<R: tauri::Runtime, F>(
         // attributed (each turn gets its own window and capture boundary)
         // and the gate is locked exactly while something is running — never
         // between turns, which is where the wedge used to live.
+        let opened = turn_phase_open(&next.phase);
+        if opened != turn_phase_open(&prev.phase) {
+            delegated_note_turn_edge(app, opened);
+        }
         if turn_state_transition_rearms_claim(&prev, &next) {
             rearm_claim_for_live_authorization(app);
         }
@@ -9326,10 +9330,12 @@ fn turn_state_transition_rearms_claim(prev: &TurnState, next: &TurnState) -> boo
 // consumed, interrupted (the Escape path) and past-TTL records, so a
 // cancelled approval can never re-arm itself.
 fn rearm_claim_for_live_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
-    // delegated-work-action-gates: a claim that survives only as a delegated
-    // hold is not this turn's, so it doesn't stop the re-arm; the write
-    // unions the still-bound ids back in.
-    if inflight_claim_ids_and_claimed_at(app).is_some() && !claim_is_delegated_hold(app) {
+    // delegated-work-action-gates: a claim of bound ids only is not this
+    // turn's, so it doesn't stop the re-arm (see rearm_blocked).
+    if rearm_blocked(
+        read_inflight_claim(app).as_ref(),
+        &delegated_bound_ids_union(app),
+    ) {
         return;
     }
     let Some((kind, _age_ms, ids)) = worklist_active_authorization_summary(app) else {
@@ -63055,14 +63061,8 @@ fn record_claim_interval<R: tauri::Runtime>(
     if !bram_state_dir(&root).is_dir() {
         return;
     }
-    let prior: Vec<String> = inflight_claim_ids_and_claimed_at(app)
-        .map(|(p, _)| p)
-        .unwrap_or_default();
-    let mut a: Vec<&str> = prior.iter().map(|s| s.as_str()).collect();
-    let mut b: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-    a.sort_unstable();
-    b.sort_unstable();
-    if a == b {
+    let prior: Vec<String> = read_inflight_claim(app).map(|c| c.ids).unwrap_or_default();
+    if sorted_id_set(&prior) == sorted_id_set(ids) {
         append_bram_trace_line(app, "claim-interval", "op=skip-unchanged-ids");
         return;
     }
@@ -67907,135 +67907,126 @@ fn write_inflight_claim_sentinel_inner<R: tauri::Runtime>(
     kind: &str,
     snapshot: bool,
 ) {
-    let Some(path) = inflight_claim_file(app) else {
+    let Some(files) = claim_files(app) else {
         return;
     };
-    // delegated-work-action-gates: a new claim written while a subagent is
-    // still bound keeps the bound ids in it, so the subagent's later writes
-    // stay credited to its items (they become joint with the new claim's,
-    // which errs safe). Not on the no-snapshot path: the drop-policy
-    // validator writes and immediately clears by its own ids, and a union
-    // there would turn that clear partial and strand the claim.
+    let g = claim_lock();
+    write_claim_locked(&g, &files, app, ids, kind, snapshot);
+}
+
+// The claim and the bindings are written under one lock (claim_lock), so a
+// write can't land between a release and the reconciliation that follows it.
+// A new claim written while a subagent is still bound keeps the bound ids in
+// it, so the subagent's later writes stay credited to its items (joint with
+// the new claim's, which errs safe). Not on the no-snapshot path: the
+// drop-policy validator writes and immediately clears by its own ids.
+fn write_claim_locked(
+    _g: &ClaimGuard,
+    files: &ClaimFiles,
+    fx: &dyn ClaimEffects,
+    ids: &[String],
+    kind: &str,
+    snapshot: bool,
+) -> Vec<String> {
     let bound = if snapshot {
-        delegated_bound_ids_union(app)
+        read_delegated_bindings_at(&files.bindings).union_ids()
     } else {
         Vec::new()
     };
-    let unioned;
-    let ids: &[String] = if bound.is_empty() {
-        ids
+    let ids: Vec<String> = if bound.is_empty() {
+        ids.to_vec()
     } else {
-        unioned = union_sorted_ids(ids, &bound);
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "delegated",
-                &format!(
-                    "op=union-on-write new={} bound={}",
-                    ids_json_str(ids),
-                    ids_json_str(&bound)
-                ),
-            );
-        }
-        &unioned
+        fx.trace(
+            "delegated",
+            &format!(
+                "op=union-on-write new={} bound={}",
+                ids_json_str(ids),
+                ids_json_str(&bound)
+            ),
+        );
+        sorted_id_set(ids.iter().chain(bound.iter()))
     };
     if snapshot {
-        record_claim_interval(app, ids, kind, unix_now_ms());
+        fx.boundary(&ids, kind);
     }
     // subagent-worklist-collision-observability: capture the prior claim
     // (if any) BEFORE it is overwritten, so a write that displaces a still-
     // live claim can be traced. Only read when tracing is enabled — this
     // must not add I/O on the default path.
-    let prior_claim = if bram_trace_enabled() {
-        inflight_claim_ids_and_claimed_at(app).and_then(|(prior_ids, claimed_at)| {
-            if prior_ids.is_empty() {
-                None
-            } else {
-                let prior_kind = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                    .and_then(|v| v.get("kind").and_then(|k| k.as_str().map(String::from)))
-                    .unwrap_or_default();
-                Some((prior_ids, prior_kind, claimed_at))
-            }
-        })
+    let prior = if fx.tracing() {
+        read_inflight_claim_at(&files.claim).filter(|c| !c.ids.is_empty())
     } else {
         None
     };
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = files.claim.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let written_at_ms = unix_now_ms();
-    let payload = serde_json::json!({
-        "ids": ids,
-        "claimedAt": written_at_ms,
-        "kind": kind,
-    });
-    let body = match serde_json::to_string_pretty(&payload) {
-        Ok(s) => s,
-        Err(_) => return,
+    let claim = InflightClaim {
+        ids,
+        claimed_at: unix_now_ms(),
+        kind: kind.to_string(),
     };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, format!("{}\n", body)).is_err() {
-        return;
+    if !write_inflight_claim_at(&files.claim, &claim) {
+        return claim.ids;
     }
-    let _ = std::fs::rename(&tmp, &path);
     // state-mirror-store-and-ledger: mirror the write we just made. Trace-
     // only on failure — never blocks or alters the file path above.
-    {
-        let ids = ids.to_vec();
-        let kind = kind.to_string();
-        worklist_state_apply(app, "claim-write", move |conn| {
-            worklist_state::mirror_claim_write(
-                conn,
-                written_at_ms,
-                &kind,
-                &ids,
-                "inflight-claim-sentinel",
-            )
-        });
-    }
-    if bram_trace_enabled() {
-        let extra = match &prior_claim {
-            Some((prior_ids, prior_kind, claimed_at)) => format!(
-                " prior_ids={} prior_kind={} prior_age_ms={}",
-                serde_json::to_string(prior_ids).unwrap_or_else(|_| "[]".to_string()),
-                prior_kind,
-                unix_now_ms() - claimed_at
-            ),
-            None => String::new(),
-        };
-        append_bram_trace_line(
-            app,
-            "inflight-sentinel",
-            &format!(
-                "op=write kind={} ids={}{}",
-                kind,
-                serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string()),
-                extra
-            ),
-        );
-    }
-    emit_replayable_signal(app, "inflight-claim-changed");
+    fx.mirror_write(claim.claimed_at, kind, &claim.ids);
+    let extra = match &prior {
+        Some(p) => format!(
+            " prior_ids={} prior_kind={} prior_age_ms={}",
+            ids_json_str(&p.ids),
+            p.kind,
+            unix_now_ms() - p.claimed_at
+        ),
+        None => String::new(),
+    };
+    fx.trace(
+        "inflight-sentinel",
+        &format!(
+            "op=write kind={} ids={}{}",
+            kind,
+            ids_json_str(&claim.ids),
+            extra
+        ),
+    );
+    fx.signal("inflight-claim-changed");
+    claim.ids
+}
+
+// The live claim, as written by write_claim_locked. The one reader: the older
+// tuple readers below are views of it.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct InflightClaim {
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(rename = "claimedAt", default)]
+    claimed_at: i64,
+    #[serde(default)]
+    kind: String,
+}
+
+fn read_inflight_claim_at(path: &Path) -> Option<InflightClaim> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn read_inflight_claim<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<InflightClaim> {
+    read_inflight_claim_at(&inflight_claim_file(app)?)
+}
+
+fn write_inflight_claim_at(path: &Path, claim: &InflightClaim) -> bool {
+    let Ok(body) = serde_json::to_string_pretty(claim) else {
+        return false;
+    };
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, format!("{}\n", body)).is_ok() && std::fs::rename(&tmp, path).is_ok()
 }
 
 fn inflight_claim_ids_and_claimed_at<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Option<(Vec<String>, i64)> {
-    let path = inflight_claim_file(app)?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let claim: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let ids: Vec<String> = claim
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let claimed_at = claim.get("claimedAt").and_then(|v| v.as_i64()).unwrap_or(0);
-    Some((ids, claimed_at))
+    read_inflight_claim(app).map(|c| (c.ids, c.claimed_at))
 }
 
 // rethink-activity-indicators: the current claim's kind, consulted by the
@@ -68047,10 +68038,9 @@ fn inflight_claim_ids_and_claimed_at<R: tauri::Runtime>(
 // iterate-end, explicit PTY interrupts, startup stale-claim cleanup)
 // clear regardless of kind.
 fn inflight_claim_kind<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
-    let path = inflight_claim_file(app)?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let claim: serde_json::Value = serde_json::from_str(&content).ok()?;
-    claim.get("kind").and_then(|v| v.as_str()).map(String::from)
+    read_inflight_claim(app)
+        .map(|c| c.kind)
+        .filter(|k| !k.is_empty())
 }
 
 // Clear the inflight sentinel (#84). Conditions: a sentinel exists,
@@ -68068,89 +68058,151 @@ fn inflight_claim_fully_covered(claimed_ids: &[String], mutated_ids: &[String]) 
             .all(|cid| mutated_ids.iter().any(|mid| mid == cid))
 }
 
-// Returns true iff a covering sentinel was found, removed, and the
-// inflight-claim-changed signal emitted; false on every early return (no file,
-// parse failure, empty/uncovered claim). A caller that reaches a completion
-// point without a prior sentinel (refs #133) uses the false return to emit its
-// own reconcile signal so the iframe still clears optimistic `submitting`.
+// The all-or-nothing clear. `via` names the caller on the trace. Ids a live
+// subagent binding holds are retained (delegated-work-action-gates): the
+// claim shrinks to them instead of clearing, whoever the caller is.
 fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
     app: &AppHandle<R>,
     mutated_ids: &[String],
-) -> bool {
-    let Some(path) = inflight_claim_file(app) else {
-        return false;
+    via: &str,
+) {
+    let Some(files) = claim_files(app) else {
+        return;
     };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    let claim: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let claimed_ids: Vec<String> = claim
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    if !inflight_claim_fully_covered(&claimed_ids, mutated_ids) {
-        if bram_trace_enabled() {
-            let remaining: Vec<String> = claimed_ids
-                .iter()
-                .filter(|cid| !mutated_ids.iter().any(|mid| mid == *cid))
-                .cloned()
-                .collect();
-            append_bram_trace_line(
-                app,
-                "inflight-sentinel",
-                &format!(
-                    "op=clear-partial claimed={} requested={} remaining={}",
-                    serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string()),
-                    serde_json::to_string(mutated_ids).unwrap_or_else(|_| "[]".to_string()),
-                    serde_json::to_string(&remaining).unwrap_or_else(|_| "[]".to_string())
-                ),
-            );
-        }
-        return false;
+    let g = claim_lock();
+    retire_claim_locked(&g, &files, app, mutated_ids, Retire::Clear, via);
+}
+
+// Which ids stay in a claim when `requested` retire, and which of those stay
+// only because a live binding holds them. None: an all-or-nothing clear
+// that doesn't cover the claim.
+fn plan_claim_retire(
+    claimed: &[String],
+    requested: &[String],
+    bound: &[String],
+    mode: Retire,
+) -> Option<(Vec<String>, Vec<String>)> {
+    if mode == Retire::Clear && !inflight_claim_fully_covered(claimed, requested) {
+        return None;
     }
-    // issue-273: cut an UNOWNED boundary before the claim disappears. Without
-    // this, whatever interval this claim opened stays open forever, and any
-    // later direct edit made with no claim live lands inside it and is
-    // credited to this claim's owner. An empty-ids capture is the honest
-    // "nobody owns what follows from here" boundary — the same mechanism
-    // record_claim_interval already uses for owner-to-owner handoffs, just
-    // with an empty destination set. Called BEFORE the file is removed so
-    // the read inside record_claim_interval still sees the PRIOR (this)
-    // claim as the boundary's left edge.
-    record_claim_interval(app, &[], "cleared", unix_now_ms());
-    let _ = std::fs::remove_file(&path);
-    // state-mirror-store-and-ledger: mirror the clear. Trace-only on
-    // failure — never blocks or alters the file path above.
-    {
-        let ids = claimed_ids.clone();
-        let at_ms = unix_now_ms();
-        worklist_state_apply(app, "claim-clear", move |conn| {
-            worklist_state::mirror_claim_clear(conn, &ids, at_ms, "inflight-claim-sentinel")
-        });
-    }
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
+    let keep = claimed
+        .iter()
+        .filter(|id| !requested.contains(id) || bound.contains(id))
+        .cloned()
+        .collect();
+    let retained = claimed
+        .iter()
+        .filter(|id| requested.contains(id) && bound.contains(id))
+        .cloned()
+        .collect();
+    Some((keep, retained))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retire {
+    /// Clear only when the requested ids cover the claim (turn ends, cancels).
+    Clear,
+    /// Retire exactly the requested ids (lifecycle routes that know them).
+    Shrink,
+}
+
+// The one place a claim loses ids. Every clear and shrink comes through here,
+// so retention of bound ids can't be skipped by a caller.
+fn retire_claim_locked(
+    _g: &ClaimGuard,
+    files: &ClaimFiles,
+    fx: &dyn ClaimEffects,
+    requested: &[String],
+    mode: Retire,
+    via: &str,
+) -> ClaimShrink {
+    let Some(mut claim) = read_inflight_claim_at(&files.claim) else {
+        return ClaimShrink::NoClaim;
+    };
+    let bound = read_delegated_bindings_at(&files.bindings).union_ids();
+    let Some((keep, retained)) = plan_claim_retire(&claim.ids, requested, &bound, mode) else {
+        let remaining: Vec<String> = claim
+            .ids
+            .iter()
+            .filter(|cid| !requested.contains(cid))
+            .cloned()
+            .collect();
+        fx.trace(
             "inflight-sentinel",
             &format!(
-                "op=clear ids={}",
-                serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string())
+                "op=clear-partial claimed={} requested={} remaining={}",
+                ids_json_str(&claim.ids),
+                ids_json_str(requested),
+                ids_json_str(&remaining)
             ),
         );
+        return ClaimShrink::Uncovered;
+    };
+    if !retained.is_empty() {
+        fx.trace(
+            "delegated",
+            &format!("op=retain ids={} via={}", ids_json_str(&retained), via),
+        );
     }
-    emit_replayable_signal(app, "inflight-claim-changed");
+    let mirror_source = match mode {
+        Retire::Clear => "inflight-claim-sentinel",
+        Retire::Shrink => "inflight-claim-sentinel-shrink",
+    };
+    if keep.is_empty() {
+        // issue-273: cut an UNOWNED boundary before the claim disappears.
+        // Without this, whatever interval this claim opened stays open
+        // forever, and any later direct edit made with no claim live lands
+        // inside it and is credited to this claim's owner. Called BEFORE the
+        // file is removed so the read inside record_claim_interval still sees
+        // the PRIOR (this) claim as the boundary's left edge.
+        fx.boundary(&[], "cleared");
+        let _ = std::fs::remove_file(&files.claim);
+        fx.mirror_clear(&claim.ids, mirror_source);
+        fx.trace(
+            "inflight-sentinel",
+            &format!("op=clear ids={}", ids_json_str(&claim.ids)),
+        );
+        fx.signal("inflight-claim-changed");
+        fx.cleared();
+        return ClaimShrink::Cleared;
+    }
+    if keep.len() == claim.ids.len() {
+        // Nothing retired (every requested id was bound, or none was
+        // claimed). The pane still refetches: the caller acted.
+        fx.signal("inflight-claim-changed");
+        return ClaimShrink::Shrunk { remaining: keep };
+    }
+    // issue-273: cut a boundary owned by whoever REMAINS, before the claim
+    // file is rewritten. Rewritten in place, so claimedAt and kind survive
+    // (the soft clears' freshness gates read claimedAt).
+    fx.boundary(&keep, "shrunk");
+    let resolved: Vec<String> = claim
+        .ids
+        .iter()
+        .filter(|c| !keep.contains(c))
+        .cloned()
+        .collect();
+    claim.ids = keep.clone();
+    if !write_inflight_claim_at(&files.claim, &claim) {
+        return ClaimShrink::NoClaim;
+    }
+    fx.mirror_shrink(&resolved, &keep, mirror_source);
+    fx.trace(
+        "inflight-sentinel",
+        &format!(
+            "op=clear-shrink resolved={} remaining={}",
+            ids_json_str(&resolved),
+            ids_json_str(&keep)
+        ),
+    );
+    fx.signal("inflight-claim-changed");
+    ClaimShrink::Shrunk { remaining: keep }
+}
 
-    // Flush a deferred tools-pane-reload if one was queued during the
-    // cycle (refs #93). Atomic swap-to-false; the previous value tells
-    // us whether to fire.
+// Flush a deferred tools-pane-reload if one was queued during the cycle
+// (refs #93), once the claim has cleared.
+fn flush_deferred_tools_reload<R: tauri::Runtime>(app: &AppHandle<R>) {
+    // Atomic swap-to-false; the previous value tells us whether to fire.
     if PENDING_TOOLS_RELOAD.swap(false, std::sync::atomic::Ordering::SeqCst) {
         let forced = PENDING_TOOLS_RELOAD_FORCED.swap(false, std::sync::atomic::Ordering::SeqCst);
         if forced || tools_pane_hot_reload_enabled(app) {
@@ -68169,7 +68221,6 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
             );
         }
     }
-    true
 }
 
 // Outcome of an incremental claim retirement (see shrink_inflight_claim_sentinel).
@@ -68177,6 +68228,8 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
 enum ClaimShrink {
     /// No claim on disk, or it could not be read.
     NoClaim,
+    /// An all-or-nothing clear that didn't cover the claim (op=clear-partial).
+    Uncovered,
     /// Some ids are still in flight; the claim was rewritten with the rest.
     Shrunk { remaining: Vec<String> },
     /// Nothing left in flight; the claim file was removed.
@@ -68207,137 +68260,26 @@ enum ClaimShrink {
 // `op=clear-shrink` is a distinct op on purpose. If shrinking were traced as
 // `clear-partial`, that line would stop meaning "collision" and start meaning
 // "collision OR normal progress" -- an instrument quietly losing its edge.
+//
+// Ids a live subagent binding holds are retained here too (see
+// retire_claim_locked), so advancing a bound id leaves it claimed.
 fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
     app: &AppHandle<R>,
     resolved_ids: &[String],
+    via: &str,
 ) -> ClaimShrink {
-    let Some(path) = inflight_claim_file(app) else {
+    let Some(files) = claim_files(app) else {
         return ClaimShrink::NoClaim;
     };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return ClaimShrink::NoClaim;
-    };
-    let mut claim: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return ClaimShrink::NoClaim,
-    };
-    let claimed_ids: Vec<String> = claim
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let remaining: Vec<String> = claimed_ids
-        .iter()
-        .filter(|cid| !resolved_ids.iter().any(|rid| rid == *cid))
-        .cloned()
-        .collect();
-
-    if remaining.is_empty() {
-        // issue-273: same unowned-boundary cut as the full clear path above —
-        // a shrink that empties the claim is a full clear by another route,
-        // and without this the open interval never closes.
-        record_claim_interval(app, &[], "cleared", unix_now_ms());
-        let _ = std::fs::remove_file(&path);
-        // state-mirror-store-and-ledger: mirror the clear. Trace-only on
-        // failure — never blocks or alters the file path above.
-        {
-            let ids = claimed_ids.clone();
-            let at_ms = unix_now_ms();
-            worklist_state_apply(app, "claim-clear", move |conn| {
-                worklist_state::mirror_claim_clear(
-                    conn,
-                    &ids,
-                    at_ms,
-                    "inflight-claim-sentinel-shrink",
-                )
-            });
-        }
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "inflight-sentinel",
-                &format!(
-                    "op=clear ids={}",
-                    serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string())
-                ),
-            );
-        }
-        emit_replayable_signal(app, "inflight-claim-changed");
-        return ClaimShrink::Cleared;
-    }
-
-    // issue-273: cut a boundary owned by whoever REMAINS, before the claim
-    // file is rewritten. The ids that resolved out are no longer covered by
-    // the open interval from here forward; the ids still in flight are.
-    record_claim_interval(app, &remaining, "shrunk", unix_now_ms());
-    // Rewrite in place so every other field (claimedAt, kind, ...) survives.
-    if let Some(obj) = claim.as_object_mut() {
-        obj.insert("ids".into(), serde_json::json!(remaining));
-    }
-    let Ok(body) = serde_json::to_string_pretty(&claim) else {
-        return ClaimShrink::NoClaim;
-    };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, format!("{}\n", body)).is_err() {
-        return ClaimShrink::NoClaim;
-    }
-    if std::fs::rename(&tmp, &path).is_err() {
-        return ClaimShrink::NoClaim;
-    }
-    // state-mirror-store-and-ledger: mirror the shrink. Trace-only on
-    // failure — never blocks or alters the file path above.
-    {
-        let resolved = resolved_ids.to_vec();
-        let remaining_ids = remaining.clone();
-        let at_ms = unix_now_ms();
-        worklist_state_apply(app, "claim-shrink", move |conn| {
-            worklist_state::mirror_claim_shrink(
-                conn,
-                &resolved,
-                &remaining_ids,
-                at_ms,
-                "inflight-claim-sentinel-shrink",
-            )
-        });
-    }
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "inflight-sentinel",
-            &format!(
-                "op=clear-shrink resolved={} remaining={}",
-                serde_json::to_string(resolved_ids).unwrap_or_else(|_| "[]".to_string()),
-                serde_json::to_string(&remaining).unwrap_or_else(|_| "[]".to_string())
-            ),
-        );
-    }
-    emit_replayable_signal(app, "inflight-claim-changed");
-    ClaimShrink::Shrunk { remaining }
+    let g = claim_lock();
+    retire_claim_locked(&g, &files, app, resolved_ids, Retire::Shrink, via)
 }
 
 // True iff resources/.inflight-claim.json exists, parses, and lists at
 // least one claimed id. Used by the watcher to decide whether to emit
 // tools-pane-reload now or defer it until the cycle clears (refs #93).
 fn inflight_sentinel_is_active<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
-    let Some(path) = inflight_claim_file(app) else {
-        return false;
-    };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    let claim: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    claim
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| !arr.is_empty())
-        .unwrap_or(false)
+    read_inflight_claim(app).map_or(false, |c| !c.ids.is_empty())
 }
 
 // Emit tools-pane-reload, OR defer it if a cycle is currently active
@@ -68409,13 +68351,9 @@ fn clear_active_sentinel<R: tauri::Runtime>(app: &AppHandle<R>) {
     // cleared at turn end, never spanning agent silence. The re-arm is
     // deliberately untouched — it is what keeps a legitimate multi-turn apply
     // attributed (#286).
+    // This function's one caller is the PTY-silence turn-end path.
     if let Some((ids, _claimed_at)) = inflight_claim_ids_and_claimed_at(app) {
-        // delegated-work-action-gates: live bindings hold the claim instead.
-        // This function's one caller is the PTY-silence turn-end path.
-        if reconcile_claim_with_bindings(app, "silence") {
-            return;
-        }
-        clear_inflight_claim_sentinel(app, &ids);
+        clear_inflight_claim_sentinel(app, &ids, "silence");
     }
 }
 
@@ -68440,8 +68378,11 @@ fn clear_active_sentinel_with_reason<R: tauri::Runtime>(app: &AppHandle<R>, reas
         unix_now_ms(),
         claimed_after,
     );
+    // delegated-work-action-gates: a foreground cancel (permission reject,
+    // Escape) is no evidence a background subagent stopped; its ids are
+    // retained by the clear.
     if let Some((ids, _claimed_at)) = active_claim {
-        clear_inflight_claim_sentinel(app, &ids);
+        clear_inflight_claim_sentinel(app, &ids, reason);
     } else {
         if bram_trace_enabled() {
             append_bram_trace_line(
@@ -70158,11 +70099,8 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // `worklist-commit` read the auth record, not the claim, so a later turn
     // completes the lifecycle exactly as before.
     //
-    // delegated-work-action-gates: a subagent still bound to this claim's
-    // items holds it past the turn end (shrunk to the bound ids) instead.
-    if reconcile_claim_with_bindings(app, "turn-end") {
-        return;
-    }
+    // delegated-work-action-gates: ids a subagent is still bound to survive
+    // the clear (retire_claim_locked retains them).
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -70174,37 +70112,24 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
             ),
         );
     }
-    clear_inflight_claim_sentinel(app, &claimed_ids);
+    clear_inflight_claim_sentinel(app, &claimed_ids, "turn-end");
 }
 
 // Startup cleanup. Removes any stale inflight sentinel from a prior
 // session that didn't complete (Bram killed mid-cycle, agent crashed
 // before mutate, etc.).
 fn cleanup_stale_inflight_claim<R: tauri::Runtime>(app: &AppHandle<R>) {
-    // delegated-work-action-gates: a restart starts with no bindings. The
-    // subagents that held them died with the session that spawned them.
-    delegated_release_all(app, "restart");
-    let Some(path) = inflight_claim_file(app) else {
-        return;
-    };
-    if !path.exists() {
-        return;
-    }
-    // delegated-work-action-gates: cut the unowned boundary a stale claim
-    // never got. Removing the file bare left the dead claim's interval open,
-    // so every edit after the restart was credited to it until the next claim
-    // write. Called while the file is still present: record_claim_interval
-    // reads the PRIOR claim as the boundary's left edge, and with the file
-    // gone the empty->empty transition would be skipped as unchanged. It runs
-    // a scoped temp-index capture synchronously at startup, but only when a
-    // stale claim exists (Bram quit mid-claim), and fails open: no git, no
-    // repo, or a failed capture records nothing and startup proceeds.
-    record_claim_interval(app, &[], "cleared", unix_now_ms());
-    let _ = std::fs::remove_file(&path);
-    if bram_trace_enabled() {
+    if bram_trace_enabled() && inflight_claim_file(app).map_or(false, |p| p.exists()) {
         append_bram_trace_line(app, "inflight-sentinel", "op=stale-startup-clear");
     }
-    emit_replayable_signal(app, "inflight-claim-changed");
+    // delegated-work-action-gates: a restart starts with no bindings (their
+    // subagents died with the session that spawned them), and the stale
+    // claim clears through the choke point, which cuts the unowned boundary
+    // removing the file bare never did: the dead claim's interval stayed
+    // open, crediting every edit after the restart to it. The boundary is a
+    // scoped temp-index capture, run only when a stale claim exists, and
+    // fails open: no git, no repo, or a failed capture records nothing.
+    delegated_release_all_and_clear(app, "restart");
 }
 
 // --- delegated-work-action-gates ---------------------------------------------
@@ -70212,15 +70137,19 @@ fn cleanup_stale_inflight_claim<R: tauri::Runtime>(app: &AppHandle<R>) {
 // Decision: docs/decisions/2026-11-04-delegated-work-binds-to-the-spawning-claim.md.
 // Claude only. A subagent inherits the claim it was spawned under: on
 // `SubagentStart` (reported by the guard's menu hook to /__agent/subagent) the
-// host binds the subagent's agent_id to the live claim's item ids. While any
-// binding is live:
-//   - the claim is HELD at turn end (shrunk to the bound ids instead of
-//     cleared), so the subagent's writes stay inside an interval owned by its
-//     items rather than landing as unowned;
+// host binds the subagent's agent_id to the live claim's item ids. The
+// bindings are a reference count on that one claim, not a second claim. While
+// any binding is live:
+//   - the claim keeps the bound ids through every clear and shrink
+//     (retire_claim_locked retains them, `op=retain`), so the subagent's
+//     writes stay inside an interval owned by its items;
 //   - commit, drop and prune refuse the bound ids (409 refuse-delegated-live).
+// "Held by delegation" is derived, never stored: held_by_delegation_at.
 // A binding is released only on evidence: SubagentStop, the spawning session
 // ending (PTY replaced, or the agent exiting to the shell prompt), a Bram
-// restart, or a manual Release. Never on a timeout.
+// restart, or a manual Release. Never on a timeout. Only those session-level
+// releases may clear the claim regardless of bindings
+// (delegated_release_all_and_clear).
 //
 // agent_id format: Claude's hook `agent_id` is the bare id (specimen
 // docs/agent-specimens/claude/hooks/SubagentStop.json: "ae3fb2df9de52ea71",
@@ -70248,9 +70177,172 @@ struct DelegatedBindings {
     bindings: std::collections::BTreeMap<String, DelegatedBinding>,
 }
 
-fn sorted_unique_ids<'a>(ids: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+// The one id-set helper: sorted, deduplicated. Two id lists name the same
+// set iff their sorted_id_set values are equal.
+fn sorted_id_set<'a>(ids: impl IntoIterator<Item = &'a String>) -> Vec<String> {
     let set: std::collections::BTreeSet<String> = ids.into_iter().cloned().collect();
     set.into_iter().collect()
+}
+
+// One lock over the claim file and the bindings file. Every claim write and
+// retirement, and every binding change with the claim reconciliation that
+// follows it, runs under it, so two releases (or a release and a clear) can't
+// interleave and resurrect a cleared claim. Not reentrant: the *_locked
+// functions take the held guard instead of locking again.
+type ClaimGuard = std::sync::MutexGuard<'static, ()>;
+
+fn claim_lock() -> ClaimGuard {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+struct ClaimFiles {
+    claim: PathBuf,
+    bindings: PathBuf,
+}
+
+fn claim_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<ClaimFiles> {
+    Some(ClaimFiles {
+        claim: inflight_claim_file(app)?,
+        bindings: delegated_bindings_file(app)?,
+    })
+}
+
+// What a claim transition does besides its two files: the attribution
+// boundary, the state mirror, the trace and the pane signal. The host's
+// AppHandle implements it; the unit tests stub it, which is what lets the
+// *_locked transactions run against temp files.
+trait ClaimEffects {
+    fn boundary(&self, ids: &[String], kind: &str);
+    fn mirror_write(&self, at_ms: i64, kind: &str, ids: &[String]);
+    fn mirror_clear(&self, ids: &[String], source: &'static str);
+    fn mirror_shrink(&self, resolved: &[String], remaining: &[String], source: &'static str);
+    fn tracing(&self) -> bool;
+    fn trace(&self, category: &str, detail: &str);
+    fn signal(&self, name: &str);
+    // The claim cleared: flush what waited on it.
+    fn cleared(&self);
+    fn main_turn_open(&self) -> bool;
+}
+
+impl<R: tauri::Runtime> ClaimEffects for AppHandle<R> {
+    fn boundary(&self, ids: &[String], kind: &str) {
+        record_claim_interval(self, ids, kind, unix_now_ms());
+    }
+    fn mirror_write(&self, at_ms: i64, kind: &str, ids: &[String]) {
+        let (kind, ids) = (kind.to_string(), ids.to_vec());
+        worklist_state_apply(self, "claim-write", move |conn| {
+            worklist_state::mirror_claim_write(conn, at_ms, &kind, &ids, "inflight-claim-sentinel")
+        });
+    }
+    fn mirror_clear(&self, ids: &[String], source: &'static str) {
+        let (ids, at_ms) = (ids.to_vec(), unix_now_ms());
+        worklist_state_apply(self, "claim-clear", move |conn| {
+            worklist_state::mirror_claim_clear(conn, &ids, at_ms, source)
+        });
+    }
+    fn mirror_shrink(&self, resolved: &[String], remaining: &[String], source: &'static str) {
+        let (resolved, remaining, at_ms) = (resolved.to_vec(), remaining.to_vec(), unix_now_ms());
+        worklist_state_apply(self, "claim-shrink", move |conn| {
+            worklist_state::mirror_claim_shrink(conn, &resolved, &remaining, at_ms, source)
+        });
+    }
+    fn tracing(&self) -> bool {
+        bram_trace_enabled()
+    }
+    fn trace(&self, category: &str, detail: &str) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(self, category, detail);
+        }
+    }
+    fn signal(&self, name: &str) {
+        emit_replayable_signal(self, name);
+    }
+    fn cleared(&self) {
+        flush_deferred_tools_reload(self);
+    }
+    fn main_turn_open(&self) -> bool {
+        main_turn_open()
+    }
+}
+
+// Whether the main agent turn is running, from the host's turn state (the
+// `[turn-state]` phase): working, or paused on a permission menu.
+fn turn_phase_open(phase: &str) -> bool {
+    phase == "working" || phase == "waiting-for-permission"
+}
+
+fn main_turn_open() -> bool {
+    turn_state_cell()
+        .lock()
+        .map(|t| turn_phase_open(&t.phase))
+        .unwrap_or(false)
+}
+
+fn ids_subset(ids: &[String], of: &[String]) -> bool {
+    ids.iter().all(|id| of.contains(id))
+}
+
+// The claim survives only because subagents are bound to it: every claimed id
+// is bound, and no main turn is running. Derived on every read, so no claim
+// writer can forget to set it.
+fn held_by_delegation_at(
+    claim: Option<&InflightClaim>,
+    bound: &[String],
+    main_turn_open: bool,
+) -> bool {
+    !main_turn_open && claim.map_or(false, |c| !c.ids.is_empty() && ids_subset(&c.ids, bound))
+}
+
+fn held_by_delegation<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    held_by_delegation_at(
+        read_inflight_claim(app).as_ref(),
+        &delegated_bound_ids_union(app),
+        main_turn_open(),
+    )
+}
+
+// A turn start re-arms its authorization's claim unless a claim of a running
+// turn is already live. A claim of bound ids only is not one: the re-arm
+// proceeds, and write_claim_locked unions the bound ids back in.
+fn rearm_blocked(claim: Option<&InflightClaim>, bound: &[String]) -> bool {
+    claim.map_or(false, |c| c.ids.is_empty() || !ids_subset(&c.ids, bound))
+}
+
+// The bound ids at the start of the current main turn (taken when the turn
+// opens). They belong to subagents of an EARLIER turn, so a subagent this
+// turn spawns doesn't inherit them: a chat turn's research subagent must not
+// bind to an item another subagent holds. Ids this turn's own subagents bind
+// are not in it, so parallel subagents of one turn all bind.
+fn turn_start_bound_cell() -> &'static Mutex<Vec<String>> {
+    static CELL: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// The main turn opened or closed. Snapshot the bound ids at the open, and
+// tell the pane: heldByDelegation depends on the turn state.
+fn delegated_note_turn_edge<R: tauri::Runtime>(app: &AppHandle<R>, opened: bool) {
+    let bound = delegated_bound_ids_union(app);
+    if opened {
+        if let Ok(mut g) = turn_start_bound_cell().lock() {
+            *g = bound.clone();
+        }
+    }
+    if !bound.is_empty() {
+        emit_replayable_signal(app, "inflight-claim-changed");
+    }
+}
+
+// The claim ids a subagent spawned now inherits: the claim minus ids bound
+// before this turn began.
+fn delegated_inheritable_ids(claim: &[String], turn_start_bound: &[String]) -> Vec<String> {
+    claim
+        .iter()
+        .filter(|id| !turn_start_bound.contains(id))
+        .cloned()
+        .collect()
 }
 
 impl DelegatedBindings {
@@ -70271,7 +70363,7 @@ impl DelegatedBindings {
             return false;
         }
         let next = DelegatedBinding {
-            ids: sorted_unique_ids(ids.iter()),
+            ids: sorted_id_set(ids.iter()),
             bound_at_ms: now_ms,
             session_id: session_id.to_string(),
             agent_type: agent_type.to_string(),
@@ -70288,7 +70380,7 @@ impl DelegatedBindings {
     }
 
     fn union_ids(&self) -> Vec<String> {
-        sorted_unique_ids(self.bindings.values().flat_map(|b| b.ids.iter()))
+        sorted_id_set(self.bindings.values().flat_map(|b| b.ids.iter()))
     }
 
     // The requested ids a live binding holds, and the agents holding them.
@@ -70364,62 +70456,6 @@ fn write_delegated_bindings_at(path: &Path, bindings: &DelegatedBindings) -> boo
     std::fs::rename(&tmp, path).is_ok()
 }
 
-fn union_sorted_ids(a: &[String], b: &[String]) -> Vec<String> {
-    sorted_unique_ids(a.iter().chain(b.iter()))
-}
-
-fn same_id_set(a: &[String], b: &[String]) -> bool {
-    sorted_unique_ids(a.iter()) == sorted_unique_ids(b.iter())
-}
-
-// What a claim should become once bindings change.
-#[derive(Debug, PartialEq, Eq)]
-enum DelegatedClaimAction {
-    /// Do nothing to the claim.
-    Leave,
-    /// Clear it the normal way (records the cleared boundary).
-    Clear,
-    /// Hold it on exactly these ids, marked as held by delegation.
-    Hold(Vec<String>),
-}
-
-// At a turn-end clear (jsonl end_turn, PTY silence): with bindings live, hold
-// the claim on their union instead of clearing it.
-fn delegated_turn_end_action(bound_union: &[String]) -> DelegatedClaimAction {
-    if bound_union.is_empty() {
-        DelegatedClaimAction::Clear
-    } else {
-        DelegatedClaimAction::Hold(bound_union.to_vec())
-    }
-}
-
-// After a binding is released. THE RECONCILE RULE (kept conservative): only a
-// claim that is currently a delegated hold -- the main turn ended and the
-// claim survives only for bindings -- is touched here. It shrinks to the
-// remaining bindings' union, or clears when none remain. A claim that is NOT
-// a hold belongs to a running main turn (or was freshly written by one, with
-// the bound ids unioned in); it is left alone, and that turn's own end
-// reconciles it against whatever bindings are still live then. So a main
-// claim never loses ids mid-turn because a subagent stopped.
-fn delegated_release_action(
-    claim_is_hold: bool,
-    remaining_union: &[String],
-) -> DelegatedClaimAction {
-    if !claim_is_hold {
-        DelegatedClaimAction::Leave
-    } else if remaining_union.is_empty() {
-        DelegatedClaimAction::Clear
-    } else {
-        DelegatedClaimAction::Hold(remaining_union.to_vec())
-    }
-}
-
-// Serializes every read-modify-write of the bindings file.
-fn delegated_bindings_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 fn delegated_bindings_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     project_resource_path(app, DELEGATED_BINDINGS_REL)
 }
@@ -70451,287 +70487,154 @@ fn trace_token(s: &str) -> String {
     }
 }
 
-fn emit_delegated_changed<R: tauri::Runtime>(app: &AppHandle<R>) {
-    emit_replayable_signal(app, "inflight-claim-changed");
-    emit_replayable_signal(app, "worklist-changed");
-}
-
-// Read the live claim: (ids, delegatedHold). None when there is no claim.
-fn inflight_claim_ids_and_hold<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Option<(Vec<String>, bool)> {
-    let path = inflight_claim_file(app)?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let claim: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let ids = worklist_json_ids(&claim, "ids");
-    let hold = claim
-        .get("delegatedHold")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    Some((ids, hold))
-}
-
-fn claim_is_delegated_hold<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
-    inflight_claim_ids_and_hold(app)
-        .map(|(_, hold)| hold)
-        .unwrap_or(false)
-}
-
-// SubagentStart: bind to the main turn's live claim, if there is one. A held
-// claim is not the main turn's -- a subagent spawned while only a delegated
-// hold is live came from a chat turn and binds to nothing.
-fn delegated_bind_to_live_claim<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+// SubagentStart: bind to the ids of the live claim this turn may hand on
+// (delegated_inheritable_ids). A subagent spawned with no claim, or under a
+// claim whose ids were all bound before this turn began (a chat turn while
+// another subagent works), binds to nothing.
+fn bind_locked(
+    _g: &ClaimGuard,
+    files: &ClaimFiles,
+    fx: &dyn ClaimEffects,
     agent: &str,
     agent_type: &str,
     session_id: &str,
+    turn_start_bound: &[String],
 ) -> Option<Vec<String>> {
     let skipped = |reason: &str| {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "delegated",
-                &format!("op=bind-skipped agent={} reason={}", agent, reason),
-            );
-        }
-    };
-    let Some((ids, hold)) = inflight_claim_ids_and_hold(app) else {
-        skipped("no-claim");
-        return None;
-    };
-    if ids.is_empty() {
-        skipped("no-claim");
-        return None;
-    }
-    if hold {
-        skipped("held-claim-only");
-        return None;
-    }
-    let Some(path) = delegated_bindings_file(app) else {
-        skipped("no-project");
-        return None;
-    };
-    let changed = {
-        let _g = delegated_bindings_lock().lock();
-        let mut b = read_delegated_bindings_at(&path);
-        let changed = b.bind(agent, &ids, unix_now_ms(), session_id, agent_type);
-        if changed && !write_delegated_bindings_at(&path, &b) {
-            drop(_g);
-            skipped("write-failed");
-            return None;
-        }
-        changed
-    };
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
+        fx.trace(
             "delegated",
-            &format!(
-                "op=bind agent={} ids={} type={}",
-                agent,
-                ids_json_str(&ids),
-                trace_token(agent_type)
-            ),
+            &format!("op=bind-skipped agent={} reason={}", agent, reason),
         );
+        None
+    };
+    let claim = read_inflight_claim_at(&files.claim).unwrap_or_default();
+    if claim.ids.is_empty() {
+        return skipped("no-claim");
     }
+    let ids = delegated_inheritable_ids(&claim.ids, turn_start_bound);
+    if ids.is_empty() {
+        return skipped("held-claim-only");
+    }
+    let mut b = read_delegated_bindings_at(&files.bindings);
+    let changed = b.bind(agent, &ids, unix_now_ms(), session_id, agent_type);
+    if changed && !write_delegated_bindings_at(&files.bindings, &b) {
+        return skipped("write-failed");
+    }
+    fx.trace(
+        "delegated",
+        &format!(
+            "op=bind agent={} ids={} type={}",
+            agent,
+            ids_json_str(&ids),
+            trace_token(agent_type)
+        ),
+    );
     if changed {
-        emit_delegated_changed(app);
+        fx.signal("inflight-claim-changed");
+        fx.signal("worklist-changed");
     }
     Some(ids)
 }
 
-// Release one binding. Does NOT reconcile the claim; callers that want the
-// claim to follow call delegated_reconcile_claim_after_release.
-fn delegated_release<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str, reason: &str) -> bool {
-    let Some(path) = delegated_bindings_file(app) else {
-        return false;
+// Which bindings a release removes.
+enum ReleaseScope<'a> {
+    Agents(&'a [String]),
+    All,
+}
+
+// Release bindings and reconcile the claim, as one transaction. Returns how
+// many bindings were released.
+//
+// The reconcile rule: once no main turn is running and the claim consisted
+// only of bound ids before this release, the ids no binding holds any more
+// retire through retire_claim_locked (which keeps the still-bound ones), and
+// the last release clears it. A claim with ids of its own belongs to a
+// running or starting turn and is left alone; that turn's end retires it, and
+// retention keeps whatever is still bound then. So a main claim never loses
+// ids mid-turn because a subagent stopped.
+//
+// `clear_claim` is the force variant, for session-level evidence (PTY
+// replaced, the agent exited, a restart): with every binding released, the
+// claim clears whatever the turn state.
+fn release_locked(
+    g: &ClaimGuard,
+    files: &ClaimFiles,
+    fx: &dyn ClaimEffects,
+    scope: ReleaseScope,
+    reason: &str,
+    clear_claim: bool,
+) -> usize {
+    let mut b = read_delegated_bindings_at(&files.bindings);
+    let before = b.union_ids();
+    let released: Vec<(String, DelegatedBinding)> = match scope {
+        ReleaseScope::All => std::mem::take(&mut b.bindings).into_iter().collect(),
+        ReleaseScope::Agents(agents) => agents
+            .iter()
+            .filter_map(|a| match b.release(a) {
+                Some(rel) => Some((a.clone(), rel)),
+                None => {
+                    fx.trace(
+                        "delegated",
+                        &format!("op=release-miss agent={} reason={}", a, reason),
+                    );
+                    None
+                }
+            })
+            .collect(),
     };
-    let released = {
-        let _g = delegated_bindings_lock().lock();
-        let mut b = read_delegated_bindings_at(&path);
-        let released = b.release(agent);
-        if released.is_some() {
-            let _ = write_delegated_bindings_at(&path, &b);
-        }
-        released
-    };
-    if bram_trace_enabled() {
-        let detail = match &released {
-            Some(rel) => format!(
+    if !released.is_empty() {
+        let _ = write_delegated_bindings_at(&files.bindings, &b);
+    }
+    for (agent, rel) in &released {
+        fx.trace(
+            "delegated",
+            &format!(
                 "op=release agent={} reason={} ids={}",
                 agent,
                 reason,
                 ids_json_str(&rel.ids)
             ),
-            None => format!("op=release-miss agent={} reason={}", agent, reason),
-        };
-        append_bram_trace_line(app, "delegated", &detail);
-    }
-    if released.is_some() {
-        emit_delegated_changed(app);
-        true
-    } else {
-        false
-    }
-}
-
-// Release every binding (session end, restart, manual all). Returns how many
-// were released. Does NOT reconcile the claim.
-fn delegated_release_all<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) -> usize {
-    let Some(path) = delegated_bindings_file(app) else {
-        return 0;
-    };
-    if !path.exists() {
-        return 0;
-    }
-    let released = {
-        let _g = delegated_bindings_lock().lock();
-        let b = read_delegated_bindings_at(&path);
-        let _ = write_delegated_bindings_at(&path, &DelegatedBindings::default());
-        b
-    };
-    if bram_trace_enabled() {
-        for (agent, rel) in &released.bindings {
-            append_bram_trace_line(
-                app,
-                "delegated",
-                &format!(
-                    "op=release agent={} reason={} ids={}",
-                    agent,
-                    reason,
-                    ids_json_str(&rel.ids)
-                ),
-            );
-        }
-    }
-    let n = released.bindings.len();
-    if n > 0 {
-        emit_delegated_changed(app);
-    }
-    n
-}
-
-// Rewrite the live claim to hold exactly `target` ids, marked delegatedHold.
-// Keeps kind and claimedAt (the soft clears' freshness gates read claimedAt).
-// Records a boundary only when the id set changes, and is a silent no-op when
-// the claim is already a hold on these ids -- turn-end detectors re-fire.
-fn hold_claim_for_delegation<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    target: &[String],
-    agents: usize,
-    via: &str,
-) -> bool {
-    let Some(path) = inflight_claim_file(app) else {
-        return false;
-    };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    let Ok(mut claim) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return false;
-    };
-    let claimed = worklist_json_ids(&claim, "ids");
-    let already_hold = claim
-        .get("delegatedHold")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let unchanged_ids = same_id_set(&claimed, target);
-    if unchanged_ids && already_hold {
-        return false;
-    }
-    let target = sorted_unique_ids(target.iter());
-    if !unchanged_ids {
-        // Before the file is rewritten, so the boundary's left edge is the
-        // claim being shrunk -- the same discipline as the shrink path.
-        record_claim_interval(app, &target, "delegated", unix_now_ms());
-    }
-    let Some(obj) = claim.as_object_mut() else {
-        return false;
-    };
-    obj.insert("ids".into(), serde_json::json!(target));
-    obj.insert("delegatedHold".into(), serde_json::json!(true));
-    let Ok(body) = serde_json::to_string_pretty(&claim) else {
-        return false;
-    };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, format!("{}\n", body)).is_err() {
-        return false;
-    }
-    if std::fs::rename(&tmp, &path).is_err() {
-        return false;
-    }
-    if !unchanged_ids {
-        let resolved: Vec<String> = claimed
-            .iter()
-            .filter(|c| !target.contains(c))
-            .cloned()
-            .collect();
-        let remaining = target.clone();
-        let at_ms = unix_now_ms();
-        worklist_state_apply(app, "claim-shrink", move |conn| {
-            worklist_state::mirror_claim_shrink(
-                conn,
-                &resolved,
-                &remaining,
-                at_ms,
-                "delegated-hold",
-            )
-        });
-    }
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "delegated",
-            &format!(
-                "op=hold ids={} agents={} via={}",
-                ids_json_str(&target),
-                agents,
-                via
-            ),
         );
     }
-    emit_replayable_signal(app, "inflight-claim-changed");
-    true
-}
-
-// Called where a turn-end detector would CLEAR the claim. Returns true when
-// live bindings took over (the claim is now a hold, or already was) and the
-// caller must not clear; false when there are no bindings and the caller
-// clears as before.
-fn reconcile_claim_with_bindings<R: tauri::Runtime>(app: &AppHandle<R>, via: &str) -> bool {
-    let bindings = read_delegated_bindings(app);
-    let union = bindings.union_ids();
-    match delegated_turn_end_action(&union) {
-        DelegatedClaimAction::Hold(ids) => {
-            hold_claim_for_delegation(app, &ids, bindings.bindings.len(), via);
-            true
+    let claim = read_inflight_claim_at(&files.claim).unwrap_or_default();
+    if clear_claim {
+        if !claim.ids.is_empty() {
+            retire_claim_locked(g, files, fx, &claim.ids, Retire::Clear, reason);
         }
-        _ => false,
+    } else if !released.is_empty()
+        && !claim.ids.is_empty()
+        && !fx.main_turn_open()
+        && ids_subset(&claim.ids, &before)
+    {
+        retire_claim_locked(g, files, fx, &claim.ids, Retire::Shrink, reason);
     }
+    if !released.is_empty() {
+        fx.signal("inflight-claim-changed");
+        fx.signal("worklist-changed");
+    }
+    released.len()
 }
 
-// After a release: follow delegated_release_action (see the rule above it).
-fn delegated_reconcile_claim_after_release<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let Some((claim_ids, hold)) = inflight_claim_ids_and_hold(app) else {
+fn delegated_release<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    scope: ReleaseScope,
+    reason: &str,
+) -> usize {
+    let Some(files) = claim_files(app) else {
+        return 0;
+    };
+    let g = claim_lock();
+    release_locked(&g, &files, app, scope, reason, false)
+}
+
+// The force variant: release every binding and clear the claim. Only for
+// evidence the spawning session is gone.
+fn delegated_release_all_and_clear<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    let Some(files) = claim_files(app) else {
         return;
     };
-    let bindings = read_delegated_bindings(app);
-    match delegated_release_action(hold, &bindings.union_ids()) {
-        DelegatedClaimAction::Leave => {}
-        DelegatedClaimAction::Clear => {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "delegated",
-                    &format!("op=hold-end ids={}", ids_json_str(&claim_ids)),
-                );
-            }
-            clear_inflight_claim_sentinel(app, &claim_ids);
-        }
-        DelegatedClaimAction::Hold(ids) => {
-            hold_claim_for_delegation(app, &ids, bindings.bindings.len(), "release");
-        }
-    }
+    let g = claim_lock();
+    release_locked(&g, &files, app, ReleaseScope::All, reason, true);
 }
 
 // The 409 a lifecycle route returns for ids a live binding holds. `category`
@@ -70771,20 +70674,6 @@ fn delegated_refusal_response<R: tauri::Runtime>(
     ))
 }
 
-// /__worklist/mutate's prune refusal, applied at the route (not inside
-// handle_worklist_mutate, which the commit route also calls for its own
-// post-commit prune).
-fn delegated_prune_refusal<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    body: &[u8],
-) -> Option<(u16, &'static str, Vec<u8>)> {
-    let req: serde_json::Value = serde_json::from_slice(body).ok()?;
-    if req.get("op").and_then(|v| v.as_str()) != Some("prune") {
-        return None;
-    }
-    delegated_refusal_response(app, &worklist_json_ids(&req, "ids"), "worklist-mutate")
-}
-
 // The agent exited to the shell: the session that spawned the bindings is
 // gone, and nothing will send their SubagentStop.
 // Called from the PTY read path, so the common case (no bindings) is one
@@ -70795,17 +70684,12 @@ fn delegated_release_on_shell_prompt<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     }
     let app = app.clone();
-    std::thread::spawn(move || {
-        if delegated_release_all(&app, "session-end") > 0 {
-            delegated_reconcile_claim_after_release(&app);
-        }
-    });
+    std::thread::spawn(move || delegated_release_all_and_clear(&app, "session-end"));
 }
 
 // /__inflight's `delegated` array: one row per live binding, labelled from
-// the subagent's meta.json sidecar when it can be found cheaply (the flat
-// <session>/subagents/agent-<id>.meta.json; workflow-nested agents go
-// unlabelled rather than walking the tree on every claim refetch).
+// the subagent's meta.json sidecar, found the way the roster finds it
+// (st_subagent_files, so workflow-nested agents are labelled too).
 fn delegated_inflight_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_json::Value> {
     let bindings = read_delegated_bindings(app);
     if bindings.is_empty() {
@@ -70820,7 +70704,11 @@ fn delegated_inflight_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
                 if b.session_id.is_empty() || !session_id_is_safe(&b.session_id) {
                     return None;
                 }
-                st_read_subagent_meta(&dir.join(&b.session_id).join("subagents"), agent)
+                let session = dir.join(format!("{}.jsonl", b.session_id));
+                let file = st_subagent_files(&session)
+                    .into_iter()
+                    .find(|f| &f.agent_id == agent)?;
+                st_read_subagent_meta(&file.dir, agent)
             });
             let description = meta
                 .as_ref()
@@ -70850,6 +70738,42 @@ fn delegated_inflight_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
 // POST /__agent/subagent — the guard's SubagentStart / SubagentStop report.
 // Token-checked exactly like /__agent/session. Always answers 200 for a
 // well-formed authenticated report: the hook is fail-open and reads nothing.
+// The background work a SubagentStop is still waiting on, and a `type:status`
+// summary of every entry for the trace. Claude Code's hooks reference (Stop
+// input) describes each entry as an in-flight task with `type` and `status`.
+// A `subagent` entry never counts: subagents can't spawn subagents, and on
+// 2026-11-04 a finished subagent's own final stop still listed one task,
+// itself, so counting every entry kept its row held forever. An entry whose
+// status reads as finished doesn't count either.
+fn pending_background_tasks(tasks: Option<&serde_json::Value>) -> (usize, String) {
+    let Some(list) = tasks.and_then(|v| v.as_array()) else {
+        return (0, String::new());
+    };
+    let mut pending = 0;
+    let mut seen = Vec::new();
+    for t in list {
+        let kind = t.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        seen.push(format!("{}:{}", trace_token(kind), trace_token(status)));
+        let finished = matches!(
+            status.to_ascii_lowercase().as_str(),
+            "completed"
+                | "complete"
+                | "done"
+                | "failed"
+                | "killed"
+                | "stopped"
+                | "cancelled"
+                | "canceled"
+                | "exited"
+        );
+        if kind != "subagent" && !finished {
+            pending += 1;
+        }
+    }
+    (pending, seen.join(","))
+}
+
 fn handle_agent_subagent<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -70874,17 +70798,23 @@ fn handle_agent_subagent<R: tauri::Runtime>(
     let session = field("session_id");
     match event.as_str() {
         "SubagentStart" => {
-            if current_provider(app) != Some(SessionProvider::Claude) {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
+            let turn_start_bound = turn_start_bound_cell()
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let bound = claim_files(app)
+                .and_then(|files| {
+                    let g = claim_lock();
+                    bind_locked(
+                        &g,
+                        &files,
                         app,
-                        "delegated",
-                        &format!("op=bind-skipped agent={} reason=provider", agent),
-                    );
-                }
-                return (200, JSON, b"{\"ok\":true,\"bound\":[]}".to_vec());
-            }
-            let bound = delegated_bind_to_live_claim(app, &agent, &agent_type, &session)
+                        &agent,
+                        &agent_type,
+                        &session,
+                        &turn_start_bound,
+                    )
+                })
                 .unwrap_or_default();
             (
                 200,
@@ -70900,11 +70830,17 @@ fn handle_agent_subagent<R: tauri::Runtime>(
             // Keep the binding; its final stop (no pending tasks) releases it.
             // Seen live 2026-11-04: a subagent backgrounded `sleep 600`, ended
             // its turn, and the binding was released ten minutes early.
-            let pending = value
-                .get("background_tasks")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
+            let (pending, seen) = pending_background_tasks(value.get("background_tasks"));
+            if bram_trace_enabled() && !seen.is_empty() {
+                append_bram_trace_line(
+                    app,
+                    "delegated",
+                    &format!(
+                        "op=stop-tasks agent={} pending={} seen=[{}]",
+                        agent, pending, seen
+                    ),
+                );
+            }
             if pending > 0 {
                 // Only a bound agent's pause is a deferral; another agent's
                 // (one spawned with no claim) is traced as the miss it is.
@@ -70925,10 +70861,7 @@ fn handle_agent_subagent<R: tauri::Runtime>(
                         .into_bytes(),
                 );
             }
-            let released = delegated_release(app, &agent, "stop");
-            if released {
-                delegated_reconcile_claim_after_release(app);
-            }
+            let released = delegated_release(app, ReleaseScope::Agents(&[agent]), "stop") > 0;
             (
                 200,
                 JSON,
@@ -70941,7 +70874,8 @@ fn handle_agent_subagent<R: tauri::Runtime>(
     }
 }
 
-// POST /__agent/subagent/release — the row's Release control: `{agentId}` or
+// POST /__agent/subagent/release — the row's Release control: `{agentIds:[…]}`
+// (the selection's agents, released in one transaction), `{agentId}` or
 // `{all:true}`. Pane-called, so it carries no token; like the other pane POST
 // routes it is protected by the common loopback gate (loopback_gate_refusal:
 // loopback Host, no foreign Origin). Traced reason=manual.
@@ -70953,23 +70887,28 @@ fn handle_agent_subagent_release<R: tauri::Runtime>(
     let Ok(req) = serde_json::from_slice::<serde_json::Value>(body) else {
         return (400, JSON, b"{\"error\":\"invalid JSON\"}".to_vec());
     };
-    let released: usize = if req.get("all").and_then(|v| v.as_bool()) == Some(true) {
-        delegated_release_all(app, "manual")
+    let released = if req.get("all").and_then(|v| v.as_bool()) == Some(true) {
+        delegated_release(app, ReleaseScope::All, "manual")
     } else {
-        let agent =
-            normalize_delegated_agent_id(req.get("agentId").and_then(|v| v.as_str()).unwrap_or(""));
-        if !delegated_agent_id_is_safe(&agent) {
+        let mut agents = worklist_json_ids(&req, "agentIds");
+        agents.extend(
+            req.get("agentId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        );
+        let agents: Vec<String> = agents
+            .iter()
+            .map(|a| normalize_delegated_agent_id(a))
+            .collect();
+        if agents.is_empty() || !agents.iter().all(|a| delegated_agent_id_is_safe(a)) {
             return (
                 400,
                 JSON,
-                b"{\"error\":\"agentId or all:true required\"}".to_vec(),
+                b"{\"error\":\"agentIds, agentId or all:true required\"}".to_vec(),
             );
         }
-        usize::from(delegated_release(app, &agent, "manual"))
+        delegated_release(app, ReleaseScope::Agents(&agents), "manual")
     };
-    if released > 0 {
-        delegated_reconcile_claim_after_release(app);
-    }
     (
         200,
         JSON,
@@ -70982,6 +70921,29 @@ fn handle_agent_subagent_release<R: tauri::Runtime>(
 #[cfg(test)]
 mod delegated_binding_tests {
     use super::*;
+
+    #[test]
+    fn a_stop_waits_only_on_real_background_work() {
+        // The 2026-11-04 demo: a paused subagent (its shell sleep plus itself),
+        // then its final stop still listing itself.
+        let paused = serde_json::json!([
+            { "id": "b2slumspb", "type": "shell", "status": "running" },
+            { "id": "a0204c4a", "type": "subagent", "status": "running" }
+        ]);
+        let (n, seen) = pending_background_tasks(Some(&paused));
+        assert_eq!(n, 1);
+        assert_eq!(seen, "shell:running,subagent:running");
+        let final_stop = serde_json::json!([
+            { "id": "a0204c4a", "type": "subagent", "status": "running" }
+        ]);
+        assert_eq!(pending_background_tasks(Some(&final_stop)).0, 0);
+        // A finished shell no longer holds the binding.
+        let done = serde_json::json!([{ "type": "shell", "status": "completed" }]);
+        assert_eq!(pending_background_tasks(Some(&done)).0, 0);
+        // No list, or an empty one: nothing pending, nothing to trace.
+        assert_eq!(pending_background_tasks(None), (0, String::new()));
+        assert_eq!(pending_background_tasks(Some(&serde_json::json!([]))).0, 0);
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -71025,46 +70987,342 @@ mod delegated_binding_tests {
         assert!(b.release("a1").is_none());
     }
 
-    #[test]
-    fn turn_end_with_a_live_binding_holds_instead_of_clearing() {
-        assert_eq!(
-            delegated_turn_end_action(&s(&["x"])),
-            DelegatedClaimAction::Hold(s(&["x"]))
-        );
-        assert_eq!(delegated_turn_end_action(&[]), DelegatedClaimAction::Clear);
+    // ---- the claim transactions, over temp files --------------------------
+
+    // Stubs the host side of a claim transition. `open` is the main turn's
+    // state. With `pause`, the first "shrunk" boundary blocks between the two
+    // barriers, holding the claim lock, so a test can try to interleave.
+    #[derive(Default)]
+    struct Fx {
+        open: bool,
+        pause: Option<(
+            std::sync::Arc<std::sync::Barrier>,
+            std::sync::Arc<std::sync::Barrier>,
+        )>,
+        paused: std::sync::atomic::AtomicBool,
+    }
+
+    impl ClaimEffects for Fx {
+        fn boundary(&self, _ids: &[String], kind: &str) {
+            if let Some((entered, resume)) = &self.pause {
+                if kind == "shrunk" && !self.paused.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    entered.wait();
+                    resume.wait();
+                }
+            }
+        }
+        fn mirror_write(&self, _: i64, _: &str, _: &[String]) {}
+        fn mirror_clear(&self, _: &[String], _: &'static str) {}
+        fn mirror_shrink(&self, _: &[String], _: &[String], _: &'static str) {}
+        fn tracing(&self) -> bool {
+            false
+        }
+        fn trace(&self, _: &str, _: &str) {}
+        fn signal(&self, _: &str) {}
+        fn cleared(&self) {}
+        fn main_turn_open(&self) -> bool {
+            self.open
+        }
+    }
+
+    fn temp_files(name: &str) -> ClaimFiles {
+        let bindings = temp_bindings_path(name);
+        ClaimFiles {
+            claim: bindings.with_file_name(".inflight-claim.json"),
+            bindings,
+        }
+    }
+
+    // A claim on `ids` and one binding per (agent, ids), as a turn that
+    // started them and spawned the subagents would leave them.
+    fn seed(files: &ClaimFiles, ids: &[&str], bindings: &[(&str, &[&str])]) {
+        let claim = InflightClaim {
+            ids: s(ids),
+            claimed_at: 1,
+            kind: "approved".into(),
+        };
+        assert!(write_inflight_claim_at(&files.claim, &claim));
+        let mut b = DelegatedBindings::default();
+        for (agent, ids) in bindings {
+            b.bind(agent, &s(ids), 2, "sess", "general-purpose");
+        }
+        assert!(write_delegated_bindings_at(&files.bindings, &b));
+    }
+
+    fn claim_ids(files: &ClaimFiles) -> Option<Vec<String>> {
+        read_inflight_claim_at(&files.claim).map(|c| c.ids)
+    }
+
+    fn held(files: &ClaimFiles, open: bool) -> bool {
+        held_by_delegation_at(
+            read_inflight_claim_at(&files.claim).as_ref(),
+            &read_delegated_bindings_at(&files.bindings).union_ids(),
+            open,
+        )
+    }
+
+    fn retire(files: &ClaimFiles, ids: &[&str], mode: Retire) -> ClaimShrink {
+        let g = claim_lock();
+        retire_claim_locked(&g, files, &Fx::default(), &s(ids), mode, "test")
+    }
+
+    fn release(files: &ClaimFiles, agents: &[&str], fx: &Fx) -> usize {
+        let g = claim_lock();
+        release_locked(
+            &g,
+            files,
+            fx,
+            ReleaseScope::Agents(&s(agents)),
+            "stop",
+            false,
+        )
     }
 
     #[test]
-    fn last_release_clears_a_held_claim_and_leaves_a_main_claim() {
-        // Held claim, nothing left bound: clear.
+    fn retire_plan_keeps_bound_ids() {
+        // Clear covering the claim: the bound id stays.
         assert_eq!(
-            delegated_release_action(true, &[]),
-            DelegatedClaimAction::Clear
+            plan_claim_retire(&s(&["a", "b"]), &s(&["a", "b"]), &s(&["b"]), Retire::Clear),
+            Some((s(&["b"]), s(&["b"])))
         );
-        // Held claim, another subagent still bound: shrink to it.
+        // A clear that doesn't cover the claim is still refused.
         assert_eq!(
-            delegated_release_action(true, &s(&["y"])),
-            DelegatedClaimAction::Hold(s(&["y"]))
+            plan_claim_retire(&s(&["a", "b"]), &s(&["a"]), &[], Retire::Clear),
+            None
         );
-        // A main turn's claim is never touched by a release.
+        // A shrink retires only what it names, and not a bound id.
         assert_eq!(
-            delegated_release_action(false, &[]),
-            DelegatedClaimAction::Leave
+            plan_claim_retire(&s(&["a", "b"]), &s(&["a"]), &s(&["a"]), Retire::Shrink),
+            Some((s(&["a", "b"]), s(&["a"])))
         );
         assert_eq!(
-            delegated_release_action(false, &s(&["y"])),
-            DelegatedClaimAction::Leave
+            plan_claim_retire(&s(&["a", "b"]), &s(&["a"]), &[], Retire::Shrink),
+            Some((s(&["b"]), vec![]))
         );
     }
 
+    // Codex §10: a foreground cancel (permission reject, Escape) clears with
+    // every claimed id; a still-bound subagent's ids must survive it.
     #[test]
-    fn union_on_write_keeps_bound_ids_in_the_new_claim() {
+    fn cancellation_clear_retains_a_bound_claim() {
+        let files = temp_files("cancel");
+        seed(&files, &["a"], &[("s1", &["a"])]);
+        retire(&files, &["a"], Retire::Clear);
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+        assert!(held(&files, false));
+        // A claim with an unbound id loses only that one.
+        seed(&files, &["a", "b"], &[("s1", &["a"])]);
+        retire(&files, &["a", "b"], Retire::Clear);
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+    }
+
+    // Antigravity §1: advance shrinks by the advanced ids; a bound id stays.
+    #[test]
+    fn advance_shrink_retains_a_bound_id() {
+        let files = temp_files("advance");
+        seed(&files, &["a", "b"], &[("s1", &["b"])]);
         assert_eq!(
-            union_sorted_ids(&s(&["new"]), &s(&["bound", "new"])),
+            retire(&files, &["b"], Retire::Shrink),
+            ClaimShrink::Shrunk {
+                remaining: s(&["a", "b"])
+            }
+        );
+        assert_eq!(
+            retire(&files, &["a"], Retire::Shrink),
+            ClaimShrink::Shrunk {
+                remaining: s(&["b"])
+            }
+        );
+        assert_eq!(claim_ids(&files), Some(s(&["b"])));
+    }
+
+    // OpenCode §8: an explicit end naming only bound ids leaves the claim
+    // held, and the final stop clears it.
+    #[test]
+    fn iterate_end_with_every_id_bound_holds_until_the_last_stop() {
+        let files = temp_files("end");
+        seed(&files, &["a"], &[("s1", &["a"])]);
+        retire(&files, &["a"], Retire::Shrink);
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+        assert!(held(&files, false));
+        assert!(!held(&files, true), "a running main turn is not a hold");
+        assert_eq!(release(&files, &["s1"], &Fx::default()), 1);
+        assert_eq!(claim_ids(&files), None);
+        assert!(read_delegated_bindings_at(&files.bindings).is_empty());
+    }
+
+    // A release while a main turn runs leaves that turn's claim alone; the
+    // turn's own end clears it, with nothing bound by then.
+    #[test]
+    fn release_during_a_main_turn_leaves_the_claim_to_the_turn_end() {
+        let files = temp_files("release-open");
+        seed(&files, &["a"], &[("s1", &["a"])]);
+        let open = Fx {
+            open: true,
+            ..Fx::default()
+        };
+        assert_eq!(release(&files, &["s1"], &open), 1);
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+        retire(&files, &["a"], Retire::Clear);
+        assert_eq!(claim_ids(&files), None);
+    }
+
+    // Codex §11: dropping an unrelated item writes a drop claim (unioned with
+    // the bound ids) and prunes it; the claim must read as held afterwards,
+    // and the final stop must clear it.
+    #[test]
+    fn drop_of_an_unrelated_item_keeps_the_hold() {
+        let files = temp_files("drop");
+        seed(&files, &["a"], &[("s1", &["a"])]);
+        {
+            let g = claim_lock();
+            let written = write_claim_locked(&g, &files, &Fx::default(), &s(&["b"]), "drop", true);
+            assert_eq!(written, s(&["a", "b"]));
+        }
+        retire(&files, &["b"], Retire::Shrink);
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+        assert!(held(&files, false));
+        release(&files, &["s1"], &Fx::default());
+        assert_eq!(claim_ids(&files), None);
+    }
+
+    // Antigravity §2: a chat turn while a subagent holds `a` re-arms `a`'s
+    // live authorization. The re-arm isn't blocked by the held claim, keeps
+    // the bound id, and a subagent this chat turn spawns binds to nothing.
+    #[test]
+    fn chat_turn_rearm_keeps_the_hold_and_binds_nothing_new() {
+        let files = temp_files("rearm");
+        seed(&files, &["a"], &[("s1", &["a"])]);
+        let bound = read_delegated_bindings_at(&files.bindings).union_ids();
+        let claim = read_inflight_claim_at(&files.claim);
+        assert!(!rearm_blocked(claim.as_ref(), &bound));
+        // The turn opened with `a` already bound.
+        let turn_start_bound = bound.clone();
+        let g = claim_lock();
+        write_claim_locked(&g, &files, &Fx::default(), &s(&["a"]), "approved", true);
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+        let fx = Fx {
+            open: true,
+            ..Fx::default()
+        };
+        assert_eq!(
+            bind_locked(&g, &files, &fx, "s2", "Explore", "sess", &turn_start_bound),
+            None
+        );
+        drop(g);
+        assert!(!read_delegated_bindings_at(&files.bindings)
+            .bindings
+            .contains_key("s2"));
+        // A main turn's own claim does block a re-arm.
+        let own = InflightClaim {
+            ids: s(&["c"]),
+            ..InflightClaim::default()
+        };
+        assert!(rearm_blocked(Some(&own), &bound));
+        assert!(!rearm_blocked(None, &bound));
+    }
+
+    // The turn that starts `a` may spawn several subagents; each binds.
+    #[test]
+    fn parallel_subagents_of_one_turn_all_bind() {
+        let files = temp_files("parallel");
+        seed(&files, &["a"], &[]);
+        let fx = Fx {
+            open: true,
+            ..Fx::default()
+        };
+        let g = claim_lock();
+        assert_eq!(
+            bind_locked(&g, &files, &fx, "s1", "t", "sess", &[]),
+            Some(s(&["a"]))
+        );
+        assert_eq!(
+            bind_locked(&g, &files, &fx, "s2", "t", "sess", &[]),
+            Some(s(&["a"]))
+        );
+        // A turn starting `b` while `a` is held hands on only `b`.
+        assert_eq!(
+            delegated_inheritable_ids(&s(&["a", "b"]), &s(&["a"])),
+            s(&["b"])
+        );
+    }
+
+    // Antigravity §3: a held claim is not stranded.
+    #[test]
+    fn stranded_skips_a_held_claim() {
+        let held_claim = InflightClaim {
+            ids: s(&["a"]),
+            ..InflightClaim::default()
+        };
+        assert!(!claim_can_strand(&held_claim, &s(&["a"]), false));
+        assert!(claim_can_strand(&held_claim, &[], false));
+        // While a main turn runs it is that turn's claim, and can strand.
+        assert!(claim_can_strand(&held_claim, &s(&["a"]), true));
+        assert!(!claim_can_strand(&InflightClaim::default(), &[], false));
+    }
+
+    // Codex §9: two releases close together. Release A pauses inside its
+    // claim reconciliation, holding the lock; release B must wait for it, and
+    // the end state has no bindings and no claim (B used to clear the claim
+    // first and A then wrote back a stale [b]).
+    #[test]
+    fn interleaved_releases_leave_no_claim() {
+        let files = std::sync::Arc::new(temp_files("interleave"));
+        seed(&files, &["a", "b"], &[("sa", &["a"]), ("sb", &["b"])]);
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let a = {
+            let files = files.clone();
+            let fx = Fx {
+                pause: Some((entered.clone(), resume.clone())),
+                ..Fx::default()
+            };
+            std::thread::spawn(move || release(&files, &["sa"], &fx))
+        };
+        entered.wait();
+        let b = {
+            let files = files.clone();
+            std::thread::spawn(move || release(&files, &["sb"], &Fx::default()))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // B is blocked on the lock: its binding is still there.
+        assert!(read_delegated_bindings_at(&files.bindings)
+            .bindings
+            .contains_key("sb"));
+        resume.wait();
+        assert_eq!(a.join().unwrap(), 1);
+        assert_eq!(b.join().unwrap(), 1);
+        assert!(read_delegated_bindings_at(&files.bindings).is_empty());
+        assert_eq!(claim_ids(&files), None);
+    }
+
+    #[test]
+    fn force_release_clears_the_claim_whatever_the_turn_state() {
+        let files = temp_files("force");
+        seed(&files, &["a", "b"], &[("s1", &["a"])]);
+        let open = Fx {
+            open: true,
+            ..Fx::default()
+        };
+        let g = claim_lock();
+        assert_eq!(
+            release_locked(&g, &files, &open, ReleaseScope::All, "session-end", true),
+            1
+        );
+        assert_eq!(claim_ids(&files), None);
+    }
+
+    #[test]
+    fn id_sets_compare_sorted_and_deduplicated() {
+        assert_eq!(
+            sorted_id_set(s(&["new"]).iter().chain(s(&["bound", "new"]).iter())),
             s(&["bound", "new"])
         );
-        assert!(same_id_set(&s(&["b", "a"]), &s(&["a", "b", "a"])));
-        assert!(!same_id_set(&s(&["a"]), &s(&["a", "b"])));
+        assert_eq!(
+            sorted_id_set(&s(&["b", "a"])),
+            sorted_id_set(&s(&["a", "b", "a"]))
+        );
     }
 
     #[test]
@@ -79002,11 +79260,20 @@ fn trace_stranded_approval<R: tauri::Runtime>(
 // that has to decide whether rung 2 is safe.
 const STRANDED_CLAIM_QUIET_MS: i64 = 60_000;
 
+// A claim held by delegation is not stranded: a subagent is working on it,
+// and its activity doesn't reach the main session's PTY or JSONL clocks.
+fn claim_can_strand(claim: &InflightClaim, bound: &[String], main_turn_open: bool) -> bool {
+    !claim.ids.is_empty() && !held_by_delegation_at(Some(claim), bound, main_turn_open)
+}
+
 fn stranded_claim_ids<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<(Vec<String>, i64, i64)> {
-    let (ids, claimed_at) = inflight_claim_ids_and_claimed_at(app)?;
-    if ids.is_empty() {
+    let claim = read_inflight_claim(app)?;
+    if !claim_can_strand(&claim, &delegated_bound_ids_union(app), main_turn_open()) {
         return None;
     }
+    let InflightClaim {
+        ids, claimed_at, ..
+    } = claim;
     let now = unix_now_ms();
     let age_ms = now.saturating_sub(claimed_at);
     let latest_activity = turn_state_cell()
@@ -79534,8 +79801,16 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
             // sentinel has already been cleared, so write+clear here
             // is a small redundant pair of events. No state
             // divergence.
-            write_inflight_claim_sentinel_no_snapshot(app, &dropped_via_auth, "drop");
-            clear_inflight_claim_sentinel(app, &dropped_via_auth);
+            //
+            // delegated-work-action-gates: with a claim live (a subagent's
+            // hold, or the drop claim itself), retire the dropped ids from it
+            // instead; overwriting it would drop the bound ids it carries.
+            if inflight_sentinel_is_active(app) {
+                let _ = shrink_inflight_claim_sentinel(app, &dropped_via_auth, "drop-policy");
+            } else {
+                write_inflight_claim_sentinel_no_snapshot(app, &dropped_via_auth, "drop");
+                clear_inflight_claim_sentinel(app, &dropped_via_auth, "drop-policy");
+            }
             retire_worklist_authorization_ids(app, &dropped_via_auth);
         }
         return true;
@@ -85655,20 +85930,19 @@ fn route_request<R: tauri::Runtime>(
         })()
         .unwrap_or(body);
         // delegated-work-action-gates: live subagent bindings, and whether the
-        // claim survives only because of them (the main turn has ended).
+        // claim survives only because of them (held_by_delegation, derived).
         // Always present so the pane reads one shape.
         let body = (|| -> Option<String> {
             let mut v: serde_json::Value = serde_json::from_str(&body).ok()?;
-            let held = v
-                .get("delegatedHold")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false);
             let obj = v.as_object_mut()?;
             obj.insert(
                 "delegated".into(),
                 serde_json::json!(delegated_inflight_rows(app)),
             );
-            obj.insert("heldByDelegation".into(), serde_json::json!(held));
+            obj.insert(
+                "heldByDelegation".into(),
+                serde_json::json!(held_by_delegation(app)),
+            );
             serde_json::to_string(&v).ok()
         })()
         .unwrap_or(body);
@@ -86093,7 +86367,7 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
                 (s, b)
             }
             "worklist-mutate" => {
-                let (s, _m, b) = handle_worklist_mutate(app, &body_bytes);
+                let (s, _m, b) = handle_worklist_mutate(app, &body_bytes, MutateCaller::External);
                 (s, b)
             }
             "worklist-commit" => {
@@ -87589,58 +87863,23 @@ fn handle_iterate_end<R: tauri::Runtime>(
             .map(|(claim_ids, claimed_at)| !claim_ids.is_empty() && unix_now_ms() >= claimed_at)
             .unwrap_or(false),
     );
-    // delegated-work-action-gates: ids a live subagent binding holds are not
-    // retired by an explicit end; the claim keeps them until the subagent
-    // stops. The rest retire as before.
-    let bound = delegated_bound_ids_union(app);
-    let (held, ids): (Vec<String>, Vec<String>) =
-        ids.into_iter().partition(|id| bound.contains(id));
-    if !held.is_empty() && bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "delegated",
-            &format!(
-                "op=hold ids={} agents={} via=end",
-                ids_json_str(&held),
-                read_delegated_bindings(app).bindings.len()
-            ),
-        );
-    }
-    if ids.is_empty() {
-        let remaining = inflight_claim_ids_and_claimed_at(app)
-            .map(|(r, _)| r)
-            .unwrap_or_default();
-        let body = serde_json::json!({
-            "ok": true,
-            "cleared": false,
-            "remaining": remaining,
-            "heldByDelegation": held,
-        });
-        return (
-            200,
-            "application/json; charset=utf-8",
-            serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"ok":true}"#.to_vec()),
-        );
-    }
     // Report what actually happened. This returned a bare {"ok":true} whether
     // or not anything was cleared, so a caller ending one id of a two-id claim
     // got success, a still-live claim, and a spinner it could not explain.
-    let mut body = match shrink_inflight_claim_sentinel(app, &ids) {
+    // Ids a live subagent binding holds stay in `remaining` (op=retain).
+    let body = match shrink_inflight_claim_sentinel(app, &ids, "end") {
         ClaimShrink::Cleared => serde_json::json!({ "ok": true, "cleared": true }),
         ClaimShrink::Shrunk { remaining } => serde_json::json!({
             "ok": true,
             "cleared": false,
             "remaining": remaining,
         }),
-        ClaimShrink::NoClaim => serde_json::json!({
+        ClaimShrink::NoClaim | ClaimShrink::Uncovered => serde_json::json!({
             "ok": true,
             "cleared": false,
             "remaining": [],
         }),
     };
-    if !held.is_empty() {
-        body["heldByDelegation"] = serde_json::json!(held);
-    }
     (
         200,
         "application/json; charset=utf-8",
@@ -88882,7 +89121,9 @@ fn handle_worklist_drop_direct<R: tauri::Runtime>(
     if ids.is_empty() {
         return worklist_json_error(400, "ids[] required");
     }
-    // delegated-work-action-gates: refuse before recording any grant.
+    // delegated-work-action-gates: the prune below refuses bound ids too
+    // (handle_worklist_mutate's gate); this early check only keeps a refused
+    // drop from recording a grant and writing a drop claim first.
     if let Some(refusal) = delegated_refusal_response(app, &ids, "worklist-drop") {
         return refusal;
     }
@@ -88902,7 +89143,8 @@ fn handle_worklist_drop_direct<R: tauri::Runtime>(
     // resolve consumes the auth and writes the drop sentinel; prune clears it.
     let _ = handle_worklist_resolve(app, Some(ids.clone()));
     let prune_body = serde_json::json!({ "op": "prune", "ids": ids }).to_string();
-    let (code, _, mbytes) = handle_worklist_mutate(app, prune_body.as_bytes());
+    let (code, _, mbytes) =
+        handle_worklist_mutate(app, prune_body.as_bytes(), MutateCaller::External);
     append_bram_trace_line(
         app,
         "worklist-drop",
@@ -89536,9 +89778,18 @@ fn handle_worklist_reorder<R: tauri::Runtime>(
     )
 }
 
+// Who is calling handle_worklist_mutate. Only the commit route's own
+// post-commit prune is Internal: its commit already refused bound ids.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MutateCaller {
+    External,
+    Internal,
+}
+
 fn handle_worklist_mutate<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
+    caller: MutateCaller,
 ) -> (u16, &'static str, Vec<u8>) {
     // Serialize concurrent mutates so the RMW (read worklist → apply op →
     // write back) is atomic with respect to other mutate callers. Without
@@ -89573,6 +89824,14 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
             "application/json; charset=utf-8",
             serde_json::json!({ "error": e }).to_string().into_bytes(),
         );
+    }
+    // delegated-work-action-gates: the one prune refusal, shared by the HTTP
+    // route, Codex's worklist-mutate intent and host-direct Drop. Advance on a
+    // bound id is allowed: the claim retains the id anyway.
+    if op == "prune" && caller == MutateCaller::External {
+        if let Some(refusal) = delegated_refusal_response(app, &ids, "worklist-mutate") {
+            return refusal;
+        }
     }
 
     // Auth check. Deliberately ignores consumedAtMs: same-turn
@@ -89644,7 +89903,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
             // over finished work). Other refusals leave the claim alone —
             // they may be retried under the same auth.
             if e.contains("authorization expired") {
-                let _ = shrink_inflight_claim_sentinel(app, &ids);
+                let _ = shrink_inflight_claim_sentinel(app, &ids, "auth-expired");
             }
             return (
                 400,
@@ -89783,7 +90042,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         // ids, and each mutate resolves only its own. worklist-commit reaches
         // this same path by delegating a prune.
         let cleared = !matches!(
-            shrink_inflight_claim_sentinel(app, completion_ids),
+            shrink_inflight_claim_sentinel(app, completion_ids, op),
             ClaimShrink::NoClaim
         );
         if !cleared {
@@ -89921,7 +90180,7 @@ fn release_claim_on_commit_refusal<R: tauri::Runtime>(
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     record_last_commit_refusal(ids, &head, reason);
-    let _ = shrink_inflight_claim_sentinel(app, ids);
+    let _ = shrink_inflight_claim_sentinel(app, ids, "commit-refusal");
     append_bram_trace_line(
         app,
         "inflight-sentinel",
@@ -91506,7 +91765,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         // outlive the turn — release both exactly as the prune path would,
         // leaving only the item row behind.
         retire_worklist_authorization(app, Some(&retained));
-        let _ = shrink_inflight_claim_sentinel(app, &retained);
+        let _ = shrink_inflight_claim_sentinel(app, &retained, "residual-withhold");
         append_bram_trace_line(
             app,
             "inflight-sentinel",
@@ -91556,7 +91815,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             "ids": prune_ids,
         });
         let prune_bytes = serde_json::to_vec(&prune_body).unwrap_or_default();
-        let (status, _content_type, body) = handle_worklist_mutate(app, &prune_bytes);
+        let (status, _content_type, body) =
+            handle_worklist_mutate(app, &prune_bytes, MutateCaller::Internal);
         if !(200..300).contains(&status) {
             let parsed: serde_json::Value = serde_json::from_slice(&body)
                 .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(&body) }));
@@ -94634,7 +94894,7 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
                     ),
                 );
             }
-            clear_inflight_claim_sentinel(app, &claimed_ids);
+            clear_inflight_claim_sentinel(app, &claimed_ids, "opencode-turn-end");
         }
         Err(reason) => {
             if bram_trace_enabled() {
@@ -97069,7 +97329,7 @@ fn antigravity_turn_ended<R: tauri::Runtime>(
                     ),
                 );
             }
-            clear_inflight_claim_sentinel(app, &claimed_ids);
+            clear_inflight_claim_sentinel(app, &claimed_ids, "antigravity-turn-end");
         }
         Err(reason) => {
             if bram_trace_enabled() {
@@ -98395,10 +98655,7 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         } else {
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
-            // delegated-work-action-gates: prune refuses ids a live subagent
-            // binding holds. Checked here rather than in the handler, which
-            // the commit route also calls for its own post-commit prune.
-            delegated_prune_refusal(app, &buf).unwrap_or_else(|| handle_worklist_mutate(app, &buf))
+            handle_worklist_mutate(app, &buf, MutateCaller::External)
         }
     } else if path == "__worklist/drop" {
         // issue-340: a host-direct drop. A drop is pure host work
@@ -100868,9 +101125,6 @@ fn hangup_replaced_pty<R: tauri::Runtime>(_app: &AppHandle<R>, pty: PtyState) {
 // the header's working status and turn state, and the shell-foreground
 // record, which the new shell's first prompt marker re-establishes.
 fn reset_state_after_pty_replace<R: tauri::Runtime>(app: &AppHandle<R>) {
-    // delegated-work-action-gates: the spawning session is gone, and its
-    // subagents with it; release their bindings before the claim clears.
-    delegated_release_all(app, "session-end");
     if let Some((ids, _)) = inflight_claim_ids_and_claimed_at(app) {
         append_bram_trace_line(
             app,
@@ -100880,8 +101134,11 @@ fn reset_state_after_pty_replace<R: tauri::Runtime>(app: &AppHandle<R>) {
                 serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
             ),
         );
-        clear_inflight_claim_sentinel(app, &ids);
     }
+    // delegated-work-action-gates: the spawning session is gone, and its
+    // subagents with it: release their bindings and clear the claim (the
+    // force variant).
+    delegated_release_all_and_clear(app, "session-end");
     let provider = match current_provider(app) {
         Some(SessionProvider::Codex) => "codex",
         Some(SessionProvider::Opencode) => "opencode",

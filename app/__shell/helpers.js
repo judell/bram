@@ -4123,8 +4123,10 @@ window.__bramDelegatedForItem = function (claim, itemId) {
 };
 
 // Release every binding covering the selection (the user knows the subagent
-// is gone, or its stop never arrived). The host emits inflight-claim-changed
-// and worklist-changed on the change, which refetch the gate bar and rows.
+// is gone, or its stop never arrived), in ONE request: the host releases them
+// and reconciles the claim as one transaction. The host emits
+// inflight-claim-changed and worklist-changed on the change, which refetch
+// the gate bar and rows.
 window.__bramDelegatedRelease = function (claim, sel) {
   var bs = window.__bramDelegatedBindingsFor(claim, sel);
   var agentIds = [];
@@ -4132,20 +4134,19 @@ window.__bramDelegatedRelease = function (claim, sel) {
     if (agentIds.indexOf(b.agentId) === -1) agentIds.push(b.agentId);
   });
   window.__bramIframeTrace("delegated-release", { op: "click", agentIds: agentIds, ids: (sel || []).slice() });
-  agentIds.forEach(function (agentId) {
-    window
-      .fetch("/__agent/subagent/release", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agentId: agentId }),
-      })
-      .then(function (r) {
-        window.__bramIframeTrace("delegated-release", { op: "done", agentIds: [agentId], status: r.status });
-      })
-      .catch(function (e) {
-        window.__bramIframeTrace("delegated-release", { op: "failed", agentIds: [agentId], error: String(e) });
-      });
-  });
+  if (!agentIds.length) return;
+  window
+    .fetch("/__agent/subagent/release", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentIds: agentIds }),
+    })
+    .then(function (r) {
+      window.__bramIframeTrace("delegated-release", { op: "done", agentIds: agentIds, status: r.status });
+    })
+    .catch(function (e) {
+      window.__bramIframeTrace("delegated-release", { op: "failed", agentIds: agentIds, error: String(e) });
+    });
 };
 
 // strip-label-tense-for-applied-items: the Worklist2 summary strip's

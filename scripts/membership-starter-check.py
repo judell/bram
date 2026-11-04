@@ -40,6 +40,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
+import bram_state  # noqa: E402
 import demo_instance  # noqa: E402
 
 # switch-matrix-runs-on-windows: Windows can't execute the .sh, and its
@@ -73,7 +74,7 @@ def run(repo: Path, *args: str, tolerate: str = "") -> None:
 
 
 def trace_lines(repo: Path) -> list[str]:
-    path = repo / "resources/bram-traces/bram-trace.log"
+    path = bram_state.trace_log(repo)
     try:
         return path.read_text(errors="replace").splitlines()
     except FileNotFoundError:
@@ -97,7 +98,7 @@ def wait_for_fresh(repo: Path, start: int, timeout: float) -> list[str]:
 
 
 def board(repo: Path) -> dict:
-    port = (repo / "resources/.bram-port").read_text().strip()
+    port = bram_state.port_file(repo).read_text().strip()
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/__worklist", timeout=30) as r:
         return json.load(r)
 

@@ -32,7 +32,7 @@ Every change here is behavior-preserving when `.bram/` doesn't exist, which is e
 - The move is the rename, then a note file, then the port file. `.bram/.gitignore` is written first so there is no instant where the new folder is stageable. Then `.bram/.migrated-from`, one line with the old path and the time, so a person or a later Bram can tell the folder came from a migration and the migration can't run twice. The port file is written last, so a guard that wakes early finds the old one or nothing, never half of each. An empty `resources/` is removed; a non-empty one is left and reported.
 - `.bram.json` split (decision 2); `.bram.json~` named in the report.
 - Instructions refreshed before the first agent turn: conventions, `AGENTS.md` block, provider files, and the Codex user-level instruction. Resumed sessions get a host-written note in their next turn that the folder moved. The host's own turn frame emits the new path; the guard already accepts either.
-- The five scripts that hard-code `resources/.bram-port` (`xmlui-howto-gap-miner.py`, `send-ledger-settle-probe.py`, `switch-matrix.py`, `membership-starter-check.py`, `demo_instance.py`) read either.
+- Scripts read the state folder through `scripts/bram_state.py` and `scripts/bram-state.sh`, the host's rule in each language. That's 29 scripts as of 2026-11-04, not five. Where the demo fixture hydrates a scenario's board is pending the mover's answer on #474.
 - `/__search` rescanned; `worklist-history` links by SHA still resolve in the Commits tab.
 - `/__bram/` serving with the `/resources/` alias.
 - Conventions carry one line for history: "before 0.8.4 the folder was `resources/`; that path in older transcripts and issues means `.bram/`."

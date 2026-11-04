@@ -17,7 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-CAPTURE_REL = Path("resources/codex-permission-hook-capture.jsonl")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
+# Written in the state folder (`.bram/` or `resources/`).
+CAPTURE_NAME = "codex-permission-hook-capture.jsonl"
 
 
 def utc_now() -> str:
@@ -78,8 +82,8 @@ def main() -> int:
         "payload_shape": compact_shape(payload),
     }
 
-    if (cwd / "resources").is_dir():
-        write_jsonl(cwd / CAPTURE_REL, record)
+    if bram_state.state_dir(cwd).is_dir():
+        write_jsonl(bram_state.state_dir(cwd) / CAPTURE_NAME, record)
 
     trace_log = os.environ.get("BRAM_TRACE_LOG")
     if os.environ.get("BRAM_TRACE") == "1" and trace_log:

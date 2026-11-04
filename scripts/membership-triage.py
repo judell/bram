@@ -6,8 +6,8 @@ evidence with a denominator. The membership engine's three op families —
 ``op=membership`` (cost, every board serve), ``op=membership-diverges`` (the
 two models disagree on a path's owners), and
 ``op=membership-conservation-broken`` (the tripwire) — scroll past in
-``resources/bram-traces/bram-trace.log`` and its rotated archives across every
-enrolled repo. This tool makes that ambient evidence visible and countable:
+``bram-traces/bram-trace.log`` in the state folder (``.bram/`` or
+``resources/``) and its rotated archives across every enrolled repo. This tool makes that ambient evidence visible and countable:
 
 - collects the three families from each repo's live log plus rotated
   ``bram-trace-*.log`` / ``.log.gz`` archives;
@@ -36,9 +36,11 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPOS = (SOURCE_ROOT, Path.home() / "xmlui", Path.home() / "budget")
-TRACE_DIR = "resources/bram-traces"
 
 LINE_RE = re.compile(
     r"^\[(?P<ts>[0-9T:.Z+-]+)\]\s+\[claim-interval\]\s+(?P<payload>op=\S.*)$"
@@ -84,7 +86,7 @@ def classify(replay: frozenset[str], membership: frozenset[str]) -> str:
 
 
 def trace_files(repo: Path) -> list[Path]:
-    trace_dir = repo / TRACE_DIR
+    trace_dir = bram_state.trace_dir(repo)
     if not trace_dir.is_dir():
         return []
     files = sorted(
@@ -359,7 +361,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    repos = args.repo or [p for p in DEFAULT_REPOS if (p / TRACE_DIR).is_dir()]
+    repos = args.repo or [p for p in DEFAULT_REPOS if bram_state.trace_dir(p).is_dir()]
     if not repos:
         print("membership-triage: no repos with trace directories found", file=sys.stderr)
         return 2

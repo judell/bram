@@ -14,8 +14,9 @@ The default report also attributes idle-time spikes: for every heartbeat spike
 over 1 s while no agent turn was running, it counts which host emits and routes
 appeared in the 2.5 s before it. That column found the 2026-10-29 regression
 (another project's subagent writes refetching this window's roster). --trend
-reads the rotated archives under resources/bram-traces/ and prints one row per
-day, for comparing against the long-run baseline.
+reads the rotated archives under bram-traces/ in the state folder (.bram/ or
+resources/) and prints one row per day, for comparing against the long-run
+baseline.
 
 What "healthy" looked like on this machine, for reading the numbers: the
 2026-07-22 fix left heartbeat avg 6-14 ms, max 81-141 ms, 0 spikes; the
@@ -39,6 +40,9 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
 
 LINE = re.compile(r"^\[(?P<ts>[^\]]+)\] \[(?P<cat>[^\]]+)\] (?P<rest>.*)$")
 GAUGES = (
@@ -228,7 +232,7 @@ def trend(trace_dir, days):
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    traces = root / "resources" / "bram-traces"
+    traces = bram_state.trace_dir(root)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("logs", nargs="*", help="trace logs or .gz archives (default: the live trace)")
     ap.add_argument("--trend", nargs="+", metavar="DAY", help="per-day rows from the archives, YYYY-MM-DD")

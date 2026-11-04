@@ -4,9 +4,9 @@
 # Run from within a Bram PTY shell, where BRAM_PORT (or legacy
 # XMLUI_DESKTOP_PORT) is exported into the environment.
 #
-# Backs up resources/.worklist-authorization.json, writes synthetic records,
-# curls the resolver, and asserts the response shapes. Restores the backup
-# on exit (success, failure, or interrupt) via a trap.
+# Backs up .worklist-authorization.json in the state folder (.bram/ or
+# resources/), writes synthetic records, curls the resolver, and asserts
+# the response shapes. Restores the backup on exit (success, failure, or interrupt) via a trap.
 #
 # Scenario 1 — approved consume-on-read:
 #   - first GET returns kind=approved
@@ -25,7 +25,8 @@ if [[ -z "$PORT" ]]; then
   exit 2
 fi
 
-AUTH="resources/.worklist-authorization.json"
+. "$(dirname "${BASH_SOURCE[0]}")/bram-state.sh"
+AUTH="$(bram_state_dir .)/.worklist-authorization.json"
 BACKUP=""
 
 cleanup() {

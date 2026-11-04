@@ -21,6 +21,10 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO_ROOT/scripts/bram-state.sh"
+# The state folder's name under a project (.bram or resources), re-resolved on
+# each call because Setup may create it mid-scenario.
+state_rel() { basename "$(bram_state_dir "$1")"; }
 BRAM_BIN="${BRAM_BIN:-$REPO_ROOT/src-tauri/target/debug/bram}"
 WORK_ROOT="${HARNESS_TMP:-$(mktemp -d -t bram-setup-harness)}"
 KEEP_ON_FAIL="${KEEP_ON_FAIL:-1}"
@@ -63,8 +67,8 @@ launch() {
   BRAM_PID=$!
   local i
   for i in $(seq 1 80); do
-    if [ -f "$dir/resources/.bram-port" ]; then
-      BRAM_PORT="$(cat "$dir/resources/.bram-port" 2>/dev/null)"
+    if [ -f "$(bram_state_dir "$dir")/.bram-port" ]; then
+      BRAM_PORT="$(cat "$(bram_state_dir "$dir")/.bram-port" 2>/dev/null)"
       [ -n "$BRAM_PORT" ] && sleep 1 && return 0
     fi
     kill -0 "$BRAM_PID" 2>/dev/null || { bad "launch" "process exited; see $WORK_ROOT/$SCENARIO.log"; return 1; }
@@ -110,7 +114,7 @@ assert_refused() {
   else
     bad "autostart held ($kind)" "no op=autostart-held line in $WORK_ROOT/$SCENARIO.log"
   fi
-  for p in resources .claude AGENTS.md CLAUDE.md .bram.json; do
+  for p in resources .bram .claude AGENTS.md CLAUDE.md .bram.json; do
     [ -e "$dir/$p" ] && written="$written $p"
   done
   if [ -z "$written" ]; then
@@ -144,12 +148,13 @@ assert_file() {
   if [ -e "$dir/$rel" ]; then ok "seeded $rel"; else bad "seeded $rel" "missing"; fi
 }
 
-# Fingerprint everything Setup owns. resources/ is excluded: the port file,
-# port sidecar and traces legitimately change between runs.
+# Fingerprint everything Setup owns. The state folder (.bram/ or resources/)
+# is excluded: the port file, port sidecar and traces legitimately change
+# between runs.
 fingerprint() {
   local dir="$1"
   (cd "$dir" && find . -type f \
-      -not -path './resources/*' -not -path './.git/*' \
+      -not -path './resources/*' -not -path './.bram/*' -not -path './.git/*' \
       -print0 2>/dev/null | sort -z | xargs -0 shasum 2>/dev/null)
 }
 
@@ -162,7 +167,7 @@ assert_trace() {
   local dir="$1" pattern="$2" name="$3"
   local i
   for i in $(seq 1 20); do
-    if grep -q "$pattern" "$dir/resources/bram-traces/bram-trace.log" 2>/dev/null; then
+    if grep -q "$pattern" "$(bram_state_dir "$dir")/bram-traces/bram-trace.log" 2>/dev/null; then
       ok "$name"
       return 0
     fi
@@ -180,7 +185,7 @@ assert_setup_landed() {
   local dir="$1"
 
   # core_installed keys on this file (lib.rs:33509).
-  assert_file "$dir" "resources/.worklist-authorization.json"
+  assert_file "$dir" "$(state_rel "$dir")/.worklist-authorization.json"
   assert_file "$dir" ".claude/bram-conventions.md"
   assert_file "$dir" ".claude/settings.json"
   assert_file "$dir" "AGENTS.md"
@@ -366,7 +371,7 @@ scenario_subfolder() {
     bad "toplevel names the repo root" "got: $top"
   fi
   local p written=""
-  for p in resources .claude AGENTS.md .bram.json; do
+  for p in resources .bram .claude AGENTS.md .bram.json; do
     [ -e "$repo/$p" ] && written="$written $p"
   done
   if [ -z "$written" ]; then ok "nothing written at the repo root"; else bad "nothing written at the repo root" "found:$written"; fi
@@ -405,7 +410,7 @@ scenario_already_setup() {
   # managed project does not track them (the bram repo keeps
   # resources/bram-traces/ untracked). Committing them would make this
   # scenario fail on its own live trace writes rather than on Setup churn.
-  printf 'resources/bram-traces/\nresources/.bram-port*\n' > "$dir/.gitignore"
+  printf 'resources/bram-traces/\nresources/.bram-port*\n.bram/bram-traces/\n.bram/.bram-port*\n' > "$dir/.gitignore"
   git -C "$dir" add -A
   git -C "$dir" -c user.email=h@h -c user.name=harness commit -qm init
   launch "$dir" || return
@@ -523,7 +528,7 @@ scenario_nested() {
   fi
   # The targeting check: a nested launch must not be auto-set-up.
   assert_trace "$dir" "\[auto-setup\] op=skip reason=nested" "auto-setup skipped on nested launch"
-  if [ -e "$dir/resources/.worklist-authorization.json" ]; then
+  if [ -e "$(bram_state_dir "$dir")/.worklist-authorization.json" ]; then
     bad "nested launch not seeded" "worklist authorization present"
   else
     ok "nested launch not seeded"

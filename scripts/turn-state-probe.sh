@@ -19,7 +19,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT_FILE="${BRAM_PORT_FILE:-$REPO_ROOT/resources/.bram-port}"
+. "$REPO_ROOT/scripts/bram-state.sh"
+PORT_FILE="${BRAM_PORT_FILE:-$(bram_state_dir "$REPO_ROOT")/.bram-port}"
 
 WATCH=0
 INTERVAL=2

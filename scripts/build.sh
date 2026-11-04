@@ -5,7 +5,7 @@
 #
 # Same as `cargo build --manifest-path src-tauri/Cargo.toml`: output and exit
 # status pass through unchanged. Each build appends one JSON line to
-# resources/build-log.jsonl (gitignored):
+# build-log.jsonl in the state folder (.bram/ or resources/; gitignored):
 #
 #   started, seconds, exit   when, how long, cargo's status
 #   head, head_moved         HEAD, and whether it changed since the last logged
@@ -29,8 +29,10 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MANIFEST="$ROOT/src-tauri/Cargo.toml"
-LOG="$ROOT/resources/build-log.jsonl"
-mkdir -p "$ROOT/resources"
+. "$ROOT/scripts/bram-state.sh"
+STATE="$(bram_state_dir "$ROOT")"
+LOG="$STATE/build-log.jsonl"
+mkdir -p "$STATE"
 
 command -v python3 > /dev/null 2>&1 || { exec cargo build --manifest-path "$MANIFEST" "$@"; }
 

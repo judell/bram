@@ -4,8 +4,8 @@
 # Usage (from repo root):
 #   scripts/record-trace.sh [--with-timing] <gesture-name>
 #
-# 1. Reads the current byte size of resources/bram-traces/bram-trace.log
-#    as a start marker.
+# 1. Reads the current byte size of bram-traces/bram-trace.log in the state
+#    folder (.bram/ or resources/) as a start marker.
 # 2. Prints the gesture instructions from tests/trace-gestures.md.
 # 3. Waits for the operator to perform the gesture and press Enter.
 # 4. Captures all bytes appended to bram-trace.log between the markers.
@@ -67,7 +67,8 @@ if [ -z "$gesture" ]; then
   exit 64
 fi
 
-trace_log="resources/bram-traces/bram-trace.log"
+. scripts/bram-state.sh
+trace_log="$(bram_state_dir .)/bram-traces/bram-trace.log"
 gestures_doc="tests/trace-gestures.md"
 snapshot_dir="tests/trace-snapshots"
 

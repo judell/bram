@@ -60,7 +60,11 @@ import tempfile
 import zlib
 from typing import Any, Iterable, Sequence
 
-DEFAULT_TRACE_DIR = "resources/bram-traces"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
+# The state folder (`.bram/` or `resources/`) under the current directory.
+DEFAULT_TRACE_DIR = str(bram_state.trace_dir(Path(".")))
 BUCKETS = ("own", "other", "unclaimed", "before", "unexplained")
 CLASSES = ("outside-named", "committer-uncredited", "membership-extra")
 

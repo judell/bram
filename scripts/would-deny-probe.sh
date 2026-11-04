@@ -18,9 +18,9 @@
 # someone who was not there.
 #
 # The technique: `bram-guard` is a hook binary that reads a JSON payload on
-# stdin and appends to `<project>/resources/bram-traces/hook-events.log`. So a
-# violation needs no live agent session and no running Bram -- just a scratch
-# project and a crafted payload.
+# stdin and appends to `bram-traces/hook-events.log` in the project's state
+# folder (`.bram/` or `resources/`). So a violation needs no live agent
+# session and no running Bram -- just a scratch project and a crafted payload.
 #
 # Usage:
 #   scripts/would-deny-probe.sh
@@ -31,6 +31,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO_ROOT/scripts/bram-state.sh"
 GUARD_BIN="${GUARD_BIN:-$REPO_ROOT/src-tauri/target/debug/bram-guard}"
 KEEP_ON_FAIL="${KEEP_ON_FAIL:-1}"
 
@@ -78,7 +79,7 @@ drive() {
 }
 
 log_lines() {
-  cat "$WORK/resources/bram-traces/hook-events.log" 2>/dev/null
+  cat "$(bram_state_dir "$WORK")/bram-traces/hook-events.log" 2>/dev/null
 }
 
 # `$1` label, `$2` grep pattern, `$3` expected count

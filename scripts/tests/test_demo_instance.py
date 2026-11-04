@@ -228,6 +228,20 @@ class DemoInstanceTests(unittest.TestCase):
         self.assertFalse((self.repo / "stray.tmp").exists())
         self.assertEqual(trace.read_text(), "live trace\n")
 
+    def test_reset_preserves_a_live_bram_state_folder(self) -> None:
+        # A live instance that keeps its state in .bram/ keeps its port and
+        # trace across a reset, as one using resources/ does.
+        self.new()
+        port = self.repo / ".bram/.bram-port"
+        trace = self.repo / ".bram/bram-traces/bram-trace.log"
+        trace.parent.mkdir(parents=True)
+        port.write_text("55123\n")
+        trace.write_text("live trace\n")
+
+        self.assertEqual(demo.reset_scenario(self.repo), "full")
+        self.assertEqual(port.read_text(), "55123\n")
+        self.assertEqual(trace.read_text(), "live trace\n")
+
     def test_capture_turns_a_stumbled_state_into_a_scenario(self) -> None:
         self.new("starting", ["supersession"])
         stumbled = self.repo / "demo/supersession.txt"

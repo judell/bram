@@ -10,8 +10,8 @@ deferred over a suspected race window right after injection: maybe the
 predicate is unreliable for the first moment or two, and switching to it
 too eagerly would trade false strands-by-timeout for false strands-by-race.
 
-The rotated trace archives (`resources/bram-traces/bram-trace-*.log.gz`)
-can NEVER settle this, no matter how many are collected. `payload_in_tail`
+The rotated trace archives (`bram-traces/bram-trace-*.log.gz` in the state
+folder, `.bram/` or `resources/`) can NEVER settle this, no matter how many are collected. `payload_in_tail`
 was, until this change, only ever computed at strand-VERDICT time -- 60s or
 120s after injection -- so nothing in the archives records what the
 predicate would have returned at T+200ms. Waiting longer only produces more
@@ -71,7 +71,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_PORT_FILE = Path("resources/.bram-port")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
 DEFAULT_INTERVAL_S = 0.1
 
 
@@ -284,7 +285,7 @@ def main(argv=None) -> int:
         "--project-root",
         type=Path,
         default=Path.cwd(),
-        help="project whose resources/.bram-port to read (default: cwd)",
+        help="project whose .bram-port to read, in its state folder (.bram/ or resources/) (default: cwd)",
     )
     ap.add_argument("--port-file", type=Path, help="override the port file path")
     ap.add_argument("--port", type=int, help="explicit port, skips reading the port file")
@@ -306,7 +307,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     root = args.project_root.expanduser().resolve()
-    port_file = (args.port_file or (root / DEFAULT_PORT_FILE)).expanduser()
+    port_file = (args.port_file or bram_state.port_file(root)).expanduser()
     try:
         url = ledger_endpoint(args.port, args.host, port_file)
     except ProbeFailure as error:

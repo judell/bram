@@ -8,9 +8,9 @@ authorization live) should be DENIED from editing a file that belongs to a
 guessing it: whenever a general-turn edit lands on a path some board item
 already covers, and the live authorization record (`.worklist-authorization.json`)
 does not itself cover that path, the guard emits a `would-deny` breadcrumb to
-`resources/bram-traces/hook-events.log` and allows the edit anyway. #368 was
-closed on 3 qualifying post-fix fires, all judged benign, concluding "do not
-deny."
+`bram-traces/hook-events.log` in the state folder (`.bram/` or `resources/`)
+and allows the edit anyway. #368 was closed on 3 qualifying post-fix fires,
+all judged benign, concluding "do not deny."
 
 THAT CONCLUSION IS UNTESTED IN ONE SPECIFIC WAY: an empty (or near-empty)
 dangerous pile is consistent with two different worlds -- "the dangerous case
@@ -35,13 +35,13 @@ predates the observer and was recorded for other reasons:
   - every Edit/Write/MultiEdit tool call the agent ever made is in the Claude
     session JSONLs (~2,750 calls, each carrying a timestamp and a target path)
   - every worklist claim open/close is logged as an [inflight-sentinel] line
-    in resources/bram-traces/bram-trace.log (live + rotated archives) --
+    in the state folder's bram-traces/bram-trace.log (live + rotated archives) --
     `op=write` / `op=rearm-at-turn-start` open, `op=clear` and its several
     named-id variants close
   - every worklist item's `begunAtMs` and declared `files`, at every point in
     time, are recoverable from the periodic full-board snapshots in
-    resources/worklist-history/*.json (median ~4.8 minutes apart) plus the
-    live resources/worklist.json for "now"
+    worklist-history/*.json (median ~4.8 minutes apart) plus the live
+    worklist.json for "now", both in the state folder (.bram/ or resources/)
 
 This script replays that primary data and asks the #368 question directly,
 for every edit the agent ever made, not just the ones a live process happened
@@ -236,6 +236,9 @@ import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
 
 COMMIT_BOUNDARY = "2026-09-09T19:39:39Z"  # b64d81f: would-deny keys on authorization
 
@@ -789,7 +792,7 @@ def items_from_doc(doc) -> dict:
 
 def build_snapshots(history_dir: Path, worklist_path: Path):
     """[(ts_ms, {id: {...}}), ...] sorted ascending, ending with the CURRENT
-    resources/worklist.json (stamped at its mtime, standing for "now" --
+    worklist.json (stamped at its mtime, standing for "now" --
     valid from that point forward). Board membership at any edit time is read
     from the nearest snapshot AT OR BEFORE that time; an item absent from
     that snapshot is treated as not-yet-proposed or already-pruned, with no
@@ -1455,9 +1458,10 @@ def main(argv=None) -> int:
     root = args.project_root.expanduser().resolve()
     session_dir = (args.session_dir or session_dir_for(root)).expanduser()
     codex_session_dir_path = (args.codex_session_dir or codex_session_dir()).expanduser()
-    trace_dir = (args.trace_dir or root / "resources" / "bram-traces").expanduser()
-    history_dir = (args.history_dir or root / "resources" / "worklist-history").expanduser()
-    worklist_path = root / "resources" / "worklist.json"
+    state = bram_state.state_dir(root)
+    trace_dir = (args.trace_dir or state / "bram-traces").expanduser()
+    history_dir = (args.history_dir or state / "worklist-history").expanduser()
+    worklist_path = state / "worklist.json"
 
     since = parse_ts(args.since) if args.since else None
     if args.since and since is None:

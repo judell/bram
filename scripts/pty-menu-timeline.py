@@ -34,7 +34,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TRACE_DIR = ROOT / "resources" / "bram-traces"
+sys.path.insert(0, str(ROOT / "scripts"))
+import bram_state  # noqa: E402
+
+TRACE_DIR = bram_state.trace_dir(ROOT)
 LIVE = TRACE_DIR / "bram-trace.log"
 
 TS = re.compile(r"^\[(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+)Z\]")

@@ -54,6 +54,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
 TRACE_MARKER = "skip-stale-jsonl-end"
 TRACE_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
 ENVELOPE = "<task-notification>"
@@ -287,7 +290,7 @@ def main(argv=None) -> int:
 
     root = args.project_root.expanduser().resolve()
     session_dir = (args.session_dir or session_dir_for(root)).expanduser()
-    trace_dir = (args.trace_dir or root / "resources" / "bram-traces").expanduser()
+    trace_dir = (args.trace_dir or bram_state.trace_dir(root)).expanduser()
     since = parse_ts(args.since) if args.since else None
     if args.since and since is None:
         print(f"could not parse --since {args.since!r}", file=sys.stderr)

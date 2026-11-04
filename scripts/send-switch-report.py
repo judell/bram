@@ -8,8 +8,8 @@ Usage (from the repo root):
 
     scripts/send-switch-report.py [PROJECT_ROOT ...]
 
-Each root's resources/bram-traces/bram-trace*.log* (rotated .gz archives
-included) is read. Two reports per root:
+Each root's bram-traces/bram-trace*.log* (rotated .gz archives included),
+in its state folder (.bram/ or resources/), is read. Two reports per root:
 
 1. Reconstruction, which works on any history: plain chat sends
    (`to-turn` stage=source whose text is not a lifecycle payload), the tab
@@ -30,6 +30,10 @@ import re
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
 
 WINDOW = 60
 BOUNCE = 20
@@ -43,7 +47,7 @@ def ts(s):
 
 
 def events(root):
-    for f in sorted(glob.glob(f"{root}/resources/bram-traces/bram-trace*.log*")):
+    for f in sorted(glob.glob(str(bram_state.trace_dir(root) / "bram-trace*.log*"))):
         opener = gzip.open if f.endswith(".gz") else open
         try:
             with opener(f, "rt", errors="replace") as fh:

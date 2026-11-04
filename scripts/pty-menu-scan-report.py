@@ -18,7 +18,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TRACE = ROOT / "resources" / "bram-traces" / "bram-trace.log"
+sys.path.insert(0, str(ROOT / "scripts"))
+import bram_state  # noqa: E402
+
+DEFAULT_TRACE = bram_state.trace_log(ROOT)
 SPECIMEN_DIR = ROOT / "docs" / "pty-menu-specimens"
 
 

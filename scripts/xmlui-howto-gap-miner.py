@@ -28,6 +28,9 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
 
 DEFAULT_ANALYTICS = Path(
     "~/Library/Caches/xmlui/xmlui-mcp/xmlui-mcp-analytics.json"
@@ -35,7 +38,8 @@ DEFAULT_ANALYTICS = Path(
 DEFAULT_HOWTO_DIR = Path(
     "~/xmlui/website/content/docs/pages/howto"
 ).expanduser()
-DEFAULT_PORT_FILE = Path("resources/.bram-port")
+# The state folder (`.bram/` or `resources/`) under the current directory.
+DEFAULT_PORT_FILE = bram_state.port_file(Path("."))
 DEFAULT_TYPES = "session,issue,commit,worklist-history"
 
 SEARCH_TOOLS = {
@@ -1070,7 +1074,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port-file", type=Path, default=DEFAULT_PORT_FILE)
     parser.add_argument(
         "--search-url",
-        help="full Bram /__search endpoint; defaults from resources/.bram-port",
+        help="full Bram /__search endpoint; defaults from .bram-port in the state folder (.bram/ or resources/)",
     )
     parser.add_argument("--types", default=DEFAULT_TYPES)
     parser.add_argument("--since", help="ISO timestamp/date lower bound")

@@ -33,6 +33,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 import importlib.util  # noqa: E402
 
+import bram_state  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location("msc", SCRIPTS / "membership-starter-check.py")
 msc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(msc)  # reuse run() and trace_lines()
@@ -41,7 +43,7 @@ def trace_lines(repo: Path) -> list[str]:
     """The trace the instance is writing. Observed 2026-10-27 22:37Z: after a
     launch the instance kept writing to a rotated name (bram-trace-<date>-N.log)
     while bram-trace.log stayed empty, so read the most recently written one."""
-    files = [p for p in (repo / "resources/bram-traces").glob("bram-trace*.log") if p.is_file()]
+    files = [p for p in bram_state.trace_dir(repo).glob("bram-trace*.log") if p.is_file()]
     if not files:
         return []
     newest = max(files, key=lambda p: p.stat().st_mtime)
@@ -72,7 +74,7 @@ class Run:
     def url(self, path: str) -> str:
         # Reread every call: right after a launch the file can still hold the
         # previous instance's port.
-        port = (self.repo / "resources/.bram-port").read_text().strip()
+        port = bram_state.port_file(self.repo).read_text().strip()
         return f"http://127.0.0.1:{port}/{path}"
 
     def _send(self, make) -> tuple[int, str]:

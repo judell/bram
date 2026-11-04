@@ -59,6 +59,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO_ROOT/scripts/bram-state.sh"
 BRAM_BIN="${BRAM_BIN:-$REPO_ROOT/src-tauri/target/debug/bram}"
 KEEP_ON_FAIL="${KEEP_ON_FAIL:-1}"
 PID_TAG="right-pane-reload-probe-$$"
@@ -69,7 +70,6 @@ WORK=""
 FOREIGN_DIR=""
 BRAM_MARKER=""
 BRAM_PID=""
-TRACE_LOG=""
 LAUNCH_LOG=""
 
 pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
@@ -126,7 +126,6 @@ HTML
   # visually shown (the watcher classifies unconditionally), but this
   # keeps the fixture honest about the scenario in the filing.
   printf '{"ui":{"showTargetApp":true}}' > "$WORK/.bram.json"
-  TRACE_LOG="$WORK/resources/bram-traces/bram-trace.log"
   LAUNCH_LOG="$WORK/bram-launch.log"
 }
 
@@ -144,6 +143,10 @@ launch_bram() {
   BRAM_PID=$!
 }
 
+# Re-resolved on each read: the state folder (.bram/ or resources/) exists
+# only once the instance has launched.
+trace_log() { echo "$(bram_state_dir "$WORK")/bram-traces/bram-trace.log"; }
+
 wait_for_ready() {
   local i
   for i in $(seq 1 150); do
@@ -152,7 +155,7 @@ wait_for_ready() {
       tail -n 40 "$LAUNCH_LOG" >&2 2>/dev/null
       return 1
     fi
-    if [ -f "$WORK/resources/.bram-port" ] && grep -q '\[watcher\] watching' "$LAUNCH_LOG" 2>/dev/null; then
+    if [ -f "$(bram_state_dir "$WORK")/.bram-port" ] && grep -q '\[watcher\] watching' "$LAUNCH_LOG" 2>/dev/null; then
       # Give the watcher a beat past its first "watching" line to finish
       # registering every root (proj_root, tools-pane dirs, sessions
       # parent, ~/.bram, current-agent) before we start perturbing it.
@@ -168,13 +171,13 @@ wait_for_ready() {
 
 # --- trace helpers ---------------------------------------------------------
 trace_line_count() {
-  wc -l < "$TRACE_LOG" 2>/dev/null | tr -d ' ' || echo 0
+  wc -l < "$(trace_log)" 2>/dev/null | tr -d ' ' || echo 0
 }
 
 # `$1` count-before. Prints only the lines appended since.
 new_trace_lines() {
   local since="$1"
-  tail -n "+$((since + 1))" "$TRACE_LOG" 2>/dev/null
+  tail -n "+$((since + 1))" "$(trace_log)" 2>/dev/null
 }
 
 # `$1` label, `$2` lines (already the sliced new-lines text), `$3` grep

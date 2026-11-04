@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Capture Bram lockup state for diagnosis.
 #
-# 1. Snapshots resources/bram-trace.log, .inflight-claim.json,
-#    worklist.json, .worklist-authorization.json into a staging dir.
+# 1. Snapshots bram-traces/bram-trace.log, .inflight-claim.json,
+#    worklist.json, .worklist-authorization.json from the state folder
+#    (.bram/ or resources/) into a staging dir.
 # 2. Filters bram-trace.log to the last DURATION (default 1h).
 # 3. Prompts the user to export an xs-trace via the Inspector
 #    (restarting Bram first if it's wedged).
@@ -14,7 +15,7 @@
 #   scripts/capture-bram-state.sh [DURATION]
 #
 # DURATION: lookback for bram-trace.log filtering. Accepts Nm or Nh.
-# Default 1h. Run from a Bram project directory (one with resources/).
+# Default 1h. Run from a Bram project directory (one with .bram/ or resources/).
 
 set -euo pipefail
 
@@ -29,8 +30,10 @@ case "$DURATION" in
     ;;
 esac
 
-if [[ ! -d resources ]]; then
-  echo "No resources/ in $PWD — run from a Bram project directory" >&2
+. "$(dirname "$0")/bram-state.sh"
+STATE="$(bram_state_dir .)"
+if [[ ! -d "$STATE" ]]; then
+  echo "No .bram/ or resources/ in $PWD — run from a Bram project directory" >&2
   exit 1
 fi
 
@@ -53,8 +56,8 @@ echo
 
 # Snapshot the JSON state files
 for f in .inflight-claim.json worklist.json .worklist-authorization.json; do
-  if [[ -f "resources/$f" ]]; then
-    cp "resources/$f" "$STAGE/$f"
+  if [[ -f "$STATE/$f" ]]; then
+    cp "$STATE/$f" "$STAGE/$f"
     echo "  + $f"
   else
     echo "  - $f (not present)"
@@ -62,7 +65,8 @@ for f in .inflight-claim.json worklist.json .worklist-authorization.json; do
 done
 
 # Filter and snapshot bram-trace.log
-if [[ -f resources/bram-trace.log ]]; then
+TRACE="$STATE/bram-traces/bram-trace.log"
+if [[ -f "$TRACE" ]]; then
   awk -v cutoff="$CUTOFF" '
     /^\[[0-9]/ {
       end = index($0, "]")
@@ -70,7 +74,7 @@ if [[ -f resources/bram-trace.log ]]; then
       keep = (ts >= cutoff)
     }
     keep
-  ' resources/bram-trace.log > "$STAGE/bram-trace.log"
+  ' "$TRACE" > "$STAGE/bram-trace.log"
   lines=$(wc -l < "$STAGE/bram-trace.log" | tr -d ' ')
   echo "  + bram-trace.log ($lines lines since $CUTOFF)"
 else

@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GUARD="$ROOT/app/__shell/worklist-guard.py"
-TRACE="$ROOT/resources/bram-traces/bram-trace.log"
+. "$ROOT/scripts/bram-state.sh"
+TRACE="$(bram_state_dir "$ROOT")/bram-traces/bram-trace.log"
 
 if [[ ! -f "$GUARD" ]]; then
   echo "missing guard file: $GUARD" >&2

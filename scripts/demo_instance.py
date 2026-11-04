@@ -27,11 +27,15 @@ import tempfile
 import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPO = SOURCE_ROOT.parent / "bram-demo-instance"
 MARKER = ".bram-demo.json"
 SCENARIO_META = ".bram-demo-scenario.json"
+# judell/bram#474: hydration target pending the mover's answer
 WORKLIST = "resources/worklist.json"
 CLAIMS = "resources/.claim-intervals.json"
 AUTH = "resources/.worklist-authorization.json"
@@ -1072,6 +1076,8 @@ def use_scenario(repo: Path, name: str) -> None:
     # Process/session infrastructure is not scenario state. Preserve the live
     # port and trace while a human is driving the second instance, along with
     # Setup's active agent files. Everything else untracked is disposable.
+    # The live instance's files are in its state folder (.bram/ or resources/).
+    state = bram_state.state_dir_name(repo)
     run_git(
         repo,
         "clean",
@@ -1084,11 +1090,11 @@ def use_scenario(repo: Path, name: str) -> None:
         "-e",
         "CLAUDE.md",
         "-e",
-        "resources/.bram-port",
+        f"{state}/.bram-port",
         "-e",
-        "resources/.bram-port.json",
+        f"{state}/.bram-port.json",
         "-e",
-        "resources/bram-traces/",
+        f"{state}/bram-traces/",
     )
     run_git(repo, "reset", "--mixed", "-q", boundary)
 
@@ -1407,7 +1413,8 @@ def status(repo: Path) -> dict[str, Any]:
     refs = run_git(
         repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/bram/claims"
     ).splitlines()
-    worklist = read_json(repo / WORKLIST) if (repo / WORKLIST).exists() else {"items": []}
+    live_worklist = bram_state.state_dir(repo) / "worklist.json"
+    worklist = read_json(live_worklist) if live_worklist.exists() else {"items": []}
     process_path = runtime / "process.json"
     process = read_json(process_path) if process_path.exists() else {}
     pid = int(process.get("pid", 0) or 0)

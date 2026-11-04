@@ -6,11 +6,11 @@ built by `worklist_state.rs` (see that module's doc comment and the
 
 Scope: this script checks —
 
-  - `resources/.worklist-authorization.json` vs the matching row in the
-    mirror's `auth_records` table (keyed by `issuedAtMs` / `issued_at_ms`).
-  - `resources/.inflight-claim.json` vs the live (uncleared) row in the
+  - `.worklist-authorization.json` (in the state folder, `.bram/` or
+    `resources/`) vs the matching row in the mirror's `auth_records` table (keyed by `issuedAtMs` / `issued_at_ms`).
+  - `.inflight-claim.json` vs the live (uncleared) row in the
     mirror's `claims` table.
-  - with `--items`, `resources/worklist.json` items vs the mirror's
+  - with `--items`, `worklist.json` items vs the mirror's
     `items` table (id/status/begunAtMs/files), un-tombstoned rows only
     (`state-mirror-items-shadow`). Silently downgrades to a SKIPPED note
     (not a failure) when the mirror db predates that item and has no
@@ -53,8 +53,12 @@ import sqlite3
 import sys
 from pathlib import Path
 
-WORKLIST_AUTH_REL = "resources/.worklist-authorization.json"
-INFLIGHT_CLAIM_REL = "resources/.inflight-claim.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
+# Names inside the state folder (`.bram/` or `resources/`).
+WORKLIST_AUTH_NAME = ".worklist-authorization.json"
+INFLIGHT_CLAIM_NAME = ".inflight-claim.json"
 APP_IDENTIFIER = "org.xmlui.bram"
 
 
@@ -141,7 +145,7 @@ def _report(check: str, msg: str, pre_mirror: bool) -> bool:
 
 
 def check_auth(conn: sqlite3.Connection, project_root: Path, db_created_ms: int | None) -> bool:
-    auth_path = project_root / WORKLIST_AUTH_REL
+    auth_path = bram_state.state_dir(project_root) / WORKLIST_AUTH_NAME
     record = load_json(auth_path)
     if record == "ERROR":
         return False
@@ -210,7 +214,7 @@ def check_auth(conn: sqlite3.Connection, project_root: Path, db_created_ms: int 
 
 
 def check_claim(conn: sqlite3.Connection, project_root: Path, db_created_ms: int | None) -> bool:
-    claim_path = project_root / INFLIGHT_CLAIM_REL
+    claim_path = bram_state.state_dir(project_root) / INFLIGHT_CLAIM_NAME
     claim = load_json(claim_path)
     if claim == "ERROR":
         return False
@@ -297,7 +301,7 @@ def check_items(conn: sqlite3.Connection, project_root: Path) -> bool:
         )
         return True
 
-    worklist_path = project_root / "resources" / "worklist.json"
+    worklist_path = bram_state.state_dir(project_root) / "worklist.json"
     doc = load_json(worklist_path)
     if doc == "ERROR":
         return False
@@ -364,8 +368,8 @@ def main() -> int:
     parser.add_argument(
         "--project-root",
         default=".",
-        help="Bram project root containing resources/.worklist-authorization.json "
-        "and resources/.inflight-claim.json (default: current directory)",
+        help="Bram project root whose state folder (.bram/ or resources/) holds "
+        ".worklist-authorization.json and .inflight-claim.json (default: current directory)",
     )
     parser.add_argument(
         "--db",
@@ -378,7 +382,7 @@ def main() -> int:
     parser.add_argument(
         "--items",
         action="store_true",
-        help="Also compare resources/worklist.json items against the mirror's "
+        help="Also compare the state folder's worklist.json items against the mirror's "
         "items table (state-mirror-items-shadow). Silently downgrades to a "
         "SKIPPED note, not a failure, when the mirror db has no items table.",
     )

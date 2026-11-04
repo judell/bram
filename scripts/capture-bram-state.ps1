@@ -2,8 +2,9 @@
 # Capture Bram lockup state for diagnosis (Windows / PowerShell port of
 # capture-bram-state.sh).
 #
-# 1. Snapshots resources\bram-trace.log, .inflight-claim.json,
-#    worklist.json, .worklist-authorization.json into a staging dir.
+# 1. Snapshots bram-traces\bram-trace.log, .inflight-claim.json,
+#    worklist.json, .worklist-authorization.json from the state folder
+#    (.bram\ or resources\) into a staging dir.
 # 2. Filters bram-trace.log to the last Duration (default 1h).
 # 3. Prompts the user to export an xs-trace via the Inspector
 #    (restarting Bram first if it's wedged).
@@ -15,7 +16,7 @@
 #   .\scripts\capture-bram-state.ps1 [-Duration 1h]
 #
 # Duration: lookback for bram-trace.log filtering. Accepts Nm or Nh.
-# Default 1h. Run from a Bram project directory (one with resources\).
+# Default 1h. Run from a Bram project directory (one with .bram\ or resources\).
 #
 # Execution policy: Windows blocks unsigned .ps1 by default. Invoke with
 #   powershell -ExecutionPolicy Bypass -File .\scripts\capture-bram-state.ps1
@@ -38,8 +39,12 @@ if ($Duration -match '^(\d+)m$') {
     exit 1
 }
 
-if (-not (Test-Path 'resources' -PathType Container)) {
-    Write-Error "No resources\ in $PWD - run from a Bram project directory"
+# The state folder, by the host's rule (bram_state_dir in src-tauri/src/lib.rs):
+# .bram if it exists and this isn't the home directory, else resources.
+$state = 'resources'
+if ((Test-Path '.bram' -PathType Container) -and ((Get-Location).Path -ne $HOME)) { $state = '.bram' }
+if (-not (Test-Path $state -PathType Container)) {
+    Write-Error "No .bram\ or resources\ in $PWD - run from a Bram project directory"
     exit 1
 }
 
@@ -57,7 +62,7 @@ try {
 
     # Snapshot the JSON state files
     foreach ($f in '.inflight-claim.json','worklist.json','.worklist-authorization.json') {
-        $src = Join-Path 'resources' $f
+        $src = Join-Path $state $f
         if (Test-Path $src -PathType Leaf) {
             Copy-Item $src (Join-Path $stage $f)
             Write-Host "  + $f"
@@ -69,7 +74,7 @@ try {
     # Filter and snapshot bram-trace.log. Mirrors the awk in the bash sibling:
     # set keep on every line that starts with [YYYY...]; continuation lines
     # inherit the prior keep state.
-    $traceSrc = Join-Path 'resources' 'bram-trace.log'
+    $traceSrc = Join-Path (Join-Path $state 'bram-traces') 'bram-trace.log'
     if (Test-Path $traceSrc -PathType Leaf) {
         $traceDst = Join-Path $stage 'bram-trace.log'
         $script:keep = $false

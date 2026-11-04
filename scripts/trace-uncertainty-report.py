@@ -24,13 +24,18 @@ import argparse
 import glob
 import json
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 
-DEFAULT_TRACE = Path("resources/bram-traces/bram-trace.log")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
+# The state folder (`.bram/` or `resources/`) under the current directory.
+DEFAULT_TRACE = bram_state.trace_log(Path("."))
 
 ROUTE_RE = re.compile(r"^\[(?P<ts>[^]]+)\] \[(?P<cat>[^]]+)\] (?P<body>.*)$")
 HOOK_TARGET_RE = re.compile(r"tool=Bash target=(?P<target>.*?) cwd=")

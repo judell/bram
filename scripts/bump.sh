@@ -86,7 +86,8 @@ git fetch origin --quiet
 # rebase, so check the recorded SHAs first and name any entry whose commit
 # is no longer an ancestor of HEAD — orphaning becomes a decision instead
 # of a silent side effect discovered as dead History-tab links.
-HIST_DIR="resources/worklist-history"
+. scripts/bram-state.sh
+HIST_DIR="$(bram_state_dir .)/worklist-history"
 if [ -d "$HIST_DIR" ]; then
   # Scope to entries newer than the last release tag: a first full-history
   # scan found 71 orphans accumulated over months, and re-prompting about

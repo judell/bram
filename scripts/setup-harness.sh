@@ -254,7 +254,7 @@ assert_setup_landed() {
     # The command wraps the guard so that no decision (an older guard that
     # doesn't know the hook) becomes a deny; agy lets empty output through.
     if jq -e '.["bram-worklist-guard"].PreToolUse[0]
-              | (.matcher == "^(write_file|edit_file|run_command)$")
+              | (.matcher == "^(write_file|edit_file|run_command|call_mcp_tool)$")
                 and (.hooks[0].command | contains("guard antigravity-worklist"))
                 and (.hooks[0].command | contains("\"decision\":\"deny\""))' \
          "$dir/.agents/hooks.json" > /dev/null 2>&1; then

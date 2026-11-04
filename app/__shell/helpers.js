@@ -14325,14 +14325,18 @@ window.__bramToolResultIsStructuredJson = function (result) {
 // which read as a scrolling monospace blob. Parse the "Q"="A" pairs into
 // question/answer prose; null on parse miss so the caller self-declines to
 // the generic fence.
+// askuserquestion-quoted-answer-truncated: quotes inside a question or an
+// answer are expected (a typed "Other" answer often quotes something). So
+// split on the separators, not on every quote: a question ends at `"="`, an
+// answer at `", "` (the next pair) or the closing `".` / final `"`. The
+// result string has no escaping, so an answer containing the literal `", "`
+// stays ambiguous.
 window.__bramAskUserQuestionQA = function (text) {
-  var pairs = String(text || "").match(/"[^"]+"="[^"]*"/g);
-  if (!pairs || !pairs.length) return null;
+  var re = /"((?:[^"]|"(?!="))+)"="((?:[^"]|"(?!, "|\.(?:\s|$)|$))*)"/g;
+  var s = String(text || "");
   var out = [];
-  for (var i = 0; i < pairs.length; i++) {
-    var mm = /"([^"]+)"="([^"]*)"/.exec(pairs[i]);
-    if (mm) out.push("**" + mm[1] + "**\n\n✔ " + mm[2]);
-  }
+  var mm;
+  while ((mm = re.exec(s))) out.push("**" + mm[1] + "**\n\n✔ " + mm[2]);
   return out.length ? out.join("\n\n") : null;
 };
 

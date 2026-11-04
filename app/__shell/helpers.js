@@ -17417,6 +17417,122 @@ window.__bramStateMoveBanner = function (p, part, last) {
     ", so Bram will move only its own files, at the next launch. Yours stay where they are.";
 };
 
+// pane-buttons-acknowledge-clicks: time an APICall from its beforeRequest to
+// its success / error, so the ~30 s completion lag seen on the state-move
+// controls can be measured on the APICalls that remain. Wire it as
+// onBeforeRequest="window.__bramApiTiming('<id>', 'before')" and the same
+// with 'success' / 'error'. Returns undefined, so it never cancels a request
+// or suppresses invalidation. Traced as iframe `api-timing`.
+window.__bramApiTimingStarts = window.__bramApiTimingStarts || {};
+window.__bramApiTiming = function (id, op) {
+  try {
+    var now = Date.now();
+    if (op === "before") window.__bramApiTimingStarts[id] = now;
+    var started = window.__bramApiTimingStarts[id];
+    if (typeof window.logToHost !== "function") return;
+    window.logToHost({
+      kind: "iframe-trace",
+      subkind: "api-timing",
+      at: new Date(now).toISOString(),
+      id: id,
+      op: op,
+      ms: op === "before" || !started ? 0 : now - started,
+    });
+  } catch (e) {}
+};
+
+// pane-buttons-acknowledge-clicks: a pane action as a plain fetch, in place of
+// an APICall whose onSuccess (and post-success invalidation) reached the pane
+// ~30 s after the host answered (measured 2026-11-04: api:complete 11 ms,
+// onSuccess +29.96 s, four of four runs; cause inside XMLUI, handed off).
+// __bramPaneAction(name, url, init) fetches; init.query becomes the query
+// string, init.body is sent as JSON. Subscribers of
+// __bramSubscribePaneAction(name) (a PushSource factory, the shape of
+// bramSubscribeTauriEvent) get { tick, name, busy: true } at the click and
+// { tick, name, busy: false, ok, status, data, error } when it lands, so a
+// button can disable at once and a ChangeListener can run what onSuccess /
+// onError ran. Traced as iframe `pane-action` op=click|done|failed with ms.
+window.__bramPaneActionBus = window.__bramPaneActionBus || Object.create(null);
+window.__bramPaneActionChannel = function (name) {
+  var bus = window.__bramPaneActionBus;
+  if (!bus[name]) bus[name] = { subscribers: new Set(), tick: 0, last: null };
+  return bus[name];
+};
+window.__bramSubscribePaneAction = function (name) {
+  var ch = window.__bramPaneActionChannel(name);
+  if (ch.factory) return ch.factory;
+  ch.factory = function (emit) {
+    ch.subscribers.add(emit);
+    if (ch.last) emit(ch.last);
+    return function () { ch.subscribers.delete(emit); };
+  };
+  return ch.factory;
+};
+window.__bramPaneAction = function (name, url, init) {
+  var ch = window.__bramPaneActionChannel(name);
+  var opts = init || {};
+  var started = Date.now();
+  var trace = function (op, extra) {
+    try {
+      if (typeof window.logToHost !== "function") return;
+      var payload = {
+        kind: "iframe-trace",
+        subkind: "pane-action",
+        at: new Date().toISOString(),
+        name: name,
+        op: op,
+        ms: Date.now() - started,
+      };
+      if (extra) Object.assign(payload, extra);
+      window.logToHost(payload);
+    } catch (e) {}
+  };
+  var publish = function (fields) {
+    ch.tick += 1;
+    var snap = Object.assign({ tick: ch.tick, name: name }, fields);
+    ch.last = snap;
+    ch.subscribers.forEach(function (fn) {
+      try { fn(snap); } catch (e) { console.error("[__bramPaneAction] subscriber threw:", e); }
+    });
+    return snap;
+  };
+  var full = url;
+  if (opts.query) {
+    var qs = Object.keys(opts.query)
+      .filter(function (k) { return opts.query[k] !== undefined && opts.query[k] !== null; })
+      .map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(String(opts.query[k])); })
+      .join("&");
+    if (qs) full += (url.indexOf("?") < 0 ? "?" : "&") + qs;
+  }
+  var req = { method: opts.method || "GET", cache: "no-store" };
+  if (opts.body !== undefined) {
+    req.method = opts.method || "POST";
+    req.headers = { "Content-Type": "application/json" };
+    req.body = JSON.stringify(opts.body);
+  }
+  trace("click");
+  publish({ busy: true });
+  return window
+    .fetch(full, req)
+    .then(function (r) {
+      return r.text().then(function (text) {
+        var data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+        var error = null;
+        if (!r.ok) {
+          error = (data && typeof data === "object" && (data.error || data.message)) ||
+            (typeof data === "string" && data) || ("error " + r.status);
+        }
+        trace("done", { status: r.status });
+        return publish({ busy: false, ok: r.ok, status: r.status, data: data, error: error });
+      });
+    })
+    .catch(function (e) {
+      trace("failed", { error: String(e) });
+      return publish({ busy: false, ok: false, status: 0, data: null, error: String(e) });
+    });
+};
+
 // The banner's and Status's Move / Not now: a plain fetch, like the subagent
 // Release, instead of an APICall. The host answers in under 1 ms and pushes
 // `state-dir-changed`, on which both surfaces refetch the plan; the APICall

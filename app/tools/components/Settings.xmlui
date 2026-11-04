@@ -8,7 +8,10 @@
     id="saveSettings"
     method="post"
     url="/__settings"
-    body="{$param}" />
+    body="{$param}"
+    onBeforeRequest="window.__bramApiTiming('saveSettings', 'before')"
+    onSuccess="window.__bramApiTiming('saveSettings', 'success')"
+    onError="window.__bramApiTiming('saveSettings', 'error')" />
 
   <DataSource
     id="traceArchiveStatus"

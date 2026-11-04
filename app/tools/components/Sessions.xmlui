@@ -71,24 +71,29 @@
     listenTo="{sessionsSource}"
     onDidChange="pendingDeletes = pendingDeletes.filter(id => !(sessionsSource || []).some(s => s.id === id)); savePendingSessionDeletes(pendingDeletes)" />
 
-  <APICall
-    id="deleteSession"
-    url="/__sessions/delete"
-    method="get"
-    queryParams="{{ id: $param.id, provider: $param.provider }}"
-    confirmTitle="Delete session?"
-    confirmMessage="This cannot be undone."
-    completedNotificationMessage="Session deleted."
-    errorNotificationMessage="{'Could not delete: ' + ($error.message || 'error ' + $error.statusCode)}"
-    onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId) { expandedId = null; } sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch();" />
+  <!-- pane-buttons-acknowledge-clicks: delete and rename were APICalls,
+       whose onSuccess reached the pane ~30 s after the host answered, so a
+       deleted row lingered that long. window.__bramPaneAction (a plain
+       fetch) publishes busy / done; these ChangeListeners run what onSuccess
+       / onError ran, including the toasts APICall showed
+       (https://www.xmlui.org/docs/howto/show-toast-notifications-from-code).
+       The delete confirmation is the global confirm()
+       (https://www.xmlui.org/docs/howto/open-a-confirmation-before-delete). -->
+  <PushSource
+    id="deleteSessionAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('deleteSession')}" />
+  <ChangeListener
+    listenTo="{deleteSessionAct.value &amp;&amp; deleteSessionAct.value.tick}"
+    onDidChange="() => { const a = deleteSessionAct.value; if (a &amp;&amp; !a.busy) { if (a.ok) { toast('Session deleted.'); pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId) { expandedId = null; } sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch(); } else { toast.error('Could not delete: ' + a.error); } } }" />
 
-  <APICall
-    id="renameSession"
-    url="/__sessions/rename"
-    method="get"
-    queryParams="{{ id: $param.id, provider: $param.provider, title: $param.title }}"
-    onSuccess="sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch();"
-    onError="pendingRenames = pendingRenames.filter(id => id !== lastRenameId); savePendingSessionRenames(pendingRenames); renamingSession = { id: lastRenameId, provider: lastRenameProvider, title: lastRenameOriginalTitle }; renameDraft = lastRenameTitle" />
+  <PushSource
+    id="renameSessionAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('renameSession')}" />
+  <ChangeListener
+    listenTo="{renameSessionAct.value &amp;&amp; renameSessionAct.value.tick}"
+    onDidChange="() => { const a = renameSessionAct.value; if (a &amp;&amp; !a.busy) { if (a.ok) { sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch(); } else { pendingRenames = pendingRenames.filter(id => id !== lastRenameId); savePendingSessionRenames(pendingRenames); renamingSession = { id: lastRenameId, provider: lastRenameProvider, title: lastRenameOriginalTitle }; renameDraft = lastRenameTitle; } } }" />
 
   <ModalDialog
     id="renameDialog"
@@ -114,7 +119,7 @@
         <Button
           label="Rename"
           enabled="{renameDraft &amp;&amp; renameDraft.trim().length > 0}"
-          onClick="let target = renamingSession; let title = renameDraft; lastRenameId = target.id; lastRenameProvider = target.provider; lastRenameOriginalTitle = target.title || ''; lastRenameTitle = title; pendingRenames = pendingRenames.includes(target.id) ? pendingRenames : pendingRenames.concat([target.id]); savePendingSessionRenames(pendingRenames); renamingSession = null; renameDraft = ''; toast('Session renamed. Reload Bram to see the new title in the session list.'); renameSession.execute({ id: target.id, provider: target.provider, title: title })" />
+          onClick="let target = renamingSession; let title = renameDraft; lastRenameId = target.id; lastRenameProvider = target.provider; lastRenameOriginalTitle = target.title || ''; lastRenameTitle = title; pendingRenames = pendingRenames.includes(target.id) ? pendingRenames : pendingRenames.concat([target.id]); savePendingSessionRenames(pendingRenames); renamingSession = null; renameDraft = ''; toast('Session renamed. Reload Bram to see the new title in the session list.'); window.__bramPaneAction('renameSession', '/__sessions/rename', { query: { id: target.id, provider: target.provider, title: title } })" />
       </HStack>
     </VStack>
   </ModalDialog>
@@ -265,12 +270,12 @@
               tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : ($item.current ? 'Reload this session (restarts the agent)' : 'Switch to this session (restarts the agent on it)')))}"
               onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
             <Button
-              label="✕"
+              label="{deleteSessionAct.value &amp;&amp; deleteSessionAct.value.busy &amp;&amp; lastDeleteId === $item.id ? '…' : '✕'}"
               variant="ghost"
               size="xs"
-              enabled="{window.__bramSessionEditEnabled($item, 'delete', pendingDeletes, pendingRenames)}"
+              enabled="{window.__bramSessionEditEnabled($item, 'delete', pendingDeletes, pendingRenames) &amp;&amp; !(deleteSessionAct.value &amp;&amp; deleteSessionAct.value.busy)}"
               tooltip="{window.__bramSessionEditTooltip($item, 'delete', pendingDeletes, pendingRenames)}"
-              onClick="lastDeleteId = $item.id; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
+              onClick="lastDeleteId = $item.id; if (confirm('Delete session?', 'This cannot be undone.', 'Delete')) window.__bramPaneAction('deleteSession', '/__sessions/delete', { query: { id: $item.id, provider: $item.provider } })" />
             <Button
               label="✎"
               variant="ghost"

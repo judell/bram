@@ -35,12 +35,18 @@
        variables computed with '' and admitted all rows). Issues uses the
        root-attr shape and never exhibited the staleness. Filtering itself
        is filterCommitList (Globals.xs) with the needle passed explicitly. -->
-  <APICall
-    id="pullRebase"
-    method="post"
-    url="/__git/pull-rebase"
-    onSuccess="pullError = null; pullWarningDismissed = false; commits.refetch(); gitStatus.refetch()"
-    onError="(e) => pullError = (e &amp;&amp; e.message) ? e.message : String(e)" />
+  <!-- pane-buttons-acknowledge-clicks: was an APICall, whose onSuccess
+       reached the pane ~30 s after the host answered, holding the Pull
+       button disabled that long. window.__bramPaneAction (a plain fetch)
+       publishes busy / done here; the ChangeListener runs what onSuccess /
+       onError ran, and the autostash warning reads the response's data. -->
+  <PushSource
+    id="pullRebaseAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('pullRebase')}" />
+  <ChangeListener
+    listenTo="{pullRebaseAct.value &amp;&amp; pullRebaseAct.value.tick}"
+    onDidChange="() => { const a = pullRebaseAct.value; if (a &amp;&amp; !a.busy) { if (a.ok) { pullError = null; pullWarningDismissed = false; commits.refetch(); gitStatus.refetch(); } else { pullError = a.error; } } }" />
 
   <!-- rung9-publish-surface: the close queue's post-push state. The
        pre-push half ("Push will close #N") reads pendingCloses on unpushed
@@ -109,9 +115,8 @@
       <Button
         label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
         size="xs"
-        enabled="{!pullRebase.inProgress &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
-        onClick="pullError = null; pullRebase.execute()"
-        onError="(e) => pullError = (e.error &amp;&amp; e.error.message) ? e.error.message : String(e)" />
+        enabled="{!(pullRebaseAct.value &amp;&amp; pullRebaseAct.value.busy) &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
+        onClick="pullError = null; window.__bramPaneAction('pullRebase', '/__git/pull-rebase', { method: 'POST' })" />
     </HStack>
 
     <!-- push-withheld-when-commits-ride-a-pr: on the default branch, when
@@ -132,13 +137,10 @@
     <!-- pull-rebase-stash-safety: the pull succeeded but reapplying the
          autostash conflicted, so git kept the changes in the stash and left
          conflict markers. Stays until dismissed, not a transient toast.
-         Reads the response via lastResult
-         (https://www.xmlui.org/docs/howto/consume-an-apicall-response).
-         The Button's own onError above keeps a failed execute() from
-         escaping as an unhandled rejection
-         (https://www.xmlui.org/docs/howto/handle-action-errors-on-a-component). -->
-    <HStack when="{!pullWarningDismissed &amp;&amp; pullRebase.lastResult &amp;&amp; pullRebase.lastResult.autostashRetained}" backgroundColor="$color-warning-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
-      <Text fontSize="$fontSize-sm" color="$color-warning-800" width="*" value="{pullRebase.lastResult.message}" />
+         Reads the response from the pane action's published data
+         (pane-buttons-acknowledge-clicks). -->
+    <HStack when="{!pullWarningDismissed &amp;&amp; pullRebaseAct.value &amp;&amp; pullRebaseAct.value.ok &amp;&amp; pullRebaseAct.value.data &amp;&amp; pullRebaseAct.value.data.autostashRetained}" backgroundColor="$color-warning-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
+      <Text fontSize="$fontSize-sm" color="$color-warning-800" width="*" value="{pullRebaseAct.value.data.message}" />
       <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pullWarningDismissed = true" />
     </HStack>
     <!-- issue-383: pushError can now be genuinely multi-line (stdout+stderr,

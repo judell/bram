@@ -219,16 +219,25 @@
   <ChangeListener
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
     onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
-  <APICall
-    id="restartServer"
-    url="/__restart-server"
-    method="get"
-    onSuccess="rpInfo.refetch()" />
-  <APICall
-    id="runEnhanceSetup"
-    url="/__enhance/run"
-    method="get"
-    onError="setupCompleteProvider = ''; enhanceStatus.refetch()" />
+  <!-- pane-buttons-acknowledge-clicks: these were APICalls, whose onSuccess
+       and post-success invalidation reached the pane ~30 s after the host
+       answered. Now window.__bramPaneAction (a plain fetch) publishes busy /
+       done on a pane-local PushSource; the ChangeListener runs what onSuccess /
+       onError ran, and the button reads busy at once. -->
+  <PushSource
+    id="restartServerAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('restartServer')}" />
+  <ChangeListener
+    listenTo="{restartServerAct.value &amp;&amp; restartServerAct.value.tick}"
+    onDidChange="() => { if (restartServerAct.value &amp;&amp; !restartServerAct.value.busy) rpInfo.refetch(); }" />
+  <PushSource
+    id="runEnhanceSetupAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('runEnhanceSetup')}" />
+  <ChangeListener
+    listenTo="{runEnhanceSetupAct.value &amp;&amp; runEnhanceSetupAct.value.tick}"
+    onDidChange="() => { if (runEnhanceSetupAct.value &amp;&amp; !runEnhanceSetupAct.value.busy) { if (!runEnhanceSetupAct.value.ok) setupCompleteProvider = ''; enhanceStatus.refetch(); } }" />
   <ChangeListener
     listenTo="{enhanceStatus.value &amp;&amp; enhanceStatus.value.providerNeedsSetup}"
     onDidChange="(c) => { if (c.newValue) { if ($pathname !== '/') navigate('/'); window.scrollAllToTop(); } }" />
@@ -407,9 +416,10 @@
         </HStack>
         <HStack gap="$space-2" marginTop="$space-1">
           <Button
-            label="Restart project server"
+            label="{restartServerAct.value &amp;&amp; restartServerAct.value.busy ? 'Restarting…' : 'Restart project server'}"
+            enabled="{!(restartServerAct.value &amp;&amp; restartServerAct.value.busy)}"
             size="sm"
-            onClick="restartServer.execute()" />
+            onClick="window.__bramPaneAction('restartServer', '/__restart-server')" />
         </HStack>
       </VStack>
 
@@ -1000,7 +1010,7 @@
 <HStack when="{window.__bramSetupBanner(enhanceStatus.value, 'runnable')}">
   <Button
     label="{window.__bramSetupBanner(enhanceStatus.value, 'button')}"
-    onClick="setupCompleteProvider = (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || 'setup'; runEnhanceSetup.execute()" />
+    onClick="setupCompleteProvider = (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || 'setup'; window.__bramPaneAction('runEnhanceSetup', '/__enhance/run')" />
 </HStack>
   </VStack>
 

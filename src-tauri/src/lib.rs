@@ -6931,11 +6931,25 @@ fn session_flags<R: tauri::Runtime>(app: &AppHandle<R>) -> [bool; 4] {
     STARTUP_AGENTS.map(|provider| provider_has_sessions(app, provider))
 }
 
+// login-fallback-offers-the-agent-you-left: the provider that was current
+// before the latest deliberate switch. set_current_provider writes it whenever
+// the current-provider record changes, so it survives only within this
+// process; None until the first real switch (or a launch whose provider
+// differs from the last run's record).
+fn previous_provider_cell() -> &'static Mutex<Option<SessionProvider>> {
+    static CELL: OnceLock<Mutex<Option<SessionProvider>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn previous_provider() -> Option<SessionProvider> {
+    previous_provider_cell().lock().ok().and_then(|g| *g)
+}
+
 // terminal-attention-login-screen (#448): the pane offers one other agent, but
-// only when its CLI is on PATH. With multiple agents "the other one" isn't
-// defined, so the offer is the installed agent with sessions in this project,
-// else the first installed one in LOGIN_SWITCH_ORDER — never the agent that
-// isn't logged in.
+// only when its CLI is on PATH. The offer is the agent the user just left
+// (login-fallback-offers-the-agent-you-left), else the installed agent with
+// sessions in this project, else the first installed one in
+// LOGIN_SWITCH_ORDER — never the agent that isn't logged in.
 fn login_switch_target<R: tauri::Runtime>(
     app: &AppHandle<R>,
     shape: Option<&str>,
@@ -6946,39 +6960,158 @@ fn login_switch_target<R: tauri::Runtime>(
         Some("antigravity-login") => SessionProvider::Antigravity,
         _ => return None,
     };
-    login_switch_choice(blocked, installed_agent_flags(), session_flags(app))
-        .map(session_provider_label)
+    let previous = previous_provider();
+    let choice = login_switch_choice(
+        blocked,
+        installed_agent_flags(),
+        session_flags(app),
+        previous,
+    );
+    if bram_trace_enabled() {
+        let (offer, basis) = match choice {
+            Some((provider, basis)) => (session_provider_label(provider), basis),
+            None => ("none", "none"),
+        };
+        append_bram_trace_line(
+            app,
+            "terminal-attention",
+            &format!(
+                "op=switch-offer blocked={} offer={} basis={} previous={}",
+                session_provider_label(blocked),
+                offer,
+                basis,
+                previous.map(session_provider_label).unwrap_or("none")
+            ),
+        );
+    }
+    choice.map(|(provider, _)| session_provider_label(provider))
 }
 
 // The pure half, so the four-agent rule is testable without an AppHandle.
+// Returns the offer and its basis: "previous" (the agent the user left),
+// "sessions" (has sessions in this project) or "order" (LOGIN_SWITCH_ORDER).
 fn login_switch_choice(
     blocked: SessionProvider,
     installed: [bool; 4],
     has_sessions: [bool; 4],
-) -> Option<SessionProvider> {
+    previous: Option<SessionProvider>,
+) -> Option<(SessionProvider, &'static str)> {
     let eligible = |provider: SessionProvider| {
         provider != blocked && provider_slot(provider).is_some_and(|slot| installed[slot])
     };
+    if let Some(provider) = previous.filter(|p| eligible(*p)) {
+        return Some((provider, "previous"));
+    }
     LOGIN_SWITCH_ORDER
         .iter()
         .copied()
         .filter(|provider| eligible(*provider))
         .find(|provider| provider_slot(*provider).is_some_and(|slot| has_sessions[slot]))
+        .map(|provider| (provider, "sessions"))
         .or_else(|| {
             LOGIN_SWITCH_ORDER
                 .iter()
                 .copied()
                 .find(|provider| eligible(*provider))
+                .map(|provider| (provider, "order"))
         })
 }
 
 #[cfg(test)]
 mod login_switch_offer_tests {
-    use super::{login_switch_choice, SessionProvider};
+    use super::SessionProvider;
 
     // Slots: Claude, Codex, OpenCode, Antigravity.
     const ALL_INSTALLED: [bool; 4] = [true, true, true, true];
     const NO_SESSIONS: [bool; 4] = [false, false, false, false];
+
+    // The pre-existing cases: no agent was left (startup straight into a
+    // login screen), so the order and session rules decide as before.
+    fn login_switch_choice(
+        blocked: SessionProvider,
+        installed: [bool; 4],
+        has_sessions: [bool; 4],
+    ) -> Option<SessionProvider> {
+        with_previous(blocked, installed, has_sessions, None).map(|(p, _)| p)
+    }
+
+    fn with_previous(
+        blocked: SessionProvider,
+        installed: [bool; 4],
+        has_sessions: [bool; 4],
+        previous: Option<SessionProvider>,
+    ) -> Option<(SessionProvider, &'static str)> {
+        super::login_switch_choice(blocked, installed, has_sessions, previous)
+    }
+
+    #[test]
+    fn the_agent_you_left_is_offered_over_the_fixed_order() {
+        // Windows 2026-11-02: Claude -> new Antigravity session, agy asks to
+        // sign in; Codex is installed and has sessions here, but Claude is
+        // the agent the user just left.
+        assert_eq!(
+            with_previous(
+                SessionProvider::Antigravity,
+                ALL_INSTALLED,
+                [true, true, false, false],
+                Some(SessionProvider::Claude)
+            ),
+            Some((SessionProvider::Claude, "previous"))
+        );
+    }
+
+    #[test]
+    fn a_previous_agent_that_is_the_blocked_one_falls_back_to_the_order() {
+        assert_eq!(
+            with_previous(
+                SessionProvider::Antigravity,
+                ALL_INSTALLED,
+                NO_SESSIONS,
+                Some(SessionProvider::Antigravity)
+            ),
+            Some((SessionProvider::Codex, "order"))
+        );
+        // With sessions, the session rule still applies.
+        assert_eq!(
+            with_previous(
+                SessionProvider::Antigravity,
+                ALL_INSTALLED,
+                [false, true, false, false],
+                Some(SessionProvider::Antigravity)
+            ),
+            Some((SessionProvider::Codex, "sessions"))
+        );
+    }
+
+    #[test]
+    fn a_previous_agent_that_is_not_installed_falls_back_to_the_order() {
+        assert_eq!(
+            with_previous(
+                SessionProvider::Antigravity,
+                [false, true, true, true],
+                NO_SESSIONS,
+                Some(SessionProvider::Claude)
+            ),
+            Some((SessionProvider::Codex, "order"))
+        );
+    }
+
+    #[test]
+    fn no_previous_agent_keeps_the_existing_order() {
+        assert_eq!(
+            with_previous(
+                SessionProvider::Antigravity,
+                ALL_INSTALLED,
+                [true, true, false, false],
+                None
+            ),
+            Some((SessionProvider::Codex, "sessions"))
+        );
+        assert_eq!(
+            with_previous(SessionProvider::Claude, ALL_INSTALLED, NO_SESSIONS, None),
+            Some((SessionProvider::Codex, "order"))
+        );
+    }
 
     #[test]
     fn a_logged_out_claude_is_traded_for_codex_as_before() {
@@ -26981,6 +27114,13 @@ fn set_current_provider<R: tauri::Runtime>(
         })
         .unwrap_or_default();
     let provider_label = session_provider_label(provider);
+    // login-fallback-offers-the-agent-you-left: remember the agent being left,
+    // so a sign-in screen on the new one offers the way back.
+    if let Some(left) = SessionProvider::from_str(&old_provider).filter(|p| *p != provider) {
+        if let Ok(mut slot) = previous_provider_cell().lock() {
+            *slot = Some(left);
+        }
+    }
     let body = serde_json::json!({
         "provider": provider_label,
         "reason": reason,

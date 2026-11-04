@@ -41,6 +41,8 @@ Every change here is behavior-preserving when `.bram/` doesn't exist, which is e
 - Tracked content is never `git mv`'d by the host. Where a project tracks something Bram wrote, the host proposes a worklist item and the team commits it through the gate.
 - If #393 has settled it: Setup stops editing `AGENTS.md` and proposes a worklist item instead.
 
+- As built, the mixed-folder choice: when the move is refused only for foreign or tracked-foreign entries, a banner (and Status) offers **Move Bram's files** or **Not now**, stored in `resources/.state-move`. At the next startup `move` stages Bram's entries in `.bram-moving/` (its `*` `.gitignore` first) and renames it to `.bram/` in one step, so the resolver never sees a half-filled folder; any failure renames everything back and keeps the answer. `not-now` is quiet until Status's **Move at next launch**. A tracked Bram-owned entry still refuses (`tracked-owned`).
+
 ### 0.8.5: retirement.
 
 - A found `resources/.bram-port` with no `.bram/` is reported ("an older Bram's folder; migrate from Status") and not silently used (decision 5).

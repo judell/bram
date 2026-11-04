@@ -13,6 +13,16 @@
   <!-- issue-469-status-dry-run: what the 0.8.4 state-folder move would do.
        Read-only; refetched on Refresh, no polling. -->
   <DataSource id="stateDirPlan" url="/__state-dir/plan?t={refreshTick}" />
+  <!-- issue-469-mixed-folder-dialog: Status's way back from Not now. Same
+       route and helper as the banner in Main.xmlui; refetch on success.
+       https://www.xmlui.org/docs/reference/components/APICall -->
+  <APICall
+    id="stateMoveDecision"
+    method="post"
+    url="/__state-dir/decision"
+    body="{$param}"
+    invalidates="{[]}"
+    onSuccess="stateDirPlan.refetch()" />
 
   <VStack padding="$space-6" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -71,6 +81,16 @@
       <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{stateDirPlan.value.note}" />
       <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanFolderLine(stateDirPlan.value)}" />
       <Text value="{window.__bramStateDirPlanLiveClaimLine(stateDirPlan.value)}" />
+      <HStack when="{stateDirPlan.value.pending}" verticalAlignment="center" wrapContent="true" gap="$space-2">
+        <Text value="{window.__bramStateMoveBanner(stateDirPlan.value, 'text')}" />
+        <Button
+          when="{window.__bramStateMoveBanner(stateDirPlan.value, 'offer')}"
+          label="Move at next launch"
+          variant="outlined"
+          size="xs"
+          tooltip="{window.__bramStateMoveBanner(stateDirPlan.value, 'stays')}"
+          onClick="stateMoveDecision.execute({ choice: 'move' })" />
+      </HStack>
       <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'wouldMove')}" />
       <Items data="{stateDirPlan.value.wouldMove || []}">
         <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />

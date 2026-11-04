@@ -78,6 +78,7 @@ resources/.needs-you-dismissed.json
 resources/.worklist-direct-edit.json
 resources/.turn-context.json
 resources/.target-server-pid
+resources/.state-move
 
 # issue-229 lean audit ledger: machine-local, append-only record of
 # authorization decisions and Bram-gated commits. Untracked by design —

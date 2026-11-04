@@ -17355,6 +17355,26 @@ window.__bramStateDirPlanLiveClaimLine = function (p) {
   return "Live claim: yes" + (bits.length ? " (" + bits.join("; ") + ")" : "");
 };
 
+// issue-469-mixed-folder-dialog: the mixed-folder banner (Main.xmlui) and the
+// Status tab's "Move at next launch", from the plan's `pending` / `decision`.
+// Parts: show (banner visible), chosen (Move already chosen), text, stays
+// (tooltip naming what stays), offer (Status button visible).
+window.__bramStateMoveBanner = function (p, part) {
+  if (!p || !p.pending) return part === "text" || part === "stays" ? "" : false;
+  var choice = (p.decision || {}).choice || "";
+  if (part === "show") return choice !== "not-now";
+  if (part === "chosen") return choice === "move";
+  if (part === "offer") return choice !== "move";
+  if (part === "stays") {
+    var names = (p.foreign || []).map(function (f) { return f.name + (f.isDir ? "/" : ""); });
+    return "Stays in " + p.stateDir + "/: " + (names.join(", ") || "tracked files") + ".";
+  }
+  if (choice === "move") return "Bram moves its own files from " + p.stateDir + "/ to .bram/ at the next launch.";
+  return "Bram's folder " + p.stateDir + "/ also holds files that aren't Bram's" +
+    (p.pending === "tracked" ? " or are tracked by git" : "") +
+    ", so it can move only its own files to .bram/, at the next launch.";
+};
+
 window.__bramLandedNote = function (board) {
   var n = window.__bramLandedIds(board).length;
   if (!n) return "";

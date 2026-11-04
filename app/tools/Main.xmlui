@@ -935,6 +935,49 @@
       onClick="codexTrustBannerDismissed = true" />
   </HStack>
 
+  <!-- issue-469-mixed-folder-dialog: resources/ holds files that aren't
+       Bram's (or are tracked), so Bram can't move the folder whole. The
+       answer is written to resources/.state-move and acted on at the next
+       launch, never on click; Not now hides the banner for good (Status
+       offers the move later). Fetched on load, refetched after the answer,
+       no polling. APICall onSuccess refetch, with invalidates="{[]}" so no
+       other DataSource refetches:
+       https://www.xmlui.org/docs/howto/chain-a-refetch
+       https://www.xmlui.org/docs/howto/control-cache-invalidation -->
+  <DataSource id="stateMovePlan" url="/__state-dir/plan" />
+  <APICall
+    id="stateMoveDecision"
+    method="post"
+    url="/__state-dir/decision"
+    body="{$param}"
+    invalidates="{[]}"
+    onSuccess="stateMovePlan.refetch()" />
+  <HStack
+    when="{window.__bramStateMoveBanner(stateMovePlan.value, 'show')}"
+    backgroundColor="$color-warn-100"
+    padding="$space-2"
+    gap="$space-3"
+    wrapContent="true"
+    verticalAlignment="center">
+    <Text
+      fontSize="$fontSize-sm"
+      value="{window.__bramStateMoveBanner(stateMovePlan.value, 'text')}"
+      tooltip="{window.__bramStateMoveBanner(stateMovePlan.value, 'stays')}" />
+    <SpaceFiller />
+    <Button
+      when="{!window.__bramStateMoveBanner(stateMovePlan.value, 'chosen')}"
+      label="Move Bram's files"
+      size="xs"
+      tooltip="{window.__bramStateMoveBanner(stateMovePlan.value, 'stays')}"
+      onClick="stateMoveDecision.execute({ choice: 'move' })" />
+    <Button
+      when="{!window.__bramStateMoveBanner(stateMovePlan.value, 'chosen')}"
+      label="Not now"
+      variant="ghost"
+      size="xs"
+      onClick="stateMoveDecision.execute({ choice: 'not-now' })" />
+  </HStack>
+
   <!-- issue-320: gate on providerNeedsSetup ALONE, not activeProvider. The
        host now answers providerNeedsSetup project-level when no provider is
        active, so a fresh/failure-path launch (auto-setup skipped or failed)

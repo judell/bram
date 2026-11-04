@@ -447,6 +447,34 @@ A real subagent run in this project still costs up to a second per roster
 refetch (the 2026-10-28 04:00 hour had 141 spikes). That's open, and it
 starts with a Timeline.
 
+### Does the pane slow with age, or with session size?
+
+`scripts/pane-age-health.py` answers that from the trace and the agent's
+session files. It reports projection p50/p90 and focused spikes over 1 s per
+active hour, by session size, by pane age, by active minutes since load
+(minutes with a focused drift line or a working turn, so a pane left idle
+overnight stops looking old), and as a size × age cross-tab. A pane load is
+the first `GET __app-info` after a 10 s gap. The session file's size at each
+tick is rebuilt from its own line timestamps, since the file is append-only.
+
+```sh
+python3 -I scripts/pane-age-health.py                                  # archives since 2026-10-15
+python3 -I scripts/pane-age-health.py --since 2026-11-01
+python3 -I scripts/pane-age-health.py --build-since 2026-11-04T04:06:00Z   # every table, before and after
+```
+
+The baseline, from this script on 2026-11-04 (archives since 2026-10-15: 21
+sessions, 373 pane loads), runs 19, 63, 112 and 121 spikes per active hour
+at wall-clock pane ages of 0–0.5 h, 0.5–1 h, 1–2 h and 2–4 h. By active
+hours since load it runs 19, 94 and 127 over the first two hours, then
+falls to 33 for 2–4 h, so the climb comes from use, not elapsed time.
+Session size barely moves it: 19–82 per hour across the size bins, with no
+trend, and projection p50 stays within 93–139 ms. (The scratch run of
+2026-11-03 that prompted the script read 20, 74, 121 and 123.) So a
+sluggish pane is fixed by a reload, not a new session. Start a new
+session for the agent's reasons. Use `--build-since` to score a pane change
+against the age curve.
+
 ## Build vs. reload boundary
 
 **Settled 2026-08-26 (the helpers.js-needs-rebuild mantra was wrong,

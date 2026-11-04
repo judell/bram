@@ -62814,7 +62814,15 @@ fn state_dir_entry_for(name: &str) -> Option<&'static OwnedEntry> {
 // usable: the same claim file the Status tab's "Current claim" row reads, and
 // the record's freshness under worklist_auth_freshness_ok (the TTL mutate
 // and commit apply).
-fn state_dir_live_claim(root: &Path, now_ms: i64) -> (bool, Vec<String>, Option<String>) {
+//
+// state-move-ignores-finished-authorization: the record is single-slot and
+// outlives its work, so a fresh record counts only while at least one of its
+// ids is still an item on the board. A committed or dropped item has been
+// pruned; an approval whose agent is mid-edit still names a board item.
+// consumedAtMs is no test: resolve sets it on first read and the commit route
+// ignores it (same-turn resolve -> commit). An unreadable board keeps the
+// record live. The fourth value is true when a fresh record was set aside.
+fn state_dir_live_claim(root: &Path, now_ms: i64) -> (bool, Vec<String>, Option<String>, bool) {
     let claim_ids: Vec<String> =
         std::fs::read_to_string(resource_relative_path(root, INFLIGHT_CLAIM_REL))
             .ok()
@@ -62827,7 +62835,7 @@ fn state_dir_live_claim(root: &Path, now_ms: i64) -> (bool, Vec<String>, Option<
                 })
             })
             .unwrap_or_default();
-    let auth_kind = std::fs::read_to_string(resource_relative_path(root, WORKLIST_AUTH_REL))
+    let fresh_auth = std::fs::read_to_string(resource_relative_path(root, WORKLIST_AUTH_REL))
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .filter(|v| {
@@ -62836,12 +62844,44 @@ fn state_dir_live_claim(root: &Path, now_ms: i64) -> (bool, Vec<String>, Option<
             kind != "none"
                 && issued > 0
                 && worklist_auth_freshness_ok(v, now_ms, WorklistAuthUse::Reconcile).is_ok()
-        })
-        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(String::from));
+        });
+    let mut stale_authorization = false;
+    let auth_kind = fresh_auth.and_then(|v| {
+        let board_ids: Option<std::collections::HashSet<String>> =
+            std::fs::read_to_string(resource_relative_path(root, "worklist.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|w| {
+                    w.get("items").and_then(|i| i.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|it| it.get("id").and_then(|id| id.as_str()))
+                            .map(String::from)
+                            .collect()
+                    })
+                });
+        let on_board = match &board_ids {
+            None => true,
+            Some(board) => v
+                .get("ids")
+                .and_then(|ids| ids.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|id| id.as_str())
+                        .any(|id| board.contains(id))
+                })
+                .unwrap_or(false),
+        };
+        if !on_board {
+            stale_authorization = true;
+            return None;
+        }
+        v.get("kind").and_then(|k| k.as_str()).map(String::from)
+    });
     (
         !claim_ids.is_empty() || auth_kind.is_some(),
         claim_ids,
         auth_kind,
+        stale_authorization,
     )
 }
 
@@ -62902,6 +62942,7 @@ struct StateDirPlan {
     live_claim: bool,
     claim_ids: Vec<String>,
     auth_kind: Option<String>,
+    stale_authorization: bool,
 }
 
 fn state_dir_plan_core(root: &Path, now_ms: i64) -> StateDirPlan {
@@ -62942,7 +62983,8 @@ fn state_dir_plan_core(root: &Path, now_ms: i64) -> StateDirPlan {
                 .map(|s| String::from_utf8_lossy(s).into_owned())
                 .collect()
         });
-    let (live_claim, claim_ids, auth_kind) = state_dir_live_claim(root, now_ms);
+    let (live_claim, claim_ids, auth_kind, stale_authorization) =
+        state_dir_live_claim(root, now_ms);
     StateDirPlan {
         state_name,
         state_dir_exists: state_dir.is_dir(),
@@ -62952,6 +62994,7 @@ fn state_dir_plan_core(root: &Path, now_ms: i64) -> StateDirPlan {
         live_claim,
         claim_ids,
         auth_kind,
+        stale_authorization,
     }
 }
 
@@ -63062,7 +63105,11 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
         },
         "rootSettings": state_dir_root_settings(root),
         "liveClaim": p.live_claim,
-        "liveClaimDetail": { "claimIds": p.claim_ids, "authorization": p.auth_kind },
+        "liveClaimDetail": {
+            "claimIds": p.claim_ids,
+            "authorization": p.auth_kind,
+            "staleAuthorization": p.stale_authorization,
+        },
         "nested": state_dir_nested(root, p.state_name),
         "note": STATE_DIR_PLAN_NOTE,
         // The mixed-folder banner (issue-469-mixed-folder-dialog).
@@ -93922,6 +93969,68 @@ mod worklist_authorization_tests {
         let root = std::env::temp_dir().join(format!("bram-469-plan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    // state-move-ignores-finished-authorization: a fresh authorization
+    // counts as live work only while one of its ids is still on the board.
+    fn state_dir_live_claim_fixture(board_ids: &[&str], auth_ids: &[&str]) -> std::path::PathBuf {
+        let root = state_dir_plan_temp_root();
+        let res = super::bram_state_dir(&root);
+        std::fs::create_dir_all(&res).unwrap();
+        let items: Vec<serde_json::Value> = board_ids
+            .iter()
+            .map(|id| serde_json::json!({ "id": id, "status": "proposed" }))
+            .collect();
+        std::fs::write(
+            res.join("worklist.json"),
+            serde_json::json!({ "version": 1, "items": items }).to_string(),
+        )
+        .unwrap();
+        let now = super::unix_now_ms();
+        std::fs::write(
+            res.join(super::WORKLIST_AUTH_REL),
+            serde_json::json!({
+                "kind": "approved", "ids": auth_ids,
+                "issuedAtMs": now - 1000, "consumedAtMs": now - 500
+            })
+            .to_string(),
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn state_dir_live_claim_ignores_authorization_for_pruned_items() {
+        let root = state_dir_live_claim_fixture(&["other"], &["committed-item"]);
+        let plan = super::state_dir_plan(&root);
+        assert_eq!(plan["liveClaim"], false);
+        assert_eq!(plan["liveClaimDetail"]["staleAuthorization"], true);
+        assert!(plan["liveClaimDetail"]["authorization"].is_null());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_dir_live_claim_keeps_authorization_with_an_item_on_the_board() {
+        let root = state_dir_live_claim_fixture(&["mid-edit"], &["gone", "mid-edit"]);
+        let plan = super::state_dir_plan(&root);
+        assert_eq!(plan["liveClaim"], true);
+        assert_eq!(plan["liveClaimDetail"]["staleAuthorization"], false);
+        assert_eq!(plan["liveClaimDetail"]["authorization"], "approved");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_dir_live_claim_counts_the_inflight_claim_alone() {
+        let root = state_dir_live_claim_fixture(&[], &["gone"]);
+        std::fs::write(
+            super::resource_relative_path(&root, super::INFLIGHT_CLAIM_REL),
+            serde_json::json!({ "ids": ["x"] }).to_string(),
+        )
+        .unwrap();
+        let plan = super::state_dir_plan(&root);
+        assert_eq!(plan["liveClaim"], true);
+        assert_eq!(plan["liveClaimDetail"]["staleAuthorization"], true);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

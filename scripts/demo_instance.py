@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,10 +36,22 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPO = SOURCE_ROOT.parent / "bram-demo-instance"
 MARKER = ".bram-demo.json"
 SCENARIO_META = ".bram-demo-scenario.json"
-# judell/bram#474: hydration target pending the mover's answer
-WORKLIST = "resources/worklist.json"
-CLAIMS = "resources/.claim-intervals.json"
-AUTH = "resources/.worklist-authorization.json"
+# Board files, relative to the live state folder (bram_state.state_dir). A
+# scenario branch always stores them under SCENARIO_STATE, the 0.8.3 layout, so
+# captures made by either binary stay valid; hydration maps them into the
+# live layout and capture maps them back (judell/bram#474).
+WORKLIST = "worklist.json"
+CLAIMS = ".claim-intervals.json"
+AUTH = ".worklist-authorization.json"
+DRAFTS = "worklist-drafts"
+SCENARIO_STATE = bram_state.STATE_DIR_LEGACY
+# The live layouts: `.bram/` (0.8.4, the default) or `resources/` (0.8.3, kept
+# so the real mover can be exercised on a demo).
+LAYOUT_NEW = "dot-bram"
+LAYOUT_LEGACY = "legacy"
+# State-folder entries that are never scenario state: the new layout's own
+# bookkeeping, and settings (the fixture's settings are its tracked .bram.json).
+UNCAPTURED_STATE = {".gitignore", ".migrated-from", ".state-move", "settings.json"}
 RUNTIME_DIR = "bram-demo"
 FORMAT_VERSION = 1
 SCENARIO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -529,27 +542,63 @@ def temporary_index(repo: Path, base: str) -> Iterator[dict[str, str]]:
             os.unlink(raw)
 
 
-def capture_tree(repo: Path, base: str = "HEAD", force_paths: Iterable[str] = ()) -> str:
+def capture_tree(
+    repo: Path,
+    base: str = "HEAD",
+    force_paths: Iterable[str] = (),
+    board: Sequence[tuple[str, Path]] = (),
+) -> str:
+    """The worktree as a tree on top of `base`. `board` adds files from
+    outside their tree path: (path in the tree, file on disk) pairs, hashed
+    into the temporary index, so the live `.bram/` board is stored at its
+    `resources/` scenario paths without copying anything in the worktree."""
     with temporary_index(repo, base) as env:
         run_git(repo, "add", "-A", "--", ".", env=env)
         existing = [p for p in force_paths if (repo / p).exists()]
         if existing:
             run_git(repo, "add", "-f", "--", *existing, env=env)
+        if board:
+            shas = run_git(
+                repo,
+                "hash-object",
+                "-w",
+                "--stdin-paths",
+                input_text="".join(f"{disk}\n" for _, disk in board),
+            ).splitlines()
+            if len(shas) != len(board):
+                raise DemoError("git hash-object did not hash every board file")
+            run_git(
+                repo,
+                "update-index",
+                "--add",
+                "--index-info",
+                env=env,
+                input_text="".join(
+                    f"100644 {sha}\t{rel}\n" for (rel, _), sha in zip(board, shas)
+                ),
+            )
         tree = run_git(repo, "write-tree", env=env)
     if not tree:
         raise DemoError("git produced an empty tree id")
     return tree
 
 
+def state_path(repo: Path, rel: str) -> Path:
+    """A board file in the live state folder, `.bram/` or `resources/`."""
+    return bram_state.state_dir(repo) / rel
+
+
 def _load_controls(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    worklist_path = state_path(repo, WORKLIST)
+    claims_path = state_path(repo, CLAIMS)
     worklist = (
-        read_json(repo / WORKLIST)
-        if (repo / WORKLIST).exists()
+        read_json(worklist_path)
+        if worklist_path.exists()
         else {"description": "Synthetic Bram worklist", "items": [], "version": 1}
     )
     claims = (
-        read_json(repo / CLAIMS)
-        if (repo / CLAIMS).exists()
+        read_json(claims_path)
+        if claims_path.exists()
         else {"intervals": [], "version": 1}
     )
     meta = (
@@ -563,8 +612,8 @@ def _load_controls(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str
 def _write_controls(
     repo: Path, worklist: dict[str, Any], claims: dict[str, Any], meta: dict[str, Any]
 ) -> None:
-    write_json(repo / WORKLIST, worklist)
-    write_json(repo / CLAIMS, claims)
+    write_json(state_path(repo, WORKLIST), worklist)
+    write_json(state_path(repo, CLAIMS), claims)
     write_json(repo / SCENARIO_META, meta)
 
 
@@ -598,7 +647,7 @@ class StarterBuilder:
         if begun_at_ms is not None:
             entry["begunAtMs"] = begun_at_ms
         self.worklist.setdefault("items", []).append(entry)
-        draft = self.repo / "resources/worklist-drafts" / f"{item_id}.md"
+        draft = state_path(self.repo, DRAFTS) / f"{item_id}.md"
         draft.parent.mkdir(parents=True, exist_ok=True)
         draft.write_text(f"# Before\n\n{before}\n\n# After\n\n{after}\n", encoding="utf-8")
 
@@ -945,7 +994,7 @@ class StarterBuilder:
         )
         self.file(path, "authorization: expired\n")
         write_json(
-            self.repo / AUTH,
+            state_path(self.repo, AUTH),
             {
                 "commitToo": False,
                 "consumedAtMs": None,
@@ -959,15 +1008,44 @@ class StarterBuilder:
         )
 
 
-def _control_paths(repo: Path) -> list[str]:
-    paths = [SCENARIO_META, WORKLIST, CLAIMS, AUTH, "resources/worklist-drafts"]
-    return [path for path in paths if (repo / path).exists()]
+def _board_entries(repo: Path) -> list[tuple[str, Path]]:
+    """The live board as (scenario path, file) pairs, whichever folder holds it.
+
+    The board files are always taken (the demo's .gitignore hides them).
+    Anything else in the state folder is taken when the same file under
+    `resources/` would not be ignored, which is what `git add -A` took from a
+    0.8.3-layout board. So a capture is the same tree in either layout."""
+    state = bram_state.state_dir(repo)
+    if not state.is_dir():
+        return []
+    files = sorted(
+        path
+        for path in state.rglob("*")
+        if path.is_file() and path.relative_to(state).parts[0] not in UNCAPTURED_STATE
+    )
+    entries = [(f"{SCENARIO_STATE}/{path.relative_to(state).as_posix()}", path) for path in files]
+    forced = {f"{SCENARIO_STATE}/{rel}" for rel in (WORKLIST, CLAIMS, AUTH)}
+    drafts = f"{SCENARIO_STATE}/{DRAFTS}/"
+    optional = [rel for rel, _ in entries if rel not in forced and not rel.startswith(drafts)]
+    ignored: set[str] = set()
+    if optional:
+        out = run_git(
+            repo,
+            "check-ignore",
+            "--no-index",
+            "--stdin",
+            input_text="".join(f"{rel}\n" for rel in optional),
+            check=False,
+        )
+        ignored = set(out.splitlines())
+    return [(rel, path) for rel, path in entries if rel not in ignored]
 
 
 def _claim_records(repo: Path) -> list[dict[str, Any]]:
-    if not (repo / CLAIMS).exists():
+    claims_path = state_path(repo, CLAIMS)
+    if not claims_path.exists():
         return []
-    claims = read_json(repo / CLAIMS).get("intervals", [])
+    claims = read_json(claims_path).get("intervals", [])
     if not isinstance(claims, list):
         raise DemoError(f"expected an intervals array in {CLAIMS}")
     records: list[dict[str, Any]] = []
@@ -994,8 +1072,11 @@ def _commit_tree(repo: Path, tree: str, parent: str, message: str, step: int) ->
     )
 
 
-def capture_scenario(repo: Path, name: str, force: bool = False) -> str:
+def capture_scenario(
+    repo: Path, name: str, force: bool = False, layout: str | None = None
+) -> str:
     repo = validate_demo(repo)
+    layout = _resolve_layout(repo, layout)
     ref = scenario_ref(name)
     old = run_git(repo, "rev-parse", "--verify", "--quiet", ref, check=False)
     if old and not force:
@@ -1011,7 +1092,7 @@ def capture_scenario(repo: Path, name: str, force: bool = False) -> str:
         "starters": list(live_meta.get("starters", [])),
     }
     write_json(repo / SCENARIO_META, scenario_doc)
-    final_tree = capture_tree(repo, boundary, _control_paths(repo))
+    final_tree = capture_tree(repo, boundary, [SCENARIO_META], _board_entries(repo))
 
     parent = boundary
     for index, record in enumerate(records, 1):
@@ -1026,7 +1107,7 @@ def capture_scenario(repo: Path, name: str, force: bool = False) -> str:
         repo, final_tree, parent, f"Scenario {name}: parked pending work", len(records) + 1
     )
     run_git(repo, "update-ref", ref, pending, *( [old] if old else [] ))
-    use_scenario(repo, name)
+    use_scenario(repo, name, layout)
     return pending
 
 
@@ -1059,8 +1140,73 @@ def _runtime_root(repo: Path) -> Path:
     return path
 
 
-def use_scenario(repo: Path, name: str) -> None:
+def _resolve_layout(repo: Path, layout: str | None) -> str:
+    """An explicit layout, else the one the active scenario was hydrated
+    with, else `.bram/`."""
+    if layout is not None:
+        if layout not in (LAYOUT_NEW, LAYOUT_LEGACY):
+            raise DemoError(f"unknown layout {layout!r}")
+        return layout
+    active_path = _runtime_root(repo) / "active.json"
+    if active_path.exists():
+        remembered = read_json(active_path).get("layout")
+        if remembered in (LAYOUT_NEW, LAYOUT_LEGACY):
+            return str(remembered)
+    return LAYOUT_NEW
+
+
+def _merge_move(src: Path, dst: Path) -> None:
+    """Move `src` to `dst`, merging into an existing directory so the live
+    port and traces already there survive; a scenario file wins a clash."""
+    if src.is_dir() and not src.is_symlink() and dst.is_dir() and not dst.is_symlink():
+        for child in list(src.iterdir()):
+            _merge_move(child, dst / child.name)
+        src.rmdir()
+        return
+    if dst.is_dir() and not dst.is_symlink():
+        shutil.rmtree(dst)
+    os.replace(src, dst)
+
+
+def _settle_state_folder(repo: Path, layout: str) -> None:
+    """Put the hydrated board (always checked out under `resources/`) and the
+    live port and traces into the layout's state folder.
+
+    `.bram/` is laid out as the mover lays it out: `.gitignore` = `*` first,
+    so the folder is never stageable, then the entries, then
+    `.migrated-from`, so a 0.8.4 binary sees a moved folder and never runs
+    the mover on a demo."""
+    legacy = repo / bram_state.STATE_DIR_LEGACY
+    new = repo / bram_state.STATE_DIR_NEW
+    if run_git(repo, "ls-files", "--", f"{bram_state.STATE_DIR_LEGACY}/", f"{bram_state.STATE_DIR_NEW}/"):
+        raise DemoError("refusing to move a state folder with tracked files")
+    if layout == LAYOUT_LEGACY:
+        if new.is_dir():
+            # A previous `.bram/` hydrate: carry the live port and traces back.
+            for entry in list(new.iterdir()):
+                if entry.name in (".gitignore", ".migrated-from"):
+                    entry.unlink()
+                else:
+                    _merge_move(entry, legacy / entry.name)
+            new.rmdir()
+        return
+    new.mkdir(exist_ok=True)
+    (new / ".gitignore").write_bytes(b"*\n")
+    if legacy.is_dir():
+        for entry in sorted(legacy.iterdir()):
+            if entry.name in (".gitignore", ".migrated-from"):
+                entry.unlink()
+            else:
+                _merge_move(entry, new / entry.name)
+        legacy.rmdir()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    (new / ".migrated-from").write_bytes(f"{legacy} {stamp} demo-hydrate\n".encode("utf-8"))
+
+
+def use_scenario(repo: Path, name: str, layout: str | None = LAYOUT_NEW) -> None:
+    """Hydrate `name` into the given layout; None repeats the active one."""
     repo = validate_demo(repo)
+    layout = _resolve_layout(repo, layout)
     tip, doc = _scenario_doc(repo, name)
     boundary = str(doc.get("boundary", ""))
     run_git(repo, "cat-file", "-e", f"{boundary}^{{commit}}")
@@ -1076,8 +1222,14 @@ def use_scenario(repo: Path, name: str) -> None:
     # Process/session infrastructure is not scenario state. Preserve the live
     # port and trace while a human is driving the second instance, along with
     # Setup's active agent files. Everything else untracked is disposable.
-    # The live instance's files are in its state folder (.bram/ or resources/).
-    state = bram_state.state_dir_name(repo)
+    # The live instance's files are in its state folder, and the hydrate may
+    # be switching layouts, so keep them in either one; _settle_state_folder
+    # then moves them into the layout's folder. The checked-out board under
+    # resources/ is tracked at this point, so the clean leaves it alone.
+    live: list[str] = []
+    for state in (bram_state.STATE_DIR_NEW, bram_state.STATE_DIR_LEGACY):
+        live += ["-e", f"{state}/.bram-port", "-e", f"{state}/.bram-port.json"]
+        live += ["-e", f"{state}/bram-traces/"]
     run_git(
         repo,
         "clean",
@@ -1089,14 +1241,10 @@ def use_scenario(repo: Path, name: str) -> None:
         "AGENTS.md",
         "-e",
         "CLAUDE.md",
-        "-e",
-        f"{state}/.bram-port",
-        "-e",
-        f"{state}/.bram-port.json",
-        "-e",
-        f"{state}/bram-traces/",
+        *live,
     )
     run_git(repo, "reset", "--mixed", "-q", boundary)
+    _settle_state_folder(repo, layout)
 
     _clear_claim_refs(repo)
     for record in doc.get("claimIntervals", []):
@@ -1109,17 +1257,24 @@ def use_scenario(repo: Path, name: str) -> None:
 
     write_json(
         _runtime_root(repo) / "active.json",
-        {"boundary": boundary, "name": name, "ref": scenario_ref(name), "tip": tip},
+        {
+            "boundary": boundary,
+            "layout": layout,
+            "name": name,
+            "ref": scenario_ref(name),
+            "tip": tip,
+        },
     )
 
 
-def reset_scenario(repo: Path) -> str:
+def reset_scenario(repo: Path, layout: str | None = None) -> str:
+    """Rehydrate the active scenario, in its remembered layout unless given."""
     repo = validate_demo(repo)
     active_path = _runtime_root(repo) / "active.json"
     if not active_path.exists():
         raise DemoError("no active scenario; run 'use <name>' first")
     name = str(read_json(active_path).get("name", ""))
-    use_scenario(repo, name)
+    use_scenario(repo, name, layout)
     return name
 
 
@@ -1157,7 +1312,13 @@ def add_starter(repo: Path, starter: str) -> None:
     builder.add(starter)
 
 
-def new_scenario(repo: Path, name: str, starters: Sequence[str], force: bool = False) -> str:
+def new_scenario(
+    repo: Path,
+    name: str,
+    starters: Sequence[str],
+    force: bool = False,
+    layout: str = LAYOUT_NEW,
+) -> str:
     scenario_ref(name)
     repo = initialize_repo(repo)
     process_path = _runtime_root(repo) / "process.json"
@@ -1167,6 +1328,8 @@ def new_scenario(repo: Path, name: str, starters: Sequence[str], force: bool = F
             raise DemoError(f"stop the running demo PID {pid} before creating a new scenario")
     base = run_git(repo, "rev-parse", "refs/heads/demo/base")
     run_git(repo, "reset", "--hard", "-q", base)
+    # Removes any `.bram/` too, so the starters build in resources/ and the
+    # capture's hydrate below moves them into the chosen layout.
     run_git(repo, "clean", "-fdx", "-q")
     run_git(repo, "checkout", "--detach", "--force", "-q", base)
     _clear_claim_refs(repo)
@@ -1205,7 +1368,7 @@ def new_scenario(repo: Path, name: str, starters: Sequence[str], force: bool = F
     builder = StarterBuilder(repo, name)
     for starter in expanded:
         builder.add(starter)
-    return capture_scenario(repo, name, force=force)
+    return capture_scenario(repo, name, force=force, layout=layout)
 
 
 def scrub_agent_environment(env: Mapping[str, str]) -> dict[str, str]:
@@ -1421,6 +1584,8 @@ def status(repo: Path) -> dict[str, Any]:
     return {
         "activeScenario": active.get("name"),
         "claimRefs": refs,
+        "layout": active.get("layout"),
+        "stateDir": bram_state.state_dir_name(repo),
         "dirty": run_git(repo, "status", "--short").splitlines(),
         "items": len(worklist.get("items", [])),
         "log": str(runtime / "bram.log"),
@@ -1464,6 +1629,17 @@ def prune_scenarios(
     return removed, skipped
 
 
+def _layout_flag(parser: argparse.ArgumentParser, help_text: str) -> None:
+    parser.add_argument(
+        "--legacy-layout",
+        dest="layout",
+        action="store_const",
+        const=LAYOUT_LEGACY,
+        default=None,
+        help=help_text,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1478,15 +1654,19 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("name")
     new.add_argument("--from", dest="starters", action="append", choices=(*STARTERS, "all"))
     new.add_argument("--force", action="store_true")
+    _layout_flag(new, "hydrate into resources/, the 0.8.3 layout (default: .bram/)")
 
     use = sub.add_parser("use", help="hydrate a parked scenario exactly")
     use.add_argument("name")
+    _layout_flag(use, "hydrate into resources/, the 0.8.3 layout (default: .bram/)")
 
     capture = sub.add_parser("capture", help="park the current stumbled-into state")
     capture.add_argument("name")
     capture.add_argument("--force", action="store_true")
+    _layout_flag(capture, "rehydrate into resources/ (default: the active layout)")
 
-    sub.add_parser("reset", help="rehydrate the active scenario")
+    reset = sub.add_parser("reset", help="rehydrate the active scenario")
+    _layout_flag(reset, "rehydrate into resources/ (default: the active layout)")
 
     add = sub.add_parser("add", help="add a starter to the live dirty fixture")
     add.add_argument("starter", choices=STARTERS)
@@ -1527,16 +1707,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "new":
-            tip = new_scenario(args.repo, args.name, args.starters or ["all"], args.force)
+            tip = new_scenario(
+                args.repo, args.name, args.starters or ["all"], args.force, args.layout or LAYOUT_NEW
+            )
             print(f"created and hydrated scenario/{args.name} ({tip[:12]})")
         elif args.command == "use":
-            use_scenario(args.repo, args.name)
+            use_scenario(args.repo, args.name, args.layout or LAYOUT_NEW)
             print(f"hydrated scenario/{args.name}")
         elif args.command == "capture":
-            tip = capture_scenario(args.repo, args.name, args.force)
+            tip = capture_scenario(args.repo, args.name, args.force, args.layout)
             print(f"captured and hydrated scenario/{args.name} ({tip[:12]})")
         elif args.command == "reset":
-            print(f"reset scenario/{reset_scenario(args.repo)}")
+            print(f"reset scenario/{reset_scenario(args.repo, args.layout)}")
         elif args.command == "add":
             add_starter(args.repo, args.starter)
             print(f"added {args.starter}; capture it to make it durable")
@@ -1552,7 +1734,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(value, indent=2, sort_keys=True))
             else:
                 print(f"repo: {value['repo']}")
-                print(f"active: {value['activeScenario'] or '-'}")
+                print(f"active: {value['activeScenario'] or '-'}  state folder: {value['stateDir']}/")
                 print(f"scenarios: {', '.join(value['scenarios']) or '-'}")
                 print(f"items: {value['items']}  claims: {len(value['claimRefs'])}")
                 print(f"dirty paths: {len(value['dirty'])}  pid: {value['pid'] or '-'}")

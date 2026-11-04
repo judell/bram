@@ -44,12 +44,13 @@ overwrites them.
 
 Bram's state folder, written `<state>/` below, is `.bram/` if it
 exists, else `resources/`; whichever one holds `.bram-port` is in use.
+Before 0.8.4 the folder was `resources/`; that path in older
+transcripts and issues means `.bram/`.
 
 `<state>/worklist.json` is the canonical surface for multi-step
-coordination between you and the user. The Worklist tab in the agent
-pane renders it as a checklist under "Worklist". It doesn't need to
-exist in advance — Bram serves an empty default and the Worklist tab
-creates the file (and the state folder) on first use. Empty state is fine:
+coordination between you and the user; the Worklist tab renders it as
+a checklist. It needn't exist in advance: Bram serves an empty default
+and creates the file (and the folder) on first use. Empty is fine:
 `{ "description": "", "items": [] }`.
 
 ### When to route through the worklist

@@ -766,7 +766,7 @@
       <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.projectRoot}" />.
       Setup writes <Text inline="true" fontFamily="$fontFamily-monospace" value=".bram.json" />,
       <Text inline="true" fontFamily="$fontFamily-monospace" value="AGENTS.md" />,
-      <Text inline="true" fontFamily="$fontFamily-monospace" value="resources/" /> (worklist, port
+      <Text inline="true" fontFamily="$fontFamily-monospace" value=".bram/" /> (worklist, port
       sidecar, traces) and <Text inline="true" fontFamily="$fontFamily-monospace" value=".claude/" />
       (conventions, hooks, skills, settings).
     </Text>
@@ -933,6 +933,46 @@
       size="xs"
       tooltip="Dismiss for this session"
       onClick="codexTrustBannerDismissed = true" />
+  </HStack>
+
+  <!-- issue-469-mixed-folder-dialog: resources/ holds files that aren't
+       Bram's (or are tracked), so Bram can't move the folder whole. The
+       answer is written to resources/.state-move and acted on at the next
+       launch, never on click; Not now hides the banner for good (Status
+       offers the move later). Fetched on load; the buttons call
+       window.__bramStateMoveDecide (a plain fetch) and the plan refetches on
+       the host's state-dir-changed push, no polling. Not an APICall: its
+       completion reached the pane ~30 s late on macOS and Windows
+       (issue-469-state-move-pane-fixes). -->
+  <DataSource id="stateMovePlan" url="/__state-dir/plan" />
+  <PushSource id="stateMovePlanEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('state-dir-changed')}" />
+  <ChangeListener listenTo="{stateMovePlanEvt.value &amp;&amp; stateMovePlanEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(stateMovePlanEvt.value, stateMovePlan)" />
+  <HStack
+    when="{window.__bramStateMoveBanner(stateMovePlan.value, 'show')}"
+    backgroundColor="$color-warn-100"
+    padding="$space-2"
+    gap="$space-3"
+    wrapContent="true"
+    verticalAlignment="center">
+    <Text
+      fontSize="$fontSize-sm"
+      value="{window.__bramStateMoveBanner(stateMovePlan.value, 'text')}"
+      tooltip="{window.__bramStateMoveBanner(stateMovePlan.value, 'stays')}" />
+    <SpaceFiller />
+    <Button
+      when="{!window.__bramStateMoveBanner(stateMovePlan.value, 'chosen')}"
+      label="Move Bram's files"
+      size="xs"
+      tooltip="{window.__bramStateMoveBanner(stateMovePlan.value, 'stays')}"
+      onClick="window.__bramStateMoveDecide('move')" />
+    <Button
+      when="{!window.__bramStateMoveBanner(stateMovePlan.value, 'chosen')}"
+      label="Not now"
+      variant="ghost"
+      size="xs"
+      onClick="window.__bramStateMoveDecide('not-now')" />
   </HStack>
 
   <!-- issue-320: gate on providerNeedsSetup ALONE, not activeProvider. The

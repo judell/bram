@@ -77,7 +77,11 @@
          (tracked is capped at 200 by the host). -->
     <VStack when="{stateDirPlan.value}" gap="$space-2">
       <Heading level="h3">State folder</Heading>
-      <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{stateDirPlan.value.note}" />
+      <!-- status-reports-a-completed-move: once moved, say what happened;
+           the dry run below describes a move that is done, so it hides. -->
+      <Text when="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'line')}" />
+      <Text when="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" value="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'left')}" />
+      <Text when="{!window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{stateDirPlan.value.note}" />
       <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanFolderLine(stateDirPlan.value)}" />
       <Text value="{window.__bramStateDirPlanLiveClaimLine(stateDirPlan.value)}" />
       <HStack when="{window.__bramStateMoveBanner(window.__bramStateDirPlanKept(stateDirPlan.value), 'pending')}" verticalAlignment="center" wrapContent="true" gap="$space-2">
@@ -90,14 +94,16 @@
           tooltip="{window.__bramStateMoveBanner(window.__bramStateDirPlanKept(stateDirPlan.value), 'stays')}"
           onClick="window.__bramStateMoveDecide('move')" />
       </HStack>
-      <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'wouldMove')}" />
-      <Items data="{stateDirPlan.value.wouldMove || []}">
-        <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
-      </Items>
-      <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'foreign')}" />
-      <Items data="{stateDirPlan.value.foreign || []}">
-        <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
-      </Items>
+      <VStack when="{!window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" gap="$space-2">
+        <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'wouldMove')}" />
+        <Items data="{stateDirPlan.value.wouldMove || []}">
+          <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
+        </Items>
+        <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'foreign')}" />
+        <Items data="{stateDirPlan.value.foreign || []}">
+          <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
+        </Items>
+      </VStack>
       <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanHeading(stateDirPlan.value, 'tracked')}" />
       <Items data="{window.__bramStateDirPlanTrackedPaths(stateDirPlan.value)}">
         <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />

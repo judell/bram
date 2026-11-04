@@ -63013,7 +63013,57 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
         // The mixed-folder banner (issue-469-mixed-folder-dialog).
         "pending": state_dir_pending(&p),
         "decision": state_move_decision(root).filter(|_| p.state_name == BRAM_STATE_DIR_LEGACY),
+        // status-reports-a-completed-move: after a move, the dry run above
+        // describes the new folder; Status shows what happened instead.
+        "migrated": state_dir_migrated(root, p.state_name),
+        "leftBehind": state_dir_left_behind(root, p.state_name),
     })
+}
+
+// `.bram/.migrated-from` is "<old path> <ISO time>[ <how>]", how being
+// `selective` or `demo-hydrate`. Null until a move has happened.
+fn state_dir_migrated(root: &Path, state_name: &str) -> Option<serde_json::Value> {
+    if state_name != BRAM_STATE_DIR_NEW {
+        return None;
+    }
+    let text = std::fs::read_to_string(root.join(BRAM_STATE_DIR_NEW).join(STATE_MIGRATED_FROM_REL))
+        .ok()?;
+    parse_migrated_from(&text)
+}
+
+fn parse_migrated_from(text: &str) -> Option<serde_json::Value> {
+    let mut tokens: Vec<&str> = text.split_whitespace().collect();
+    let how = match tokens.last() {
+        Some(t) if !t.ends_with('Z') => tokens.pop(),
+        _ => None,
+    };
+    let at = tokens.pop()?;
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "from": tokens.join(" "),
+        "at": at,
+        "selective": how == Some("selective"),
+        "how": how,
+    }))
+}
+
+// What is still in the old folder after a move: the foreign and tracked
+// entries a selective move leaves. Empty when the old folder is gone.
+fn state_dir_left_behind(root: &Path, state_name: &str) -> Vec<String> {
+    if state_name != BRAM_STATE_DIR_NEW {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = std::fs::read_dir(root.join(BRAM_STATE_DIR_LEGACY))
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 // judell/bram#469: the user's answer to the mixed-folder banner, kept in the
@@ -87096,6 +87146,24 @@ mod spa_fallback_tests {
 
 #[cfg(test)]
 mod state_url_tests {
+    #[test]
+    fn migrated_from_parses_each_form() {
+        let v =
+            super::parse_migrated_from("/Users/j/xmlui/resources 2026-11-04T22:16:08Z selective\n")
+                .unwrap();
+        assert_eq!(v["from"], "/Users/j/xmlui/resources");
+        assert_eq!(v["at"], "2026-11-04T22:16:08Z");
+        assert_eq!(v["selective"], true);
+        let v = super::parse_migrated_from("/p/resources 2026-11-04T20:31:17Z\n").unwrap();
+        assert_eq!(v["selective"], false);
+        assert!(v["how"].is_null());
+        let v =
+            super::parse_migrated_from("/p/resources 2026-11-04T22:02:15Z demo-hydrate").unwrap();
+        assert_eq!(v["how"], "demo-hydrate");
+        assert!(super::parse_migrated_from("").is_none());
+        assert!(super::parse_migrated_from("2026-11-04T22:02:15Z").is_none());
+    }
+
     use super::{state_migrate_moved, state_url_rel, StateMigrateOutcome, BRAM_STATE_DIR_LEGACY};
 
     #[test]

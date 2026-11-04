@@ -17324,6 +17324,22 @@ window.__bramGuardRoutingLine = function (r) {
 
 // issue-469-status-dry-run: the Status tab's "State folder" section
 // (GET /__state-dir/plan). Nothing moves; these only format the plan.
+// status-reports-a-completed-move: after a move, Status says what happened
+// instead of listing the new folder as "would move". Parts: show, line, left.
+window.__bramStateDirPlanMoved = function (p, part) {
+  var m = p && p.migrated;
+  if (part === "show") return !!m;
+  if (!m) return "";
+  if (part === "left") {
+    var left = p.leftBehind || [];
+    return left.length ? "Left in resources/: " + left.join(", ") + "." : "";
+  }
+  var when = String(m.at || "").replace("T", " ").replace(/:\d\d(\.\d+)?Z$/, " UTC");
+  var how = m.selective ? " (selective)" : (m.how === "demo-hydrate" ? " (demo hydrate)" : "");
+  var from = String(m.from || "").replace(/^.*\//, "") || "resources";
+  return "Moved from " + from + "/ on " + when + how + ".";
+};
+
 window.__bramStateDirPlanFolderLine = function (p) {
   if (!p) return "";
   return "State folder: " + p.stateDir + (p.stateDirExists ? " (exists)" : " (not created yet)");

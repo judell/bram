@@ -1,0 +1,27 @@
+<Component name="WorklistBarButton">
+  <!-- pane-sources-move-to-their-readers (judell/bram#470): the Worklist
+       bar's button owns the board it summarizes, so a Worklist or git refresh
+       redraws this button, not the whole pane. Refreshed the way
+       Worklist.xmlui refreshes its own (push, no poll).
+       Contract:
+         props   open (whether the Worklist pane is open; Main.xmlui owns it)
+         events  toggle — the parent flips its own var; a component can't
+                 write its parent's var
+                 (https://docs.xmlui.org/howto/emit-a-custom-event-from-a-component,
+                 same shape as FindBar.xmlui's needleChange). -->
+  <DataSource id="twlBoard" url="/__worklist" />
+  <PushSource id="twlWorklistEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener
+    listenTo="{twlWorklistEvt.value &amp;&amp; twlWorklistEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(twlWorklistEvt.value, twlBoard)" />
+  <PushSource id="twlGitEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener
+    listenTo="{twlGitEvt.value &amp;&amp; twlGitEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(twlGitEvt.value, twlBoard)" />
+  <Button variant="ghost" size="sm" width="*" contentPosition="start"
+    label="{window.__bramTranscriptWorklistBarLabel($props.open, twlBoard.value)}"
+    tooltip="{$props.open ? 'Hide the Worklist' : 'Show the Worklist'}"
+    onClick="emitEvent('toggle')" />
+</Component>

@@ -1,0 +1,31 @@
+<Component name="AlertsPulse">
+  <!-- pane-sources-move-to-their-readers (judell/bram#470): the Alerts nav
+       link's pulse dot owns the Needs-you source it reads, so a Needs-you,
+       issues or Worklist refresh redraws this dot, not the whole pane. Same
+       seam and push events as Inbox.xmlui (no poll); same per-component
+       isolation as ActivitySparkline.xmlui. The dot itself is unchanged from
+       alerts-pulse-and-startup-check: a fading dot beside the label, pulled
+       in across NavLink's right padding by a negative margin
+       (https://www.xmlui.org/docs/behaviors#animation). -->
+  <DataSource id="alertsNav" url="/__needs-you" />
+  <PushSource id="alertsNavEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('needs-you-changed')}" />
+  <ChangeListener listenTo="{alertsNavEvt.value &amp;&amp; alertsNavEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavEvt.value, alertsNav)" />
+  <PushSource id="alertsNavIssuesEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('issues-changed')}" />
+  <ChangeListener listenTo="{alertsNavIssuesEvt.value &amp;&amp; alertsNavIssuesEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavIssuesEvt.value, alertsNav)" />
+  <PushSource id="alertsNavWorklistEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener listenTo="{alertsNavWorklistEvt.value &amp;&amp; alertsNavWorklistEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavWorklistEvt.value, alertsNav)" />
+  <Text
+    when="{window.__bramAlertsShouldPulse(alertsNav.value, $pathname)}"
+    color="$color-primary-500"
+    fontSize="$fontSize-sm"
+    marginLeft="-0.75rem"
+    animation="fadein"
+    animationOptions="{{ duration: 1200, reverse: true, loop: true }}"
+    tooltip="Something new is waiting in Alerts">●</Text>
+</Component>

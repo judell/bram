@@ -1,0 +1,37 @@
+<Component name="CompactionBanner">
+  <!-- pane-sources-move-to-their-readers (judell/bram#470): the
+       compaction banner owns its push source, so its updates (which follow
+       terminal show/hide) redraw the banner, not the whole pane.
+       Banner unchanged from compaction-in-progress-banner: fires when the
+       host's CompactionTracker sees the live PTY tail CONTAINS the
+       provider's "Compacting conversation" progress line AND the terminal
+       pane is hidden (derived in the bramSubscribeCompaction bridge,
+       helpers.js). A text-PRESENCE detector, not terminal_attention's
+       byte-silence one, so it auto-clears when the tail no longer shows that
+       line. Informational (info palette), with a ✕ that hides only the
+       current episode — a later compaction re-shows it. -->
+  <PushSource
+    id="compactionEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeCompaction()}" />
+  <VStack
+    when="{compactionEvt.value &amp;&amp; compactionEvt.value.active}"
+    padding="$space-2"
+    gap="$space-1"
+    backgroundColor="$color-info-50"
+    borderTop="1px solid $color-info-200">
+    <HStack gap="$space-2" verticalAlignment="center">
+      <Text
+        fontSize="$fontSize-sm"
+        width="*"
+        color="$color-info-700"
+        value="Compacting context — the agent will resume shortly." />
+      <Button
+        label="✕"
+        variant="ghost"
+        size="xs"
+        tooltip="Dismiss this notice"
+        onClick="window.__bramDismissCompaction()" />
+    </HStack>
+  </VStack>
+</Component>

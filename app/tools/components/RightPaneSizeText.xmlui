@@ -1,0 +1,13 @@
+<Component name="RightPaneSizeText" var.rightPaneSize="(measuring…)">
+  <!-- pane-sources-move-to-their-readers (judell/bram#470): the screen-size
+       readout owns the pane-size source and its var, so a terminal show/hide
+       (which resizes the pane) redraws this text, not the whole pane. -->
+  <PushSource
+    id="rightPaneSizeEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeRightPaneSize()}" />
+  <ChangeListener
+    listenTo="{rightPaneSizeEvt.value}"
+    onDidChange="() => { const s = rightPaneSizeEvt.value || null; rightPaneSize = s ? (s.width + ' × ' + s.height) : '(measuring…)'; }" />
+  <Text fontFamily="$fontFamily-monospace" value="{rightPaneSize}" />
+</Component>

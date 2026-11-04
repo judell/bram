@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -24,21 +24,8 @@
     initial="{window.__bramUnseenValue ? window.__bramUnseenValue() : 0}"
     subscribe="{window.bramSubscribeTranscriptUnseen ? window.bramSubscribeTranscriptUnseen() : null}" />
   <!-- alerts-pulse-and-startup-check: the Alerts nav link's pulse needs the
-       Needs-you lanes on every tab, not only when the Alerts page is open.
-       Same seam and same push events as Inbox.xmlui (no poll). -->
-  <DataSource id="alertsNav" url="/__needs-you" />
-  <PushSource id="alertsNavEvt" initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('needs-you-changed')}" />
-  <ChangeListener listenTo="{alertsNavEvt.value &amp;&amp; alertsNavEvt.value.tick}"
-    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavEvt.value, alertsNav)" />
-  <PushSource id="alertsNavIssuesEvt" initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('issues-changed')}" />
-  <ChangeListener listenTo="{alertsNavIssuesEvt.value &amp;&amp; alertsNavIssuesEvt.value.tick}"
-    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavIssuesEvt.value, alertsNav)" />
-  <PushSource id="alertsNavWorklistEvt" initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
-  <ChangeListener listenTo="{alertsNavWorklistEvt.value &amp;&amp; alertsNavWorklistEvt.value.tick}"
-    onDidChange="window.__bramRefetchOnLiveEvent(alertsNavWorklistEvt.value, alertsNav)" />
+       Needs-you lanes on every tab; the source now lives in AlertsPulse.xmlui
+       beside the dot that reads it (pane-sources-move-to-their-readers). -->
   <!-- PTY-throughput subscription now lives inside ActivitySparkline so its
        per-chunk churn is isolated from the footer composer. -->
 
@@ -46,10 +33,8 @@
     id="enhanceStatusEvt"
     initial="{0}"
     subscribe="{window.bramSubscribeEnhanceStatusTick()}" />
-  <PushSource
-    id="rightPaneSizeEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeRightPaneSize()}" />
+  <!-- rightPaneSizeEvt lives in RightPaneSizeText.xmlui with its only reader
+       (pane-sources-move-to-their-readers). -->
   <!-- top-banner-wraps: how far the header has stacked (0 one row, 1 two
        groups, 2 the left group stacked too). Measured in helpers.js. -->
   <PushSource
@@ -90,9 +75,6 @@
   <ChangeListener
     listenTo="{enhanceStatusEvt.value}"
     onDidChange="() => { window.__bramIframeTrace('refetch-called', {context: 'enhance-status-changed'}); enhanceStatus.refetch(); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || ''); }" />
-  <ChangeListener
-    listenTo="{rightPaneSizeEvt.value}"
-    onDidChange="() => { const s = rightPaneSizeEvt.value || null; rightPaneSize = s ? (s.width + ' × ' + s.height) : '(measuring…)'; }" />
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <!-- first-run-lands-on-transcript: in a brand-new repo the repo-startup
        greeting is projected into the Transcript stream, but the default
@@ -130,21 +112,10 @@
        silently split them into two cache entries that drifted apart, which was
        the whole of #265. Refresh via refetch(), which invalidates the shared
        entry for all consumers. -->
-  <DataSource id="headerInflightClaim" url="/__inflight" />
-  <PushSource
-    id="headerInflightEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('inflight-claim-changed')}" />
-  <ChangeListener
-    listenTo="{headerInflightEvt.value}"
-    onDidChange="() => { headerInflightClaim.refetch(); window.__bramIframeTrace('refetch-called', {context: 'header-inflight-claim-changed'}); }" />
-  <!-- Backup driver: the dedicated inflight-claim-changed subscription dedups
-       against Workspace's, so also refetch whenever the agent status changes
-       (App-scope push that's already proven). An in-flight action always makes
-       the agent work, so this reliably picks the claim up and drops it. -->
-  <ChangeListener
-    listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
-    onDidChange="() => { headerInflightClaim.refetch(); window.__bramIframeTrace('header-inflight-refetch', {state: (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state) || ''}); }" />
+  <!-- The inflight-claim source and both its refetch drivers now live in
+       FooterContextLine.xmlui with their only reader
+       (pane-sources-move-to-their-readers); same url, so the cache sharing
+       described above still holds. -->
   <DataSource id="appInfo" url="/__app-info" />
   <!-- clickable-update-from-banner: self-update progress for the banner.
        Pushed, never polled: the host emits self-update-changed on every
@@ -184,17 +155,9 @@
   <ChangeListener
     listenTo="{footerSessionsChangedEvt.value &amp;&amp; footerSessionsChangedEvt.value.tick}"
     onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
-  <!-- footer-indexing-status: search-indexer state for the bottom-row
-       indicator (flush right). Pushed via search-index-changed (no polling); refetch on
-       its tick. -->
-  <DataSource id="footerIndexStatus" url="/__search-index-status" />
-  <PushSource
-    id="footerIndexChangedEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('search-index-changed')}" />
-  <ChangeListener
-    listenTo="{footerIndexChangedEvt.value &amp;&amp; footerIndexChangedEvt.value.tick}"
-    onDidChange="() => footerIndexStatus.refetch()" />
+  <!-- footer-indexing-status: the search-indexer source lives in
+       FooterIndexLabel.xmlui with the indicator that reads it
+       (pane-sources-move-to-their-readers). -->
   <!-- Subagent roster for the footer chips strip, and main-model metadata
        for the footer session line. Refreshed by both session and subagent
        signals: subagent JSONL appends are swallowed by the watcher's
@@ -235,23 +198,10 @@
        prompt (no open turn + PTY byte-silence + prompt-shaped tail),
        joined client-side with terminal-pane visibility — only the parent
        shell knows that half. Sibling to the suspicious-silence PushSource
-       in FooterAgentStatus.xmlui, but declared here (not per-component)
-       because the banner itself renders in this footer, beside the
-       send-ledger notice below. The source is push-only; it adds no
-       polling or independent refresh loop. -->
-  <PushSource
-    id="terminalAttentionEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeTerminalAttention()}" />
-  <!-- compaction-in-progress-banner: host-detected active compaction (a
-       text-PRESENCE match on the live PTY tail — NOT the byte-silence
-       terminal_attention path above), joined client-side with
-       terminal-pane visibility and an episode-keyed dismiss — see
-       bramSubscribeCompaction, helpers.js. -->
-  <PushSource
-    id="compactionEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeCompaction()}" />
+       in FooterAgentStatus.xmlui; its source now lives in
+       TerminalAttentionBanner.xmlui with the banner
+       (pane-sources-move-to-their-readers). The compaction banner's source
+       likewise lives in CompactionBanner.xmlui. -->
   <!-- toast-issue-closed-on-push: toast when the user's Push auto-closes a
        queued issue. Host emits issues-closed-on-push after the close flush. -->
   <PushSource
@@ -409,7 +359,7 @@
 
       <VStack gap="$space-1" marginTop="$space-2">
         <Text fontWeight="bold">Screen size</Text>
-        <Text fontFamily="$fontFamily-monospace" value="{rightPaneSize}" />
+        <RightPaneSizeText />
       </VStack>
 
       <VStack when="{appInfo.value}" gap="$space-1" marginTop="$space-2">
@@ -756,14 +706,7 @@
          (https://www.xmlui.org/docs/reference/components/NavLink). -->
     <HStack verticalAlignment="center" gap="0">
       <NavLink label="Alerts" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
-      <Text
-        when="{window.__bramAlertsShouldPulse(alertsNav.value, $pathname)}"
-        color="$color-primary-500"
-        fontSize="$fontSize-sm"
-        marginLeft="-0.75rem"
-        animation="fadein"
-        animationOptions="{{ duration: 1200, reverse: true, loop: true }}"
-        tooltip="Something new is waiting in Alerts">●</Text>
+      <AlertsPulse />
     </HStack>
     <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
     <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
@@ -1079,19 +1022,9 @@
     </Pages>
   </Theme>
   <!-- worklist-bar-on-every-page (Jon): the Worklist bar under every tab,
-       not only the Transcript. The board the bar summarizes, refreshed the
-       way Worklist.xmlui refreshes its own (push, no poll). -->
-  <DataSource id="twlBoard" url="/__worklist" />
-  <PushSource id="twlWorklistEvt" initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
-  <ChangeListener
-    listenTo="{twlWorklistEvt.value &amp;&amp; twlWorklistEvt.value.tick}"
-    onDidChange="window.__bramRefetchOnLiveEvent(twlWorklistEvt.value, twlBoard)" />
-  <PushSource id="twlGitEvt" initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
-  <ChangeListener
-    listenTo="{twlGitEvt.value &amp;&amp; twlGitEvt.value.tick}"
-    onDidChange="window.__bramRefetchOnLiveEvent(twlGitEvt.value, twlBoard)" />
+       not only the Transcript. The board it summarizes lives in
+       WorklistBarButton.xmlui with the button that reads it
+       (pane-sources-move-to-their-readers). -->
   <!-- Arriving on the Worklist page closes the pane, so every other tab
        comes back with the bar alone. -->
   <ChangeListener
@@ -1117,10 +1050,8 @@
       <VStack when="{!window.__bramIsWorklistRoute($pathname)}" width="100%" gap="0"
         backgroundColor="$color-secondary-50">
         <HStack verticalAlignment="center" gap="0">
-          <Button variant="ghost" size="sm" width="*" contentPosition="start"
-            label="{window.__bramTranscriptWorklistBarLabel(worklistOpen, twlBoard.value)}"
-            tooltip="{worklistOpen ? 'Hide the Worklist' : 'Show the Worklist'}"
-            onClick="worklistOpen = window.__bramSetWorklistPaneOpen(!worklistOpen, 'bar')" />
+          <WorklistBarButton width="*" open="{worklistOpen}"
+            onToggle="worklistOpen = window.__bramSetWorklistPaneOpen(!worklistOpen, 'bar')" />
           <!-- Pop out: the full Worklist page. Arriving there closes the pane
                (the $pathname listener above). -->
           <!-- A labeled, outlined button with room from the edge: the bare
@@ -1191,63 +1122,10 @@
             width="*"
             enhanceStatus="{enhanceStatus.value}"
             runningSubagentCount="{window.__bramRunningSubagentCount(footerAgents.value)}" />
-          <!-- ONE combined context line — "Selected in Worklist: a, b" with
-               the claim verb parenthesized when work is in flight
-               ("… (Refining…)"). WRAPS rather than ellipsizing: item ids are
-               long, and the id is the message (Text wraps by default in a
-               width-constrained container —
-               xmlui.org/docs/howto/wrap-long-text-in-a-link). -->
-          <PushSource id="footerSel" initial="{[]}" subscribe="{window.bramSubscribeW2Selection()}" />
-          <!-- footer-says-proposing-new-item: no boot-state route by design —
-               a missed proposing-changed event just degrades to today's
-               silence until the next set/clear. `false` skips the
-               /__event/latest replay fetch that other PushSources use for
-               boot recovery (see bramSubscribeTauriEvent in helpers.js). -->
-          <PushSource id="footerProposing" initial="{null}" subscribe="{window.bramSubscribeTauriEvent('proposing-changed', false)}" />
-          <!-- Renders only when there's a context line: an empty container
-               still took its half of the row, and the status ellipsized
-               against blank space. -->
-          <HStack
-            when="{!!window.__bramFooterContextLine(headerInflightClaim.value, !!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing), footerSel.value, mainAgentStatus.value)}"
-            width="*" verticalAlignment="center" var.footerProposingFlag="{!!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing)}">
-            <Text
-              when="{!!window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value) &amp;&amp; !window.__bramFooterSelectionEditable(headerInflightClaim.value, footerSel.value)}"
-              width="100%"
-              fontSize="$fontSize-md"
-              fontStyle="italic"
-              color="$color-primary-600"
-              value="{window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value)}" />
-            <!-- footer-selection-uncheck-in-place: a plain selection (no
-                 claim) shows each id behind a ticked box; clicking the box
-                 or the id drops it from the selection right here. The box is
-                 drawn, not a Checkbox: a live Checkbox inside Items keeps its
-                 own state by position (an untick would carry to the next id),
-                 and a readOnly one swallowed the click (live, 2026-10-15: the
-                 dom-click reached the INPUT, the row onClick never fired).
-                 Which ids render is decided by the data, per
-                 https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop
-                 (Icon: https://www.xmlui.org/docs/reference/components/Icon;
-                 custom icon registered in config.json under icon.*).
-                 Wraps because ids are long. -->
-            <HStack
-              when="{window.__bramFooterSelectionEditable(headerInflightClaim.value, footerSel.value)}"
-              width="100%" wrapContent="true" gap="$space-1" verticalAlignment="center">
-              <Text fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="Selected in Worklist:" />
-              <Items data="{footerSel.value}">
-                <HStack
-                  gap="$space-0_5"
-                  verticalAlignment="center"
-                  tooltip="Untick to remove from the selection"
-                  onClick="window.__bramW2Unselect($item)">
-                  <!-- The real checked box, drawn (resources/checkbox-checked.svg),
-                       in its theme color backgroundColor-checked-Checkbox. -->
-                  <Icon name="checkbox-checked" size="1em" color="$color-primary-500" />
-                  <Text fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="{$item}" />
-                </HStack>
-              </Items>
-              <Text when="{footerProposingFlag}" fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="· Proposing a new item…" />
-            </HStack>
-          </HStack>
+          <!-- The context line ("Selected in Worklist: …", the claim verb, "Proposing a
+               new item…") owns its sources in FooterContextLine.xmlui
+               (pane-sources-move-to-their-readers). -->
+          <FooterContextLine width="*" agentStatus="{mainAgentStatus.value}" />
         </HStack>
         <!-- switch-to-transcript-on-action: the indexing status moved to the
              bottom session-info row (flush right), clearing this row's right
@@ -1554,11 +1432,7 @@
                 onClick="dismissedAgentIds = window.__bramRestoreAllAgents()" />
             </DropdownMenu>
           </HStack>
-          <Text
-            when="{window.__bramFooterIndexLabel(footerIndexStatus.value)}"
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            value="{'· ' + window.__bramFooterIndexLabel(footerIndexStatus.value)}" />
+          <FooterIndexLabel />
         </HStack>
         <!-- composer-addressee-hugs-box (Jon): the chip slot moved from the
              line's start to its end, so the status sits flush left and does
@@ -1609,72 +1483,12 @@
             onClick="sendNoticeDismissed = window.__bramDismissSendNotice(window.__bramSendLedgerNoticeKey(sendLedgerDs.value))" />
         </HStack>
       </VStack>
-      <!-- Terminal-attention banner (issue-234): fires only when the host
-           detector is active AND the terminal pane is hidden (derived in
-           the bramSubscribeTerminalAttention bridge, helpers.js). No
-           dismiss button by design — it clears itself on PTY activity
-           (host-side) or when the terminal becomes visible (client-side
-           join), so there is nothing to hand-dismiss. -->
-      <VStack
-        when="{terminalAttentionEvt.value &amp;&amp; terminalAttentionEvt.value.active}"
-        padding="$space-2"
-        gap="$space-1"
-        backgroundColor="$color-warn-50"
-        borderTop="1px solid $color-warn-200">
-        <HStack gap="$space-2" verticalAlignment="center">
-          <Text
-            fontSize="$fontSize-sm"
-            width="*"
-            color="$color-warn-700"
-            value="{window.__bramTerminalAttentionText(terminalAttentionEvt.value)}" />
-          <!-- terminal-attention-login-screen (#448): a logged-out agent can
-               be traded for the other one, when the host found its CLI. -->
-          <Button
-            when="{!!(terminalAttentionEvt.value &amp;&amp; terminalAttentionEvt.value.switchTo)}"
-            label="{window.__bramTerminalAttentionSwitchLabel(terminalAttentionEvt.value)}"
-            variant="outlined"
-            size="xs"
-            onClick="window.__bramTerminalAttentionSwitch(terminalAttentionEvt.value, toast)" />
-          <Button
-            label="Open terminal"
-            variant="outlined"
-            size="xs"
-            onClick="window.__bramOpenTerminalForAttention()" />
-        </HStack>
-      </VStack>
-      <!-- Compaction-in-progress banner (compaction-in-progress-banner):
-           fires when the host's CompactionTracker sees the live PTY tail
-           CONTAINS the provider's "Compacting conversation" progress line
-           AND the terminal pane is hidden (derived in the
-           bramSubscribeCompaction bridge, helpers.js). This is a
-           text-PRESENCE detector, not terminal_attention's byte-silence
-           one — compaction actively prints a spinner, so it auto-clears
-           the moment the tail no longer shows that line (compaction
-           finished). Informational, not a warning: compaction is
-           autonomous and needs no answer, so this uses the info palette
-           (not warn) and, unlike the terminal-attention banner above,
-           carries a ✕ dismiss (send-ledger-notice idiom) that hides only
-           the current episode — a later compaction re-shows it. -->
-      <VStack
-        when="{compactionEvt.value &amp;&amp; compactionEvt.value.active}"
-        padding="$space-2"
-        gap="$space-1"
-        backgroundColor="$color-info-50"
-        borderTop="1px solid $color-info-200">
-        <HStack gap="$space-2" verticalAlignment="center">
-          <Text
-            fontSize="$fontSize-sm"
-            width="*"
-            color="$color-info-700"
-            value="Compacting context — the agent will resume shortly." />
-          <Button
-            label="✕"
-            variant="ghost"
-            size="xs"
-            tooltip="Dismiss this notice"
-            onClick="window.__bramDismissCompaction()" />
-        </HStack>
-      </VStack>
+      <!-- Terminal-attention banner (issue-234): TerminalAttentionBanner.xmlui
+           owns its source (pane-sources-move-to-their-readers). -->
+      <TerminalAttentionBanner />
+      <!-- Compaction-in-progress banner: CompactionBanner.xmlui owns its
+           source (pane-sources-move-to-their-readers). -->
+      <CompactionBanner />
       <!-- issue-231 footer tips: one context-driven, dismissible Tip line at
            the footer bottom, picked by window.__bramPickTip from the settings
            snapshot. Re-picks on mount and on footerTipTick bumps; Next skips

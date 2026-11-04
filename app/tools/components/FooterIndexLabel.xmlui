@@ -1,0 +1,20 @@
+<Component name="FooterIndexLabel">
+  <!-- pane-sources-move-to-their-readers (judell/bram#470): the footer's
+       "· Indexed N" text owns its source, so a search-index refresh redraws
+       this text, not the whole pane. Same per-component isolation as
+       ActivitySparkline.xmlui. Pushed via search-index-changed (no polling);
+       refetch on its tick. -->
+  <DataSource id="footerIndexStatus" url="/__search-index-status" />
+  <PushSource
+    id="footerIndexChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('search-index-changed')}" />
+  <ChangeListener
+    listenTo="{footerIndexChangedEvt.value &amp;&amp; footerIndexChangedEvt.value.tick}"
+    onDidChange="() => footerIndexStatus.refetch()" />
+  <Text
+    when="{window.__bramFooterIndexLabel(footerIndexStatus.value)}"
+    fontSize="$fontSize-sm"
+    color="$textColor-secondary"
+    value="{'· ' + window.__bramFooterIndexLabel(footerIndexStatus.value)}" />
+</Component>

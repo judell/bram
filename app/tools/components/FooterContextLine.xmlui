@@ -1,0 +1,85 @@
+<Component name="FooterContextLine">
+  <!-- pane-sources-move-to-their-readers (judell/bram#470): the footer's
+       context line owns the inflight-claim, Worklist-selection and proposing
+       sources it reads, so their refreshes redraw this line, not the whole
+       pane. Contract:
+         props   agentStatus — mainAgentStatus.value from Main.xmlui (used
+                 App-wide, so it stays there)
+       headerInflightClaim keeps url="/__inflight": XMLUI shares one cache
+       entry per url across instances
+       (https://www.xmlui.org/docs/reference/components/DataSource), so this
+       and Workspace's inflightClaim stay one source of truth (#265). Refresh
+       via refetch(), which invalidates the shared entry for all consumers. -->
+  <DataSource id="headerInflightClaim" url="/__inflight" />
+  <PushSource
+    id="headerInflightEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('inflight-claim-changed')}" />
+  <ChangeListener
+    listenTo="{headerInflightEvt.value}"
+    onDidChange="() => { headerInflightClaim.refetch(); window.__bramIframeTrace('refetch-called', {context: 'header-inflight-claim-changed'}); }" />
+  <!-- Backup driver: the dedicated inflight-claim-changed subscription dedups
+       against Workspace's, so also refetch whenever the agent status changes.
+       An in-flight action always makes the agent work, so this reliably
+       picks the claim up and drops it. -->
+  <ChangeListener
+    listenTo="{$props.agentStatus &amp;&amp; $props.agentStatus.state}"
+    onDidChange="() => { headerInflightClaim.refetch(); window.__bramIframeTrace('header-inflight-refetch', {state: ($props.agentStatus &amp;&amp; $props.agentStatus.state) || ''}); }" />
+  <!-- ONE combined context line — "Selected in Worklist: a, b" with
+       the claim verb parenthesized when work is in flight
+       ("… (Refining…)"). WRAPS rather than ellipsizing: item ids are
+       long, and the id is the message (Text wraps by default in a
+       width-constrained container —
+       xmlui.org/docs/howto/wrap-long-text-in-a-link). -->
+  <PushSource id="footerSel" initial="{[]}" subscribe="{window.bramSubscribeW2Selection()}" />
+  <!-- footer-says-proposing-new-item: no boot-state route by design —
+       a missed proposing-changed event just degrades to today's
+       silence until the next set/clear. `false` skips the
+       /__event/latest replay fetch that other PushSources use for
+       boot recovery (see bramSubscribeTauriEvent in helpers.js). -->
+  <PushSource id="footerProposing" initial="{null}" subscribe="{window.bramSubscribeTauriEvent('proposing-changed', false)}" />
+  <!-- Renders only when there's a context line: an empty container
+       still took its half of the row, and the status ellipsized
+       against blank space. -->
+  <HStack
+    when="{!!window.__bramFooterContextLine(headerInflightClaim.value, !!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing), footerSel.value, $props.agentStatus)}"
+    width="*" verticalAlignment="center" var.footerProposingFlag="{!!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing)}">
+    <Text
+      when="{!!window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, $props.agentStatus) &amp;&amp; !window.__bramFooterSelectionEditable(headerInflightClaim.value, footerSel.value)}"
+      width="100%"
+      fontSize="$fontSize-md"
+      fontStyle="italic"
+      color="$color-primary-600"
+      value="{window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, $props.agentStatus)}" />
+    <!-- footer-selection-uncheck-in-place: a plain selection (no
+         claim) shows each id behind a ticked box; clicking the box
+         or the id drops it from the selection right here. The box is
+         drawn, not a Checkbox: a live Checkbox inside Items keeps its
+         own state by position (an untick would carry to the next id),
+         and a readOnly one swallowed the click (live, 2026-10-15: the
+         dom-click reached the INPUT, the row onClick never fired).
+         Which ids render is decided by the data, per
+         https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop
+         (Icon: https://www.xmlui.org/docs/reference/components/Icon;
+         custom icon registered in config.json under icon.*).
+         Wraps because ids are long. -->
+    <HStack
+      when="{window.__bramFooterSelectionEditable(headerInflightClaim.value, footerSel.value)}"
+      width="100%" wrapContent="true" gap="$space-1" verticalAlignment="center">
+      <Text fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="Selected in Worklist:" />
+      <Items data="{footerSel.value}">
+        <HStack
+          gap="$space-0_5"
+          verticalAlignment="center"
+          tooltip="Untick to remove from the selection"
+          onClick="window.__bramW2Unselect($item)">
+          <!-- The real checked box, drawn (resources/checkbox-checked.svg),
+               in its theme color backgroundColor-checked-Checkbox. -->
+          <Icon name="checkbox-checked" size="1em" color="$color-primary-500" />
+          <Text fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="{$item}" />
+        </HStack>
+      </Items>
+      <Text when="{footerProposingFlag}" fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="· Proposing a new item…" />
+    </HStack>
+  </HStack>
+</Component>

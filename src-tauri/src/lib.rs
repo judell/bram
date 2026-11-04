@@ -62646,7 +62646,7 @@ fn bram_state_grep() -> Vec<&'static str> {
     ranked.into_iter().map(|(_, rel)| rel).collect()
 }
 
-const STATE_DIR_PLAN_NOTE: &str = "Nothing moves in this release. This is what 0.8.4 would do.";
+const STATE_DIR_PLAN_NOTE: &str = "Bram moves this folder at startup only when nothing in it is tracked or foreign and no claim is live.";
 const STATE_DIR_PLAN_TRACKED_CAP: usize = 200;
 
 fn owned_kind_label(kind: OwnedKind) -> &'static str {
@@ -62749,9 +62749,25 @@ fn state_dir_nested(root: &Path, state_name: &str) -> Vec<serde_json::Value> {
     found
 }
 
-// judell/bram#469: what the 0.8.4 state-folder move would do for `root`,
-// read-only. GET /__state-dir/plan serves it on the Status tab.
-fn state_dir_plan(root: &Path) -> serde_json::Value {
+// judell/bram#469: what the state-folder move would do for `root`, read-only.
+// The startup mover (migrate_state_dir) decides from this; state_dir_plan
+// serializes it for GET /__state-dir/plan and `bram --state-dir-plan`.
+struct StateDirPlan {
+    state_name: &'static str,
+    state_dir_exists: bool,
+    // (top-level name, inventory entry, is a directory)
+    would_move: Vec<(String, &'static OwnedEntry, bool)>,
+    foreign: Vec<(String, bool)>,
+    // None: the git query failed, so nobody knows what is tracked. The dry
+    // run reports that; the mover refuses on it (Codex review, 2026-11-04:
+    // a corrupt index let `rev-parse` pass while `ls-files` failed).
+    tracked: Option<Vec<String>>,
+    live_claim: bool,
+    claim_ids: Vec<String>,
+    auth_kind: Option<String>,
+}
+
+fn state_dir_plan_core(root: &Path, now_ms: i64) -> StateDirPlan {
     let state_name = bram_state_dir_name(root);
     let state_dir = bram_state_dir(root);
     let mut would_move = Vec::new();
@@ -62770,16 +62786,12 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
         for (name, is_dir) in names {
             match state_dir_entry_for(&name) {
                 Some(e) if e.class == OwnedClass::SeededContent => {}
-                Some(e) => would_move.push(serde_json::json!({
-                    "path": format!("{}/{}", state_name, name),
-                    "kind": owned_kind_label(e.kind),
-                    "isDir": is_dir,
-                })),
-                None => foreign.push(serde_json::json!({ "name": name, "isDir": is_dir })),
+                Some(e) => would_move.push((name, e, is_dir)),
+                None => foreign.push((name, is_dir)),
             }
         }
     }
-    let tracked: Vec<String> = std::process::Command::new("git")
+    let tracked: Option<Vec<String>> = std::process::Command::new("git")
         .current_dir(root)
         .args(["ls-files", "-z", "--", state_name])
         .stderr(std::process::Stdio::null())
@@ -62792,25 +62804,248 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
                 .filter(|s| !s.is_empty())
                 .map(|s| String::from_utf8_lossy(s).into_owned())
                 .collect()
+        });
+    let (live_claim, claim_ids, auth_kind) = state_dir_live_claim(root, now_ms);
+    StateDirPlan {
+        state_name,
+        state_dir_exists: state_dir.is_dir(),
+        would_move,
+        foreign,
+        tracked,
+        live_claim,
+        claim_ids,
+        auth_kind,
+    }
+}
+
+fn state_dir_plan(root: &Path) -> serde_json::Value {
+    let p = state_dir_plan_core(root, unix_now_ms());
+    let would_move: Vec<serde_json::Value> = p
+        .would_move
+        .iter()
+        .map(|(name, e, is_dir)| {
+            serde_json::json!({
+                "path": format!("{}/{}", p.state_name, name),
+                "kind": owned_kind_label(e.kind),
+                "isDir": is_dir,
+            })
         })
-        .unwrap_or_default();
-    let (live_claim, claim_ids, auth_kind) = state_dir_live_claim(root, unix_now_ms());
-    let nested = state_dir_nested(root, state_name);
+        .collect();
+    let foreign: Vec<serde_json::Value> = p
+        .foreign
+        .iter()
+        .map(|(name, is_dir)| serde_json::json!({ "name": name, "isDir": is_dir }))
+        .collect();
     serde_json::json!({
-        "stateDir": state_name,
-        "stateDirExists": state_dir.is_dir(),
+        "stateDir": p.state_name,
+        "stateDirExists": p.state_dir_exists,
         "wouldMove": would_move,
         "foreign": foreign,
         "tracked": {
-            "count": tracked.len(),
-            "paths": tracked.iter().take(STATE_DIR_PLAN_TRACKED_CAP).collect::<Vec<_>>(),
-            "truncated": tracked.len() > STATE_DIR_PLAN_TRACKED_CAP,
+            "known": p.tracked.is_some(),
+            "count": p.tracked.as_ref().map_or(0, |t| t.len()),
+            "paths": p.tracked.iter().flatten().take(STATE_DIR_PLAN_TRACKED_CAP).collect::<Vec<_>>(),
+            "truncated": p.tracked.as_ref().map_or(false, |t| t.len() > STATE_DIR_PLAN_TRACKED_CAP),
         },
-        "liveClaim": live_claim,
-        "liveClaimDetail": { "claimIds": claim_ids, "authorization": auth_kind },
-        "nested": nested,
+        "liveClaim": p.live_claim,
+        "liveClaimDetail": { "claimIds": p.claim_ids, "authorization": p.auth_kind },
+        "nested": state_dir_nested(root, p.state_name),
         "note": STATE_DIR_PLAN_NOTE,
     })
+}
+
+// judell/bram#469 0.8.4: the startup move, `resources/` -> `.bram/`, for this
+// root only (nested instances move themselves). One rename or nothing: a
+// blocked rename (any open handle under the folder on Windows, #474) is
+// retried, then this run stays on the old folder and the next startup tries
+// again. Never entry by entry, which would split state across two folders.
+#[derive(Debug, PartialEq, Eq)]
+enum StateMigrateOutcome {
+    Moved {
+        entries: usize,
+        ms: u128,
+        marker_written: bool,
+    },
+    Blocked {
+        os_error: Option<i32>,
+        attempts: u32,
+        restored: bool,
+    },
+    // Eligibility changed between rename attempts (a claim, a foreign or
+    // tracked entry appeared), so the run stopped without moving.
+    Abandoned {
+        reason: &'static str,
+        attempts: u32,
+        restored: bool,
+    },
+    Skipped(&'static str),
+}
+
+const STATE_MIGRATE_ATTEMPTS: u32 = 10;
+const STATE_MIGRATE_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+const STATE_MIGRATED_FROM_REL: &str = ".migrated-from";
+
+fn migrate_state_dir(root: &Path) -> StateMigrateOutcome {
+    migrate_state_dir_with(
+        root,
+        unix_now_ms(),
+        &mut |from, to| std::fs::rename(from, to),
+        STATE_MIGRATE_ATTEMPTS,
+        STATE_MIGRATE_PAUSE,
+    )
+}
+
+// Why the mover must not run now, or the plan it would act on. Checked
+// before the first rename and again before every retry: a running instance
+// or agent can create a claim, a foreign entry or tracked content while a
+// blocked rename waits (Codex review, 2026-11-04).
+fn state_migrate_eligibility(root: &Path, now_ms: i64) -> Result<StateDirPlan, &'static str> {
+    if root.join(BRAM_STATE_DIR_NEW).exists() {
+        return Err("already-moved");
+    }
+    if !root.join(BRAM_STATE_DIR_LEGACY).is_dir() {
+        return Err("no-old-folder");
+    }
+    let plan = state_dir_plan_core(root, now_ms);
+    match plan.tracked.as_ref() {
+        None => return Err("tracked-unknown"),
+        Some(t) if !t.is_empty() => return Err("tracked"),
+        Some(_) => {}
+    }
+    if !plan.foreign.is_empty() {
+        return Err("mixed");
+    }
+    if plan.live_claim {
+        return Err("live-claim");
+    }
+    Ok(plan)
+}
+
+fn migrate_state_dir_with(
+    root: &Path,
+    now_ms: i64,
+    rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
+    attempts: u32,
+    pause: std::time::Duration,
+) -> StateMigrateOutcome {
+    let old = root.join(BRAM_STATE_DIR_LEGACY);
+    let new = root.join(BRAM_STATE_DIR_NEW);
+    let plan = match state_migrate_eligibility(root, now_ms) {
+        Ok(plan) => plan,
+        Err(reason) => return StateMigrateOutcome::Skipped(reason),
+    };
+    let started = std::time::Instant::now();
+    // Written before the rename and carried by it, so the new folder is never
+    // stageable. A `.gitignore` here is a state-root dotfile (Bram-owned) and
+    // untracked, or eligibility would have refused. A prior one is discarded
+    // on success: `*` is the only rule `.bram/` needs. One that exists but
+    // can't be read stops the run, so a rollback never deletes what it
+    // couldn't restore.
+    let ignore = old.join(".gitignore");
+    let prior_ignore = match std::fs::read(&ignore) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return StateMigrateOutcome::Skipped("ignore-unreadable"),
+    };
+    // Without the `*` rule the moved folder would be stageable: don't move.
+    if std::fs::write(&ignore, "*\n").is_err() {
+        return StateMigrateOutcome::Skipped("ignore-write-failed");
+    }
+    // Leave the old folder as it was found; report whether that worked.
+    let restore = |prior: &Option<Vec<u8>>| match prior {
+        Some(bytes) => std::fs::write(&ignore, bytes).is_ok(),
+        None => std::fs::remove_file(&ignore).is_ok(),
+    };
+    let mut tried = 0;
+    loop {
+        tried += 1;
+        let err = match rename(&old, &new) {
+            Ok(()) => break,
+            Err(e) => e,
+        };
+        if tried >= attempts {
+            return StateMigrateOutcome::Blocked {
+                os_error: err.raw_os_error(),
+                attempts: tried,
+                restored: restore(&prior_ignore),
+            };
+        }
+        std::thread::sleep(pause);
+        if let Err(reason) = state_migrate_eligibility(root, now_ms) {
+            return StateMigrateOutcome::Abandoned {
+                reason,
+                attempts: tried,
+                restored: restore(&prior_ignore),
+            };
+        }
+    }
+    // The marker is what stops a second run, so a failed write is traced.
+    let marker_written = std::fs::write(
+        new.join(STATE_MIGRATED_FROM_REL),
+        format!("{} {}\n", old.display(), format_iso_utc(now_ms)),
+    )
+    .is_ok();
+    StateMigrateOutcome::Moved {
+        entries: plan.would_move.len(),
+        ms: started.elapsed().as_millis(),
+        marker_written,
+    }
+}
+
+fn ok_failed(ok: bool) -> &'static str {
+    if ok {
+        "ok"
+    } else {
+        "failed"
+    }
+}
+
+// The mover runs before the trace log opens (an open log handle under the
+// folder would block the rename), so its lines are returned for the caller
+// to write once prepare_bram_trace_log has run.
+fn state_migrate_trace_lines(outcome: &StateMigrateOutcome) -> Vec<String> {
+    match outcome {
+        StateMigrateOutcome::Skipped(reason) => vec![format!("op=skipped reason={}", reason)],
+        StateMigrateOutcome::Moved {
+            entries,
+            ms,
+            marker_written,
+        } => vec![
+            "op=start".to_string(),
+            format!(
+                "op=moved entries={} ms={} marker={}",
+                entries,
+                ms,
+                ok_failed(*marker_written)
+            ),
+        ],
+        StateMigrateOutcome::Blocked {
+            os_error,
+            attempts,
+            restored,
+        } => vec![
+            "op=start".to_string(),
+            format!(
+                "op=blocked os_error={} attempts={} restored={}",
+                os_error.map_or("none".to_string(), |n| n.to_string()),
+                attempts,
+                ok_failed(*restored)
+            ),
+        ],
+        StateMigrateOutcome::Abandoned {
+            reason,
+            attempts,
+            restored,
+        } => vec![
+            "op=start".to_string(),
+            format!(
+                "op=abandoned reason={} attempts={} restored={}",
+                reason,
+                attempts,
+                ok_failed(*restored)
+            ),
+        ],
+    }
 }
 
 // Tests that need a repo-relative state path as fixture data: a root with no
@@ -93041,6 +93276,223 @@ mod worklist_authorization_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // judell/bram#469 0.8.4 mover: a legacy folder holding only owned state.
+    fn state_migrate_root() -> std::path::PathBuf {
+        let root = state_dir_plan_temp_root();
+        let old = root.join(super::BRAM_STATE_DIR_LEGACY);
+        std::fs::create_dir_all(old.join("worklist-drafts")).unwrap();
+        std::fs::write(old.join("worklist.json"), "{}").unwrap();
+        std::fs::write(old.join(".bram-port"), "61455").unwrap();
+        // The mover runs only at a repo's root, and an inventory it can't
+        // query refuses (tracked-unknown), so the fixture is a repo.
+        assert!(std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["init", "-q"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        root
+    }
+
+    fn state_migrate(
+        root: &std::path::Path,
+        rename: &mut dyn FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    ) -> super::StateMigrateOutcome {
+        super::migrate_state_dir_with(
+            root,
+            super::unix_now_ms(),
+            rename,
+            3,
+            std::time::Duration::ZERO,
+        )
+    }
+
+    fn real_rename(a: &std::path::Path, b: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(a, b)
+    }
+
+    #[test]
+    fn state_migrate_moves_a_fresh_legacy_folder() {
+        let root = state_migrate_root();
+        let outcome = state_migrate(&root, &mut real_rename);
+        assert!(
+            matches!(
+                outcome,
+                super::StateMigrateOutcome::Moved { entries: 3, .. }
+            ),
+            "{:?}",
+            outcome
+        );
+        let new = root.join(super::BRAM_STATE_DIR_NEW);
+        assert!(!root.join(super::BRAM_STATE_DIR_LEGACY).exists());
+        assert_eq!(
+            std::fs::read_to_string(new.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+        assert!(new.join("worklist-drafts").is_dir());
+        let note = std::fs::read_to_string(new.join(super::STATE_MIGRATED_FROM_REL)).unwrap();
+        assert!(note.contains(super::BRAM_STATE_DIR_LEGACY), "{}", note);
+        // The resolver follows at once: the port file is found where it moved.
+        assert_eq!(
+            std::fs::read_to_string(resource_relative_path(&root, ".bram-port")).unwrap(),
+            "61455"
+        );
+        // And a second startup does nothing.
+        assert_eq!(
+            state_migrate(&root, &mut real_rename),
+            super::StateMigrateOutcome::Skipped("already-moved")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_migrate_skips_without_moving() {
+        let skipped = |root: &std::path::Path, reason: &'static str| {
+            let mut renames = 0;
+            let outcome = state_migrate(root, &mut |_, _| {
+                renames += 1;
+                Ok(())
+            });
+            assert_eq!(outcome, super::StateMigrateOutcome::Skipped(reason));
+            assert_eq!(renames, 0);
+            let _ = std::fs::remove_dir_all(root);
+        };
+        skipped(&state_dir_plan_temp_root(), "no-old-folder");
+        // A `.gitignore` that exists but can't be read as a file stops the run,
+        // so a blocked rename could never delete what it couldn't restore.
+        let root = state_migrate_root();
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_LEGACY).join(".gitignore"))
+            .unwrap();
+        skipped(&root, "ignore-unreadable");
+        // Both folders present.
+        let root = state_migrate_root();
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_NEW)).unwrap();
+        skipped(&root, "already-moved");
+        // A foreign entry: the mixed-folder dialog's case.
+        let root = state_migrate_root();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_LEGACY).join("notes.md"),
+            "x",
+        )
+        .unwrap();
+        skipped(&root, "mixed");
+        // A live claim.
+        let root = state_migrate_root();
+        std::fs::write(
+            resource_relative_path(&root, super::INFLIGHT_CLAIM_REL),
+            r#"{"ids":["some-item"]}"#,
+        )
+        .unwrap();
+        skipped(&root, "live-claim");
+        // A tracked file under the folder.
+        let root = state_migrate_root();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "--", super::BRAM_STATE_DIR_LEGACY]);
+        skipped(&root, "tracked");
+        // Codex review: the root is a repo, but the index can't be read, so
+        // `ls-files` fails. Unknown is not empty: nothing moves.
+        let root = state_migrate_root();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "--", super::BRAM_STATE_DIR_LEGACY]);
+        std::fs::write(root.join(".git").join("index"), b"not an index").unwrap();
+        skipped(&root, "tracked-unknown");
+    }
+
+    #[test]
+    fn state_migrate_abandons_when_a_claim_appears_between_retries() {
+        // Codex review: the first rename is blocked, and while it waits a
+        // running instance writes a claim. The retry must not move it.
+        let root = state_migrate_root();
+        let claim = resource_relative_path(&root, super::INFLIGHT_CLAIM_REL);
+        let mut calls = 0;
+        let outcome = state_migrate(&root, &mut |from, to| {
+            calls += 1;
+            if calls == 1 {
+                std::fs::write(&claim, r#"{"ids":["now-running"]}"#).unwrap();
+                return Err(std::io::Error::from_raw_os_error(5));
+            }
+            std::fs::rename(from, to)
+        });
+        assert_eq!(
+            outcome,
+            super::StateMigrateOutcome::Abandoned {
+                reason: "live-claim",
+                attempts: 1,
+                restored: true
+            }
+        );
+        assert_eq!(calls, 1, "no rename after eligibility changed");
+        assert!(root.join(super::BRAM_STATE_DIR_LEGACY).is_dir());
+        assert!(!root.join(super::BRAM_STATE_DIR_NEW).exists());
+        assert!(!root
+            .join(super::BRAM_STATE_DIR_LEGACY)
+            .join(".gitignore")
+            .exists());
+        assert_eq!(
+            super::state_migrate_trace_lines(&outcome),
+            vec![
+                "op=start",
+                "op=abandoned reason=live-claim attempts=1 restored=ok"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_migrate_blocked_rename_retries_then_leaves_the_folder() {
+        let root = state_migrate_root();
+        let mut calls = 0;
+        let outcome = state_migrate(&root, &mut |_, _| {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(5))
+        });
+        assert_eq!(
+            outcome,
+            super::StateMigrateOutcome::Blocked {
+                os_error: Some(5),
+                attempts: 3,
+                restored: true
+            }
+        );
+        assert_eq!(calls, 3);
+        let old = root.join(super::BRAM_STATE_DIR_LEGACY);
+        assert!(
+            !old.join(".gitignore").exists(),
+            "the pre-written ignore is removed"
+        );
+        assert!(old.join("worklist.json").is_file());
+        assert!(!root.join(super::BRAM_STATE_DIR_NEW).exists());
+        assert_eq!(
+            super::state_migrate_trace_lines(&outcome),
+            vec!["op=start", "op=blocked os_error=5 attempts=3 restored=ok"]
+        );
+        // Next startup, unblocked: the move goes through.
+        assert!(matches!(
+            state_migrate(&root, &mut real_rename),
+            super::StateMigrateOutcome::Moved { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // judell/bram#469: every construction of the state folder goes through
     // the resolver. Scans this file and worklist_state.rs at test time; a
     // line that must keep the literal carries the marker comment below, with
@@ -99770,6 +100222,24 @@ pub fn run() {
             // to ephemeral when the previous port is held by anything
             // else, including a second Bram instance.
             let startup_project_root = project_root(Some(app.handle()));
+            // judell/bram#469: move resources/ to .bram/ before anything
+            // opens a file under it. Traced after prepare_bram_trace_log.
+            let state_migrate_lines = startup_project_root.as_deref().map(|root| {
+                let outcome = if project_folder().is_ok() {
+                    migrate_state_dir(root)
+                } else {
+                    StateMigrateOutcome::Skipped("not-repo")
+                };
+                let lines = state_migrate_trace_lines(&outcome);
+                // Only an outcome the trace can't record goes to stderr: outside
+                // a project folder nothing is traced at all.
+                if matches!(outcome, StateMigrateOutcome::Skipped("not-repo")) {
+                    for line in &lines {
+                        eprintln!("[state-migrate] {}", line);
+                    }
+                }
+                lines
+            });
             set_shell_window_title(app.handle());
             // issue-414: --minimized / --open-app, or .bram.json "launch".
             apply_launch_options(app.handle(), startup_project_root.as_deref());
@@ -99813,6 +100283,9 @@ pub fn run() {
             // archive rename below would carry that handle into the archive
             // (test-drive-trace-before-archive).
             prepare_bram_trace_log(app.handle());
+            for line in state_migrate_lines.iter().flatten() {
+                append_bram_trace_line(app.handle(), "state-migrate", line);
+            }
             if test_drive_enabled() {
                 append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");
             }

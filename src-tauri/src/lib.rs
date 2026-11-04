@@ -63028,10 +63028,75 @@ fn state_dir_root_settings(root: &Path) -> serde_json::Value {
 // tracked file, so it asks the agent, once per distinct state of the file.
 const SETTINGS_NOTE_KIND: &str = "tracked-settings-dirty";
 const SETTINGS_NOTE_REL: &str = ".settings-note";
-const SETTINGS_NOTE: &str = "This project's tracked .bram.json differs from HEAD. Since 0.8.4 \
-Bram keeps personal settings in .bram/settings.json and never writes the root file. Propose a \
-worklist item that copies the personal keys (not team settings such as `server`) into \
-.bram/settings.json, keeping their values, and restores .bram.json to HEAD.";
+// settings-note-says-finish-with-drop: the recipe depends on what HEAD's
+// .bram.json holds. Team settings only (`server`): restore to HEAD, which
+// leaves nothing to commit, so the item ends in Drop (community-calendar,
+// 2026-11-04). Personal keys in HEAD: restoring would keep them tracked, so
+// they come out in a real commit, and other clones must copy theirs first
+// (Bram's own repo, 2026-11-04, 5d4f1a0). Unreadable HEAD: the agent decides.
+const SETTINGS_NOTE_TEAM_KEYS: &[&str] = &["server"];
+const SETTINGS_NOTE_HEAD: &str =
+    "This project's tracked .bram.json differs from HEAD. Since 0.8.4 \
+Bram keeps personal settings in .bram/settings.json and never writes the root file.";
+
+// The personal (non-team) top-level keys in HEAD's .bram.json; None when
+// HEAD's copy can't be read or parsed.
+fn head_settings_personal_keys(root: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["show", "HEAD:.bram.json"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(
+        v.as_object()?
+            .keys()
+            .filter(|k| !SETTINGS_NOTE_TEAM_KEYS.contains(&k.as_str()))
+            .cloned()
+            .collect(),
+    )
+}
+
+// (recipe for the trace, note text).
+fn settings_note_text(head_personal: Option<&[String]>) -> (&'static str, String) {
+    match head_personal {
+        Some([]) => (
+            "restore",
+            format!(
+                "{} Propose a worklist item that copies the personal keys (not team settings \
+such as `server`) into .bram/settings.json, keeping their values, and restores .bram.json to \
+HEAD. This leaves nothing to commit (.bram/ ignores itself), so say so when proposing, and \
+when the files are in place recommend Drop.",
+                SETTINGS_NOTE_HEAD
+            ),
+        ),
+        Some(keys) => (
+            "remove",
+            format!(
+                "{} HEAD's .bram.json itself holds personal keys ({}), so restoring it would \
+keep them tracked. Propose a worklist item that copies every personal key from the working file \
+into .bram/settings.json, keeping their values, then removes them from .bram.json: delete the \
+file if only personal keys remain, else keep just the team settings such as `server`. That is a \
+real commit. Its message should tell other clones to copy their own .bram.json keys into their \
+.bram/settings.json before pulling it.",
+                SETTINGS_NOTE_HEAD,
+                keys.join(", ")
+            ),
+        ),
+        None => (
+            "unknown",
+            format!(
+                "{} Propose a worklist item that copies the personal keys (not team settings \
+such as `server`) into .bram/settings.json, keeping their values, and takes them out of the \
+tracked .bram.json: restore it to HEAD if HEAD holds only team settings (nothing to commit; \
+recommend Drop), otherwise remove them in a commit.",
+                SETTINGS_NOTE_HEAD
+            ),
+        ),
+    }
+}
 
 // "<HEAD blob> <working blob>" when the tracked root .bram.json differs from
 // HEAD, else None (untracked, clean, absent, or git unavailable).
@@ -63069,9 +63134,11 @@ fn state_settings_note<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> St
     {
         return "op=settings-note skipped reason=already-asked".to_string();
     }
-    queue_host_note(app, SETTINGS_NOTE_KIND, SETTINGS_NOTE.to_string());
+    let head_personal = head_settings_personal_keys(root);
+    let (recipe, text) = settings_note_text(head_personal.as_deref());
+    queue_host_note(app, SETTINGS_NOTE_KIND, text);
     let _ = std::fs::write(&marker, format!("{}\n", sig));
-    "op=settings-note queued".to_string()
+    format!("op=settings-note queued recipe={}", recipe)
 }
 
 fn state_dir_plan(root: &Path) -> serde_json::Value {
@@ -87282,6 +87349,56 @@ mod state_url_tests {
         .unwrap();
         let sig = super::root_settings_signature(&root).unwrap();
         assert_eq!(sig.split(' ').count(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_note_recipe_follows_heads_keys() {
+        let (r, t) = super::settings_note_text(Some(&[]));
+        assert_eq!(r, "restore");
+        assert!(t.contains("restores .bram.json to HEAD") && t.contains("recommend Drop"));
+        let keys = vec!["shell".to_string(), "ui".to_string()];
+        let (r, t) = super::settings_note_text(Some(&keys));
+        assert_eq!(r, "remove");
+        assert!(t.contains("(shell, ui)") && t.contains("real commit"));
+        assert!(!t.contains("recommend Drop"));
+        let (r, _) = super::settings_note_text(None);
+        assert_eq!(r, "unknown");
+    }
+
+    #[test]
+    fn head_settings_personal_keys_skips_team_keys() {
+        let root =
+            std::env::temp_dir().join(format!("bram-settings-head-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join(".bram.json"), "{\"server\":{\"port\":1}}\n").unwrap();
+        git(&["add", ".bram.json"]);
+        git(&["commit", "-q", "-m", "team"]);
+        assert_eq!(super::head_settings_personal_keys(&root), Some(vec![]));
+        std::fs::write(
+            root.join(".bram.json"),
+            "{\"server\":{\"port\":1},\"shell\":{\"agent\":\"claude\"}}\n",
+        )
+        .unwrap();
+        git(&["commit", "-q", "-am", "personal"]);
+        assert_eq!(
+            super::head_settings_personal_keys(&root),
+            Some(vec!["shell".to_string()])
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

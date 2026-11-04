@@ -63116,6 +63116,104 @@ fn root_settings_signature(root: &Path) -> Option<String> {
     (head != work).then(|| format!("{} {}", head, work))
 }
 
+// untracked-root-bram-json-folds-into-state: 0.8.3 wrote personal keys to the
+// root `.bram.json`. Where the repo neither tracks nor ignores it, the move
+// left it stageable at the root (#469, Windows acceptance: `?? .bram.json` in
+// Studio and XMLUI). At every startup once the state folder is `.bram/`, an
+// untracked, unignored root file is folded into `.bram/settings.json`: renamed
+// into place when there is none, else deep-merged under it (settings.json
+// wins, the reader's rule) and removed. A `.bram.json~` beside it moves to
+// `.bram/.bram.json~`. Tracked (the settings note's case), ignored (kept
+// locally on purpose) and unparseable files stay. Returns the trace line, or
+// None when there is no root file or the folder hasn't moved.
+fn fold_untracked_root_settings(root: &Path) -> Option<String> {
+    if bram_state_dir_name(root) != BRAM_STATE_DIR_NEW {
+        return None;
+    }
+    let root_file = root.join(".bram.json");
+    if !root_file.is_file() {
+        return None;
+    }
+    let git_code = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()
+            .and_then(|s| s.code())
+    };
+    let skipped = |reason: &str| Some(format!("op=settings-fold-skipped reason={}", reason));
+    match git_code(&["ls-files", "--error-unmatch", "--", ".bram.json"]) {
+        Some(0) => return skipped("tracked"),
+        Some(1) => {}
+        _ => return skipped("git-unknown"),
+    }
+    match git_code(&["check-ignore", "-q", "--", ".bram.json"]) {
+        Some(0) => return skipped("ignored"),
+        Some(1) => {}
+        _ => return skipped("git-unknown"),
+    }
+    let root_value = match std::fs::read(&root_file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+    {
+        Some(v) if v.is_object() => v,
+        _ => return skipped("unparseable"),
+    };
+    let keys: Vec<String> = root_value
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    let state = bram_state_dir(root);
+    let target = state.join("settings.json");
+    let how = if target.exists() {
+        let current = match std::fs::read(&target)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        {
+            Some(v) if v.is_object() => v,
+            _ => return skipped("unparseable"),
+        };
+        let merged = merge_settings_into_config(root_value, &current);
+        let tmp = state.join(".settings.json.fold-tmp");
+        let bytes = match serde_json::to_vec_pretty(&merged) {
+            Ok(b) => b,
+            Err(_) => return skipped("write-failed"),
+        };
+        if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, &target).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return skipped("write-failed");
+        }
+        if std::fs::remove_file(&root_file).is_err() {
+            return skipped("write-failed");
+        }
+        "merge"
+    } else {
+        if std::fs::rename(&root_file, &target).is_err() {
+            return skipped("write-failed");
+        }
+        "rename"
+    };
+    let backup_file = root.join(".bram.json~");
+    let backup = if backup_file.is_file()
+        && git_code(&["ls-files", "--error-unmatch", "--", ".bram.json~"]) == Some(1)
+        && git_code(&["check-ignore", "-q", "--", ".bram.json~"]) == Some(1)
+        && std::fs::rename(&backup_file, state.join(".bram.json~")).is_ok()
+    {
+        "moved"
+    } else {
+        "none"
+    };
+    Some(format!(
+        "op=settings-folded how={} keys={} backup={}",
+        how,
+        keys.join(","),
+        backup
+    ))
+}
+
 // Called at startup after the trace log opens. Returns the trace line, and
 // queues the note only for a state of the file it hasn't asked about yet.
 fn state_settings_note<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> String {
@@ -87339,7 +87437,7 @@ mod project_path_refusal_tests {
         );
         assert_eq!(project_path_refusal("sub/.env"), Some("dot-segment"));
         assert_eq!(
-            project_path_refusal("resources/../src-tauri/Cargo.toml"),
+            project_path_refusal("resources/../src-tauri/Cargo.toml"), // state-dir: literal ok (a URL path under test, not the state folder)
             Some("traversal")
         );
         assert_eq!(
@@ -87356,7 +87454,7 @@ mod project_path_refusal_tests {
             "Main.xmlui.xs",
             "components/Query.xmlui",
             "themes/a.json",
-            "resources/code.svg",
+            "resources/code.svg", // state-dir: literal ok (a URL path under test, not the state folder)
             "orientation/index.html",
             "details",
             "a..b/c.txt",
@@ -87420,6 +87518,118 @@ mod state_url_tests {
         .unwrap();
         let sig = super::root_settings_signature(&root).unwrap();
         assert_eq!(sig.split(' ').count(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // untracked-root-bram-json-folds-into-state
+    fn fold_repo() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("bram-fold-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        fold_git(&root, &["init", "-q"]);
+        root
+    }
+
+    fn fold_git(root: &std::path::Path, args: &[&str]) {
+        assert!(std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+
+    fn read_json(p: std::path::PathBuf) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn fold_renames_an_untracked_root_file_into_place() {
+        let root = fold_repo();
+        std::fs::write(root.join(".bram.json"), r#"{"shell":{"agent":"claude"}}"#).unwrap();
+        std::fs::write(root.join(".bram.json~"), "{}").unwrap();
+        let line = super::fold_untracked_root_settings(&root).unwrap();
+        assert_eq!(
+            line,
+            "op=settings-folded how=rename keys=shell backup=moved"
+        );
+        assert!(!root.join(".bram.json").exists());
+        assert!(!root.join(".bram.json~").exists());
+        assert!(root.join(".bram/.bram.json~").is_file());
+        assert_eq!(
+            read_json(root.join(".bram/settings.json"))["shell"]["agent"],
+            "claude"
+        );
+        // Nothing left to fold: no line.
+        assert!(super::fold_untracked_root_settings(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fold_merges_under_existing_settings_which_win() {
+        let root = fold_repo();
+        std::fs::write(
+            root.join(".bram.json"),
+            r#"{"shell":{"agent":"codex","args":"--x"},"ui":{"a":1}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".bram/settings.json"),
+            r#"{"shell":{"agent":"claude"}}"#,
+        )
+        .unwrap();
+        let line = super::fold_untracked_root_settings(&root).unwrap();
+        assert_eq!(
+            line,
+            "op=settings-folded how=merge keys=shell,ui backup=none"
+        );
+        assert!(!root.join(".bram.json").exists());
+        let v = read_json(root.join(".bram/settings.json"));
+        assert_eq!(v["shell"]["agent"], "claude");
+        assert_eq!(v["shell"]["args"], "--x");
+        assert_eq!(v["ui"]["a"], 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fold_leaves_tracked_ignored_and_unparseable_files() {
+        let root = fold_repo();
+        std::fs::write(root.join(".bram.json"), r#"{"server":{"port":1}}"#).unwrap();
+        fold_git(&root, &["add", ".bram.json"]);
+        fold_git(&root, &["commit", "-q", "-m", "team"]);
+        assert_eq!(
+            super::fold_untracked_root_settings(&root).unwrap(),
+            "op=settings-fold-skipped reason=tracked"
+        );
+        fold_git(&root, &["rm", "-q", "--cached", ".bram.json"]);
+        std::fs::write(root.join(".gitignore"), ".bram.json\n").unwrap();
+        assert_eq!(
+            super::fold_untracked_root_settings(&root).unwrap(),
+            "op=settings-fold-skipped reason=ignored"
+        );
+        std::fs::remove_file(root.join(".gitignore")).unwrap();
+        std::fs::write(root.join(".bram.json"), "not json").unwrap();
+        assert_eq!(
+            super::fold_untracked_root_settings(&root).unwrap(),
+            "op=settings-fold-skipped reason=unparseable"
+        );
+        assert!(root.join(".bram.json").is_file());
+        assert!(!root.join(".bram/settings.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fold_waits_for_the_move() {
+        let root = std::env::temp_dir().join(format!("bram-fold-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_LEGACY)).unwrap();
+        fold_git(&root, &["init", "-q"]);
+        std::fs::write(root.join(".bram.json"), r#"{"shell":{}}"#).unwrap();
+        assert!(super::fold_untracked_root_settings(&root).is_none());
+        assert!(root.join(".bram.json").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -101501,6 +101711,9 @@ pub fn run() {
                 }
             }
             if let Some(proj) = startup_project_root.as_ref() {
+                if let Some(line) = fold_untracked_root_settings(proj) {
+                    append_bram_trace_line(app.handle(), "state-migrate", &line);
+                }
                 let line = state_settings_note(app.handle(), proj);
                 append_bram_trace_line(app.handle(), "state-migrate", &line);
             }

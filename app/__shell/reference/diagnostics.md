@@ -264,7 +264,7 @@ The tool deliberately does not score `result_count`, parse
 provider-specific transcripts, or correlate frustration by clock time.
 `--analytics`, `--howto-dir`, `--search-url`, and `--port-file` make each
 input explicit; defaults target the local XMLUI analytics/cache,
-`~/xmlui` how-tos, and this project's `resources/.bram-port`.
+`~/xmlui` how-tos, and this project's `.bram-port` in its state folder (`.bram/`, or `resources/` before 0.8.4).
 
 ## Citing evidence and the search-wins ledger
 

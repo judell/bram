@@ -63417,6 +63417,19 @@ fn migrate_state_dir_selective(
     }
 }
 
+// A session resumed after a move may hold `resources/` paths from its earlier
+// turns, so a startup that moved queues this note for its next plain turn.
+const STATE_MOVED_NOTE_KIND: &str = "state-folder-moved";
+const STATE_MOVED_NOTE: &str = "Bram's state folder moved from `resources/` to `.bram/` (0.8.4). \
+Paths under `resources/` in earlier turns of this session now live under `.bram/`.";
+
+fn state_migrate_moved(outcome: &StateMigrateOutcome) -> bool {
+    matches!(
+        outcome,
+        StateMigrateOutcome::Moved { .. } | StateMigrateOutcome::MovedSelective { .. }
+    )
+}
+
 fn ok_failed(ok: bool) -> &'static str {
     if ok {
         "ok"
@@ -86954,21 +86967,28 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
-    // worklist.json is the worklist convention. Treat it as always-present
-    // (empty when the project hasn't opted in) so the Workspace tool can
-    // poll without flooding devtools with 404s in guest projects.
-    // The URL keeps its name whatever the folder is called; the file is read
-    // from Bram's state folder.
-    const WORKLIST_URL_PATH: &str = "resources/worklist.json"; // state-dir: literal ok (URL route the pane fetches)
-    if path == WORKLIST_URL_PATH {
+    // judell/bram#469 0.8.4: `/__bram/<rel>` serves Bram's state folder,
+    // whatever it is called; `/resources/<rel>` is its alias until 0.8.5. The
+    // alias answers a file still in `resources/` first (a target app's own
+    // asset, or one a selective move left behind). worklist.json is always
+    // present, empty when the project hasn't opted in, so a poll of it doesn't
+    // flood devtools with 404s.
+    if let Some((rel, alias)) = state_url_rel(path) {
         let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
-        return match std::fs::read(resource_relative_path(&proj, "worklist.json")) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(_) => (
+        let legacy = proj.join(BRAM_STATE_DIR_LEGACY).join(rel);
+        let file = if alias && legacy.is_file() {
+            legacy
+        } else {
+            resource_relative_path(&proj, rel)
+        };
+        return match std::fs::read(&file) {
+            Ok(bytes) => (200, mime_for(&file), bytes),
+            Err(_) if rel == "worklist.json" => (
                 200,
                 "application/json; charset=utf-8",
                 empty_worklist_json().as_bytes().to_vec(),
             ),
+            Err(_) => (404, "text/plain; charset=utf-8", Vec::new()),
         };
     }
 
@@ -86997,8 +87017,8 @@ fn route_request<R: tauri::Runtime>(
     // from EMBEDDED_APP's founding comment: XMLUI probes optional
     // code-behind files that must genuinely 404 — so only extensionless
     // misses fall back (the try_files-shaped predicate below), and asset
-    // typos keep their honest 404s. Reserved namespaces (__*, /query,
-    // resources/worklist.json) returned earlier in this function, so they
+    // typos keep their honest 404s. Reserved namespaces (__*, /query, the
+    // state folder's resources/ alias) returned earlier in this function, so they
     // are unshadowable by position. Projects without a root index.html keep
     // the old behavior exactly.
     let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
@@ -87036,6 +87056,26 @@ fn spa_fallback_eligible(path: &str) -> bool {
     !last.is_empty() && !last.contains('.')
 }
 
+// judell/bram#469: the part of a `__bram/<rel>` or alias `resources/<rel>`
+// request path below the state folder, and whether it came by the alias.
+// None for any other path, and for a `rel` that could leave the folder
+// (empty, `.` or `..` segments, a backslash or a drive colon).
+fn state_url_rel(path: &str) -> Option<(&str, bool)> {
+    let (rest, alias) = match path.strip_prefix("__bram/") {
+        Some(rest) => (rest, false),
+        None => (
+            path.strip_prefix(BRAM_STATE_DIR_LEGACY)?
+                .strip_prefix('/')?,
+            true,
+        ),
+    };
+    let inside = !rest.contains(['\\', ':'])
+        && rest
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
+    inside.then_some((rest, alias))
+}
+
 #[cfg(test)]
 mod spa_fallback_tests {
     use super::spa_fallback_eligible;
@@ -87051,6 +87091,83 @@ mod spa_fallback_tests {
         // Trailing slash: final segment empty — not a fallback candidate
         // (the bare root is handled before the predicate).
         assert!(!spa_fallback_eligible("details/"));
+    }
+}
+
+#[cfg(test)]
+mod state_url_tests {
+    use super::{state_migrate_moved, state_url_rel, StateMigrateOutcome, BRAM_STATE_DIR_LEGACY};
+
+    #[test]
+    fn bram_route_and_alias_map_into_the_state_folder() {
+        assert_eq!(
+            state_url_rel("__bram/worklist.json"),
+            Some(("worklist.json", false))
+        );
+        assert_eq!(
+            state_url_rel("__bram/bram-traces/bram-trace.log"),
+            Some(("bram-traces/bram-trace.log", false))
+        );
+        let alias = format!("{}/worklist.json", BRAM_STATE_DIR_LEGACY);
+        assert_eq!(state_url_rel(&alias), Some(("worklist.json", true)));
+        for other in [
+            "index.html",
+            "__bramx/a",
+            "resourcesx/a",
+            "__worklist",
+            "__bram",
+        ] {
+            assert_eq!(state_url_rel(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn state_url_refuses_paths_that_could_leave_the_folder() {
+        for bad in [
+            "__bram/",
+            "__bram/../Cargo.toml",
+            "__bram/a/../../x",
+            "__bram/./x",
+            "__bram/a//b",
+            "__bram/a/",
+            "__bram/..\\x",
+            "__bram/C:/x",
+        ] {
+            assert_eq!(state_url_rel(bad), None, "{bad}");
+        }
+        let alias_up = format!("{}/../Cargo.toml", BRAM_STATE_DIR_LEGACY);
+        assert_eq!(state_url_rel(&alias_up), None);
+    }
+
+    #[test]
+    fn only_a_move_queues_the_resumed_session_note() {
+        assert!(state_migrate_moved(&StateMigrateOutcome::Moved {
+            entries: 3,
+            ms: 1,
+            marker_written: true,
+        }));
+        assert!(state_migrate_moved(&StateMigrateOutcome::MovedSelective {
+            entries: 3,
+            left: 1,
+            marker_written: false,
+        }));
+        assert!(!state_migrate_moved(&StateMigrateOutcome::Skipped(
+            "already-moved"
+        )));
+        assert!(!state_migrate_moved(&StateMigrateOutcome::Blocked {
+            os_error: Some(32),
+            attempts: 10,
+            restored: true,
+        }));
+        assert!(!state_migrate_moved(
+            &StateMigrateOutcome::SelectiveFailed {
+                reason: "blocked",
+                os_error: None,
+                entry: "worklist.json".to_string(),
+                moved: 0,
+                rolled_back: true,
+            }
+        ));
     }
 }
 
@@ -100860,7 +100977,7 @@ pub fn run() {
                         eprintln!("[state-migrate] {}", line);
                     }
                 }
-                lines
+                (lines, state_migrate_moved(&outcome))
             });
             set_shell_window_title(app.handle());
             // issue-414: --minimized / --open-app, or .bram.json "launch".
@@ -100905,8 +101022,20 @@ pub fn run() {
             // archive rename below would carry that handle into the archive
             // (test-drive-trace-before-archive).
             prepare_bram_trace_log(app.handle());
-            for line in state_migrate_lines.iter().flatten() {
-                append_bram_trace_line(app.handle(), "state-migrate", line);
+            if let Some((lines, moved)) = &state_migrate_lines {
+                for line in lines {
+                    append_bram_trace_line(app.handle(), "state-migrate", line);
+                }
+                // No rescan request is needed: the search indexer's first
+                // pass (below) reads worklist-history through the resolver,
+                // under keys that don't name the folder.
+                if *moved {
+                    queue_host_note(
+                        app.handle(),
+                        STATE_MOVED_NOTE_KIND,
+                        STATE_MOVED_NOTE.to_string(),
+                    );
+                }
             }
             if test_drive_enabled() {
                 append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");

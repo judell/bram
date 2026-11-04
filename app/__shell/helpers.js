@@ -1689,14 +1689,14 @@ window.__bramNewSessionBrief = function (words, predecessor) {
   // so name the digest Bram wrote; its header names the full transcript.
   if (predecessor && predecessor.digest) {
     prev += ", whose latest turns Bram wrote to `" + predecessor.digest +
-      "` (its header names the full transcript if you need more)";
+      "` in its state folder (`.bram/` if it exists, else `resources/`; the header names the full transcript if you need more)";
   }
   return [
     "You're starting a new session for this line of work, in my words:",
     "",
     String(words || "").trim(),
     "",
-    "Before anything else, build your context for it. Search the project history (/__search; the port is in resources/.bram-port) for what bears on it, and read " + prev + " where it's relevant.",
+    "Before anything else, build your context for it. Search the project history (/__search; the port is in .bram-port in Bram's state folder: .bram/ if it exists, else resources/) for what bears on it, and read " + prev + " where it's relevant.",
     "",
     "Then tell me what you found, with citations; what you looked for and didn't find; and what you think should frame this work. Don't change files or propose worklist items yet. We'll settle the framing together first.",
   ].join("\n");
@@ -1712,7 +1712,7 @@ window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, 
       id: offer.id,
       title: offer.title,
       // provider-session-digest-for-codex: the host writes this before launch.
-      digest: "resources/session-digests/" + offer.provider + "-" + offer.id + ".md",
+      digest: "session-digests/" + offer.provider + "-" + offer.id + ".md",
     };
   }
   if (typeof toastApi === "function") toastApi("Starting a new session…");
@@ -7266,7 +7266,7 @@ window.__bramSetupInfoMarkdown = function () {
     "",
     "**What Setup writes**",
     "",
-    "- `resources/.worklist-authorization.json`, the approval record every agent's guard reads.",
+    "- `.worklist-authorization.json` in Bram's state folder (`.bram/`, or `resources/` before 0.8.4), the approval record every agent's guard reads.",
     "- The conventions file, `.claude/bram-conventions.md`, and its reference files.",
     "- **Claude:** an import in `CLAUDE.md`, and the worklist-guard and permission hooks.",
     "- **Codex:** a block in `AGENTS.md`, plus `developer_instructions` and hooks in `~/.codex/config.toml`.",

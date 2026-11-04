@@ -766,7 +766,7 @@
       <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.projectRoot}" />.
       Setup writes <Text inline="true" fontFamily="$fontFamily-monospace" value=".bram.json" />,
       <Text inline="true" fontFamily="$fontFamily-monospace" value="AGENTS.md" />,
-      <Text inline="true" fontFamily="$fontFamily-monospace" value="resources/" /> (worklist, port
+      <Text inline="true" fontFamily="$fontFamily-monospace" value=".bram/" /> (worklist, port
       sidecar, traces) and <Text inline="true" fontFamily="$fontFamily-monospace" value=".claude/" />
       (conventions, hooks, skills, settings).
     </Text>

@@ -1060,6 +1060,18 @@ both facts and the exact git toplevel before acting. Transfer a scenario
 branch with ordinary Git plumbing (for example, a bundle), but never add
 an upstream to the disposable instance.
 
+**Layout.** A scenario branch stores the board under `resources/`, the
+0.8.3 layout, so every capture stays valid for both binaries. Hydration
+(`new`, `use`, `reset`, `capture`) moves it into `.bram/` the way the
+mover does: `.gitignore` = `*` first, then the entries, then
+`.migrated-from`, so the demo's binary never runs the mover on it. The
+live port and traces survive in either folder. `capture` reads the board
+from whichever folder is live and writes it back at the `resources/`
+paths, so a board captured in either layout gives the same tree. Pass
+`--legacy-layout` to hydrate the 0.8.3 way and exercise the real mover.
+`reset` and `capture` repeat the active layout; `new` and `use` default
+to `.bram/` (judell/bram#469).
+
 ### Switch matrix
 
 `scripts/switch-matrix.py` drives the session-switching matrix from

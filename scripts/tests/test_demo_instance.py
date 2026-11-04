@@ -28,10 +28,13 @@ def git(repo: Path, *args: str) -> str:
 
 
 def worktree_snapshot(repo: Path) -> dict[str, bytes]:
+    # .bram/.migrated-from carries the hydrate's time, so it differs by design.
     return {
         str(path.relative_to(repo)): path.read_bytes()
         for path in sorted(repo.rglob("*"))
-        if path.is_file() and ".git" not in path.relative_to(repo).parts
+        if path.is_file()
+        and ".git" not in path.relative_to(repo).parts
+        and path.relative_to(repo).as_posix() != ".bram/.migrated-from"
     }
 
 
@@ -66,7 +69,7 @@ class DemoInstanceTests(unittest.TestCase):
         self.assertTrue(git(self.repo, "status", "--short"))
         self.assertEqual(git(self.repo, "ls-files", demo.SCENARIO_META), "")
 
-        claims = json.loads((self.repo / demo.CLAIMS).read_text())["intervals"]
+        claims = json.loads(demo.state_path(self.repo, demo.CLAIMS).read_text())["intervals"]
         self.assertGreaterEqual(len(claims), 6)
         self.assertEqual(
             claim_refs(self.repo),
@@ -77,7 +80,7 @@ class DemoInstanceTests(unittest.TestCase):
 
     def test_starters_measure_safe_and_dependency_sensitive_commit_orders(self) -> None:
         self.new()
-        claims = json.loads((self.repo / demo.CLAIMS).read_text())["intervals"]
+        claims = json.loads(demo.state_path(self.repo, demo.CLAIMS).read_text())["intervals"]
 
         # Byte-exact on purpose: routing the diff through text mode and
         # write_text() lets platform newline translation rewrite the patch
@@ -148,7 +151,7 @@ class DemoInstanceTests(unittest.TestCase):
 
     def test_every_starter_hydrates(self) -> None:
         self.new("all", list(demo.STARTERS))
-        board = json.loads((self.repo / demo.WORKLIST).read_text())["items"]
+        board = json.loads(demo.state_path(self.repo, demo.WORKLIST).read_text())["items"]
         for starter in demo.STARTERS:
             self.assertTrue(
                 any(item["id"].startswith(starter) for item in board), starter
@@ -172,7 +175,7 @@ class DemoInstanceTests(unittest.TestCase):
 
         items = {
             item["id"]: item
-            for item in json.loads((self.repo / demo.WORKLIST).read_text())["items"]
+            for item in json.loads(demo.state_path(self.repo, demo.WORKLIST).read_text())["items"]
         }
         self.assertEqual(
             set(items), {"new-file-left-out-author", "new-file-left-out-neighbour"}
@@ -186,7 +189,7 @@ class DemoInstanceTests(unittest.TestCase):
         self.assertEqual(items["new-file-left-out-neighbour"]["files"], [own])
         self.assertEqual(git(self.repo, "ls-files", "--", own), own)
         self.assertNotIn(own, git(self.repo, "diff", "--name-only").splitlines())
-        claims = json.loads((self.repo / demo.CLAIMS).read_text())["intervals"]
+        claims = json.loads(demo.state_path(self.repo, demo.CLAIMS).read_text())["intervals"]
         windows = [record["ids"] for record in claims]
         self.assertEqual(windows.count(["new-file-left-out-author"]), 2)
         self.assertEqual(windows.count(["new-file-left-out-neighbour"]), 1)
@@ -196,9 +199,9 @@ class DemoInstanceTests(unittest.TestCase):
         path = "demo/chat-edit-in-item-file-file.txt"
         self.assertEqual(git(self.repo, "ls-files", "--", path), path)
         self.assertIn(path, git(self.repo, "diff", "--name-only").splitlines())
-        items = json.loads((self.repo / demo.WORKLIST).read_text())["items"]
+        items = json.loads(demo.state_path(self.repo, demo.WORKLIST).read_text())["items"]
         self.assertEqual([item["id"] for item in items], ["chat-edit-in-item-file-author"])
-        claims = json.loads((self.repo / demo.CLAIMS).read_text())["intervals"]
+        claims = json.loads(demo.state_path(self.repo, demo.CLAIMS).read_text())["intervals"]
         author = ["chat-edit-in-item-file-author"]
         self.assertEqual([record["ids"] for record in claims], [author, [], author, []])
         trees = [record["tree"] for record in claims]
@@ -210,15 +213,15 @@ class DemoInstanceTests(unittest.TestCase):
 
     def test_reset_is_byte_and_ref_exact(self) -> None:
         self.new()
-        (self.repo / "resources/.bram-port").write_text("55123\n")
-        (self.repo / "resources/.bram-port.json").write_text('{"port":55123}\n')
-        trace = self.repo / "resources/bram-traces/bram-trace.log"
+        (self.repo / ".bram/.bram-port").write_text("55123\n")
+        (self.repo / ".bram/.bram-port.json").write_text('{"port":55123}\n')
+        trace = self.repo / ".bram/bram-traces/bram-trace.log"
         trace.parent.mkdir(parents=True)
         trace.write_text("live trace\n")
         before_files = worktree_snapshot(self.repo)
         before_refs = claim_refs(self.repo)
         (self.repo / "demo/disjoint-entanglement.txt").write_text("damaged\n")
-        (self.repo / demo.WORKLIST).write_text('{"items":[]}\n')
+        demo.state_path(self.repo, demo.WORKLIST).write_text('{"items":[]}\n')
         git(self.repo, "update-ref", "refs/bram/claims/999", "HEAD^{tree}")
         (self.repo / "stray.tmp").write_text("remove me\n")
 
@@ -241,6 +244,100 @@ class DemoInstanceTests(unittest.TestCase):
         self.assertEqual(demo.reset_scenario(self.repo), "full")
         self.assertEqual(port.read_text(), "55123\n")
         self.assertEqual(trace.read_text(), "live trace\n")
+
+    def test_hydrates_into_dot_bram_as_the_mover_lays_it_out(self) -> None:
+        self.new()
+        state = self.repo / ".bram"
+        self.assertEqual(demo.bram_state.state_dir_name(self.repo), ".bram")
+        self.assertFalse((self.repo / "resources").exists())
+        self.assertEqual((state / ".gitignore").read_bytes(), b"*\n")
+        marker = (state / ".migrated-from").read_text()
+        self.assertTrue(marker.startswith(f"{self.repo.resolve() / 'resources'} "), marker)
+        self.assertTrue(marker.rstrip().endswith(" demo-hydrate"), marker)
+        for rel in (demo.WORKLIST, demo.CLAIMS, demo.DRAFTS):
+            self.assertTrue((state / rel).exists(), rel)
+        # Nothing under .bram/ is stageable, and the scenario branch keeps
+        # its resources/ layout.
+        self.assertNotIn(".bram", git(self.repo, "status", "--short", "--untracked-files=all"))
+        listed = git(self.repo, "ls-tree", "-r", "--name-only", "scenario/full").splitlines()
+        self.assertIn("resources/worklist.json", listed)
+        self.assertFalse(any(path.startswith(".bram/") for path in listed))
+        self.assertEqual(
+            json.loads((demo._runtime_root(self.repo) / "active.json").read_text())["layout"],
+            demo.LAYOUT_NEW,
+        )
+
+    def test_reset_keeps_live_port_and_traces_from_either_folder(self) -> None:
+        self.new()
+        # A live instance still on resources/ (it started before the hydrate)
+        # has its port and trace carried into .bram/.
+        legacy = self.repo / "resources"
+        (legacy / "bram-traces").mkdir(parents=True)
+        (legacy / ".bram-port").write_text("55123\n")
+        (legacy / "bram-traces/bram-trace.log").write_text("legacy trace\n")
+        # The board in .bram/ goes stale; reset must rewrite it.
+        demo.state_path(self.repo, demo.WORKLIST).write_text('{"items":[]}\n')
+        demo.reset_scenario(self.repo)
+        state = self.repo / ".bram"
+        self.assertFalse(legacy.exists())
+        self.assertEqual((state / ".bram-port").read_text(), "55123\n")
+        self.assertEqual((state / "bram-traces/bram-trace.log").read_text(), "legacy trace\n")
+        self.assertTrue(json.loads((state / demo.WORKLIST).read_text())["items"])
+
+    def test_legacy_layout_hydrates_resources_and_reset_repeats_it(self) -> None:
+        demo.new_scenario(
+            self.repo, "old", ["dependency"], layout=demo.LAYOUT_LEGACY
+        )
+        self.assertFalse((self.repo / ".bram").exists())
+        self.assertEqual(demo.bram_state.state_dir_name(self.repo), "resources")
+        self.assertTrue((self.repo / "resources" / demo.WORKLIST).is_file())
+        trace = self.repo / "resources/bram-traces/bram-trace.log"
+        trace.parent.mkdir(parents=True)
+        trace.write_text("live trace\n")
+
+        demo.reset_scenario(self.repo)
+        self.assertFalse((self.repo / ".bram").exists())
+        self.assertTrue((self.repo / "resources" / demo.WORKLIST).is_file())
+        self.assertEqual(trace.read_text(), "live trace\n")
+
+        # An explicit layout overrides the remembered one, live files included.
+        demo.use_scenario(self.repo, "old")
+        self.assertFalse((self.repo / "resources").exists())
+        self.assertEqual((self.repo / ".bram/bram-traces/bram-trace.log").read_text(), "live trace\n")
+        demo.reset_scenario(self.repo, demo.LAYOUT_LEGACY)
+        self.assertFalse((self.repo / ".bram").exists())
+        self.assertEqual(trace.read_text(), "live trace\n")
+
+    def test_capture_stores_the_same_tree_from_either_layout(self) -> None:
+        self.new("start", ["dependency", "expired-authorization"])
+        extra = demo.state_path(self.repo, "feedback-drafts/1-dependency-prepare.md")
+        extra.parent.mkdir(parents=True)
+        extra.write_text("user feedback\n")
+
+        def tree(name: str) -> list[str]:
+            # Every entry but the metadata, which names its own scenario.
+            return [
+                line
+                for line in git(self.repo, "ls-tree", "-r", f"scenario/{name}").splitlines()
+                if not line.endswith("\t" + demo.SCENARIO_META)
+            ]
+
+        demo.capture_scenario(self.repo, "from-new")
+        self.assertEqual(demo.bram_state.state_dir_name(self.repo), ".bram")
+        demo.use_scenario(self.repo, "from-new", demo.LAYOUT_LEGACY)
+        demo.capture_scenario(self.repo, "from-legacy")
+        self.assertEqual(demo.bram_state.state_dir_name(self.repo), "resources")
+        self.assertEqual(tree("from-new"), tree("from-legacy"))
+        listed = git(self.repo, "ls-tree", "-r", "--name-only", "scenario/from-new").splitlines()
+        for rel in (
+            "resources/worklist.json",
+            "resources/.claim-intervals.json",
+            "resources/.worklist-authorization.json",
+            "resources/worklist-drafts/dependency-prepare.md",
+            "resources/feedback-drafts/1-dependency-prepare.md",
+        ):
+            self.assertIn(rel, listed)
+        self.assertFalse(any(p.startswith(".bram/") or "migrated-from" in p for p in listed))
 
     def test_capture_turns_a_stumbled_state_into_a_scenario(self) -> None:
         self.new("starting", ["supersession"])
@@ -265,18 +362,18 @@ class DemoInstanceTests(unittest.TestCase):
 
         demo.use_scenario(self.repo, "one")
         self.assertEqual(claim_refs(self.repo), one_refs)
-        claims = json.loads((self.repo / demo.CLAIMS).read_text())["intervals"]
+        claims = json.loads(demo.state_path(self.repo, demo.CLAIMS).read_text())["intervals"]
         self.assertTrue(all("disjoint-entanglement" in item for record in claims for item in record["ids"]))
 
     def test_add_starter_is_live_until_captured(self) -> None:
         self.new("base", ["dependency"])
         demo.add_starter(self.repo, "expired-authorization")
-        auth = json.loads((self.repo / demo.AUTH).read_text())
+        auth = json.loads(demo.state_path(self.repo, demo.AUTH).read_text())
         self.assertEqual(auth["issuedAtMs"], 1)
-        self.assertIn("expired-authorization", (self.repo / demo.WORKLIST).read_text())
+        self.assertIn("expired-authorization", demo.state_path(self.repo, demo.WORKLIST).read_text())
         demo.capture_scenario(self.repo, "with-expired-auth")
         demo.reset_scenario(self.repo)
-        self.assertEqual(json.loads((self.repo / demo.AUTH).read_text())["issuedAtMs"], 1)
+        self.assertEqual(json.loads(demo.state_path(self.repo, demo.AUTH).read_text())["issuedAtMs"], 1)
 
     def test_refuses_unmarked_nonempty_remote_and_source_targets(self) -> None:
         unmarked = Path(self.temp.name) / "unmarked"

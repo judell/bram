@@ -28,10 +28,9 @@
     display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px;
   }
   h2 { font-size: 1.25rem; margin: 20px 0 8px; }
-  h3 { font-size: 1rem; margin: 28px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   p { margin: 0 0 14px; }
   a { color: var(--accent); }
-  h3.first { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--rule); }
+  .pitch { margin-left: 1.5rem; }
   .lede { font-size: 1.2rem; margin-bottom: 8px; }
   .tagline { font-size: 1.1rem; font-weight: 400; letter-spacing: 0; }
   .btn {
@@ -42,28 +41,28 @@
   /* The demo is near-square, so full column width would push its controls
      below the fold; cap height to the viewport minus the header above it. */
   video {
-    display: block; width: auto; max-width: 100%; height: auto; margin-top: 8px;
+    display: block; width: auto; max-width: 100%; height: auto; margin: 8px auto 0;
     max-height: max(320px, calc(100svh - 230px));
     border: 1px solid var(--rule); border-radius: 10px; background: var(--card);
   }
   .caption { color: var(--muted); font-size: 0.92rem; margin-top: 8px; text-align: center; }
-  table.links { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.links { width: 100%; border-collapse: collapse; table-layout: fixed;
+    margin-top: 48px; border-top: 1px solid var(--rule); }
+  table.links tbody tr:first-child td { padding-top: 24px; }
   table.links col.date { width: 7.5rem; }
-  /* Share column widths across Screencasts, Blog and Elsewhere;
-     wrap longer labels so their full text stays readable. */
   table.links col.src { width: 12rem; }
   table.links td { padding: 6px 12px 6px 0; vertical-align: top; }
   table.links td.date { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
-  table.links td.src { color: var(--muted); overflow-wrap: anywhere; }
+  table.links td.src { color: var(--muted); font-style: italic; overflow-wrap: anywhere; padding-right: 0; text-align: right; }
   @media (max-width: 560px) { table.links col.src { width: 0; } table.links td.src { padding: 0; font-size: 0; } }</style>
 </head>
 <body>
 <main>
 
   <h1>Bram <span class="tagline">(Bram runs agents mindfully)</span>  <a class="btn" href="https://github.com/judell/bram/releases/latest">Download</a></p></h1>
-  <p>What: A way to make agentic software development understandable.
-  <p>Why: Because understanding <a href="https://queue.acm.org/doi/10.1145/3807966">is a deliverable</a>.</p>
-  <p>How: Bram <a href="orientation/">explains itself.</a></p>
+  <p class="pitch">What: A way to make agentic software development understandable.</p>
+  <p class="pitch">Why: Because understanding <a href="https://queue.acm.org/doi/10.1145/3807966">is a deliverable</a>.</p>
+  <p class="pitch">How: Bram <a href="orientation/">explains itself.</a></p>
 
   <h2>Demo</h2>
   <video controls preload="metadata" playsinline
@@ -74,43 +73,28 @@
   <p class="caption">A six-minute tour of Bram tackling and completing a GitHub issue.</p>
 
 
-  <h3 class="first">Screencasts</h3>
   <table class="links">
-    <colgroup><col class="date"><col class="src"><col></colgroup>
+    <colgroup><col class="date"><col><col class="src"></colgroup>
     <tbody>
-      <tr><td class="date">2026-10-16</td><td class="src">Managing file entanglement</td><td><a href="https://jonudell.info/video/entanglement.mp4">Align worklist items with commits (2.5m)</a></td></tr>
-      <tr><td class="date">2026-10-14</td><td class="src">Agent coordination via GitHub issue</td><td><a href="https://jonudell.info/video/github-agent-coordination.mp4">Bram in Bram Studio and Bram in XMLUI (5m)</a></td></tr>
-      <tr><td class="date">2026-10-12</td><td class="src">Claude and Codex</td><td><a href="https://jonudell.info/video/claude-and-codex.mp4">Use Codex to review Claude’s work (3m)</a></td></tr>
-      <tr><td class="date">2026-10-05</td><td class="src">Original Bram demo</td><td><a href="https://jonudell.info/video/bram-demo-01.mp4">Pick up and resolve a GitHub issue (6m)</a></td></tr>
-    </tbody>
-  </table>
-
-  <h3>Blog</h3>
-  <table class="links">
-    <colgroup><col class="date"><col class="src"><col></colgroup>
-    <tbody>
-      <tr><td class="date">2026-08-01</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/08/01/make-agent-memory-searchable/">Make agent memory searchable</a></td></tr>
-      <tr><td class="date">2026-07-23</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/">Agents that narrate their work are the best team players</a></td></tr>
-      <tr><td class="date">2026-07-16</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/">Talking to Claude Code and Codex</a></td></tr>
-      <tr><td class="date">2026-07-12</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/12/small-models-can-solve-big-problems/">Small models can solve big problems</a></td></tr>
-      <tr><td class="date">2026-07-08</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/">Don’t infer behavior from code, observe it in logs</a></td></tr>
-      <tr><td class="date">2026-07-01</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/07/01/what-is-the-terminal/">“What is the terminal?”</a></td></tr>
-      <tr><td class="date">2026-06-28</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/06/28/doctor-it-hurts-when-agents-create-unreviewable-prs-dont-do-that/">“Doctor, it hurts when agents create unreviewable PRs.” “Don’t do that.”</a></td></tr>
-      <tr><td class="date">2026-06-17</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/">Vibe coding as a team sport</a></td></tr>
-      <tr><td class="date">2026-06-02</td><td class="src">jonudell.net</td><td><a href="https://blog.jonudell.net/2026/06/02/how-to-make-best-use-of-git-and-github-for-ai-assisted-software-development/">How to make best use of git and GitHub for AI-assisted software development</a></td></tr>
-    </tbody>
-  </table>
-
-  <h3>Elsewhere</h3>
-  <table class="links">
-    <colgroup><col class="date"><col class="src"><col></colgroup>
-    <tbody>
-      <tr><td class="date">2026-10-14</td><td class="src">InfoWorld</td><td><a href="https://www.infoworld.com/article/4232736/screencasting-in-the-ai-era.html">Screencasting in the AI era</a></td></tr>
-      <tr><td class="date">2026-09-22</td><td class="src">InfoWorld</td><td><a href="https://www.infoworld.com/article/4224587/the-agent-coordination-protocol-hiding-in-plain-sight-github-issues.html">The agent coordination protocol hiding in plain sight: GitHub issues</a></td></tr>
-      <tr><td class="date">2026-08-26</td><td class="src">InfoWorld</td><td><a href="https://www.infoworld.com/article/4211198/when-an-ai-agent-goes-off-the-rails-file-a-bug-to-fix-the-documentation-then-test-the-fix.html">When an AI agent goes off the rails, file a bug to fix the documentation – then test the fix</a></td></tr>
-      <tr><td class="date">2026-07-28</td><td class="src">arXiv</td><td><a href="https://arxiv.org/abs/2607.25975">Who is scientific code for? Maintaining human-readable landmarks in agent-written code</a></td></tr>
-      <tr><td class="date">2026-07-02</td><td class="src">downes.ca</td><td><a href="https://www.downes.ca/post/79474">What is the terminal?</a></td></tr>
-      <tr><td class="date">2026-07-02</td><td class="src">waltzweb</td><td><a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a></td></tr>
+      <tr><td class="date">2026-10-16</td><td><a href="https://jonudell.info/video/entanglement.mp4">Align worklist items with commits (2.5m)</a></td><td class="src">jonudell.info</td></tr>
+      <tr><td class="date">2026-10-14</td><td><a href="https://jonudell.info/video/github-agent-coordination.mp4">Bram in Bram Studio and Bram in XMLUI (5m)</a></td><td class="src">jonudell.info</td></tr>
+      <tr><td class="date">2026-10-14</td><td><a href="https://www.infoworld.com/article/4232736/screencasting-in-the-ai-era.html">Screencasting in the AI era</a></td><td class="src">InfoWorld</td></tr>
+      <tr><td class="date">2026-10-12</td><td><a href="https://jonudell.info/video/claude-and-codex.mp4">Use Codex to review Claude’s work (3m)</a></td><td class="src">jonudell.info</td></tr>
+      <tr><td class="date">2026-10-05</td><td><a href="https://jonudell.info/video/bram-demo-01.mp4">Pick up and resolve a GitHub issue (6m)</a></td><td class="src">jonudell.info</td></tr>
+      <tr><td class="date">2026-09-22</td><td><a href="https://www.infoworld.com/article/4224587/the-agent-coordination-protocol-hiding-in-plain-sight-github-issues.html">The agent coordination protocol hiding in plain sight: GitHub issues</a></td><td class="src">InfoWorld</td></tr>
+      <tr><td class="date">2026-08-26</td><td><a href="https://www.infoworld.com/article/4211198/when-an-ai-agent-goes-off-the-rails-file-a-bug-to-fix-the-documentation-then-test-the-fix.html">When an AI agent goes off the rails, file a bug to fix the documentation – then test the fix</a></td><td class="src">InfoWorld</td></tr>
+      <tr><td class="date">2026-08-01</td><td><a href="https://blog.jonudell.net/2026/08/01/make-agent-memory-searchable/">Make agent memory searchable</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-07-28</td><td><a href="https://arxiv.org/abs/2607.25975">Who is scientific code for? Maintaining human-readable landmarks in agent-written code</a></td><td class="src">arXiv</td></tr>
+      <tr><td class="date">2026-07-23</td><td><a href="https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/">Agents that narrate their work are the best team players</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-07-16</td><td><a href="https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/">Talking to Claude Code and Codex</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-07-12</td><td><a href="https://blog.jonudell.net/2026/07/12/small-models-can-solve-big-problems/">Small models can solve big problems</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-07-08</td><td><a href="https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/">Don’t infer behavior from code, observe it in logs</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-07-02</td><td><a href="https://www.downes.ca/post/79474">What is the terminal?</a></td><td class="src">downes.ca</td></tr>
+      <tr><td class="date">2026-07-02</td><td><a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a></td><td class="src">waltzweb</td></tr>
+      <tr><td class="date">2026-07-01</td><td><a href="https://blog.jonudell.net/2026/07/01/what-is-the-terminal/">“What is the terminal?”</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-06-28</td><td><a href="https://blog.jonudell.net/2026/06/28/doctor-it-hurts-when-agents-create-unreviewable-prs-dont-do-that/">“Doctor, it hurts when agents create unreviewable PRs.” “Don’t do that.”</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-06-17</td><td><a href="https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/">Vibe coding as a team sport</a></td><td class="src">jonudell.net</td></tr>
+      <tr><td class="date">2026-06-02</td><td><a href="https://blog.jonudell.net/2026/06/02/how-to-make-best-use-of-git-and-github-for-ai-assisted-software-development/">How to make best use of git and GitHub for AI-assisted software development</a></td><td class="src">jonudell.net</td></tr>
     </tbody>
   </table>
 

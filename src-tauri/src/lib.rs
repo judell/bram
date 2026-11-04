@@ -87248,6 +87248,17 @@ fn route_request<R: tauri::Runtime>(
             Err(_) => (404, "text/plain; charset=utf-8", Vec::new()),
         };
     }
+    // loopback-root-serves-dotgit: the root serve stays inside the project
+    // and out of its dot-directories (.git, .bram, .env, .claude, ...). No
+    // caller needs either; the trace archives since 2026-07-20 show none.
+    if let Some(reason) = project_path_refusal(path) {
+        append_bram_trace_line(
+            app,
+            "project-serve",
+            &format!("op=refused reason={} path={}", reason, path),
+        );
+        return (404, "text/plain; charset=utf-8", Vec::new());
+    }
     let full = proj.join(path);
     match std::fs::read(&full) {
         Ok(bytes) => (200, mime_for(&full), bytes),
@@ -87275,6 +87286,26 @@ fn spa_fallback_eligible(path: &str) -> bool {
     !last.is_empty() && !last.contains('.')
 }
 
+// loopback-root-serves-dotgit: why a project-relative path must not be
+// served, or None. `traversal`: a `.` or `..` segment, a backslash, a drive
+// colon or a leading slash could leave the project root. `dot-segment`: a
+// segment naming a dot-file or dot-directory. Pure and unit-tested.
+fn project_path_refusal(path: &str) -> Option<&'static str> {
+    if path.starts_with('/') || path.contains(['\\', ':']) {
+        return Some("traversal");
+    }
+    let mut dot = false;
+    for seg in path.split('/') {
+        if seg == "." || seg == ".." {
+            return Some("traversal");
+        }
+        if seg.starts_with('.') {
+            dot = true;
+        }
+    }
+    dot.then_some("dot-segment")
+}
+
 // judell/bram#469: the part of a `__bram/<rel>` or alias `resources/<rel>`
 // request path below the state folder, and whether it came by the alias.
 // None for any other path, and for a `rel` that could leave the folder
@@ -87293,6 +87324,46 @@ fn state_url_rel(path: &str) -> Option<(&str, bool)> {
             .split('/')
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
     inside.then_some((rest, alias))
+}
+
+#[cfg(test)]
+mod project_path_refusal_tests {
+    use super::project_path_refusal;
+
+    #[test]
+    fn refuses_traversal_and_dot_segments_only() {
+        assert_eq!(project_path_refusal(".git/config"), Some("dot-segment"));
+        assert_eq!(
+            project_path_refusal(".bram/worklist.json"),
+            Some("dot-segment")
+        );
+        assert_eq!(project_path_refusal("sub/.env"), Some("dot-segment"));
+        assert_eq!(
+            project_path_refusal("resources/../src-tauri/Cargo.toml"),
+            Some("traversal")
+        );
+        assert_eq!(
+            project_path_refusal("__bram/../.git/config"),
+            Some("traversal")
+        );
+        assert_eq!(project_path_refusal("./index.html"), Some("traversal"));
+        assert_eq!(project_path_refusal("a\\b"), Some("traversal"));
+        assert_eq!(project_path_refusal("C:/x"), Some("traversal"));
+        assert_eq!(project_path_refusal("/etc/passwd"), Some("traversal"));
+        for ok in [
+            "index.html",
+            "config.json",
+            "Main.xmlui.xs",
+            "components/Query.xmlui",
+            "themes/a.json",
+            "resources/code.svg",
+            "orientation/index.html",
+            "details",
+            "a..b/c.txt",
+        ] {
+            assert_eq!(project_path_refusal(ok), None, "{ok}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -61,7 +61,7 @@ Four checkouts, each with its own checks, run before and after each release:
 
 For all four: `git status --porcelain` differs only by the lines that named `resources/` disappearing; `worklist-history/` count unchanged; the Commits tab resolves its SHAs.
 
-**A tracked root `.bram.json` that already holds personal keys** (community-calendar's has `shell.agent`, written by 0.8.3; Windows check, 2026-11-04). The settings split stops new writes to the root file but doesn't take existing personal keys out, and the host never edits a tracked file. So when the dry run reports `rootSettings.tracked: true` and the working copy differs from HEAD only in personal keys, the agent running acceptance proposes a worklist item. The item copies those keys into `.bram/settings.json` and restores the root file to HEAD. After it lands through the gate, `git diff .bram.json` is empty.
+**A tracked root `.bram.json` that already holds personal keys** (community-calendar's has `shell.agent`, written by 0.8.3; Windows check, 2026-11-04). The settings split stops new writes to the root file but doesn't take existing personal keys out, and the host never edits a tracked file. So when the dry run reports `rootSettings.tracked: true` and the working copy differs from HEAD only in personal keys, Bram raises it itself: after the move it queues a host note (`tracked-settings-dirty`, once per state of the file) asking the agent to propose a worklist item, and Status says so (`tracked-bram-json-cleanup-offered`). The agent proposes the item. The item copies those keys into `.bram/settings.json` and restores the root file to HEAD. After it lands through the gate, `git diff .bram.json` is empty.
 
 ### The "before" readings (2026-11-02, macOS, after `2b31b07b`)
 

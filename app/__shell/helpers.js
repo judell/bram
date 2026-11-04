@@ -17330,6 +17330,13 @@ window.__bramStateDirPlanMoved = function (p, part) {
   var m = p && p.migrated;
   if (part === "show") return !!m;
   if (!m) return "";
+  if (part === "settings") {
+    // tracked-bram-json-cleanup-offered
+    var rs = p.rootSettings || {};
+    return rs.tracked && rs.dirty
+      ? "The tracked .bram.json differs from HEAD (personal settings an earlier Bram wrote). The agent has been asked to propose moving them to .bram/settings.json."
+      : "";
+  }
   if (part === "left") {
     var left = p.leftBehind || [];
     return left.length ? "Left in resources/: " + left.join(", ") + "." : "";

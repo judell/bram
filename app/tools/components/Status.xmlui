@@ -81,6 +81,7 @@
            the dry run below describes a move that is done, so it hides. -->
       <Text when="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'line')}" />
       <Text when="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" value="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'left')}" />
+      <Text when="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" value="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'settings')}" />
       <Text when="{!window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{stateDirPlan.value.note}" />
       <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanFolderLine(stateDirPlan.value)}" />
       <Text value="{window.__bramStateDirPlanLiveClaimLine(stateDirPlan.value)}" />

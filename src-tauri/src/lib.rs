@@ -62686,6 +62686,7 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         owned("startup-traces", Dir),
         owned("", DotfilesUnderStateRoot),
         owned("settings.json", File),
+        owned(".settings-note", File),
         owned(".bram-port", File),
         owned(".bram-port.json", File),
         owned(".bram-guard-target", File),
@@ -62973,7 +62974,61 @@ fn state_dir_root_settings(root: &Path) -> serde_json::Value {
         "exists": root.join(".bram.json").is_file(),
         "tracked": tracked,
         "keys": keys.unwrap_or_default(),
+        // tracked-bram-json-cleanup-offered: the tracked file differs from HEAD.
+        "dirty": tracked && root_settings_signature(root).is_some(),
     })
+}
+
+// tracked-bram-json-cleanup-offered: once the folder has moved, Bram never
+// writes the root .bram.json, but personal keys an earlier Bram wrote into a
+// tracked one stay until something takes them out. The host never edits a
+// tracked file, so it asks the agent, once per distinct state of the file.
+const SETTINGS_NOTE_KIND: &str = "tracked-settings-dirty";
+const SETTINGS_NOTE_REL: &str = ".settings-note";
+const SETTINGS_NOTE: &str = "This project's tracked .bram.json differs from HEAD. Since 0.8.4 \
+Bram keeps personal settings in .bram/settings.json and never writes the root file. Propose a \
+worklist item that copies the personal keys (not team settings such as `server`) into \
+.bram/settings.json, keeping their values, and restores .bram.json to HEAD.";
+
+// "<HEAD blob> <working blob>" when the tracked root .bram.json differs from
+// HEAD, else None (untracked, clean, absent, or git unavailable).
+fn root_settings_signature(root: &Path) -> Option<String> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let head = git(&["rev-parse", "HEAD:.bram.json"])?;
+    let work = git(&["hash-object", "--", ".bram.json"])?;
+    (head != work).then(|| format!("{} {}", head, work))
+}
+
+// Called at startup after the trace log opens. Returns the trace line, and
+// queues the note only for a state of the file it hasn't asked about yet.
+fn state_settings_note<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> String {
+    if bram_state_dir_name(root) != BRAM_STATE_DIR_NEW {
+        return "op=settings-note skipped reason=not-moved".to_string();
+    }
+    let Some(sig) = root_settings_signature(root) else {
+        return "op=settings-note skipped reason=clean-or-untracked".to_string();
+    };
+    let marker = root.join(BRAM_STATE_DIR_NEW).join(SETTINGS_NOTE_REL);
+    if std::fs::read_to_string(&marker)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        == Some(sig.as_str())
+    {
+        return "op=settings-note skipped reason=already-asked".to_string();
+    }
+    queue_host_note(app, SETTINGS_NOTE_KIND, SETTINGS_NOTE.to_string());
+    let _ = std::fs::write(&marker, format!("{}\n", sig));
+    "op=settings-note queued".to_string()
 }
 
 fn state_dir_plan(root: &Path) -> serde_json::Value {
@@ -87147,6 +87202,43 @@ mod spa_fallback_tests {
 #[cfg(test)]
 mod state_url_tests {
     #[test]
+    fn root_settings_signature_only_for_a_dirty_tracked_file() {
+        let root = std::env::temp_dir().join(format!("bram-settings-sig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        // Untracked: nothing to ask.
+        std::fs::write(root.join(".bram.json"), "{\"server\":{\"port\":8080}}\n").unwrap();
+        assert!(super::root_settings_signature(&root).is_none());
+        git(&["add", ".bram.json"]);
+        git(&["commit", "-q", "-m", "team settings"]);
+        // Tracked and clean: nothing to ask.
+        assert!(super::root_settings_signature(&root).is_none());
+        // Tracked and dirty (a personal key an earlier Bram wrote): ask.
+        std::fs::write(
+            root.join(".bram.json"),
+            "{\"server\":{\"port\":8080},\"shell\":{\"agent\":\"claude\"}}\n",
+        )
+        .unwrap();
+        let sig = super::root_settings_signature(&root).unwrap();
+        assert_eq!(sig.split(' ').count(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn migrated_from_parses_each_form() {
         let v =
             super::parse_migrated_from("/Users/j/xmlui/resources 2026-11-04T22:16:08Z selective\n")
@@ -101110,6 +101202,10 @@ pub fn run() {
                         STATE_MOVED_NOTE.to_string(),
                     );
                 }
+            }
+            if let Some(proj) = startup_project_root.as_ref() {
+                let line = state_settings_note(app.handle(), proj);
+                append_bram_trace_line(app.handle(), "state-migrate", &line);
             }
             if test_drive_enabled() {
                 append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");

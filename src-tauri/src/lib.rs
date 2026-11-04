@@ -18763,8 +18763,7 @@ enum Forge {
 // "gitlab"` (or "github") at the top level of the project's .bram.json.
 fn bram_config_forge<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Forge> {
     let root = project_root(Some(app))?;
-    let text = std::fs::read_to_string(root.join(".bram.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let (_, v, _) = merged_project_config(&root)?;
     match v.get("forge").and_then(|f| f.as_str())? {
         "gitlab" => Some(Forge::GitLab),
         "github" => Some(Forge::GitHub),
@@ -28584,49 +28583,78 @@ fn pty_resize(cols: u16, rows: u16, state: State<'_, AppState>) -> Result<(), St
 static LAST_PROJECT_CONFIG_LOGGED: std::sync::Mutex<Option<(String, u64)>> =
     std::sync::Mutex::new(None);
 
-fn load_project_config(root: &Path) -> Option<ProjectConfig> {
+// The merged settings view (judell/bram#469 0.8.4): `.bram/settings.json`
+// (personal, written by Bram) over the first of `.bram.json` /
+// `.xmlui-desktop.json` (possibly tracked, team keys like `server.*`). Deep
+// merge, settings.json wins; root-only keys still apply. Returns the root
+// path (for logging), the merged value, and a digest of both files' bytes.
+// settings.json is consulted only once `.bram/` exists (before the move there
+// is none, and a settings write never creates the folder).
+fn merged_project_config(root: &Path) -> Option<(PathBuf, serde_json::Value, u64)> {
+    let mut path = root.join(".bram.json");
+    let mut root_bytes = None;
     for rel in [".bram.json", ".xmlui-desktop.json"] {
-        let path = root.join(rel);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        return match serde_json::from_slice::<ProjectConfig>(&bytes) {
-            Ok(cfg) => {
-                // Log only when the loaded bytes actually change (#275). This
-                // function has 19 call sites and several are per-request --
-                // `route_request` for `__settings` and `__worklist-config`,
-                // `current_describe_model` once per Tool-Description request,
-                // the search-index depth/limit readers once per pass -- so an
-                // unconditional eprintln! reprinted an unchanged fact hundreds
-                // of times a day. It reached the launch terminal only (never
-                // bram-trace.log), which is why it went unnoticed for so long.
-                //
-                // Keyed on the file's content hash rather than mtime: a
-                // rewrite that restores identical bytes is not a change worth
-                // announcing, and editors touch mtimes freely. The read and
-                // parse still happen every call -- deliberately, because that
-                // is what keeps a hand-edit of .bram.json live -- so this is a
-                // logging fix, not a cache.
-                let digest = bytes.len() as u64
-                    ^ bytes.iter().fold(1469598103934665603u64, |h, b| {
-                        (h ^ (*b as u64)).wrapping_mul(1099511628211)
-                    });
-                let key = (path.display().to_string(), digest);
-                let mut last = LAST_PROJECT_CONFIG_LOGGED.lock().unwrap();
-                if last.as_ref() != Some(&key) {
-                    eprintln!("[project-config] loaded {}", path.display());
-                    *last = Some(key);
-                }
-                Some(cfg)
-            }
-            Err(e) => {
-                eprintln!("[project-config] failed to parse {}: {}", path.display(), e);
-                None
-            }
-        };
+        if let Ok(bytes) = std::fs::read(root.join(rel)) {
+            path = root.join(rel);
+            root_bytes = Some(bytes);
+            break;
+        }
     }
-    None
+    let settings_bytes = (bram_state_dir_name(root) == BRAM_STATE_DIR_NEW)
+        .then(|| std::fs::read(bram_state_dir(root).join("settings.json")).ok())
+        .flatten();
+    if root_bytes.is_none() && settings_bytes.is_none() {
+        return None;
+    }
+    let parse = |bytes: &[u8], p: &Path| match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!("[project-config] failed to parse {}: {}", p.display(), e);
+            None
+        }
+    };
+    let mut merged = serde_json::Value::Object(serde_json::Map::new());
+    if let Some(bytes) = &root_bytes {
+        merged = parse(bytes, &path)?;
+    }
+    if let Some(bytes) = &settings_bytes {
+        let sp = bram_state_dir(root).join("settings.json");
+        merged = merge_settings_into_config(merged, &parse(bytes, &sp)?);
+    }
+    let digest = root_bytes
+        .iter()
+        .chain(settings_bytes.iter())
+        .flat_map(|b| b.iter().chain(std::iter::once(&0u8)))
+        .fold(1469598103934665603u64, |h, b| {
+            (h ^ (*b as u64)).wrapping_mul(1099511628211)
+        });
+    Some((path, merged, digest))
+}
+
+fn load_project_config(root: &Path) -> Option<ProjectConfig> {
+    let (path, merged, digest) = merged_project_config(root)?;
+    match serde_json::from_value::<ProjectConfig>(merged) {
+        Ok(cfg) => {
+            // Log only when the loaded bytes actually change (#275). This
+            // function has 19 call sites and several are per-request, so an
+            // unconditional eprintln! reprinted an unchanged fact hundreds of
+            // times a day. Keyed on a content digest (of both files) rather
+            // than mtime. The read and parse still happen every call --
+            // deliberately, because that keeps a hand-edit live -- so this is
+            // a logging fix, not a cache.
+            let key = (path.display().to_string(), digest);
+            let mut last = LAST_PROJECT_CONFIG_LOGGED.lock().unwrap();
+            if last.as_ref() != Some(&key) {
+                eprintln!("[project-config] loaded {}", path.display());
+                *last = Some(key);
+            }
+            Some(cfg)
+        }
+        Err(e) => {
+            eprintln!("[project-config] failed to parse {}: {}", path.display(), e);
+            None
+        }
+    }
 }
 
 fn project_config_batch_commit_actions(config: Option<ProjectConfig>) -> bool {
@@ -29133,6 +29161,101 @@ mod agent_startup_policy_tests {
         assert_eq!(merged["shell"]["firstCommand"], "/status");
     }
 
+    fn split_settings_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-split-settings-{}-{}-{}",
+            tag,
+            std::process::id(),
+            super::unix_now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    // #469 0.8.4: settings.json wins, root-only keys survive, objects merge.
+    #[test]
+    fn project_config_merges_settings_json_over_root_file() {
+        let root = split_settings_root("merge");
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::write(
+            root.join(".bram.json"),
+            r#"{"server":{"command":"npm start","port":4000},"shell":{"agent":"claude","args":"--x"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".bram/settings.json"),
+            r#"{"shell":{"agent":"codex"}}"#,
+        )
+        .unwrap();
+        let (_, v, _) = super::merged_project_config(&root).unwrap();
+        assert_eq!(v["shell"]["agent"], "codex");
+        assert_eq!(v["shell"]["args"], "--x");
+        assert_eq!(v["server"]["port"], 4000);
+        let cfg = super::load_project_config(&root).unwrap();
+        assert_eq!(cfg.shell.unwrap().agent.as_deref(), Some("codex"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // After the move a write lands in .bram/settings.json and the root file's
+    // bytes (here in a non-Bram key order) are untouched (#469 finding 4).
+    #[test]
+    fn settings_write_after_move_leaves_root_file_bytes_alone() {
+        let root = split_settings_root("after");
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        let original = "{\n  \"shell\": {\"agent\": \"claude\"},\n  \"server\": {\"port\": 1},\n  \"forge\": \"github\"\n}\n";
+        std::fs::write(root.join(".bram.json"), original).unwrap();
+        let update = serde_json::json!({ "shell": { "agent": "codex" } });
+        super::write_settings_to_config(&root, &update).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(".bram.json")).unwrap(),
+            original
+        );
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join(".bram/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(written["shell"]["agent"], "codex");
+        assert_eq!(
+            super::merged_project_config(&root).unwrap().1["shell"]["agent"],
+            "codex"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Before the move a write goes to the root file as today, and never
+    // creates `.bram/` (that would make the mover skip as already-moved).
+    #[test]
+    fn settings_write_before_move_uses_root_file_and_creates_no_state_dir() {
+        let root = split_settings_root("before");
+        std::fs::write(root.join(".bram.json"), r#"{"server":{"port":1}}"#).unwrap();
+        super::write_settings_to_config(
+            &root,
+            &serde_json::json!({ "shell": { "agent": "codex" } }),
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join(".bram.json")).unwrap()).unwrap();
+        assert_eq!(v["shell"]["agent"], "codex");
+        assert_eq!(v["server"]["port"], 1);
+        assert!(!root.join(".bram").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_config_path_predicate_includes_state_settings_json() {
+        assert!(super::is_project_config_path(std::path::Path::new(
+            "/p/.bram.json"
+        )));
+        assert!(super::is_project_config_path(std::path::Path::new(
+            "/p/.bram/settings.json"
+        )));
+        assert!(!super::is_project_config_path(std::path::Path::new(
+            "/p/.claude/settings.json"
+        )));
+        assert!(!super::is_project_config_path(std::path::Path::new(
+            "/p/resources/settings.json"
+        )));
+    }
+
     // suggest-fresh-session: defaults, and a partial `sessions` save that
     // flips one key without disturbing the other keys or other sections.
     #[test]
@@ -29503,6 +29626,11 @@ fn emit_settings_changed<R: tauri::Runtime>(app: &AppHandle<R>, settings: &serde
 fn is_project_config_path(path: &Path) -> bool {
     path.file_name()
         .map_or(false, |n| n == ".bram.json" || n == ".xmlui-desktop.json")
+        || (path.file_name().is_some_and(|n| n == "settings.json")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == BRAM_STATE_DIR_NEW))
 }
 
 // Merge a Settings-tab POST body into the on-disk .bram.json, preserving
@@ -29540,6 +29668,11 @@ fn merge_settings_into_config(
 }
 
 fn settings_target_path(root: &Path) -> PathBuf {
+    // Once `.bram/` exists, writes go to its settings.json and the root file
+    // is never rewritten (#469 finding 4). Never creates `.bram/` itself.
+    if bram_state_dir_name(root) == BRAM_STATE_DIR_NEW {
+        return bram_state_dir(root).join("settings.json");
+    }
     let bram = root.join(".bram.json");
     if bram.exists() {
         return bram;
@@ -62552,6 +62685,7 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         // Startup forensics dumps; nothing writes them today.
         owned("startup-traces", Dir),
         owned("", DotfilesUnderStateRoot),
+        owned("settings.json", File),
         owned(".bram-port", File),
         owned(".bram-port.json", File),
         owned(".bram-guard-target", File),
@@ -62818,6 +62952,28 @@ fn state_dir_plan_core(root: &Path, now_ms: i64) -> StateDirPlan {
     }
 }
 
+// The root `.bram.json`, for the dry run: whether it exists, is tracked, and
+// which top-level keys it holds, so an agent can spot a tracked file full of
+// personal keys at acceptance (#469 0.8.4). Read-only.
+fn state_dir_root_settings(root: &Path) -> serde_json::Value {
+    let keys: Option<Vec<String>> = std::fs::read(root.join(".bram.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.as_object().map(|m| m.keys().cloned().collect()));
+    let tracked = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--error-unmatch", "--", ".bram.json"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    serde_json::json!({
+        "exists": root.join(".bram.json").is_file(),
+        "tracked": tracked,
+        "keys": keys.unwrap_or_default(),
+    })
+}
+
 fn state_dir_plan(root: &Path) -> serde_json::Value {
     let p = state_dir_plan_core(root, unix_now_ms());
     let would_move: Vec<serde_json::Value> = p
@@ -62847,6 +63003,7 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
             "paths": p.tracked.iter().flatten().take(STATE_DIR_PLAN_TRACKED_CAP).collect::<Vec<_>>(),
             "truncated": p.tracked.as_ref().map_or(false, |t| t.len() > STATE_DIR_PLAN_TRACKED_CAP),
         },
+        "rootSettings": state_dir_root_settings(root),
         "liveClaim": p.live_claim,
         "liveClaimDetail": { "claimIds": p.claim_ids, "authorization": p.auth_kind },
         "nested": state_dir_nested(root, p.state_name),

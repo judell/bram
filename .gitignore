@@ -55,6 +55,7 @@ resources/outbound-turns/
 resources/session-digests/
 # build-log-real-builds: scripts/build.sh's per-build log (machine-local).
 resources/build-log.jsonl
+resources/settings.json
 resources/.bram-port
 resources/.bram-port.json
 resources/.bram-guard-target

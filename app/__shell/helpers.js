@@ -17381,10 +17381,17 @@ window.__bramStateMoveBanner = function (p, part, last) {
     var names = (p.foreign || []).map(function (f) { return f.name + (f.isDir ? "/" : ""); });
     return "Stays in " + p.stateDir + "/: " + (names.join(", ") || "tracked files") + ".";
   }
-  if (choice === "move") return "Bram moves its own files from " + p.stateDir + "/ to .bram/ at the next launch.";
-  return "Bram's folder " + p.stateDir + "/ also holds files that aren't Bram's" +
-    (p.pending === "tracked" ? " or are tracked by git" : "") +
-    ", so it can move only its own files to .bram/, at the next launch.";
+  // state-move-banner-says-why: lead with the reason (Jon, 2026-11-04: "this
+  // release is migrating the resources folder").
+  var why = "Bram 0.8.4 moves its working folder from " + p.stateDir + "/ to .bram/";
+  if (choice === "move") {
+    return why + ". It moves its own files at the next launch; the files that aren't Bram's stay in " +
+      p.stateDir + "/.";
+  }
+  return why + ", which keeps itself out of git. This project's " + p.stateDir +
+    "/ also holds files that aren't Bram's" +
+    (p.pending === "tracked" ? " (or that git tracks)" : "") +
+    ", so Bram will move only its own files, at the next launch. Yours stay where they are.";
 };
 
 // The banner's and Status's Move / Not now: a plain fetch, like the subagent

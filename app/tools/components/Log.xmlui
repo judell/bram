@@ -1,0 +1,45 @@
+<Component
+  name="Log"
+  var.refreshTick="{0}"
+  var.storyTick="{0}">
+
+  <!-- issue-473-readable-launch-log: Bram's story of the last hour. The host
+       selects episode lines (/__story/lines); helpers.js tells them
+       (__bramStoryTell), so a wording change is a pane reload. Refetched when
+       a turn starts or ends (turn-context-changed) and on Refresh, no
+       polling. A tick rebuilds the URL, which also moves the window's start. -->
+  <DataSource id="story"
+    url="{'/__story/lines?since=' + window.__bramStorySince(60, refreshTick + '.' + storyTick)}" />
+  <PushSource id="storyEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('turn-context-changed')}" />
+  <ChangeListener listenTo="{storyEvt.value &amp;&amp; storyEvt.value.tick}"
+    onDidChange="storyTick = storyTick + 1" />
+
+  <VStack padding="$space-6" gap="$space-4">
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Log</Heading>
+      <SpaceFiller />
+      <Button label="Refresh" size="sm" onClick="refreshTick = refreshTick + 1" />
+    </HStack>
+    <Text
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="The last hour, newest first. It shows only what you've asked to see." />
+    <!-- No firm height: the List hands its scroll to the page, which is the
+         tab's own scroll container
+         (https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region). -->
+    <List data="{window.__bramStoryTell(story.value)}">
+      <!-- https://www.xmlui.org/docs/reference/components/List (emptyListTemplate) -->
+      <property name="emptyListTemplate">
+        <Text color="$textColor-secondary" value="Nothing to show yet. Tell me what you'd like to see here." />
+      </property>
+      <HStack gap="$space-3" paddingVertical="$space-1">
+        <Text width="3.5rem" fontFamily="$fontFamily-monospace" color="$textColor-secondary" value="{$item.at}" />
+        <Text
+          width="*"
+          color="{$item.surprising ? '$color-warn-700' : '$textColor-primary'}"
+          value="{$item.text}" />
+      </HStack>
+    </List>
+  </VStack>
+</Component>

@@ -733,6 +733,7 @@
       <NavLink label="Tips" to="/tips" tooltip="All the footer tips, including ones you dismissed" />
       <NavLink label="Context" to="/context" tooltip="What the agent reads: CLAUDE.md, memory, hooks and settings" />
       <NavLink label="Status" to="/status" tooltip="Bram&apos;s health: guards, session size, state checks" />
+      <NavLink label="Log" to="/log" tooltip="What Bram did around your work, newest first" />
     </NavGroup>
   </NavPanel>
 
@@ -1061,6 +1062,7 @@
       <Page url="/search"><Search /></Page>
       <Page url="/queue"><AgentMessageQueue /></Page>
       <Page url="/status"><Status /></Page>
+      <Page url="/log"><Log /></Page>
       <Page url="/settings"><Settings /></Page>
       <Page url="/sessions"><Sessions /></Page>
       <Page url="/tips"><Tips /></Page>

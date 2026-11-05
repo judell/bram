@@ -220,6 +220,7 @@ window._xsLogs = window._xsLogs || [];
           describeInflight: window.__bramDescribeInflight || 0,
           lastLongTaskMs: lltFresh ? llt.ms : 0,
           lastLongTaskName: lltFresh ? llt.name : "",
+          lastLongTaskDuring: lltFresh ? (llt.during || "") : "",
           lastLongTaskAgoMs: lltFresh ? (Date.now() - llt.at) : -1,
         });
       }
@@ -365,6 +366,46 @@ window._xsLogs = window._xsLogs || [];
   }
 })();
 
+// Busy-slot API: names the work the pane was doing when the heartbeat
+// detects a stall. WebKit has no Long Tasks API, so a heartbeat stall alone
+// only says "something blocked the main thread". Hot paths bracket their sync
+// work with __bramBusyBegin/__bramBusyEnd; the heartbeat then attributes a
+// late tick to a span overlapping the stall window (preferring an active
+// span, else the most recent completed one that ended inside the window,
+// since the late tick usually runs after the work finished). Cheap and
+// no-throw by design; no tracing per call. Must stay above the heartbeat IIFE.
+var __bramBusyActive = {}; // token -> {name, startedAt}
+var __bramBusySeq = 0;
+var __bramBusyLast = null; // {name, startedAt, endedAt}
+window.__bramBusyBegin = function (name) {
+  try {
+    var tok = ++__bramBusySeq;
+    __bramBusyActive[tok] = { name: String(name), startedAt: Date.now() };
+    return tok;
+  } catch (e) { return 0; }
+};
+window.__bramBusyEnd = function (token) {
+  try {
+    var span = __bramBusyActive[token];
+    if (!span) return;
+    delete __bramBusyActive[token];
+    __bramBusyLast = { name: span.name, startedAt: span.startedAt, endedAt: Date.now() };
+  } catch (e) { /* ignore */ }
+};
+// Name of the busy span for stall window [windowStart, now] (Date.now() ms).
+window.__bramBusyDuring = function (windowStart) {
+  try {
+    var best = null, bestTok = -1;
+    for (var k in __bramBusyActive) {
+      var t = Number(k);
+      if (t > bestTok) { bestTok = t; best = __bramBusyActive[k]; }
+    }
+    if (best) return best.name;
+    if (__bramBusyLast && __bramBusyLast.endedAt >= windowStart) return __bramBusyLast.name;
+  } catch (e) { /* ignore */ }
+  return "";
+};
+
 // Main-thread heartbeat for the drawer iframe. setInterval scheduled
 // every 200ms; if the actual gap exceeds the threshold the main thread
 // was blocked (typically by heavy Markdown re-renders during JSONL
@@ -470,11 +511,15 @@ window._xsLogs = window._xsLogs || [];
     if (drift >= 200 && !bg && !window.__bramMenuPending) {
       // describe-backfill-observability: remember the latest long task so
       // input-latency can attribute a slow keystroke to it at emit time.
-      window.__bramLastLongTask = { ms: Math.round(drift), name: "heartbeat", at: Date.now() };
+      // Name the work (WebKit has no Long Tasks API): stall window starts
+      // where the tick was expected, i.e. drift ms ago.
+      var during = window.__bramBusyDuring(Date.now() - drift - 20);
+      window.__bramLastLongTask = { ms: Math.round(drift), name: "heartbeat", during: during, at: Date.now() };
       window.__bramIframeTrace("long-task", {
         ms: Math.round(drift),
         name: "heartbeat",
         source: "heartbeat",
+        during: during,
       });
     }
   }, TICK_MS);
@@ -11352,7 +11397,7 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   // opens a "File unavailable" preview instead of the page (the /queue
   // launch bug, 2026-07-23).
   var routeMatch = raw.match(
-    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|files|sessions|tips|settings|status|context)(\/.*)?$/
+    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|files|sessions|tips|settings|status|context|log)(\/.*)?$/
   );
   if (routeMatch) {
     var rest = routeMatch[2] ? routeMatch[2].slice(1) : "";
@@ -11849,11 +11894,23 @@ window.__bramBroadcastProjectedTurns = function (payload, reason) {
   }
   payload.revision = ++__projectedTurnsRevision;
   __projectedTurnsValue = payload;
+  // Busy span (issue-473-readable-launch-log): opens at the subscriber
+  // fan-out and closes at the double-rAF settle below, because React renders
+  // the new projection in a later task, not inside this loop. A stall while
+  // the span is open is the Transcript render (or its fan-out). If the settle
+  // can't be scheduled, the catch below closes the span at once.
+  var __busyTok = window.__bramBusyBegin("transcript-render");
+  var __busyClosed = false;
+  var __busyClose = function () {
+    if (__busyClosed) return;
+    __busyClosed = true;
+    window.__bramBusyEnd(__busyTok);
+  };
   var n = __projectedTurnsSubscribers.length;
   for (var j = 0; j < n; j++) {
     try { __projectedTurnsSubscribers[j](payload); } catch (e) {}
   }
-  __bramEagerDescribe(payload);
+  try { __bramEagerDescribe(payload); } catch (eD) { __busyClose(); throw eD; }
   // projection-broadcast-attribution (round 2 of the boot-latency work):
   // every broadcast names its trigger, the active route, and its cost —
   // sync ms here, render settle via double-rAF. The 2026-07-30 finding
@@ -11876,6 +11933,7 @@ window.__bramBroadcastProjectedTurns = function (payload, reason) {
     var __bcastSettleT0 = Date.now();
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
+        __busyClose();
         try {
           window.__bramIframeTrace("projection-broadcast", {
             stage: "settle",
@@ -11887,7 +11945,7 @@ window.__bramBroadcastProjectedTurns = function (payload, reason) {
         } catch (eS) { /* ignore */ }
       });
     });
-  } catch (eB) { /* ignore */ }
+  } catch (eB) { __busyClose(); }
 };
 
 // promote-tool-descriptions-to-row (eager): request descriptions only as
@@ -19373,3 +19431,482 @@ window.__bramInstallCodeBlockTools();
 // calls must follow what they call). Capture phase, so it runs before the
 // TextArea's own keydown submits the Form.
 try { document.addEventListener("keydown", window.__bramComposerDirectEnterKeydown, true); } catch (e) {}
+
+// ---- Bram's story (issue-473-readable-launch-log, iteration 2) -------------
+// JS port of scripts/bram-story.py. Pure and synchronous: takes the payload of
+// GET /__story/lines and returns first-person episodes, newest first. Only
+// definitions run at load time. The one outside read is the Transcript
+// projection (window.getProjectedTurns), used for the research summary.
+// BEGIN bram-story
+// The window's start is computed once per `key` (the Log's refresh ticks).
+// It sits in a DataSource URL, so a value that changed on every evaluation
+// made a new URL on every render: a refetch loop (1,513 fetches in minutes,
+// 2026-11-05). It moves only when the key does.
+var __bramStorySinceCache = { key: null, value: "" };
+window.__bramStorySince = function (minutes, key) {
+  var k = String(minutes) + "|" + String(key);
+  if (__bramStorySinceCache.key !== k) {
+    __bramStorySinceCache = {
+      key: k,
+      value: new Date(Date.now() - (Number(minutes) || 60) * 60000).toISOString(),
+    };
+  }
+  return __bramStorySinceCache.value;
+};
+
+window.__bramStoryTell = (function () {
+  var WANT_STALL_GAP = 30000, LATENCY_MS = 200, LONGTASK_MS = 1000;
+  var DURING = { "transcript-render": "rendering the Transcript",
+    "worklist-refetch": "refetching the Worklist", "worklist-render": "rendering the Worklist" };
+
+  function kv(rest, key) {
+    var m = new RegExp("(?:^|\\s)" + key + "=(\\S+)").exec(rest);
+    return m ? m[1] : null;
+  }
+  function idsOf(rest) {
+    var m = /ids=(\[[^\]]*\])/.exec(rest);
+    try { return m ? JSON.parse(m[1]) : []; } catch (e) { return []; }
+  }
+  function jsonTail(rest) {
+    var i = rest.indexOf("{");
+    try { return i >= 0 ? JSON.parse(rest.slice(i)) : {}; } catch (e) { return {}; }
+  }
+  function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
+  function dur(s) {
+    s = Math.round(s);
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m" + ("0" + (s % 60)).slice(-2) + "s";
+    return Math.floor(s / 3600) + "h" + ("0" + Math.floor((s % 3600) / 60)).slice(-2) + "m";
+  }
+  function hhmm(t) {
+    var d = new Date(t);
+    return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  }
+  function names(ids) {
+    if (!ids || !ids.length) return "no item";
+    if (ids.length <= 2) return ids.join(" and ");
+    return ids[0] + ", " + ids[1] + " and " + (ids.length - 2) + " more";
+  }
+  // head="..." from [turn-send]: unescape, drop the host's own "..." cut,
+  // keep ~60 chars. Returns null for machine-made heads.
+  function quoteOf(rest) {
+    var m = /head="((?:[^"\\]|\\.)*)"/.exec(rest);
+    if (!m) return null;
+    var h = m[1].replace(/\\"/g, '"').replace(/\\n/g, " ").replace(/\\\\/g, "\\");
+    if (/^(approved|drop|iterate|skip-worklist|voice):/.test(h) || /^Read and follow this Bram turn/.test(h)) return null;
+    var cut = /\.\.\.$/.test(h);
+    h = h.replace(/\.\.\.$/, "").replace(/\s+/g, " ").trim();
+    if (!h) return null;
+    if (h.length > 60) { h = h.slice(0, 60).replace(/\s+\S*$/, ""); cut = true; }
+    return h + (cut ? "…" : "");
+  }
+
+  // ---- research summary from the Transcript projection ----------------------
+  // Projection entries carry no timestamps, so turns are matched by order:
+  // the projection is split into groups, each opened by a user ("u") or
+  // system ("s") turn; groups map newest-first onto the trace's turn episodes.
+  function toolGroups() {
+    try {
+      var pv = typeof window.getProjectedTurns === "function" ? window.getProjectedTurns() : null;
+      if (!pv || !pv.turns) return null;
+      var groups = [], cur = null;
+      pv.turns.forEach(function (t) {
+        if (t.role === "assistant") {
+          if (!cur) { cur = { user: null, calls: [], open: true }; groups.push(cur); }
+          (t.entries || []).forEach(function (e) { if (e && e.kind === "tool") cur.calls.push(e); });
+        } else {
+          cur = { user: t.text || "", calls: [], open: false };
+          groups.push(cur);
+        }
+      });
+      return { groups: groups, truncatedHead: !!(pv.windowStart > 0) };
+    } catch (e) { return null; }
+  }
+  function summarize(calls) {
+    var c = { search: 0, hist: 0, read: 0, edit: 0, cmd: 0, agent: 0, web: 0 };
+    calls.forEach(function (e) {
+      var n = e.name || "";
+      if (n === "Bash") {
+        if (/\/__search\b/.test(e.commandDisplay || "")) c.hist++; else c.cmd++;
+      } else if (n === "Read") c.read++;
+      else if (n === "Grep" || n === "Glob" || /search|find/i.test(n.replace(/^mcp__/, "")) && n !== "ToolSearch") c.search++;
+      else if (n === "Edit" || n === "Write" || n === "MultiEdit" || n === "NotebookEdit") c.edit++;
+      else if (n === "Agent" || n === "Task") c.agent++;
+      else if (n === "WebSearch" || n === "WebFetch") c.web++;
+    });
+    var p = [];
+    if (c.hist) p.push("searched the history " + plural(c.hist, "time"));
+    if (c.search) p.push("ran " + plural(c.search, "search") );
+    if (c.read) p.push("read " + plural(c.read, "file"));
+    if (c.edit) p.push("made " + plural(c.edit, "edit"));
+    if (c.cmd) p.push("ran " + plural(c.cmd, "command"));
+    if (c.agent) p.push("started " + plural(c.agent, "subagent"));
+    if (c.web) p.push("made " + plural(c.web, "web request"));
+    if (!p.length) return "";
+    var last = p.pop();
+    return "It " + (p.length ? p.join(", ") + " and " + last : last) + ".";
+  }
+
+  function tell(payload) {
+    var out = [];
+    var lines = (payload && payload.lines) || [];
+    var open = [], turn = null;
+    var recent = [], sends = [], qsends = [], allTurns = [];
+    // queue-add: one sentence per item added to the queue; its length comes
+    // from the item's later update lines (the trace has no text).
+    var qadds = {};
+    function onQueueAdd(t, j) {
+      if (!j.id || qadds[j.id]) return;
+      var rec = { chars: j.chars || 0 };
+      qadds[j.id] = rec;
+      out.push({ t: t, at: hhmm(t), kind: "queue-add", surprising: false, _qadd: rec, _t: t });
+    }
+    // queue-delete: names the add it undoes when that add is in the window.
+    function onQueueDelete(t, j) {
+      var a = j.id && qadds[j.id];
+      var addedAt = a ? (out.filter(function (o) { return o._qadd === a; })[0] || {}).at : "";
+      out.push({
+        t: t, at: hhmm(t), kind: "queue-delete", surprising: false,
+        text: "You deleted a queued message" +
+          (j.chars ? " (" + j.chars + " characters)" : "") +
+          (addedAt ? ", the one you added at " + addedAt + "." : "."),
+      });
+    }
+    var drift = { t: 0, focused: null };
+
+    function Ep(kind, t) { return { kind: kind, t: t, deadline: t + 5000, d: {} }; }
+    function say(ep, kind, text, surprising) {
+      out.push({ t: ep.t, at: hhmm(ep.t), text: text, kind: kind, surprising: !!surprising, _ep: ep });
+    }
+    function find(kind) {
+      for (var i = open.length - 1; i >= 0; i--) if (open[i].kind === kind) return open[i];
+      return null;
+    }
+    function simple(t, kind, text, surprising) {
+      var ep = Ep("simple", t); ep.deadline = t; ep.d = { text: text, k: kind, s: surprising };
+      open.push(ep);
+    }
+    function tick(now) {
+      var due = open.filter(function (e) { return e.deadline <= now; });
+      due.forEach(function (ep) {
+        open.splice(open.indexOf(ep), 1);
+        ENDERS[ep.kind](ep);
+      });
+    }
+
+    // -- turn
+    function onSentinel(t, rest) {
+      var op = kv(rest, "op");
+      if (op === "write" && kv(rest, "kind")) {
+        recent.push({ t: t, w: "claim", kind: kv(rest, "kind"), ids: idsOf(rest) });
+        var g = find("gate");
+        if (g && idsOf(rest).length) g.d.claimed = true;
+      }
+      if (turn && (op === "clear-at-turn-end" || op === "clear")) {
+        turn.d.released = idsOf(rest).length ? idsOf(rest) : (turn.d.released || true);
+      }
+    }
+    function onTurnState(t, rest) {
+      var frm = kv(rest, "from"), to = kv(rest, "to"), menu = kv(rest, "menu");
+      if (to === "working" && frm !== "working" && !turn) {
+        turn = Ep("turn", t); turn.deadline = Infinity; turn.d.pauses = [];
+      } else if (turn) {
+        if (to === "waiting-for-permission" && frm !== to) {
+          turn.d.pauses.push(menu || "a prompt");
+        } else if ((frm === "working" || frm === "waiting-for-permission") && (to === "finished" || to === "idle")) {
+          turn.d.end = t; turn.deadline = t + 3000;
+          open.push(turn); turn = null;
+        }
+      }
+    }
+    function endTurn(ep) {
+      var t0 = ep.t, t1 = ep.d.end;
+      var near = recent.filter(function (r) { return t0 - 15000 <= r.t && r.t <= t0 + 5000; });
+      var ctx = near.filter(function (r) { return r.w === "ctx" && r.kind !== "turn-end"; });
+      var claims = near.filter(function (r) { return r.w === "claim"; });
+      var kind = ctx.length ? ctx[ctx.length - 1].kind : (claims.length ? claims[claims.length - 1].kind : null);
+      var ids = claims.length ? claims[claims.length - 1].ids : [];
+      var n = ctx.length ? ctx[ctx.length - 1].ids : null;
+      var rec = { ep: ep, shown: false };
+      allTurns.push(rec);
+      if ((t1 - t0) / 1000 < 2 && !ids.length) return;
+      var snd = null;
+      sends.forEach(function (s) { if (s.q && t0 - 15000 <= s.t && s.t <= t0 + 5000) snd = s; });
+      var queued = !!snd;
+      if (!snd) sends.forEach(function (s) { if (s.q !== null && s.quote && t0 - 15000 <= s.t && s.t <= t0 + 5000) snd = s; });
+      var quote = kind === "general" && snd && snd.quote ? ' ("' + snd.quote + '")' : "";
+      if (!queued) queued = kind === "general" && snd && qsends.some(function (q) { return Math.abs(q - snd.t) < 2000; });
+      var why;
+      if (kind === "general") why = "for your " + (queued ? "queued" : "chat") + " message" + quote;
+      else if (kind === "approved") why = "for your approval";
+      else if (kind === "iterate") why = "for your feedback";
+      else why = "I can't trace back to a message (often a background task waking it)";
+      var on = ids.length ? " on " + names(ids) : (n && n !== "0" ? " on " + n + " item(s)" : "");
+      var verb = (t1 - t0) / 1000 > 900 ? "took a long turn" : "took a turn";
+      var s = "Claude " + verb + " " + why + on + " and finished in " + dur((t1 - t0) / 1000) + ".";
+      if (ep.d.pauses.length) {
+        var k = ep.d.pauses.length, seen = {};
+        ep.d.pauses.forEach(function (p) { seen[p] = 1; });
+        s += " It stopped " + plural(k, "time") + " to wait for you (" + Object.keys(seen).sort().join(", ") + ").";
+      }
+      var surprising = false;
+      if (ep.d.released) s += " I released the claim.";
+      else if (ids.length) { s += " I did not see the claim released, so the item may still read as running."; surprising = true; }
+      rec.shown = true; rec.queued = queued; rec.quote = snd && snd.quote;
+      rec.text = s; rec.surprising = surprising;
+      say(ep, "turn", s, surprising);
+      out[out.length - 1]._rec = rec;
+    }
+
+    // -- gate
+    function onClick(t, rest) {
+      var j = jsonTail(rest), tg = j.target || "";
+      if (j.op !== "act" || tg.indexOf("gatebar-") !== 0) return;
+      var g = Ep("gate", t);
+      g.d.target = tg.slice(8); g.d.count = j.count || 0;
+      g.deadline = t + ((tg === "gatebar-commit" || tg === "gatebar-start-commit") ? 60000 : 8000);
+      open.push(g);
+    }
+    function gateNow(t) { var g = find("gate"); return g && t - g.t < 60000 ? g : null; }
+    function onAuth(t, rest) {
+      var op = kv(rest, "op"), kind = kv(rest, "kind");
+      if (op === "write" && kind === "approved") {
+        var g = gateNow(t);
+        if (!g || g.d.ids) { g = Ep("gate", t); g.d.target = null; g.d.count = 0; g.deadline = t + 8000; open.push(g); }
+        g.d.ids = idsOf(rest); g.d.recorded = true; g.deadline = Math.max(g.deadline, t + 8000);
+      } else if (op === "write" && kind === "direct-edit") {
+        simple(t, "gate", "You sent a turn that skips the Worklist (skip-worklist: prefix), so I allowed direct edits with no item.");
+      } else if (op === "refuse") {
+        var m = /expired \((\d+) ms old, TTL (\d+) ms\)/.exec(rest);
+        var what = kv(rest, "mutate_op") || "request", ids = idsOf(rest);
+        if (m) {
+          simple(t, "refusal", "I refused to " + what + " " + names(ids) + ": the approval was " + dur(+m[1] / 1000) +
+            " old and they expire after " + dur(+m[2] / 1000) + ". That's the rule working; it needs a fresh Start.");
+        } else {
+          var dm = /detail=(.*?) ids=/.exec(rest);
+          simple(t, "refusal", "I refused to " + what + " " + names(ids) + " and gave this reason: " +
+            (dm ? dm[1] : "none given") + ". I have no standard sentence for that, so it may be new.", true);
+        }
+      }
+    }
+    function onSend(t, rest) {
+      var rec = { t: t, quote: quoteOf(rest), q: false };
+      sends.push(rec);
+      if (sends.length > 60) sends.shift();
+      var g = gateNow(t);
+      if (g && /head="(approved|drop):/.test(rest) && t - g.t < 30000) g.d.handed = true;
+    }
+    function onCommit(t, rest) {
+      var op = kv(rest, "op"), g = find("gate");
+      if (op === "committed") {
+        if (g && (g.d.target === "commit" || g.d.target === "start-commit" || g.d.target === null)) {
+          g.d.sha = kv(rest, "sha"); g.deadline = t + 4000;
+        } else {
+          simple(t, "gate", "A commit landed (" + kv(rest, "sha") + "), but I saw no gate click for it.");
+        }
+      } else if (op === "staging" && g) {
+        g.d.files = kv(rest, "files");
+      } else if (op === "commit-took-unowned" && g && g.d.sha) {
+        (g.d.unowned = g.d.unowned || []).push([kv(rest, "path"), kv(rest, "added"), kv(rest, "removed")]);
+      }
+    }
+    function endGate(ep) {
+      var d = ep.d, tg = d.target, ids = d.ids || [], s, surprising = false;
+      var who = ids.length ? names(ids) : (d.count ? plural(d.count, "item") : "an item");
+      if (tg === null) {
+        if (!d.recorded) return;
+        s = "An approval for " + who + " was recorded, but I saw no click on the gate bar for it" +
+          (d.handed ? "; the turn was handed to Claude" : "") + ".";
+      } else if (tg === "drop") {
+        s = "You clicked Drop on " + who + ". Feedback-less drops finish in the host, so there's no turn to tell about.";
+      } else {
+        var label = { start: "Start", commit: "Commit", "start-commit": "Start & commit" }[tg] || tg;
+        s = "You clicked " + label + " on " + who + ".";
+        if (d.recorded) {
+          s += " I recorded the approval" + (d.claimed ? ", claimed it" : "") + (d.handed ? " and handed Claude the turn." : ".");
+        }
+        if (tg === "commit" || tg === "start-commit") {
+          if (d.sha) {
+            s += d.files ? " I staged " + plural(+d.files, "file") + " and committed " + d.sha + "." : " I committed " + d.sha + ".";
+            (d.unowned || []).forEach(function (u) {
+              s += " That commit also took lines no item owned in " + u[0] + " (+" + u[1] + "/-" + u[2] +
+                "); that's disclosed, not hidden, but worth a look.";
+              surprising = true;
+            });
+          } else { s += " I did not see a commit land within a minute."; surprising = true; }
+        }
+      }
+      say(ep, "gate", s, surprising);
+    }
+
+    // -- stall
+    function onStall(t, sub, j) {
+      if (sub === "input-latency") {
+        if ((j.latencyMs || 0) < LATENCY_MS || !j.hadFocus) return;
+      } else {
+        var focused = t - drift.t < 3000 ? drift.focused : null;
+        if ((j.ms || 0) < LONGTASK_MS || focused !== true) return;
+      }
+      var ep = find("stall");
+      if (!ep) { ep = Ep("stall", t); ep.d.ev = []; open.push(ep); }
+      ep.d.ev.push([t, sub, j]); ep.deadline = t + WANT_STALL_GAP;
+    }
+    function endStall(ep) {
+      var ev = ep.d.ev, s;
+      var lt = ev.filter(function (e) { return e[1] === "long-task"; }).map(function (e) { return e[2]; });
+      var il = ev.filter(function (e) { return e[1] === "input-latency"; }).map(function (e) { return e[2]; });
+      var span = (ev[ev.length - 1][0] - ev[0][0]) / 1000;
+      var during = {};
+      ev.forEach(function (e) {
+        // A slow input names its blocker as lastLongTaskDuring.
+        var w = e[2].during || e[2].lastLongTaskDuring; if (w) { var k = DURING[w] || w; during[k] = (during[k] || 0) + 1; }
+      });
+      var top = Object.keys(during).sort(function (a, b) { return during[b] - during[a]; })[0];
+      if (ev.length === 1) {
+        var j = ev[0][2];
+        s = il.length ? "A " + (j.event || "keystroke") + " took " + j.latencyMs + "ms to land on " + (j.route || "the pane")
+                      : "The pane froze for " + (j.ms / 1000).toFixed(1) + "s while you had it focused";
+      } else {
+        var parts = [];
+        if (lt.length) parts.push("froze " + plural(lt.length, "time") + ", worst " +
+          (Math.max.apply(null, lt.map(function (x) { return x.ms; })) / 1000).toFixed(1) + "s");
+        if (il.length) {
+          var routes = {};
+          il.forEach(function (x) { var r = x.route || "the pane"; routes[r] = (routes[r] || 0) + 1; });
+          var rt = Object.keys(routes).sort(function (a, b) { return routes[b] - routes[a]; })[0];
+          parts.push(plural(il.length, "slow input") + ", worst " +
+            Math.max.apply(null, il.map(function (x) { return x.latencyMs; })) + "ms, mostly on " + rt);
+        }
+        s = "The pane had trouble over " + (span >= 1 ? dur(span) : "a moment") + ": " + parts.join(" and ");
+      }
+      s += top ? ", while I was " + top + "." : ". I can't say what I was busy with; the trace doesn't name the work.";
+      say(ep, "stall", s, true);
+    }
+
+    // -- refusal (guard)
+    function onHook(t, rest) {
+      var reason = kv(rest, "reason") || "?", tool = kv(rest, "tool"), target = kv(rest, "target");
+      var key = reason + "\u0001" + tool + "\u0001" + target;
+      var ep = find("refusal");
+      if (ep && ep.d.key === key) { ep.d.n++; ep.deadline = t + 20000; return; }
+      ep = Ep("refusal", t); ep.d = { key: key, reason: reason, tool: tool, target: target, n: 1 };
+      ep.deadline = t + 20000; open.push(ep);
+    }
+    function endRefusal(ep) {
+      var d = ep.d, at = d.target && d.target !== "-" ? " " + d.target : "";
+      var i = d.reason.indexOf(":"), base = i < 0 ? d.reason : d.reason.slice(0, i), arg = i < 0 ? "" : d.reason.slice(i + 1);
+      var works = " That's the rule working.", s, surprising = false;
+      if (base === "stale-worklist-version") s = "I refused Claude's " + d.tool + " of" + at + ": it was written against an old worklist version. It has to re-read and retry." + works;
+      else if (base === "no-coverage-no-opt-out") s = "I refused Claude's " + d.tool + at + ": no approved item covers it and you hadn't said 'just do it'." + works;
+      else if (base === "crossboundary-unsigned") s = "I refused a forge post because it lacked the agent signature line." + works;
+      else if (base === "crossboundary-stale-version") s = "I refused a forge post: its signature named Bram " + arg + ", which isn't the running version." + works;
+      else if (base === "crossboundary-unparsed") s = "I refused a forge post because I couldn't check it (" + (arg || "unparsed") + ")." + works;
+      else if (base === "subagent-lifecycle-call") s = "I refused a worklist lifecycle call that came from a subagent." + works;
+      else { s = "I refused Claude's " + d.tool + at + " with reason '" + d.reason + "'. I have no standard sentence for that one, so it may be new."; surprising = true; }
+      if (d.n > 1) s += " (It happened " + d.n + " times in a row.)";
+      say(ep, "refusal", s, surprising);
+    }
+
+    // -- queue
+    function onQueueSend(t, rest) {
+      var j = jsonTail(rest);
+      qsends.push(t);
+      var ep = Ep("queue", t); ep.deadline = t + 2500; ep.d.mode = j.mode;
+      open.push(ep);
+    }
+    function endQueue(ep) {
+      var snd = null, best = 1e12;
+      sends.forEach(function (s) { if (Math.abs(s.t - ep.t) <= 2000 && Math.abs(s.t - ep.t) < best) { snd = s; best = Math.abs(s.t - ep.t); } });
+      if (snd) snd.q = true;
+      var what = ep.d.mode && ep.d.mode !== "message" ? "a queued " + ep.d.mode : "a queued message";
+      var q = snd && snd.quote ? ' ("' + snd.quote + '")' : "";
+      say(ep, "queue", "You sent " + what + q + ", and I handed it to Claude.", false);
+    }
+
+    var ENDERS = {
+      simple: function (ep) { say(ep, ep.d.k, ep.d.text, ep.d.s); },
+      turn: endTurn, gate: endGate, stall: endStall, refusal: endRefusal, queue: endQueue
+    };
+
+    lines.forEach(function (ln) {
+      var t = Date.parse(ln.ts);
+      if (isNaN(t)) return;
+      var cat = ln.cat, rest = ln.text || "";
+      tick(t);
+      var sub = cat === "iframe" ? kv(rest, "subkind") : null;
+      if (cat === "turn-state") onTurnState(t, rest);
+      else if (cat === "turn-context" && rest.indexOf("op=set") >= 0) recent.push({ t: t, w: "ctx", kind: kv(rest, "kind"), ids: kv(rest, "ids") });
+      else if (cat === "inflight-sentinel") onSentinel(t, rest);
+      else if (cat === "iframe" && sub === "click") onClick(t, rest);
+      else if (cat === "iframe" && sub === "queue") {
+        var qj = jsonTail(rest);
+        if (qj.op === "send") onQueueSend(t, rest);
+        else if (qj.op === "add") onQueueAdd(t, qj);
+        else if (qj.op === "update" && qadds[qj.id]) qadds[qj.id].chars = qj.chars;
+        else if (qj.op === "delete") onQueueDelete(t, qj);
+      }
+      else if (cat === "iframe" && sub === "heartbeat-drift") drift = { t: t, focused: jsonTail(rest).focused };
+      else if (cat === "iframe" && (sub === "long-task" || sub === "input-latency")) onStall(t, sub, jsonTail(rest));
+      else if (cat === "auth-record") onAuth(t, rest);
+      else if (cat === "turn-send") onSend(t, rest);
+      else if (cat === "worklist-commit") onCommit(t, rest);
+      else if (cat === "hook-deny") {
+        var hm = /^(\S+) (\S+) (\S+) (.*)$/.exec(rest);
+        if (hm && hm[4].indexOf("decided=deny") >= 0) onHook(t, "tool=" + hm[3] + " " + hm[4]);
+      }
+      else if (cat === "queue" && rest.indexOf("op=save-refused") >= 0) {
+        var bm = /base=Some\((\d+)/.exec(rest);
+        simple(t, "queue", "I refused a queue save: it was written against version " + (bm ? bm[1] : "?") +
+          " but the file was at " + kv(rest, "on_disk") + ". The writer has to re-read and try again.", true);
+      }
+      else if (cat === "bram-trace" && rest.indexOf("event=session-start") >= 0) {
+        simple(t, "launch", "I started up (pid " + kv(rest, "pid") + ").");
+      }
+    });
+    tick(Infinity);
+
+    // Research summary: map projection groups onto turn episodes by order.
+    try {
+      var pg = toolGroups();
+      if (pg && allTurns.length) {
+        var groups = pg.groups.filter(function (g) { return g.user !== null || !g.open || g.calls.length; });
+        // groups opened by a user/system turn are complete at the front; the
+        // first group may be cut off by the projection window.
+        var gi = groups.length - 1;
+        for (var ti = allTurns.length - 1; ti >= 0 && gi >= 0; ti--, gi--) {
+          var rec = allTurns[ti], g = groups[gi];
+          if (g.user === null && pg.truncatedHead && gi === 0) break;
+          if (rec.quote && g.user && g.user.slice(0, 15) !== rec.quote.replace(/…$/, "").slice(0, 15)) break;
+          if (rec.shown && g.calls.length) {
+            var sum = summarize(g.calls);
+            if (sum) {
+              out.forEach(function (o) { if (o._rec === rec) o.text += " " + sum; });
+            }
+          }
+        }
+      }
+    } catch (e) { /* summary is optional */ }
+
+    out.forEach(function (o) {
+      if (o._qadd) {
+        o.text = "You added a message to the queue" +
+          (o._qadd.chars ? " (" + o._qadd.chars + " characters so far)." : ".");
+      }
+    });
+    out.sort(function (a, b) { return b.t - a.t; });
+    return out
+      .filter(function (o) { return STORY_SHOW.indexOf(o.kind) >= 0; })
+      .map(function (o) { return { at: o.at, text: o.text, kind: o.kind, surprising: o.surprising }; });
+  }
+
+  // What the Log shows, opt-in (Jon, 2026-11-05: "show nothing until I ask
+  // for it"). Every kind is still told; only these reach the Log. Add a kind
+  // here when it's asked for. Known kinds: queue-add, queue, turn, gate,
+  // stall, refusal, launch, queue-delete.
+  var STORY_SHOW = ["queue-add", "queue-delete"];
+
+  return function (payload) {
+    try { return tell(payload); } catch (e) { return []; }
+  };
+})();
+// END bram-story

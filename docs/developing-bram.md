@@ -447,6 +447,37 @@ A real subagent run in this project still costs up to a second per roster
 refetch (the 2026-10-28 04:00 hour had 141 spikes). That's open, and it
 starts with a Timeline.
 
+### The story of a stretch: `scripts/bram-story.py`
+
+`ui-health.py` counts. `bram-story.py` narrates: it reads the trace and
+`hook-events.log` and tells, in Bram's first person, what Bram did around
+the work. It covers turns (why each started, which item, how long, the claim
+released), gate clicks and commits, stalls you'd feel, refusals (with "that's
+the rule working" when it is), and a single quiet line after 20 minutes of
+nothing.
+
+```sh
+python3 -I scripts/bram-story.py                 # the last hour
+python3 -I scripts/bram-story.py --since 19:00   # a stretch (local time or ISO)
+python3 -I scripts/bram-story.py --follow        # live, beside a working session
+python3 -I scripts/bram-story.py --cite          # each sentence's source lines
+```
+
+Every sentence comes from a fixed template over trace fields, with no model
+call, so `--cite` can check it. When a signal is missing, it says so
+("the trace doesn't name the work") rather than guessing. A stall names its
+work through the `during` field on `long-task`; only `transcript-render` is
+marked so far.
+
+The same narrator, ported to JS (`__bramStoryTell` in `helpers.js`), is the
+**Log** tab under More (`app/tools/components/Log.xmlui`). The host only selects lines
+(`/__story/lines`); the pane tells them, so a wording change is a pane reload.
+It refreshes when a turn starts or ends. The Log adds what the script can't:
+quoted openings of what you sent, and what each turn did ("ran 1 search, made
+3 edits"), counted from the Transcript projection by order, and left out
+when the order doesn't line up. Change the voice in `helpers.js`; the script
+is the CLI copy for replays.
+
 ### Does the pane slow with age, or with session size?
 
 `scripts/pane-age-health.py` answers that from the trace and the agent's

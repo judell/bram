@@ -2408,6 +2408,109 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
     project_resource_path(app, "bram-traces/bram-trace.log")
 }
 
+// issue-473-readable-launch-log: what /__story/lines selects. Trace lines in
+// these categories (and these iframe subkinds) mark episodes; everything
+// else, such as [pty-in], [watcher] and event plumbing, is left out. Guard
+// denies come from hook-events.log. Only the tail of each file is read: the
+// Log tells recent history, and the trace can run to tens of megabytes.
+const STORY_TRACE_TAIL_BYTES: u64 = 6 * 1024 * 1024;
+const STORY_HOOK_TAIL_BYTES: u64 = 1024 * 1024;
+const STORY_TRACE_CATEGORIES: &[&str] = &[
+    "turn-state",
+    "turn-context",
+    "inflight-sentinel",
+    "auth-record",
+    "turn-send",
+    "worklist-commit",
+    "queue",
+    "bram-trace",
+];
+const STORY_IFRAME_SUBKINDS: &[&str] = &[
+    "click",
+    "queue",
+    "long-task",
+    "input-latency",
+    "heartbeat-drift",
+];
+
+// The last `max` bytes of a file, starting at a line boundary.
+fn read_file_tail(path: &Path, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(max);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.take(max).read_to_end(&mut buf);
+    let mut s = String::from_utf8_lossy(&buf).into_owned();
+    if start > 0 {
+        match s.find('\n') {
+            Some(i) => {
+                s.drain(..=i);
+            }
+            None => s.clear(),
+        }
+    }
+    s
+}
+
+// Trace and hook-events timestamps share one ISO-8601 UTC form
+// (2026-11-05T05:05:52.296Z), so `since` filters by string comparison.
+fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str) -> Vec<u8> {
+    let mut lines: Vec<serde_json::Value> = Vec::new();
+    if let Some(p) = bram_trace_log_file(app) {
+        for line in read_file_tail(&p, STORY_TRACE_TAIL_BYTES).lines() {
+            let Some(rest) = line.strip_prefix('[') else {
+                continue;
+            };
+            let Some((ts, rest)) = rest.split_once("] [") else {
+                continue;
+            };
+            if ts < since {
+                continue;
+            }
+            let Some((cat, text)) = rest.split_once(']') else {
+                continue;
+            };
+            let text = text.trim_start();
+            let keep = match cat {
+                "iframe" => STORY_IFRAME_SUBKINDS
+                    .iter()
+                    .any(|k| text.starts_with(&format!("subkind={} ", k))),
+                "turn-state" => !text.starts_with("from=working to=working "),
+                _ => STORY_TRACE_CATEGORIES.contains(&cat),
+            };
+            if keep {
+                lines.push(serde_json::json!({
+                    "ts": ts, "src": "trace", "cat": cat, "text": text,
+                }));
+            }
+        }
+    }
+    if let Some(p) = project_resource_path(app, "bram-traces/hook-events.log") {
+        for line in read_file_tail(&p, STORY_HOOK_TAIL_BYTES).lines() {
+            if !line.contains(" decided=deny ") {
+                continue;
+            }
+            let Some((ts, text)) = line.split_once(' ') else {
+                continue;
+            };
+            if ts < since {
+                continue;
+            }
+            lines.push(serde_json::json!({
+                "ts": ts, "src": "hook", "cat": "hook-deny", "text": text,
+            }));
+        }
+    }
+    lines.sort_by(|a, b| a["ts"].as_str().cmp(&b["ts"].as_str()));
+    serde_json::to_vec(&serde_json::json!({ "lines": lines })).unwrap_or_default()
+}
+
 // `rel` is repo-relative under `root`.
 fn is_bram_trace_archive_rel(root: &Path, rel: &str) -> bool {
     bram_state_rel_strip(root, rel)
@@ -87118,6 +87221,24 @@ fn route_request<R: tauri::Runtime>(
         })()
         .unwrap_or(body);
         return (200, "application/json; charset=utf-8", body.into_bytes());
+    }
+
+    // /__story/lines?since=<ISO> — issue-473-readable-launch-log: the lines
+    // the Status tab's Log narrator (helpers.js) tells episodes from. The host
+    // only selects; the pane does the telling, so wording changes are a pane
+    // reload, not a rebuild.
+    if path == "__story/lines" {
+        let mut since = String::new();
+        for pair in query.split('&') {
+            if let Some(enc) = pair.strip_prefix("since=") {
+                since = percent_decode(enc);
+            }
+        }
+        return (
+            200,
+            "application/json; charset=utf-8",
+            story_lines(app, &since),
+        );
     }
 
     // /__coordination-status — compact host-side summary for the Status tab.

@@ -90555,18 +90555,21 @@ fn retry_on_index_lock(
     max_wait: std::time::Duration,
     mut on_wait: impl FnMut(u32),
 ) -> Result<String, String> {
-    let mut waited = std::time::Duration::ZERO;
+    // index-lock-wait-counts-git-time: the budget is wall-clock from entry, so
+    // slow git launches (Windows) count against it too; adding up only the
+    // sleeps let the loop run well past max_wait (#469, 2026-11-05).
+    let started = std::time::Instant::now();
     let mut attempt = 0u32;
     loop {
         match run() {
             Err(e) if git_error_is_index_lock_collision(&e) => {
-                if waited >= max_wait {
+                let elapsed = started.elapsed();
+                if elapsed >= max_wait {
                     return Err(format!("{}{}", INDEX_LOCK_GAVE_UP_PREFIX, e.trim()));
                 }
                 attempt += 1;
                 on_wait(attempt);
-                std::thread::sleep(step);
-                waited += step;
+                std::thread::sleep(step.min(max_wait - elapsed));
             }
             other => return other,
         }
@@ -105761,6 +105764,26 @@ mod index_lock_retry_tests {
         assert!(err.contains("index.lock"));
         assert!(elapsed >= Duration::from_millis(1900), "{:?}", elapsed);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // index-lock-wait-counts-git-time: time spent inside `run` counts against
+    // the budget. Each run takes 300 ms; summing only the 100 ms sleeps gave
+    // up after ~2.4 s against a 500 ms budget.
+    #[test]
+    fn slow_git_calls_count_against_the_budget() {
+        let started = std::time::Instant::now();
+        let out = retry_on_index_lock(
+            || {
+                std::thread::sleep(Duration::from_millis(300));
+                Err("fatal: Unable to create '/x/.git/index.lock': File exists.".to_string())
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(500),
+            |_| {},
+        );
+        let elapsed = started.elapsed();
+        assert!(index_lock_gave_up(&out.expect_err("must give up")));
+        assert!(elapsed < Duration::from_millis(1500), "{:?}", elapsed);
     }
 
     #[test]

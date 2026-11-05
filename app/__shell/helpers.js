@@ -3216,7 +3216,15 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim, opt) {
 
   if (kind === "iterate") {
     window.__bramWorklist2BatchIterate(ids, body);
-    window.__bramW2SetSelection([]);
+    // feedback-send-keeps-selection: the items the feedback went to stay
+    // ticked, as after Start (16d5540f), so a run of feedback stays addressed
+    // to them. Clearing here sent every second follow-up out as chat
+    // (2026-11-05, three times running). Untick, Send as chat instead, or a
+    // clearing gate verb ends the run.
+    window.__bramW2SetSelection(ids);
+    window.__bramIframeTrace("click", {
+      target: "gatebar-iterate", op: "selection-after", keptSelection: ids,
+    });
     window.__bramClearComposer();
     window.__bramGateGoTranscript();
     return;

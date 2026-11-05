@@ -291,7 +291,7 @@ The box's placeholder shows where Enter will send ("To <item>
 (feedback)", "To Claude (chat)"). With items selected, a line above it
 carries **Send as chat instead**, which sends that one message as
 general chat without clearing the selection; changing the selection
-switches it back to feedback. After **Start** the started items stay
+switches it back to feedback. After **Start** or feedback the items stay
 selected, so follow-ups arrive as `iterate:`; other gate verbs clear it.
 
 **The gate verbs.** The gate row is pure lifecycle: **Start / Start &

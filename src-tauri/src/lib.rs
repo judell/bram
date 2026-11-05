@@ -29953,6 +29953,17 @@ mod bram_port_publication_tests {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
             self.task.take().unwrap().join().unwrap();
+            // port-test-waits-for-the-dead-owner-to-close: the listening
+            // socket can outlive the join by a moment. A probe in that gap
+            // connects and is reset (Linux CI, v0.8.4 run 41957673757), which
+            // the probe rightly reports as uncertain. Wait until the port can
+            // be bound, so a dropped server is a dead owner.
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while std::net::TcpListener::bind(("127.0.0.1", self.port)).is_err()
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 

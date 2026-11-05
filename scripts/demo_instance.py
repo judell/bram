@@ -390,19 +390,24 @@ def run_git(
     merged = os.environ.copy()
     if env:
         merged.update(env)
+    # demo-git-stdin-keeps-lf-on-windows: bytes, not text=True. Text mode on
+    # Windows writes each "\n" of stdin as "\r\n", so `update-index
+    # --index-info` read every path with a trailing "\r", and Git for Windows
+    # dropped them all ("Ignoring path") while exiting 0.
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
-        input=input_text,
-        text=True,
+        input=None if input_text is None else input_text.encode("utf-8"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=merged,
         check=False,
     )
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
     if check and proc.returncode:
-        detail = proc.stderr.strip() or proc.stdout.strip()
+        detail = stderr.strip() or stdout.strip()
         raise DemoError(f"git {' '.join(args)} failed: {detail}")
-    return proc.stdout.strip()
+    return stdout.strip()
 
 
 def scenario_ref(name: str) -> str:

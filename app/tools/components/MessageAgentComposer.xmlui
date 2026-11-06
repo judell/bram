@@ -10,6 +10,17 @@
   <!-- issue-278: one message box. The Worklist's own "Message about the
        selection" box is gone; this one names its target instead. -->
   <PushSource id="w2Sel" subscribe="{window.bramSubscribeW2Selection()}" />
+  <!-- misaddressed-feedback-resends-as-chat: the agent's flag on the feedback
+       it is answering, refetched on the host's push (push over polling,
+       developing-bram.md). transformResult mirrors it for the Enter path's
+       dismiss. https://www.xmlui.org/docs/reference/components/DataSource -->
+  <DataSource id="misaddressed" url="/__worklist/misaddressed"
+    transformResult="{(d) => window.__bramMisaddressedAccept(d)}" />
+  <PushSource id="misaddressedEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('feedback-misaddressed-changed')}" />
+  <ChangeListener
+    listenTo="{misaddressedEvt.value &amp;&amp; misaddressedEvt.value.tick}"
+    onDidChange="() => misaddressed.refetch()" />
   <!-- composer-addressee-line: the per-message chat override resets when the
        selection changes, so a fresh tick defaults to feedback. -->
   <ChangeListener
@@ -63,6 +74,17 @@
          children they sat gap-Form ($space-4) apart and the line read as
          unrelated to the box (https://www.xmlui.org/docs/reference/components/Form). -->
     <VStack width="100%" gap="0">
+    <!-- misaddressed-feedback-resends-as-chat: one click unticks the item,
+         resends the message as chat, and notes the record. -->
+    <HStack when="{window.__bramMisaddressedLabel(misaddressed.value)}"
+      testId="composer-misaddressed" width="100%" gap="$space-2"
+      verticalAlignment="center" paddingLeft="3rem">
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+        value="{window.__bramMisaddressedLabel(misaddressed.value)}" />
+      <Button label="Resend as chat" variant="outlined" size="xs"
+        tooltip="Untick the item, send the same message as chat, and note on the item's feedback record that it was resent"
+        onClick="window.__bramMisaddressedResend(misaddressed)" />
+    </HStack>
     <!-- composer-addressee-in-placeholder: the placeholder always names the
          addressee (composer-addressee-always-in-box, Jon: the "To: Claude"
          line "lives inside the message box"). This line shows only with

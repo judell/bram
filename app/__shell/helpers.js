@@ -2771,6 +2771,8 @@ window.__bramSubmitFeedbackForSelection = function (box) {
 // sent with an item ticked, the sender unsure where it went — are why the
 // destination is shown before sending instead of inferred silently.
 window.__bramComposerEnterSubmit = function (box, toChat) {
+  // misaddressed-feedback-resends-as-chat: a new send answers the offer.
+  window.__bramMisaddressedDismiss();
   // composer-cmd-enter-just-do-it: ⌘Enter / Ctrl+Enter (noted by the keydown
   // listener below) sends a direct request, whatever is ticked.
   if (window.__bramComposerTakeDirectEnter()) {
@@ -2911,6 +2913,56 @@ window.__bramDismissForgeItem = function (ds, id, marker) {
       if (ds && typeof ds.refetch === "function") ds.refetch();
     })
     .catch(function () {});
+};
+
+// misaddressed-feedback-resends-as-chat: when the agent flags the feedback
+// it's answering as not about its item (POST /__worklist/misaddressed
+// op=flag), the composer shows "Not about <item>? Resend as chat". One click
+// unticks, sends the same text as chat through the composer's own chat path,
+// and the host notes on the feedback record that it was resent. Ignoring the
+// offer is fine: the next Enter send dismisses it.
+window.__bramMisaddressedPending = null;
+// The DataSource's transformResult: keeps a mirror for the Enter path.
+window.__bramMisaddressedAccept = function (d) {
+  window.__bramMisaddressedPending = (d && d.pending) || null;
+  return { pending: window.__bramMisaddressedPending };
+};
+// Takes the DataSource's value ({pending}); "" when nothing is flagged.
+window.__bramMisaddressedLabel = function (v) {
+  var p = v && v.pending;
+  return p && p.itemId ? "Not about " + p.itemId + "?" : "";
+};
+function __bramMisaddressedPost(body) {
+  if (typeof window.fetch !== "function") return Promise.resolve(null);
+  return window
+    .fetch("/__worklist/misaddressed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    .then(function (r) { return r.json().catch(function () { return null; }); })
+    .catch(function () { return null; });
+}
+window.__bramMisaddressedResend = function (ds) {
+  var pending = ds && ds.value && ds.value.pending;
+  if (!pending || !pending.feedbackRef) return;
+  window.__bramIframeTrace("click", { target: "resend-as-chat", op: "act", item: String(pending.itemId || "") });
+  __bramMisaddressedPost({ op: "resend", feedbackRef: pending.feedbackRef }).then(function (res) {
+    window.__bramMisaddressedPending = null;
+    if (ds && typeof ds.refetch === "function") ds.refetch();
+    if (!res || !res.ok || !res.text) {
+      window.__bramIframeTrace("click", { target: "resend-as-chat", op: "refused", reason: String((res && res.error) || "no-response") });
+      return;
+    }
+    var sel = (window.__bramW2Selection || []).filter(function (id) { return id !== res.itemId; });
+    if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection(sel);
+    window.__bramPrepareWorklistMessageSubmission({ text: res.text, mode: "", voiceTarget: "message-agent" });
+  });
+};
+window.__bramMisaddressedDismiss = function () {
+  if (!window.__bramMisaddressedPending) return;
+  window.__bramMisaddressedPending = null;
+  __bramMisaddressedPost({ op: "dismiss" });
 };
 
 window.__bramGateCloseComment = function (itemId, issueNumber, text, closesIssues) {

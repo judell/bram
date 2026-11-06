@@ -89783,6 +89783,238 @@ fn handle_audit_direct_edit<R: tauri::Runtime>(
     )
 }
 
+// --- misaddressed-feedback-resends-as-chat ----------------------------------
+// When feedback sent with an item ticked is plainly about something else, the
+// agent flags it here instead of asking "Did you mean to address …?" and
+// stopping, and the pane offers one click, Resend as chat, which unticks the
+// item, sends the same text as chat, and notes on the feedback record that it
+// was resent. Under /__worklist/ so the agents' existing loopback allowlist
+// covers it. One pending flag at a time, in memory: it describes the turn
+// being answered, so a relaunch forgetting it is right.
+//
+// GET  -> {"pending": {"feedbackRef","itemId","atMs"} | null}
+// POST {"op":"flag","feedbackRef"}    the agent; only a live draft whose item
+//                                     the running iterate turn is addressed to
+// POST {"op":"resend","feedbackRef"}  the pane's button; must be the pending
+//                                     ref; appends the note, returns the text
+// POST {"op":"dismiss"}               the pane, on the next send
+#[derive(Clone)]
+struct MisaddressedFeedback {
+    fref: String,
+    item_id: String,
+    at_ms: i64,
+}
+
+static MISADDRESSED_FEEDBACK: OnceLock<Mutex<Option<MisaddressedFeedback>>> = OnceLock::new();
+
+fn misaddressed_cell() -> &'static Mutex<Option<MisaddressedFeedback>> {
+    MISADDRESSED_FEEDBACK.get_or_init(|| Mutex::new(None))
+}
+
+// A feedbackRef is "<unix_ms>-<itemId>". Returns the item id, or None for
+// anything else, including path-shaped input.
+fn misaddressed_ref_item(fref: &str) -> Option<String> {
+    let (ms, item) = fref.split_once('-')?;
+    if ms.is_empty() || !ms.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if item.is_empty() || item.contains('/') || item.contains('\\') || item.contains("..") {
+        return None;
+    }
+    Some(item.to_string())
+}
+
+// The note appended to a resent feedback record. The original text stays
+// above it, so the record is corrected, not rewritten.
+fn misaddressed_note(item_id: &str, at_iso: &str) -> String {
+    format!(
+        "\n\n---\n*Resent as chat {}: this message was not about `{}`.*\n",
+        at_iso, item_id
+    )
+}
+
+fn misaddressed_json(status: u16, v: serde_json::Value) -> (u16, &'static str, Vec<u8>) {
+    (
+        status,
+        "application/json; charset=utf-8",
+        v.to_string().into_bytes(),
+    )
+}
+
+fn handle_worklist_misaddressed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    method: &str,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let trace = |line: String| {
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "feedback-misaddressed", &line);
+        }
+    };
+    if method == "GET" {
+        let pending = misaddressed_cell().lock().ok().and_then(|g| g.clone());
+        return misaddressed_json(
+            200,
+            serde_json::json!({ "pending": pending.map(|p| serde_json::json!({
+                "feedbackRef": p.fref, "itemId": p.item_id, "atMs": p.at_ms,
+            })) }),
+        );
+    }
+    if method != "POST" {
+        return misaddressed_json(405, serde_json::json!({ "error": "GET or POST" }));
+    }
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return misaddressed_json(
+                400,
+                serde_json::json!({ "error": format!("invalid JSON: {}", e) }),
+            )
+        }
+    };
+    let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let fref = req
+        .get("feedbackRef")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    match op {
+        "flag" => {
+            let Some(item_id) = misaddressed_ref_item(&fref) else {
+                trace("op=flag-refused reason=bad-ref".to_string());
+                return misaddressed_json(400, serde_json::json!({ "error": "bad feedbackRef" }));
+            };
+            let draft_live = feedback_drafts_dir(app)
+                .map(|d| d.join(format!("{}.md", fref)).is_file())
+                .unwrap_or(false);
+            if !draft_live {
+                trace(format!("op=flag-refused reason=no-live-draft ref={}", fref));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "no live feedback draft for that ref" }),
+                );
+            }
+            let ctx = project_root(Some(app))
+                .and_then(|root| {
+                    std::fs::read_to_string(resource_relative_path(&root, TURN_CONTEXT_REL)).ok()
+                })
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or_default();
+            let addressed = ctx.get("kind").and_then(|k| k.as_str()) == Some("iterate")
+                && ctx
+                    .get("addressedIds")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().any(|v| v.as_str() == Some(item_id.as_str())))
+                    .unwrap_or(false);
+            if !addressed {
+                trace(format!(
+                    "op=flag-refused reason=not-this-turn ref={} item={}",
+                    fref, item_id
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "the running turn is not feedback to that item" }),
+                );
+            }
+            if let Ok(mut g) = misaddressed_cell().lock() {
+                *g = Some(MisaddressedFeedback {
+                    fref: fref.clone(),
+                    item_id: item_id.clone(),
+                    at_ms: unix_now_ms(),
+                });
+            }
+            trace(format!("op=flag ref={} item={}", fref, item_id));
+            emit_replayable_signal(app, "feedback-misaddressed-changed");
+            misaddressed_json(200, serde_json::json!({ "ok": true, "itemId": item_id }))
+        }
+        "resend" => {
+            let pending = misaddressed_cell().lock().ok().and_then(|g| g.clone());
+            let Some(p) = pending.filter(|p| p.fref == fref) else {
+                trace(format!("op=resend-refused reason=not-pending ref={}", fref));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "that ref is not the pending flag" }),
+                );
+            };
+            let Some(path) = feedback_drafts_dir(app).map(|d| d.join(format!("{}.md", p.fref)))
+            else {
+                return misaddressed_json(409, serde_json::json!({ "error": "no drafts folder" }));
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                trace(format!(
+                    "op=resend-refused reason=draft-gone ref={}",
+                    p.fref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "the feedback draft is gone" }),
+                );
+            };
+            let at_iso = format_iso_utc(unix_now_ms());
+            let noted = format!(
+                "{}{}",
+                text.trim_end(),
+                misaddressed_note(&p.item_id, &at_iso)
+            );
+            if let Err(e) = std::fs::write(&path, noted) {
+                trace(format!(
+                    "op=resend-refused reason=write-failed ref={} error={}",
+                    p.fref, e
+                ));
+                return misaddressed_json(500, serde_json::json!({ "error": "note write failed" }));
+            }
+            if let Ok(mut g) = misaddressed_cell().lock() {
+                *g = None;
+            }
+            trace(format!("op=resend ref={} item={}", p.fref, p.item_id));
+            emit_replayable_signal(app, "feedback-misaddressed-changed");
+            misaddressed_json(
+                200,
+                serde_json::json!({ "ok": true, "itemId": p.item_id, "text": text.trim() }),
+            )
+        }
+        "dismiss" => {
+            let cleared = misaddressed_cell().lock().ok().and_then(|mut g| g.take());
+            if let Some(p) = cleared {
+                trace(format!("op=ignored ref={} item={}", p.fref, p.item_id));
+                emit_replayable_signal(app, "feedback-misaddressed-changed");
+            }
+            misaddressed_json(200, serde_json::json!({ "ok": true }))
+        }
+        _ => misaddressed_json(
+            400,
+            serde_json::json!({ "error": "op must be flag, resend or dismiss" }),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod misaddressed_feedback_tests {
+    use super::{misaddressed_note, misaddressed_ref_item};
+
+    #[test]
+    fn ref_item_parses_only_well_formed_refs() {
+        assert_eq!(
+            misaddressed_ref_item("1793976481800-transcript-worklist-open-keeps-reading")
+                .as_deref(),
+            Some("transcript-worklist-open-keeps-reading")
+        );
+        assert_eq!(misaddressed_ref_item("abc-item"), None);
+        assert_eq!(misaddressed_ref_item("123-"), None);
+        assert_eq!(misaddressed_ref_item("123-../../etc"), None);
+        assert_eq!(misaddressed_ref_item("123-a/b"), None);
+        assert_eq!(misaddressed_ref_item("nodash"), None);
+    }
+
+    #[test]
+    fn note_keeps_the_original_above_it() {
+        let note = misaddressed_note("item-x", "2026-11-06T15:00:00Z");
+        assert!(note.starts_with("\n\n---\n"));
+        assert!(note.contains("Resent as chat 2026-11-06T15:00:00Z"));
+        assert!(note.contains("`item-x`"));
+    }
+}
+
 fn handle_iterate_end<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -101194,6 +101426,13 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_opencode_event(app, &buf)
         }
+    } else if path == "__worklist/misaddressed" {
+        // misaddressed-feedback-resends-as-chat: see handle_worklist_misaddressed.
+        let mut buf = Vec::new();
+        if method == "POST" {
+            let _ = request.as_reader().read_to_end(&mut buf);
+        }
+        handle_worklist_misaddressed(app, &method, &buf)
     } else if path == "__worklist/end" {
         // The last-action route agents may call to close approved/drop
         // turns (the sentinel doesn't care which kind wrote it; the

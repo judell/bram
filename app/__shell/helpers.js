@@ -12338,6 +12338,9 @@ function __bramVisibleToolIds() {
   try {
     var evs = window.__bramLastTranscriptEvents || [];
     var r = window.__bramVisibleRange;
+    // transcript-show-only-you-messages: the range indexes the filtered
+    // list then, not this snapshot, and no tool rows are on screen.
+    if (window.__bramYouOnlyActive && r && r.startIndex >= 0) return ids;
     if (r && r.startIndex >= 0) {
       for (var j = r.startIndex; j <= r.endIndex && j < evs.length; j++) {
         var ev = evs[j];
@@ -13943,8 +13946,8 @@ window.__xmluiEvalTraceSink = function (op, d) {
   try { window.__bramIframeTrace("xmlui-probe", { op: op, d: d }); } catch (e) { /* ignore */ }
 };
 
-window.__bramRegisterTranscriptScroll = function (goTop, goBottom) {
-  window.__bramTranscriptScrollActions = { top: goTop, bottom: goBottom };
+window.__bramRegisterTranscriptScroll = function (goTop, goBottom, youStep) {
+  window.__bramTranscriptScrollActions = { top: goTop, bottom: goBottom, you: youStep || null };
 };
 window.__bramTranscriptScroll = function (dir) {
   var a = window.__bramTranscriptScrollActions;
@@ -13960,7 +13963,7 @@ window.__bramTranscriptScroll = function (dir) {
 // two closures stay in markup because they assign the Transcript's xs vars;
 // everything else runs here, and the enter line times the mount against the
 // render (tau-hub 2026-10-08: onMount ran ~18 s after the Transcript drew).
-window.__bramTranscriptOnMount = function (goTop, goBottom) {
+window.__bramTranscriptOnMount = function (goTop, goBottom, youStep) {
   try {
     window.__bramIframeTrace("follow-state", {
       op: "transcript-onmount-enter",
@@ -13968,7 +13971,7 @@ window.__bramTranscriptOnMount = function (goTop, goBottom) {
     });
   } catch (e) { /* ignore */ }
   window.__bramChipJumpPending = 0;
-  window.__bramRegisterTranscriptScroll(goTop, goBottom);
+  window.__bramRegisterTranscriptScroll(goTop, goBottom, youStep);
   window.__bramTranscriptMount();
 };
 
@@ -14787,6 +14790,192 @@ window.__bramLiveTranscriptEvents = function (payload, menu) {
     events[i] = conv;
   }
   return events;
+};
+
+// transcript-show-only-you-messages: the Transcript's `events` is what the
+// List shows, either every projected row or only the user's own turns
+// (kind "user"; compaction summaries were reclassified above, so they drop
+// out). Find, follow-bottom and the You nav all run on this array, so they
+// act on what is shown with no logic of their own. Cached by source identity
+// so an unchanged projection keeps an identical filtered array.
+// The toggle is focus state (where you're looking), so sessionStorage:
+// it survives the remount a tab switch causes, not a relaunch
+// (developing-bram.md §Client storage).
+var __BRAM_YOU_ONLY_KEY = "bram.transcriptYouOnly";
+var __bramYouRowsCache = { src: null, out: null };
+window.__bramYouOnlyInitial = function () {
+  try { return window.sessionStorage.getItem(__BRAM_YOU_ONLY_KEY) === "1"; } catch (e) { return false; }
+};
+window.__bramShownTranscriptEvents = function (all, youOnly) {
+  window.__bramYouOnlyActive = !!youOnly;
+  var src = all || [];
+  if (!youOnly) return src;
+  if (__bramYouRowsCache.src === src) return __bramYouRowsCache.out;
+  var out = [];
+  for (var i = 0; i < src.length; i++) {
+    if (src[i] && src[i].kind === "user") out.push(src[i]);
+  }
+  __bramYouRowsCache = { src: src, out: out };
+  return out;
+};
+// "340 events", or "12 of 340 events" while only your messages show.
+window.__bramTranscriptCountLabel = function (shown, all, youOnly) {
+  var n = (all || []).length;
+  return youOnly ? ((shown || []).length + " of " + n + " events") : (n + " events");
+};
+// The toggle's click. Records where the reader was (as an index into ALL
+// events) so the post-toggle listener can land them on the same spot;
+// -1 while following, where the content-change repin lands at the bottom.
+window.__bramYouOnlySet = function (on, shown, all, agentId) {
+  on = !!on;
+  try { window.sessionStorage.setItem(__BRAM_YOU_ONLY_KEY, on ? "1" : "0"); } catch (e) { /* ignore */ }
+  var anchor = -1;
+  try {
+    var r = window.__bramVisibleRange;
+    var following = window.__bramFollowAtBottom !== false;
+    if (!following && r && r.startIndex >= 0 && shown && shown[r.startIndex]) {
+      anchor = (all || []).indexOf(shown[r.startIndex]);
+    }
+  } catch (e2) { /* ignore */ }
+  window.__bramYouAnchor = anchor;
+  window.__bramYouRef = null;
+  var mine = 0;
+  for (var i = 0; i < (all || []).length; i++) if (all[i] && all[i].kind === "user") mine++;
+  window.__bramIframeTrace("transcript-you", {
+    op: "only-mine", on: on, mine: mine, total: (all || []).length,
+    anchor: anchor, agentId: agentId || "main",
+  });
+  return on;
+};
+// After the toggle re-renders the List: scroll to the recorded spot. Turning
+// on lands on your last message at or above it; turning off lands on the row
+// itself.
+window.__bramYouOnlyRestore = function (shown, all, list, agentId) {
+  var a = window.__bramYouAnchor;
+  window.__bramYouAnchor = -1;
+  if (typeof a !== "number" || a < 0 || !list) return;
+  var target = a;
+  if (shown !== all) {
+    var count = 0;
+    for (var i = 0; i <= a && i < all.length; i++) if (all[i] && all[i].kind === "user") count++;
+    target = Math.max(0, count - 1);
+  }
+  try { list.scrollToIndex(target); } catch (e) { /* ignore */ }
+  window.__bramIframeTrace("transcript-you", {
+    op: "restore", anchor: a, to: target, agentId: agentId || "main",
+  });
+};
+
+// transcript-you-message-nav: ⤒ ▲ ▼ ⤓ for your messages. The reference row
+// is the last one a step landed on while it is still in view (so ▼ keeps
+// advancing near the end, where scrollToIndex can't move the view), else the
+// first visible row (so the buttons follow a hand scroll).
+function __bramYouRefIndex(shown) {
+  var r = window.__bramVisibleRange;
+  var start = (r && r.startIndex >= 0) ? r.startIndex : 0;
+  var end = (r && r.endIndex >= 0) ? r.endIndex : start;
+  var ref = window.__bramYouRef;
+  if (ref) {
+    for (var i = start; i <= end && i < shown.length; i++) {
+      if (shown[i] && shown[i].id === ref) return i;
+    }
+  }
+  return start;
+}
+function __bramYouTarget(dir, shown, ref) {
+  var i;
+  if (dir === "first") { for (i = 0; i < shown.length; i++) if (shown[i] && shown[i].kind === "user") return i; return -1; }
+  if (dir === "last") { for (i = shown.length - 1; i >= 0; i--) if (shown[i] && shown[i].kind === "user") return i; return -1; }
+  if (dir === "prev") { for (i = Math.min(ref, shown.length) - 1; i >= 0; i--) if (shown[i] && shown[i].kind === "user") return i; return -1; }
+  for (i = ref + 1; i < shown.length; i++) if (shown[i] && shown[i].kind === "user") return i;
+  return -1;
+}
+// Button enablement, derived from (shown, tick). Cached by a value key so an
+// unchanged state keeps an identical object and doesn't re-render the pane.
+var __bramYouNavCache = { key: "", val: null };
+window.__bramYouNavState = function (shown /*, tick */) {
+  shown = shown || [];
+  var ref = __bramYouRefIndex(shown);
+  var total = 0, before = 0, after = 0, atRef = false;
+  for (var i = 0; i < shown.length; i++) {
+    if (!shown[i] || shown[i].kind !== "user") continue;
+    total++;
+    if (i < ref) before++;
+    else if (i > ref) after++;
+    else atRef = true;
+  }
+  var key = total + "|" + before + "|" + after + "|" + atRef;
+  if (__bramYouNavCache.key === key) return __bramYouNavCache.val;
+  __bramYouNavPublishSoon();
+  // No wraparound (findbar-no-wraparound): ⤒ is off only when the reference
+  // row is already your first message, ⤓ only when it is your last.
+  var val = {
+    any: total > 0, canPrev: before > 0, canNext: after > 0,
+    canFirst: total > 0 && !(atRef && before === 0),
+    canLast: total > 0 && !(atRef && after === 0),
+  };
+  __bramYouNavCache = { key: key, val: val };
+  return val;
+};
+// The nav buttons live in the composer (MessageAgentComposer.xmlui), not the
+// Transcript, so their enablement travels by PushSource: the Transcript's
+// youNav binding computes the state, a changed key publishes it here. The
+// publish is deferred a tick so the composer's state update never lands
+// inside the Transcript's render.
+var __bramYouNavSubscribers = new Set();
+var __bramYouNavPublishPending = false;
+function __bramYouNavPublishSoon() {
+  if (__bramYouNavPublishPending) return;
+  __bramYouNavPublishPending = true;
+  setTimeout(function () {
+    __bramYouNavPublishPending = false;
+    var val = __bramYouNavCache.val;
+    __bramYouNavSubscribers.forEach(function (fn) {
+      try { fn(val); } catch (e) { console.error("[bramSubscribeYouNav] subscriber threw:", e); }
+    });
+  }, 0);
+}
+window.bramSubscribeYouNav = (function () {
+  var factory = function (emit) {
+    __bramYouNavSubscribers.add(emit);
+    emit(__bramYouNavCache.val);
+    return function () { __bramYouNavSubscribers.delete(emit); };
+  };
+  return function () { return factory; };
+})();
+// The composer's ▲/▼: ride the closure the mounted Transcript registered
+// (__bramTranscriptOnMount), like the top/bottom arrows do.
+window.__bramTranscriptYouStep = function (dir) {
+  var a = window.__bramTranscriptScrollActions;
+  if (!a || !a.you) return;
+  try { a.you(dir); } catch (e) { /* ignore */ }
+};
+
+// The List's onVisibleRangeDidChange: the existing bookkeeping, plus a tick
+// that changes only when the You nav's state does.
+window.__bramSetVisibleRangeYou = function (range, listRef, agentId, shown) {
+  window.__bramSetVisibleRange(range, listRef, agentId);
+  window.__bramYouNavState(shown);
+  return __bramYouNavCache.key;
+};
+// A button click. Scrolls, remembers the landing row, opens the follow echo
+// window and returns an increasing step number; the markup's listener on
+// that number sets atBottom=false (the find-step contract).
+var __bramYouStepSeq = 0;
+window.__bramYouStep = function (dir, shown, list, agentId) {
+  shown = shown || [];
+  var ref = __bramYouRefIndex(shown);
+  var target = __bramYouTarget(dir, shown, ref);
+  window.__bramFollowTransition(false, "you-step", agentId);
+  if (target >= 0) {
+    window.__bramYouRef = shown[target].id;
+    try { list.scrollToIndex(target); } catch (e) { /* ignore */ }
+  }
+  window.__bramIframeTrace("transcript-you", {
+    op: "step", dir: dir, from: ref, to: target, agentId: agentId || "main",
+  });
+  __bramYouStepSeq += 1;
+  return __bramYouStepSeq;
 };
 
 // Token counts as "969k" / "7k" / "1.2M".

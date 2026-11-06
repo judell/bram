@@ -155,9 +155,14 @@
          closures stay here because they assign this component's xs vars
          (atBottom) and reach transcriptList; __bramTranscriptOnMount
          registers them and runs the mount work, with an enter trace. -->
-    onMount="window.__bramTranscriptOnMount(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); })"
+    onMount="window.__bramTranscriptOnMount(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); }, (dir) => { youStepSeq = window.__bramYouStep(dir, events, transcriptList, $props.agentId); })"
     onUnmount="window.__bramTranscriptUnmount(atBottom, events.length, $props.agentId)"
-    var.events="{window.__bramLiveTranscriptEvents($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
+    var.allEvents="{window.__bramLiveTranscriptEvents($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
+    var.youOnly="{window.__bramYouOnlyInitial()}"
+    var.events="{window.__bramShownTranscriptEvents(allEvents, youOnly)}"
+    var.youTick="{''}"
+    var.youStepSeq="{0}"
+    var.youNav="{window.__bramYouNavState(events, youTick + ':' + youStepSeq)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
     var.expanded="{[]}"
     var.compactToggled="{[]}"
@@ -209,7 +214,15 @@
            https://www.xmlui.org/docs/howto/wrap-items-across-multiple-rows -->
       <HStack verticalAlignment="center" gap="$space-2" paddingVertical="$space-2" wrapContent="true">
         <Heading level="h2">Transcript</Heading>
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramTranscriptCountLabel(events, allEvents, youOnly)}" />
+        <!-- transcript-show-only-you-messages (Peggy): narrow the List to your
+             own turns. `events` is the shown set (helpers.js
+             __bramShownTranscriptEvents), so find, follow and the You nav act
+             on what is shown. The listener below the List lands the reader
+             where they were. https://www.xmlui.org/docs/reference/components/Switch -->
+        <Switch label="Only mine" labelPosition="end"
+          initialValue="{youOnly}"
+          onDidChange="(v) => youOnly = window.__bramYouOnlySet(v, events, allEvents, $props.agentId)" />
         <FindBar id="transcriptFindBar" placeholder="Find in transcript…"
           clearRevision="{transcriptFindClearEvt.value &amp;&amp; transcriptFindClearEvt.value.tick}"
           matchCount="{findPlan ? findPlan.total : 0}"
@@ -289,7 +302,7 @@
       data="{(findPlan &amp;&amp; findPlan.rows) || events}"
       idKey="{findPlan ? '__findKey' : 'id'}"
       onScroll="(ev) => atBottom = window.__bramFollowClassify(atBottom, ev.atEnd, $props.agentId)"
-      onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range, transcriptList, $props.agentId)">
+      onVisibleRangeDidChange="(range) => youTick = window.__bramSetVisibleRangeYou(range, transcriptList, $props.agentId, events)">
       <!-- transcript-worklist-bar-full-width: the empty message lives in
            the List's own empty state
            (https://www.xmlui.org/docs/reference/components/List). Above the
@@ -308,10 +321,15 @@
           value="Nothing to show." />
       </property>
       <VStack gap="$space-1" paddingVertical="$space-1" paddingHorizontal="$space-4">
-        <!-- user message -->
+        <!-- user message. transcript-you-messages-stand-out (Peggy): an
+             accent bar and a primary tint mark your turns at a glance; the
+             agent's rows stay unboxed. borderLeft is the layout shorthand
+             (https://www.xmlui.org/docs/styles-and-themes/theme-variables);
+             the tone switch adapts the tint in dark mode. -->
         <VStack
           when="{$item.kind === 'user'}"
-          backgroundColor="$color-surface-100"
+          backgroundColor="$color-primary-50"
+          borderLeft="3px solid $color-primary-500"
           padding="$space-2"
           borderRadius="$borderRadius"
           gap="$space-1">
@@ -528,6 +546,17 @@
       </VStack>
     </List>
     </Stack>
+    <!-- transcript-you-message-nav: the ▲/▼ for your messages live beside
+         the message box (MessageAgentComposer.xmlui) and step through the
+         closure onMount registers. A step returns a step number; this sets
+         atBottom=false, the find-step contract. youNav (a var above) computes
+         their enablement and publishes it (helpers.js bramSubscribeYouNav). -->
+    <ChangeListener
+      listenTo="{youStepSeq}"
+      onDidChange="() => youStepSeq > 0 ? (atBottom = false) : null" />
+    <ChangeListener
+      listenTo="{youOnly}"
+      onDidChange="() => window.__bramYouOnlyRestore(events, allEvents, transcriptList, $props.agentId)" />
     <!-- Opening the Worklist pane (now in the App Footer, passed in as
          $props.worklistOpen) shrinks the transcript; land it on the newest
          turn, the message most likely to name the rows to act on. Same

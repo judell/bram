@@ -179,33 +179,45 @@
            hug the ends means zero padding. Both go through this Theme
            wrapper, which is why size stays xs.
            https://docs.xmlui.org/components/Button -->
-      <Theme fontSize-Button="$fontSize-xl"
-             paddingVertical-Button-xs="0" paddingHorizontal-Button-xs="0">
-        <VStack
-          when="{$pathname === '/transcript'}"
-          width="2rem"
-          gap="0"
-          horizontalAlignment="center">
-          <Button
-            label="▲"
-            variant="ghost"
-            size="xs"
-            tooltip="Scroll transcript to top"
-            onClick="window.__bramTranscriptScroll('top')" />
-          <Button
-            label="▼"
-            variant="ghost"
-            size="xs"
-            tooltip="Scroll transcript to bottom"
-            onClick="window.__bramTranscriptScroll('bottom')" />
-        </VStack>
-      </Theme>
+      <!-- transcript-you-message-nav (Peggy; Jon 2026-11-05: "lose the
+           buttons next to the message box, put the new ones there"): the
+           find bar's buttons (FindBar.xmlui: outlined, xs, same glyphs),
+           stacked. ⤒/⤓ keep the old arrows' job, transcript top and bottom
+           (⤓ re-arms following); ▲/▼ step to your previous/next message
+           through the Transcript's registered closure. Enablement arrives by
+           PushSource from the Transcript (helpers.js bramSubscribeYouNav).
+           The old ghost ▲/▼ used a Theme wrapper for size; these keep the
+           default xs size so they match the find bar.
+           https://www.xmlui.org/docs/reference/components/Button -->
+      <VStack
+        when="{$pathname === '/transcript'}"
+        width="fit-content"
+        gap="$space-1"
+        horizontalAlignment="center">
+        <Button size="xs" variant="outlined" label="⤒"
+          tooltip="Top of transcript"
+          onClick="window.__bramTranscriptScroll('top')" />
+        <Button size="xs" variant="outlined" label="▲"
+          enabled="{!!(youNavFeed.value &amp;&amp; youNavFeed.value.canPrev)}"
+          tooltip="Previous of your messages"
+          onClick="window.__bramTranscriptYouStep('prev')" />
+        <Button size="xs" variant="outlined" label="▼"
+          enabled="{!!(youNavFeed.value &amp;&amp; youNavFeed.value.canNext)}"
+          tooltip="Next of your messages"
+          onClick="window.__bramTranscriptYouStep('next')" />
+        <Button size="xs" variant="outlined" label="⤓"
+          tooltip="Bottom of transcript, and follow new output"
+          onClick="window.__bramTranscriptScroll('bottom')" />
+      </VStack>
     </HStack>
     </VStack>
   </Form>
   <!-- issue-407: live dictation. Each partial is written into composerBox
        (window.__bramVoiceShowLive); the delivered transcript restores the
        pre-dictation text before appending. -->
+  <!-- transcript-you-message-nav: enablement for the ▲/▼ beside the box. -->
+  <PushSource id="youNavFeed" initial="{null}"
+    subscribe="{window.bramSubscribeYouNav()}" />
   <PushSource
     id="voicePartial"
     initial="{null}"

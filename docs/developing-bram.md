@@ -470,7 +470,7 @@ work through the `during` field on `long-task`; only `transcript-render` is
 marked so far.
 
 The same narrator, ported to JS (`__bramStoryTell` in `helpers.js`), is the
-**Log** tab under More (`app/tools/components/Log.xmlui`). The host only selects lines
+**Log** tab, below Settings in the nav (`app/tools/components/Log.xmlui`). The host only selects lines
 (`/__story/lines`); the pane tells them, so a wording change is a pane reload.
 It refreshes when a turn starts or ends. The Log adds what the script can't:
 quoted openings of what you sent, and what each turn did ("ran 1 search, made

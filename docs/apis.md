@@ -123,7 +123,7 @@ uses them for the target app info dialog.
 | `/__settings` | HTTP GET | — | user-facing slice of `.bram.json`: `{ shell: { agent }, worklist: { batchCommitActions }, ui: { targetAppMinimized } }` (always populated, defaults filled) | agent pane iframe (Settings tab), parent shell |
 | `/__settings` | HTTP POST | body matches GET shape | merged response after writing `.bram.json` atomically; preserves unknown top-level keys; 400 on JSON parse error / 500 on IO error | agent pane iframe (Settings tab) |
 | `settings-changed` | Tauri event | — | same payload `GET /__settings` returns | agent pane iframe (Settings DataSource refetch), parent shell (`app/main.js` `targetAppMinimized` driver) |
-| `/__story/lines` | HTTP GET | `since` (ISO-8601 UTC; lines at or after it) | `{ lines: [{ ts, src: "trace"\|"hook", cat, text }] }`, sorted by `ts`: the trace lines that mark episodes (`turn-state` transitions, `turn-context`, `inflight-sentinel`, `auth-record`, `turn-send`, `worklist-commit`, `queue`, `bram-trace`, and iframe `click` / `queue` / `long-task` / `input-latency` / `heartbeat-drift`) plus `hook-events.log` denies. Reads only the last 6 MB of the trace and 1 MB of the hook log. Read-only. The pane tells them (`__bramStoryTell` in `helpers.js`); issue-473-readable-launch-log. | agent pane iframe (the Log tab, under More) |
+| `/__story/lines` | HTTP GET | `since` (ISO-8601 UTC; lines at or after it) | `{ lines: [{ ts, src: "trace"\|"hook", cat, text }], queueDrafts: { [queueId]: entry } }`; drafts are resolved only for queue IDs in the returned trace window, from retained `queue-drafts/<id>.json` or the active queue (legacy fallback). Lines sorted by `ts`: the trace lines that mark episodes (`turn-state` transitions, `turn-context`, `inflight-sentinel`, `auth-record`, `turn-send`, `worklist-commit`, `queue`, `bram-trace`, and iframe `click` / `queue` / `long-task` / `input-latency` / `heartbeat-drift`) plus `hook-events.log` denies. Reads only the last 6 MB of the trace and 1 MB of the hook log. Read-only. The pane tells them (`__bramStoryTell` in `helpers.js`); issue-473-readable-launch-log. | agent pane iframe (the Log tab, under More) |
 | `/__coordination-status` | HTTP GET | — | derived status payload for the Status tab: `{ generatedAt, sections: [{ title, rows: [{ signal, level, state, detail, seen }] }] }`. Aggregates worklist counts by status, inflight sentinel state, turn-completion monitor state, authorization record freshness, watcher / hook health, recent trace tails. | agent pane iframe (Status tab) |
 | `/__state-dir/plan` | HTTP GET | — | judell/bram#469 dry run, read-only (nothing moves in 0.8.3): `{ stateDir, stateDirExists, wouldMove: [{ path, kind, isDir }], foreign: [{ name, isDir }], tracked: { count, paths, truncated }, liveClaim, liveClaimDetail: { claimIds, authorization }, nested: [{ path, stateDir }], note }`. `wouldMove` is the machine-state and shown-only `BRAM_OWNED_ENTRIES` present at the state folder's top level (`kind` = `file` \| `dir` \| `dotfile`, the last for dotfiles only the dotfiles rule covers); `foreign` is every other top-level entry there; `tracked` is `git ls-files -- <stateDir>` (list capped at 200; empty outside a repo); `liveClaim` is a non-empty inflight claim or an unexpired, non-`none` authorization record; `nested` is subfolders to depth 3 (skipping `.git`, `node_modules`, `target`, the state folder) holding their own `.bram-port` or `worklist.json`, which migrate themselves. Emits `[state-dir] op=plan`. The same JSON without a window: `bram --state-dir-plan <root>` (no trace line). | agent pane iframe (Status tab, State folder section); the CLI flag |
 | `/__event/latest` | HTTP GET | `name=<event-name>` | `{ exists, payload, tsMs }` — the most recently remembered Tauri event of the given name; subscriber replay for late-attaching listeners. | agent pane iframe, diagnostics |
@@ -658,20 +658,28 @@ file / event reference.
 ## 12. Agent message queue
 
 The Queue tab persists unsent messages in
-`resources/.bram-queue.json`. Entries remain user-controlled: saving
+`<state>/.bram-queue.json`. Each accepted save also retains message records in
+`<state>/queue-drafts/<id>.json`; sending or deleting removes them from the active
+queue but leaves these saved drafts for the Log. Older already-removed messages
+may have no draft. Message bodies are not written to the trace. Entries remain user-controlled: saving
 does not inject them into the terminal; the iframe calls the existing
 `toTurn` path only when the user clicks an item's **Send** button.
 The message box's unsent draft is persisted the same way, in
 `resources/.bram-message-draft.json` behind `/__draft` and `/__draft/save`.
 Each queue edit also writes a synchronous `sessionStorage` recovery snapshot
 before the debounced host save. An iframe refresh restores that snapshot
-and retries `/__queue/save`; only acknowledgement of the identical
-payload clears it.
+and retries `/__queue/save`. The recovery snapshot remains until replaced by
+a later mutation or the browser session ends. Saves are serialized using the
+last acknowledged version. Removed entries carry their final editor values
+through the debounce window as `retainedEntries`; the host preserves those
+drafts before replacing the active queue. Old clients may omit this field;
+the host still retains their previously saved entries.
 
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
 | `/__queue` | HTTP GET | — | `{ entries: [{ id, text, sendMode, targetItemId, updatedAtMs }], version }`; `sendMode` is `message` or `iterate`; missing file defaults to `{ entries: [] }` | agent pane iframe |
-| `/__queue/save` | HTTP POST | body `{ entries: [...] }` | `{ ok: true }`; validates that `entries` is an array, then replaces `resources/.bram-queue.json` | agent pane iframe |
+| `/__queue/save` | HTTP POST | body `{ entries: [...], version, retainedEntries?: [...] }` | `{ ok: true, version }`; rejects a stale/missing base version with 409 before writing. Retains per-message drafts, then atomically replaces `<state>/.bram-queue.json`. `retainedEntries` is not kept in the active queue file. | agent pane iframe |
+| `/__queue/draft` | HTTP GET | `id` (a queue id, `q-…`) | `{ active: true, entry }` while the message is queued, `{ active: false, entry }` from its retained draft in `<state>/queue-drafts/` after a send or delete, or `{ missing: true }` (older message, unknown or path-shaped id). The entry carries `agent` (recorded when it was written), `sentToAgent` / `sentAtMs` or `deletedAtMs` when known. Read-only; never recreates an entry. Backs the Log's Open in Queue link (`log-queue-entry-opens-message`). | agent pane iframe (Queue tab) |
 | `/__draft` | HTTP GET | — | `{ text }` — the message box's unsent draft from `resources/.bram-message-draft.json` (empty string when none); 500 without a project root | agent pane iframe |
 | `/__draft/save` | HTTP POST | body `{ text }` | `{ ok: true }`; an empty `text` removes the file; 400 on bad JSON or missing `text`. Last writer wins, one message box per window. | agent pane iframe |
 

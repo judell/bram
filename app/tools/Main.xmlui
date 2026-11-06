@@ -721,6 +721,7 @@
     <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
     <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
     <NavLink label="Settings" to="/settings" tooltip="Project and personal settings for Bram" />
+    <NavLink label="Log" to="/log" tooltip="What Bram did around your work, newest first" />
     <!-- nav-primary-list-and-more-group: less-used pages, collapsed by
          default (initiallyExpanded unset;
          https://www.xmlui.org/docs/reference/components/NavGroup). The group
@@ -733,7 +734,6 @@
       <NavLink label="Tips" to="/tips" tooltip="All the footer tips, including ones you dismissed" />
       <NavLink label="Context" to="/context" tooltip="What the agent reads: CLAUDE.md, memory, hooks and settings" />
       <NavLink label="Status" to="/status" tooltip="Bram&apos;s health: guards, session size, state checks" />
-      <NavLink label="Log" to="/log" tooltip="What Bram did around your work, newest first" />
     </NavGroup>
   </NavPanel>
 

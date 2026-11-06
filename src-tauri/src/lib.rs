@@ -2508,7 +2508,217 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str) -> Vec<u8> {
         }
     }
     lines.sort_by(|a, b| a["ts"].as_str().cmp(&b["ts"].as_str()));
-    serde_json::to_vec(&serde_json::json!({ "lines": lines })).unwrap_or_default()
+    let drafts = project_resource_path(app, ".bram-queue.json")
+        .and_then(|p| p.parent().map(|s| story_queue_drafts(s, &lines)))
+        .unwrap_or_default();
+    serde_json::to_vec(&serde_json::json!({ "lines": lines, "queueDrafts": drafts }))
+        .unwrap_or_default()
+}
+
+// The queue's stable ID names its saved draft, even after send/delete removes
+// the entry from the active queue. Message bodies never go in the trace.
+fn queue_draft_path(state: &Path, id: &str) -> Option<PathBuf> {
+    if !id.starts_with("q-")
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return None;
+    }
+    Some(state.join("queue-drafts").join(format!("{}.json", id)))
+}
+
+fn retain_queue_drafts(
+    state: &Path,
+    previous: &serde_json::Value,
+    incoming: &serde_json::Value,
+) -> Result<(), String> {
+    let mut drafts = std::collections::BTreeMap::new();
+    // Preserve legacy saved entries too. The pane's removed entries carry
+    // final edits made inside the debounce window; current entries win last.
+    for entries in [
+        previous["entries"].as_array(),
+        previous["retainedEntries"].as_array(),
+        incoming["retainedEntries"].as_array(),
+        incoming["entries"].as_array(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for entry in entries {
+            let id = entry["id"].as_str().ok_or("queue entry has no id")?;
+            let path = queue_draft_path(state, id).ok_or("invalid queue draft id")?;
+            drafts.insert(path, entry);
+        }
+    }
+    if drafts.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(state.join("queue-drafts")).map_err(|e| e.to_string())?;
+    for (path, entry) in drafts {
+        let text = serde_json::to_string_pretty(entry).map_err(|e| e.to_string())?;
+        atomic_write_text(&path, &format!("{}\n", text))?;
+    }
+    Ok(())
+}
+
+// One queue message by id: `{ "active": true, "entry": … }` while it is
+// queued, `{ "active": false, "entry": … }` from its retained draft, or
+// `{ "missing": true }`. An id that isn't a queue id is missing, never a path.
+fn queue_draft_lookup(state: &Path, id: &str) -> serde_json::Value {
+    let Some(path) = queue_draft_path(state, id) else {
+        return serde_json::json!({ "missing": true });
+    };
+    let active = std::fs::read(state.join(".bram-queue.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|q| {
+            q["entries"]
+                .as_array()
+                .and_then(|es| es.iter().find(|e| e["id"].as_str() == Some(id)).cloned())
+        });
+    if let Some(entry) = active {
+        return serde_json::json!({ "active": true, "entry": entry });
+    }
+    match std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .filter(|e| e["id"].as_str() == Some(id))
+    {
+        Some(entry) => serde_json::json!({ "active": false, "entry": entry }),
+        None => serde_json::json!({ "missing": true }),
+    }
+}
+
+fn story_queue_drafts(
+    state: &Path,
+    lines: &[serde_json::Value],
+) -> serde_json::Map<String, serde_json::Value> {
+    let active = std::fs::read(state.join(".bram-queue.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or_default();
+    let mut drafts = serde_json::Map::new();
+    for line in lines {
+        if line["cat"] != "iframe" {
+            continue;
+        }
+        let text = line["text"].as_str().unwrap_or("");
+        if !text.starts_with("subkind=queue ") {
+            continue;
+        }
+        let event = text
+            .find('{')
+            .and_then(|i| serde_json::from_str::<serde_json::Value>(&text[i..]).ok())
+            .unwrap_or_default();
+        let Some(id) = event["id"].as_str() else {
+            continue;
+        };
+        let Some(path) = queue_draft_path(state, id) else {
+            continue;
+        };
+        if drafts.contains_key(id) {
+            continue;
+        }
+        let saved = std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .filter(|entry| entry["id"].as_str() == Some(id));
+        // Existing unsent messages predate draft retention until next save.
+        let entry = active["entries"]
+            .as_array()
+            .and_then(|entries| entries.iter().find(|e| e["id"].as_str() == Some(id)))
+            .cloned()
+            .or(saved);
+        if let Some(entry) = entry {
+            drafts.insert(id.to_string(), entry);
+        }
+    }
+    drafts
+}
+
+#[cfg(test)]
+mod queue_draft_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn saved_queue_draft_survives_removal_and_final_debounced_edit() {
+        let state =
+            std::env::temp_dir().join(format!("bram-queue-drafts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&state).unwrap();
+        let original = json!({"entries":[{"id":"q-one", "text":"Before sending.", "sendMode":"iterate", "targetItemId":"item-one", "images":["/tmp/image.png"]}], "version":12});
+        let line =
+            json!({"cat":"iframe", "text":"subkind=queue {\"op\":\"add\",\"id\":\"q-one\"}"});
+        std::fs::write(state.join(".bram-queue.json"), original.to_string()).unwrap();
+        assert_eq!(
+            story_queue_drafts(&state, &[line.clone()])["q-one"],
+            original["entries"][0]
+        );
+        // An old pane sends no retainedEntries; its previously saved message
+        // must still be retained when that pane removes it from the queue.
+        let empty = json!({"entries":[], "version":13});
+        retain_queue_drafts(&state, &original, &empty).unwrap();
+        std::fs::write(state.join(".bram-queue.json"), empty.to_string()).unwrap();
+        assert_eq!(
+            story_queue_drafts(&state, &[line.clone()])["q-one"],
+            original["entries"][0]
+        );
+        // The new pane includes the final edit even if the active queue save
+        // was debounced away by Send/Delete. Preserve routing and images too.
+        let mut final_entry = original["entries"][0].clone();
+        final_entry["text"] = json!("Final edit. More detail.");
+        let removal = json!({"entries":[], "retainedEntries":[final_entry]});
+        retain_queue_drafts(&state, &original, &removal).unwrap();
+        assert_eq!(
+            story_queue_drafts(&state, &[line.clone()])["q-one"],
+            removal["retainedEntries"][0]
+        );
+        retain_queue_drafts(&state, &empty, &empty).unwrap();
+        assert_eq!(
+            story_queue_drafts(&state, &[line])["q-one"]["text"],
+            "Final edit. More detail."
+        );
+        assert!(story_queue_drafts(&state, &[]).is_empty());
+        // The Open in Queue lookup: retained draft once removed, missing for
+        // unknown or path-shaped ids, never a recreated entry.
+        assert_eq!(
+            queue_draft_lookup(&state, "q-one"),
+            json!({"active": false, "entry": removal["retainedEntries"][0]})
+        );
+        assert_eq!(
+            queue_draft_lookup(&state, "q-none"),
+            json!({"missing": true})
+        );
+        assert_eq!(queue_draft_lookup(&state, "../x"), json!({"missing": true}));
+        std::fs::write(state.join(".bram-queue.json"), original.to_string()).unwrap();
+        assert_eq!(queue_draft_lookup(&state, "q-one")["active"], json!(true));
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn queue_draft_upgrade_retains_old_hosts_extra_payload_and_rejects_paths() {
+        let state =
+            std::env::temp_dir().join(format!("bram-queue-upgrade-{}", uuid::Uuid::new_v4()));
+        let old_host = json!({"entries":[], "retainedEntries":[{"id":"q-removed", "text":"Saved by an older host."}]});
+        retain_queue_drafts(&state, &old_host, &json!({"entries":[]})).unwrap();
+        assert!(queue_draft_path(&state, "q-removed").unwrap().is_file());
+        for bad in [
+            "../outside",
+            "q-../../outside",
+            "q-foo/bar",
+            "q-foo\\bar",
+            "",
+            "q-☃",
+        ] {
+            assert!(queue_draft_path(&state, bad).is_none());
+            assert!(
+                retain_queue_drafts(&state, &json!({}), &json!({"entries":[{"id":bad}]})).is_err()
+            );
+        }
+        std::fs::remove_dir_all(state).unwrap();
+    }
 }
 
 // `rel` is repo-relative under `root`.
@@ -62791,6 +63001,7 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         // Left out of the search: 1.4 GB of logs.
         owned_tab("bram-traces", Dir, None),
         owned("message-drafts", Dir),
+        owned("queue-drafts", Dir),
         owned("audit-ledger.jsonl", File),
         // Written by scripts/build.sh, in the source repo only.
         owned("build-log.jsonl", File),
@@ -85465,6 +85676,34 @@ fn route_request<R: tauri::Runtime>(
     // issue-90-q-page: durable scratch queue backing the Queue tab. GET
     // returns the whole queue file (default empty); writes go through the
     // POST /__queue/save route. Entry order is presentation order only.
+    // /__queue/draft?id=q-… — log-queue-entry-opens-message: one queue
+    // message by its stable id, for the Log's Open in Queue link when the
+    // message is no longer queued. The active entry wins, else its retained
+    // draft; `{ "missing": true }` when neither exists (an older message).
+    // Read-only: it never recreates a queue entry.
+    if path == "__queue/draft" {
+        let mut id = String::new();
+        for pair in query.split('&') {
+            if let Some(enc) = pair.strip_prefix("id=") {
+                id = percent_decode(enc);
+            }
+        }
+        let Some(qpath) = project_resource_path(app, ".bram-queue.json") else {
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            );
+        };
+        let state = qpath.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let body = queue_draft_lookup(&state, &id);
+        return (
+            200,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&body).unwrap_or_default(),
+        );
+    }
+
     if path == "__queue" {
         let Some(qpath) = project_resource_path(app, ".bram-queue.json") else {
             return (
@@ -89328,6 +89567,9 @@ fn handle_queue_save<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
 ) -> (u16, &'static str, Vec<u8>) {
+    // Serialize the version check and writes, including retained drafts.
+    static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _save_guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let v: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
@@ -89364,10 +89606,13 @@ fn handle_queue_save<R: tauri::Runtime>(
         .map(|a| a.len())
         .unwrap_or(0);
     let base = v.get("version").and_then(|x| x.as_u64());
-    let on_disk = std::fs::read(&qpath)
+    let previous = std::fs::read(&qpath)
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|d| d.get("version").and_then(|x| x.as_u64()))
+        .unwrap_or_default();
+    let on_disk = previous
+        .get("version")
+        .and_then(|x| x.as_u64())
         .unwrap_or(0);
     match base {
         Some(b) if b == on_disk => {}
@@ -89397,9 +89642,13 @@ fn handle_queue_save<R: tauri::Runtime>(
     let mut out = v.clone();
     if let Some(obj) = out.as_object_mut() {
         obj.insert("version".to_string(), serde_json::json!(next_ver));
+        obj.remove("retainedEntries");
+    }
+    if let Err(e) = retain_queue_drafts(qpath.parent().unwrap(), &previous, &v) {
+        return (500, "text/plain; charset=utf-8", e.into_bytes());
     }
     let pretty = serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string());
-    match std::fs::write(&qpath, format!("{}\n", pretty)) {
+    match atomic_write_text(&qpath, &format!("{}\n", pretty)) {
         Ok(()) => {
             append_bram_trace_line(
                 app,

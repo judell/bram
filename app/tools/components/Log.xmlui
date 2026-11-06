@@ -1,30 +1,41 @@
 <Component
   name="Log"
-  var.refreshTick="{0}"
-  var.storyTick="{0}">
+  var.storyTick="{0}"
+  var.mountKey="{window.__bramStoryMountKey()}"
+  var.expanded="{[]}"
+  var.fullscreenImage="{null}">
 
   <!-- issue-473-readable-launch-log: Bram's story of the last hour. The host
        selects episode lines (/__story/lines); helpers.js tells them
-       (__bramStoryTell), so a wording change is a pane reload. Refetched when
-       a turn starts or ends (turn-context-changed) and on Refresh, no
-       polling. A tick rebuilds the URL, which also moves the window's start. -->
+       (__bramStoryTell), so a wording change is a pane reload. Fetched when
+       the tab opens and refetched when a turn starts or ends
+       (turn-context-changed); no polling and no Refresh button, since what
+       it shows happens on other tabs. A tick rebuilds the URL, which also
+       moves the window's start. -->
   <DataSource id="story"
-    url="{'/__story/lines?since=' + window.__bramStorySince(60, refreshTick + '.' + storyTick)}" />
+    url="{'/__story/lines?since=' + window.__bramStorySince(60, mountKey + '.' + storyTick)}" />
   <PushSource id="storyEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('turn-context-changed')}" />
   <ChangeListener listenTo="{storyEvt.value &amp;&amp; storyEvt.value.tick}"
     onDidChange="storyTick = storyTick + 1" />
 
+  <!-- A queue message's screenshot opens full size, as in Transcript.xmlui. -->
+  <Theme maxWidth-ModalDialog="95vw">
+    <ModalDialog
+      when="{!!fullscreenImage}"
+      onClose="fullscreenImage = null">
+      <Image
+        src="{window.imageSrcForPath(fullscreenImage)}"
+        fit="contain"
+        width="100%"
+        height="80vh" />
+    </ModalDialog>
+  </Theme>
+
   <VStack padding="$space-6" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Log</Heading>
-      <SpaceFiller />
-      <Button label="Refresh" size="sm" onClick="refreshTick = refreshTick + 1" />
     </HStack>
-    <Text
-      fontSize="$fontSize-sm"
-      color="$textColor-secondary"
-      value="The last hour, newest first. It shows only what you've asked to see." />
     <!-- No firm height: the List hands its scroll to the page, which is the
          tab's own scroll container
          (https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region). -->
@@ -35,11 +46,57 @@
       </property>
       <HStack gap="$space-3" paddingVertical="$space-1">
         <Text width="3.5rem" fontFamily="$fontFamily-monospace" color="$textColor-secondary" value="{$item.at}" />
-        <Text
+        <!-- Transcript's ID-keyed fold, so refresh/reordering preserves the
+             expanded message rather than the row's former position.
+             https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop -->
+        <VStack when="{!!$item.queueId}" width="*" gap="$space-2">
+          <!-- The label is the Link's own text, not a nested Text, so it
+               wraps; breakMode="word" breaks a long URL inside the quote
+               (https://www.xmlui.org/docs/howto/wrap-long-text-in-a-link). -->
+          <!-- Plain text color for the toggle, scoped to it alone so the
+               external-link icon below keeps the link color
+               (textColor-Link: https://www.xmlui.org/docs/reference/components/Link). -->
+          <Theme textColor-Link="$textColor-primary" textColor-Link--hover="$textColor-secondary"
+            textColor-Link--active="$textColor-primary">
+            <Link noIndicator="true" breakMode="word"
+              label="{(expanded.includes($item.id) ? '▾ ' : '▸ ') + $item.text}"
+              onClick="expanded = window.__bramToggleInArray(expanded, $item.id)" />
+          </Theme>
+          <VStack when="{expanded.includes($item.id)}" padding="$space-2">
+            <!-- The message, then Open in Queue at its stable id
+                 (https://www.xmlui.org/docs/reference/components/Link), then
+                 the context recorded with its draft, in small print. -->
+            <!-- The message as an inline Text run inside an outer Text, with
+                 the compact Link as the next child: one line-breaking
+                 context, so the icon hugs the end of the message's last line
+                 however it wraps (Text `inline`:
+                 https://www.xmlui.org/docs/reference/components/Text).
+                 The link shows only when there is a saved draft to open. -->
+            <Text>
+              <Text inline="true" whiteSpace="pre-wrap" value="{$item.message}" />
+              <Link when="{!!$item.context}" icon="external-link" noIndicator="true" marginLeft="$space-1"
+                tooltip="Open in Queue" to="{'/queue?focus=' + $item.queueId}" />
+            </Text>
+            <!-- Screenshots sent with the message, as Transcript shows a
+                 turn's images: a thumbnail that opens full size. -->
+            <Items data="{$item.images || []}">
+              <Image
+                src="{window.imageSrcForPath($item)}"
+                maxHeight="220px"
+                maxWidth="100%"
+                fit="contain"
+                onClick="fullscreenImage = $item" />
+            </Items>
+            <Text when="{!!$item.context}" fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{$item.context}" />
+          </VStack>
+        </VStack>
+        <Text when="{!$item.queueId}"
           width="*"
           color="{$item.surprising ? '$color-warn-700' : '$textColor-primary'}"
           value="{$item.text}" />
       </HStack>
     </List>
   </VStack>
+
 </Component>

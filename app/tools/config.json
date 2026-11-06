@@ -21,6 +21,7 @@
     "icon.circle-dashed": "resources/circle-dashed.svg",
     "icon.circle-dot": "resources/circle-dot.svg",
     "icon.circle-pause": "resources/circle-pause.svg",
-    "icon.checkbox-checked": "resources/checkbox-checked.svg"
+    "icon.checkbox-checked": "resources/checkbox-checked.svg",
+    "icon.external-link": "resources/external-link.svg"
   }
 }

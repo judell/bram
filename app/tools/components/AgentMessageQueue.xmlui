@@ -1,5 +1,18 @@
 <Component name="AgentMessageQueue"
-  var.entries="{null}">
+  var.entries="{null}"
+  var.fullscreenImage="{null}">
+  <!-- A sent message's screenshot opens full size, as in Transcript.xmlui. -->
+  <Theme maxWidth-ModalDialog="95vw">
+    <ModalDialog
+      when="{!!fullscreenImage}"
+      onClose="fullscreenImage = null">
+      <Image
+        src="{window.imageSrcForPath(fullscreenImage)}"
+        fit="contain"
+        width="100%"
+        height="80vh" />
+    </ModalDialog>
+  </Theme>
   <!-- A note's Send or Delete stops a mic recording into it
        (__bramQueueRemove), but its editor is gone by the time the result
        arrives, so nothing would clear the shared recording flag and the
@@ -39,6 +52,18 @@
   <ChangeListener
     listenTo="{queueData.value}"
     onDidChange="() => { if (entries === null &amp;&amp; queueData.value) { entries = window.__bramQueueRestore(queueData.value.entries || [], queueData.value.version); } }" />
+
+  <!-- log-queue-entry-opens-message: the Log's Open in Queue link lands here
+       as /queue?focus=<id>. An active entry is highlighted and scrolled to;
+       a sent or deleted one shows its retained draft read-only below the
+       header, and is never recreated. The lookup is one small read; with no
+       focus the route answers missing and nothing shows. -->
+  <DataSource
+    id="queueFocusDraft"
+    url="{'/__queue/draft?id=' + encodeURIComponent($queryParams.focus || '')}" />
+  <ChangeListener
+    listenTo="{($queryParams.focus || '') + '|' + ((entries || []).length)}"
+    onDidChange="window.__bramQueueRevealFocus($queryParams.focus)" />
 
   <PushSource
     id="queueAgentStatus"
@@ -83,6 +108,40 @@
       color="$textColor-secondary"
       value="Park thoughts here while the agent works. Edit any note in place; Send delivers it as a fresh turn. Send stays dimmed until the terminal is quiet and no menu is pending." />
 
+    <!-- log-queue-entry-opens-message: a focused message that is no longer
+         queued, read-only, with what happened to it and its recorded context. -->
+    <!-- Leads with the quoted leading sentence (as the Log does), then what
+         happened, then the recorded context. Close clears ?focus. Tinted and
+         bordered like the pane's other contained notices (Main.xmlui's
+         info-50 / info-200 cards), so it reads as a card, not a band. -->
+    <HStack
+      when="{!!$queryParams.focus &amp;&amp; queueFocusDraft.value &amp;&amp; !queueFocusDraft.value.active}"
+      gap="$space-2" padding="$space-2" verticalAlignment="start"
+      backgroundColor="$color-info-50" border="1px solid $color-info-200"
+      borderRadius="$borderRadius">
+      <VStack width="*" gap="$space-1">
+        <Text when="{!!window.__bramQueueFocusTitle(queueFocusDraft.value.entry)}" fontWeight="$fontWeight-bold"
+          value="{window.__bramQueueFocusTitle(queueFocusDraft.value.entry)}" />
+        <Text value="{window.__bramQueueDraftFate(queueFocusDraft.value.entry)}" />
+        <Text when="{!!queueFocusDraft.value.entry}" fontSize="$fontSize-xs" color="$textColor-secondary"
+          value="{window.__bramQueueDraftContext(queueFocusDraft.value.entry)}" />
+        <!-- Its screenshots, inside the card: maxWidth bounds each to the
+             card's width (no inline-flex Link wrapper to size around), and
+             Image's own click opens it full size
+             (https://www.xmlui.org/docs/reference/components/Image). -->
+        <Items data="{(queueFocusDraft.value.entry || {}).images || []}">
+          <Image
+            src="{window.imageSrcForPath($item)}"
+            maxHeight="220px"
+            maxWidth="100%"
+            fit="contain"
+            onClick="fullscreenImage = $item" />
+        </Items>
+      </VStack>
+      <Button icon="close" variant="ghost" size="xs" tooltip="Close"
+        onClick="navigate('/queue')" />
+    </HStack>
+
     <Text
       when="{(entries || []).length === 0}"
       color="$textColor-secondary"
@@ -111,7 +170,10 @@
       <HStack
         gap="$space-2"
         verticalAlignment="start"
-        paddingVertical="$space-2">
+        paddingVertical="$space-2"
+        testId="{'queue-entry-' + $item.id}"
+        borderRadius="$borderRadius"
+        backgroundColor="{$item.id === $queryParams.focus ? '$color-primary-50' : 'transparent'}">
         <VStack width="*" gap="$space-0_5">
           <IsolatedDraftEditor
             id="queueEditor"

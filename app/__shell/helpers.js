@@ -10018,6 +10018,14 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
     var st = lastValue && lastValue.state;
     return st === "working" || st === "waiting-for-permission";
   };
+  // log-queue-entry-opens-message: the agent the status names right now, as
+  // a provider key ("" when none has reported yet). Queue entries record it
+  // when written and sent, so the Log shows who it was then, not who is
+  // selected while reading.
+  window.__bramCurrentAgent = function () {
+    ensureSubscribed();
+    return window.__bramProviderKey(lastValue && lastValue.provider);
+  };
 })();
 
 // Host suspicious-silence + parent terminal-visibility join. The Rust host
@@ -17117,6 +17125,8 @@ var __BRAM_QUEUE_RECOVERY_KEY = "bram.agent-message-queue.unsaved";
 // it — the populated queue cannot be clobbered by a click-before-hydrate.
 window.__bramQueueVersion = null;
 var __bramQueueSaveTimer = null;
+var __bramQueueSaveChain = Promise.resolve();
+var __bramQueueRetained = Object.create(null);
 // queue-persist-pasted-images: the staged-image store
 // (bramPendingPastedImages, keyed by target) stays the one source of truth
 // for a note's screenshots. Each save writes a copy of the note's paths into
@@ -17180,11 +17190,16 @@ function __bramQueueDropImages(id) {
   bramTracePasteImage("queue-delete", { target: target, dropped: before.length - kept.length, retained: bramPendingPastedImageSummary() });
   bramNotifyPasteState();
 }
-function __bramQueueScheduleSave(entries) {
+function __bramQueueScheduleSave(entries, removed) {
+  // Keep the final editor value when Send/Delete beats the debounce timer.
+  // It travels with the next versioned save, not through the trace.
+  if (removed && removed.id) __bramQueueRetained[removed.id] = removed;
   __bramQueueLastEntries = entries || [];
   var snapshot = __bramQueueWithImages(entries);
+  var retained = Object.values(__bramQueueRetained);
   var payload = JSON.stringify({
     entries: snapshot,
+    retainedEntries: retained,
     version: window.__bramQueueVersion,
   });
   try {
@@ -17193,12 +17208,15 @@ function __bramQueueScheduleSave(entries) {
   if (__bramQueueSaveTimer) clearTimeout(__bramQueueSaveTimer);
   __bramQueueSaveTimer = setTimeout(function () {
     __bramQueueSaveTimer = null;
-    fetch("/__queue/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-    })
-      .then(function (response) {
+    // A later edit can arrive while a save is in flight. Dispatch in order
+    // with the acknowledged version, so removing a message cannot race its
+    // last edit and lose the final saved draft to a stale-version refusal.
+    __bramQueueSaveChain = __bramQueueSaveChain.then(function () {
+      return fetch("/__queue/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries: snapshot, retainedEntries: retained, version: window.__bramQueueVersion }),
+      }).then(function (response) {
         if (response.status === 409) {
           // A concurrent writer (or a stale base) moved the version. Do not
           // retry blind — that is the overwrite this guard exists to prevent.
@@ -17206,12 +17224,6 @@ function __bramQueueScheduleSave(entries) {
           throw new Error("queue save refused: stale-version");
         }
         if (!response.ok) throw new Error("queue save returned " + response.status);
-        response
-          .json()
-          .then(function (r) {
-            if (r && typeof r.version === "number") window.__bramQueueVersion = r.version;
-          })
-          .catch(function () {});
         // queue-remount-stale-hydration: do NOT clear the snapshot on save.
         // It is the session-scoped source of truth (overwritten on every
         // mutation); clearing it handed remount back to the /__queue
@@ -17219,7 +17231,14 @@ function __bramQueueScheduleSave(entries) {
         // (item gone) and deletes (item back). The snapshot is cleared only
         // by the browser session ending; the host /__queue is the
         // cross-restart backstop, read when the snapshot is absent.
-      })
+        return response.json().then(function (r) {
+          if (r && typeof r.version === "number") window.__bramQueueVersion = r.version;
+          retained.forEach(function (entry) {
+            if (__bramQueueRetained[entry.id] === entry) delete __bramQueueRetained[entry.id];
+          });
+        });
+      });
+    })
       .catch(function (e) {
         window.logToHost({ kind: "queue-save", phase: "err", error: String(e) });
       });
@@ -17836,6 +17855,12 @@ window.__bramQueueRestore = function (hostEntries, hostVersion) {
   // carries it as its precondition base. Before this runs, __bramQueueVersion
   // stays null and no save can land (host refuses a version-less write).
   window.__bramQueueVersion = typeof hostVersion === "number" ? hostVersion : 0;
+  try {
+    var recovery = JSON.parse(sessionStorage.getItem(__BRAM_QUEUE_RECOVERY_KEY) || "null");
+    ((recovery && recovery.retainedEntries) || []).forEach(function (entry) {
+      if (entry && entry.id) __bramQueueRetained[entry.id] = entry;
+    });
+  } catch (e) { /* entries recovery below handles malformed storage */ }
   var restored = __bramQueueRestoreEntries(hostEntries);
   __bramQueueLastEntries = restored.entries;
   // queue-persist-pasted-images: images = screenshots re-staged by this
@@ -17843,7 +17868,7 @@ window.__bramQueueRestore = function (hostEntries, hostVersion) {
   // any save, which stamps entries from the staged store.
   var images = __bramQueueRestageImages(restored.entries);
   window.__bramIframeTrace("queue", { op: "hydrate", version: window.__bramQueueVersion, images: images });
-  if (restored.ahead) __bramQueueScheduleSave(restored.entries);
+  if (restored.ahead || Object.keys(__bramQueueRetained).length) __bramQueueScheduleSave(restored.entries);
   return restored.entries;
 };
 // Returns { entries, ahead }: ahead means the sessionStorage snapshot won and
@@ -17928,6 +17953,7 @@ window.__bramQueueAdd = function (entries) {
     sendMode: "message",
     targetItemId: "",
     updatedAtMs: now,
+    agent: window.__bramCurrentAgent ? window.__bramCurrentAgent() : "",
   });
   window.__bramIframeTrace("queue", { op: "add", id: next[0].id, chars: 0 });
   __bramQueueScheduleSave(next);
@@ -17939,6 +17965,10 @@ window.__bramQueueAdd = function (entries) {
 window.__bramQueueRemove = function (entries, idx, suppressTrace) {
   var next = (entries || []).slice();
   var removed = next[idx];
+  // Snapshot attachments before Delete clears their staging area. Send has
+  // already consumed staging, so retain any paths carried by the entry.
+  var retained = removed && Object.assign({}, removed, __bramQueueWithImages([removed])[0]);
+  if (retained && !suppressTrace) retained.deletedAtMs = Date.now();
   // Send and Delete both end here; the note's editor goes away, so a mic
   // still recording into it would have nowhere to deliver.
   if (removed && removed.id) window.__bramVoiceStopOnSend("queue-item:" + removed.id);
@@ -17948,7 +17978,7 @@ window.__bramQueueRemove = function (entries, idx, suppressTrace) {
     if (removed && removed.id) __bramQueueDropImages(removed.id);
   }
   next.splice(idx, 1);
-  __bramQueueScheduleSave(next);
+  __bramQueueScheduleSave(next, retained);
   return next;
 };
 // __bramQueueReorder: persist a drag-reordered entries array. newOrder comes
@@ -17983,6 +18013,9 @@ window.__bramQueueSend = function (entries, idx, worklistItems) {
   var mode = window.__bramQueueSendMode(entry);
   var imageTarget = "queue-item:" + (entry.id || "");
   var images = window.bramPendingPastedImageCountForTarget(imageTarget);
+  // The send below consumes the staged screenshots, so take their paths
+  // first: the retained draft records them and the Log shows them.
+  var imagePaths = window.bramPendingPastedImagePathsForTarget(imageTarget) || [];
   if (mode === "iterate") {
     var targetItemId = String(entry.targetItemId || "");
     var items = worklistItems || [];
@@ -17998,7 +18031,15 @@ window.__bramQueueSend = function (entries, idx, worklistItems) {
     toTurn(window.__bramWithStagedImageMarkers(text, imageTarget));
   }
   window.__bramIframeTrace("queue", { op: "send", id: entry.id || "", mode: mode, chars: text.length, images: images });
-  return window.__bramQueueRemove(entries, idx, true);
+  // Record where it went: the retained draft keeps the agent and time of the
+  // send, which is what the Log's context footer reports.
+  var sent = (entries || []).slice();
+  sent[idx] = Object.assign({}, entry, {
+    sentAtMs: Date.now(),
+    sentToAgent: window.__bramCurrentAgent ? window.__bramCurrentAgent() : "",
+  });
+  if (imagePaths.length) sent[idx].images = imagePaths.slice();
+  return window.__bramQueueRemove(sent, idx, true);
 };
 // Ready = no open turn (agent-status not "working") and no pending menu.
 // Advisory dimming only — the host send-gate remains the enforcement layer
@@ -19443,6 +19484,10 @@ try { document.addEventListener("keydown", window.__bramComposerDirectEnterKeydo
 // made a new URL on every render: a refetch loop (1,513 fetches in minutes,
 // 2026-11-05). It moves only when the key does.
 var __bramStorySinceCache = { key: null, value: "" };
+// A fresh key each time the Log tab mounts, so reopening it starts a new
+// window instead of reusing the first visit's URL (and its cached result).
+var __bramStoryMounts = 0;
+window.__bramStoryMountKey = function () { return ++__bramStoryMounts; };
 window.__bramStorySince = function (minutes, key) {
   var k = String(minutes) + "|" + String(key);
   if (__bramStorySinceCache.key !== k) {
@@ -19452,6 +19497,58 @@ window.__bramStorySince = function (minutes, key) {
     };
   }
   return __bramStorySinceCache.value;
+};
+
+// log-queue-entry-opens-message: the small-print context under an expanded
+// queue message, from what its saved draft recorded at the time. Older
+// drafts have no agent field and say so rather than guessing.
+window.__bramQueueDraftContext = function (draft) {
+  if (!draft) return "";
+  var agentKey = draft.sentToAgent || draft.agent || "";
+  var agent = agentKey
+    ? (draft.sentToAgent ? "Sent to " : "Agent: ") + window.__bramProviderLabel(agentKey)
+    : "Agent: not recorded";
+  var item = window.__bramQueueSendMode(draft) === "iterate" && draft.targetItemId
+    ? "Worklist item: " + draft.targetItemId
+    : "Worklist item: none";
+  return agent + " · " + item;
+};
+// What happened to a message that is no longer queued, for Queue's
+// read-only view. Missing times (older drafts) give the plain sentence.
+window.__bramQueueDraftFate = function (draft) {
+  if (!draft) return "No saved draft is available for this older message.";
+  var at = function (ms) {
+    var d = new Date(Number(ms) || 0);
+    return isNaN(d.getTime()) || !ms ? "" : " at " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  };
+  if (draft.sentAtMs) return "No longer queued: sent" + at(draft.sentAtMs) + ".";
+  if (draft.deletedAtMs) return "No longer queued: deleted" + at(draft.deletedAtMs) + ".";
+  return "No longer queued.";
+};
+// The read-only card's first line: the message's quoted leading sentence,
+// the same quote the Log uses; "" when there's no text to quote.
+window.__bramQueueFocusTitle = function (draft) {
+  var q = draft ? window.__bramStoryLeadingSentence(draft.text) : "";
+  return q ? "“" + q + "”" : "";
+};
+// Bring Queue's row for `id` into view once it renders. DndItems has no
+// scrollToId (List does), so find the row by its testId marker.
+window.__bramQueueRevealFocus = function (id) {
+  if (!id) return;
+  var tries = 0;
+  var tick = function () {
+    var el = document.querySelector('[data-testid="queue-entry-' + String(id).replace(/"/g, "") + '"]');
+    if (el) { el.scrollIntoView({ block: "center" }); return; }
+    if (++tries < 20) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+};
+
+window.__bramStoryLeadingSentence = function (text) {
+  var s = String(text || "").trim().replace(/\s+/g, " ");
+  var first = /^[\s\S]*?[.!?](?=\s|$)/.exec(s);
+  s = first ? first[0] : s;
+  return s.length > 180 ? s.slice(0, 177) + "…" : s;
 };
 
 window.__bramStoryTell = (function () {
@@ -19559,17 +19656,17 @@ window.__bramStoryTell = (function () {
       if (!j.id || qadds[j.id]) return;
       var rec = { chars: j.chars || 0 };
       qadds[j.id] = rec;
-      out.push({ t: t, at: hhmm(t), kind: "queue-add", surprising: false, _qadd: rec, _t: t });
+      out.push({ t: t, at: hhmm(t), kind: "queue-add", queueId: j.id, surprising: false, _qadd: rec, _t: t });
     }
     // queue-delete: names the add it undoes when that add is in the window.
     function onQueueDelete(t, j) {
       var a = j.id && qadds[j.id];
       var addedAt = a ? (out.filter(function (o) { return o._qadd === a; })[0] || {}).at : "";
       out.push({
-        t: t, at: hhmm(t), kind: "queue-delete", surprising: false,
-        text: "You deleted a queued message" +
+        t: t, at: hhmm(t), kind: "queue-delete", queueId: j.id, surprising: false,
+        text: "Deleted queue message" +
           (j.chars ? " (" + j.chars + " characters)" : "") +
-          (addedAt ? ", the one you added at " + addedAt + "." : "."),
+          (addedAt ? ", added at " + addedAt + "." : "."),
       });
     }
     var drift = { t: 0, focused: null };
@@ -19889,14 +19986,27 @@ window.__bramStoryTell = (function () {
 
     out.forEach(function (o) {
       if (o._qadd) {
-        o.text = "You added a message to the queue" +
-          (o._qadd.chars ? " (" + o._qadd.chars + " characters so far)." : ".");
+        o.text = "New queue message" +
+          (o._qadd.chars ? " (" + o._qadd.chars + " characters)." : ".");
       }
     });
     out.sort(function (a, b) { return b.t - a.t; });
     return out
       .filter(function (o) { return STORY_SHOW.indexOf(o.kind) >= 0; })
-      .map(function (o) { return { at: o.at, text: o.text, kind: o.kind, surprising: o.surprising }; });
+      .map(function (o) {
+        var draft = o.queueId && payload.queueDrafts && payload.queueDrafts[o.queueId];
+        var message = draft && typeof draft.text === "string" ? draft.text : null;
+        var quote = window.__bramStoryLeadingSentence(message);
+        var text = o.text;
+        if (quote) text = (o.kind === "queue-delete" ? "Deleted queue message: “" : "New queue message: “") + quote + "”";
+        return {
+          id: o.kind + ":" + (o.queueId || o.t),
+          at: o.at, text: text, kind: o.kind, surprising: o.surprising, queueId: o.queueId || null,
+          message: message === null ? "No saved draft is available for this older message." : (message || "This queued message is empty."),
+          context: window.__bramQueueDraftContext(draft || null),
+          images: (draft && Array.isArray(draft.images)) ? draft.images : [],
+        };
+      });
   }
 
   // What the Log shows, opt-in (Jon, 2026-11-05: "show nothing until I ask

@@ -3551,22 +3551,41 @@ window.settingsInfoBodies = {
     "\n\n## Pause Worklist enforcement for Claude\n\nAn advanced, experimental setting. While it is on, Bram's guard stops denying Claude's edits that no Worklist item covers, and Claude is told the Worklist is paused, so it edits directly and proposes no items. You define the work and manage commits yourself. The guard's other checks (session URLs, forge signatures) still apply. Codex, OpenCode and Antigravity stay enforced. Edits made while paused belong to no item: before turning enforcement back on, commit or stash them, or the next whole-file commit of a begun item may take them.\n\n*Project setting, saved in `.bram.json` as `worklist.enforcement` (`paused` or `on`) and shared with everyone who works in this repo. Default: on.*",
   ui:
     "## Show target app\n\nShow the embedded target-app preview pane. Usually off.\n\n*Project setting, saved in `.bram.json` as `ui.showTargetApp` and shared with everyone who works in this repo. Default: off.*\n\n## Terminal open at startup\n\nOpen the terminal pane when Bram launches. The agent pane's Worklist and Transcript are the main surface; the toolbar's terminal button still opens and closes it for the current session.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: off.*\n\n## Agent-pane hot-reload\n\nAuto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n*Project setting, saved in `.bram.json` as `ui.toolsPaneHotReload` and shared with everyone who works in this repo. Default: off.*\n\n## Show tips in the footer\n\nShow rotating tips in the footer.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Soft beep on menus and turn completion\n\nPlay a soft beep when a permission menu appears or a turn finishes.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Dismissed tips return after\n\nHow long a dismissed tip stays hidden before showing again.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: 1 week.*\n\n## Search badges start all on\n\nWhether the Search tab opens with all facet badges selected, or none.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*",
+  // tool-descriptions-prompt-names-the-agent (Jon, 2026-11-05: "i can
+  // barely understand this, peggy never would"). Facts and sources are in
+  // that item's draft: per-agent behaviour measured on real sessions; cost
+  // from claude-haiku-4-5 at $1/$5 per MTok and ~430 in / 16 out tokens per
+  // call; key-vs-subscription from code.claude.com/docs/en/authentication.
   ai:
     "## Tool Descriptions\n\n" +
-    "The one-line intent header on Transcript tool rows.\n\n" +
-    "**For Claude** — rows already lead with Claude's own words: Bash tool " +
-    "descriptions, and the narration preceding other calls. No key, nothing " +
-    "to turn on. When the toggle is on, Bram uses Haiku to enhance them.\n\n" +
-    "**For Codex** — no native descriptions; rows show the raw command. " +
-    "When the toggle is on, Bram uses Haiku to create descriptions.\n\n" +
-    "Flipping the toggle off hides existing Haiku descriptions; flipping it " +
-    "back on restores them from cache at no cost — flip freely to compare.\n\n" +
-    "On sends tool material (command, diff, context, result excerpt) to the " +
-    "Anthropic API — needs `ANTHROPIC_API_KEY`, billed per-token. " +
-    "Credentials are redacted heuristically, not guaranteed. If Claude Code " +
-    "also accepts the key, run `/config` → turn off \"Use custom API key\" " +
-    "to keep it Bram-only.\n\n" +
-    "*Project setting, saved in `.bram.json` as `ai.describeCommands` and shared with everyone who works in this repo. Default: off.*",
+    "Each step the agent takes (running a command, reading or editing a file) " +
+    "shows as a row in the Transcript. A short description at the start of the " +
+    "row says what the step was for.\n\n" +
+    "**With this off**, rows use the agent's own words where there are any:\n\n" +
+    "| Agent | Commands | File reads and edits |\n" +
+    "|---|---|---|\n" +
+    "| Claude | its own description | the sentence Claude wrote just before |\n" +
+    "| Codex | the raw command | the file name |\n" +
+    "| OpenCode | the raw command | the file name |\n" +
+    "| Antigravity | its own description | the file name |\n\n" +
+    "**With this on**, Bram asks Claude Haiku to write a description for every " +
+    "row, for every agent, using the command and the agent's own lead-in " +
+    "sentence. Descriptions are kept: turning this off hides them, and turning " +
+    "it back on shows them again at no cost.\n\n" +
+    "**It needs an Anthropic API key, and a Claude subscription doesn't cover " +
+    "it.** Set `ANTHROPIC_API_KEY` in the environment you start Bram from. " +
+    "Calls are billed per token to that key's account, separately from any " +
+    "Claude Pro or Max plan. A description costs about $0.0005; a long working " +
+    "session comes to around 10 cents.\n\n" +
+    "**One catch for Claude users:** if Claude Code also sees that key, it asks " +
+    "whether to use it. If you say yes, your Claude Code usage moves from your " +
+    "subscription to the key and is billed per token. To keep the key for Bram " +
+    "only, say no, or in Claude Code run `/config` and turn off \"Use custom " +
+    "API key\".\n\n" +
+    "**What leaves your machine:** commands, file changes and short excerpts of " +
+    "results go to Anthropic. Bram masks things that look like passwords and " +
+    "keys, but can't promise to catch every one.\n\n" +
+    "*Project setting, saved as `ai.describeCommands` and shared with everyone who works in this repo. Default: off.*",
   search:
     "## Commit depth\n\nHow many of the newest commits the search index covers, messages and diffs (100\u201320,000); deeper indexing lengthens the next cold rebuild proportionally.\n\n*Project setting, saved in `.bram.json` as `search.commitDepth` and shared with everyone who works in this repo. Default: 2,000.*\n\n## Issue limit\n\nHow many forge issues the Issues tab and search index fetch (50\u20132,000).\n\n*Project setting, saved in `.bram.json` as `search.issueLimit` and shared with everyone who works in this repo. Default: 500.*",
   traces:
@@ -18997,7 +19016,7 @@ window.__bramHighlightSetting = function (key) {
 window.__bramTipsRegistry = [
   { id: 'tool-descriptions', priority: 10,
     url: 'https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/',
-    text: 'Tip: Turn on Tool Descriptions (Settings) to have Haiku enhance the intent headers on tool rows — and add them where Codex leaves none.' },
+    text: 'Tip: Turn on Tool Descriptions (Settings) to have Claude Haiku describe every step in the Transcript. It needs an Anthropic API key, billed separately from any subscription.' },
   { id: 'terminal-toggle', priority: 15,
     text: 'Tip: Use the terminal button in the top toolbar to show or hide the terminal.' },
   { id: 'batch-actions', priority: 20, route: '/worklist2',
@@ -19212,9 +19231,31 @@ window.__bramPickTip = function (settings, sessions, tick) {
     if (__bramTipDismissed(t.id)) continue;
     if (window.__bramTipSkips[t.id]) continue;
     if (!__bramTipEligible(t, settings)) continue;
+    if (t.id === 'tool-descriptions') return Object.assign({}, t, { text: window.__bramToolDescriptionsTipText() });
     return t;
   }
   return null;
+};
+
+// tool-descriptions-prompt-names-the-agent: the footer's Tool Descriptions
+// tip says what the agent you're running leaves undescribed (measured on
+// real sessions; see the item's draft). Same tip id, so a dismissal holds;
+// the registry text stays agent-neutral for the Tips page.
+window.__bramToolDescriptionsTipText = function () {
+  var agent = window.__bramCurrentAgent ? window.__bramCurrentAgent() : "";
+  var cost = " It needs an Anthropic API key, billed separately from any subscription.";
+  if (agent === "codex" || agent === "opencode") {
+    return "Tip: " + window.__bramProviderLabel(agent) + " doesn't describe its steps, so Transcript rows show raw commands. Turn on Tool Descriptions (Settings) to have Claude Haiku write them." + cost;
+  }
+  if (agent === "antigravity") {
+    return "Tip: Antigravity describes its commands but not its file reads and edits. Turn on Tool Descriptions (Settings) to have Claude Haiku describe every step." + cost;
+  }
+  if (agent === "claude") {
+    return "Tip: Claude describes its own commands. Turn on Tool Descriptions (Settings) to have Claude Haiku describe every step, file reads and edits included." + cost;
+  }
+  return window.__bramTipsRegistry[0] && window.__bramTipsRegistry[0].id === 'tool-descriptions'
+    ? window.__bramTipsRegistry[0].text
+    : "Tip: Turn on Tool Descriptions (Settings) to have Claude Haiku describe every step in the Transcript." + cost;
 };
 
 window.__bramDismissTip = function (id, tick) {

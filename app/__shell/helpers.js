@@ -12927,7 +12927,57 @@ window.bramSubscribeProjectedLastExchange = (function () {
 //
 // Same factory shape as bramSubscribeProjectedLastExchange: `emit` is called
 // once on subscribe and on every change; the return value unsubscribes.
-window.__bramW2Selection = [];
+// keep-selection-reload (#479): a tools-pane reload started the selection
+// empty, so the next message went out as chat instead of feedback (after
+// 74e5984 kept items ticked across a feedback send, a reload silently ended
+// the run). The selection is focus state, what the user is working on now
+// (developing-bram.md §Client storage), so sessionStorage: it survives a
+// reload, dies with the session, and is project-scoped so another Bram
+// window never sees it. On a null project key, neither read nor write.
+// Restored here, at load, before Worklist.xmlui's var reads it; ids that
+// left the board drop out through the Worklist's existing prune.
+var __BRAM_W2_SELECTION_KEY = "bram.w2Selection";
+window.__bramW2RestorePending = null;
+window.__bramW2Selection = (function () {
+  var key = window.__bramProjectScopedKey(__BRAM_W2_SELECTION_KEY);
+  if (!key) return [];
+  var ids = [];
+  try {
+    var parsed = JSON.parse(window.sessionStorage.getItem(key) || "[]");
+    if (Array.isArray(parsed)) ids = parsed.filter(function (x) { return typeof x === "string" && x; });
+  } catch (e) { return []; }
+  if (ids.length) {
+    window.__bramW2RestorePending = { ids: ids.slice(), at: Date.now() };
+    window.__bramIframeTrace("w2-selection-restore", { op: "restore", count: ids.length, ids: ids });
+  }
+  return ids;
+})();
+function __bramW2PersistSelection(ids) {
+  var key = window.__bramProjectScopedKey(__BRAM_W2_SELECTION_KEY);
+  if (!key) return;
+  try {
+    if (ids.length) window.sessionStorage.setItem(key, JSON.stringify(ids));
+    else window.sessionStorage.removeItem(key);
+  } catch (e) { /* storage is optional */ }
+}
+// The first selection change after a restore, once a board is known: name
+// the restored ids the board no longer has (the prune let them go). Ids
+// still on the board are never reported, so unticking a row isn't mistaken
+// for a drop. Stale after a minute: a later change isn't the reload's doing.
+function __bramW2ReportRestoreDrops(next) {
+  var pending = window.__bramW2RestorePending;
+  if (!pending) return;
+  if (Date.now() - pending.at > 60000) { window.__bramW2RestorePending = null; return; }
+  var board = (__bramWlAccepted && Array.isArray(__bramWlAccepted.items)) ? __bramWlAccepted.items : null;
+  if (!board) return;
+  window.__bramW2RestorePending = null;
+  var onBoard = {};
+  board.forEach(function (i) { if (i && i.id) onBoard[i.id] = true; });
+  var dropped = pending.ids.filter(function (id) { return !onBoard[id] && next.indexOf(id) < 0; });
+  if (dropped.length) {
+    window.__bramIframeTrace("w2-selection-restore", { op: "dropped", count: dropped.length, ids: dropped });
+  }
+}
 window.bramSubscribeW2Selection = (function () {
   var factory;
   return function () {
@@ -12940,6 +12990,8 @@ window.bramSubscribeW2Selection = (function () {
         return;
       }
       window.__bramW2Selection = next;
+      __bramW2PersistSelection(next);
+      __bramW2ReportRestoreDrops(next);
       subscribers.forEach(function (fn) {
         try { fn(); } catch (e) { console.error("[bramSubscribeW2Selection] subscriber threw:", e); }
       });
@@ -20190,6 +20242,14 @@ window.__bramStoryTell = (function () {
         else if (qj.op === "update" && qadds[qj.id]) qadds[qj.id].chars = qj.chars;
         else if (qj.op === "delete") onQueueDelete(t, qj);
       }
+      // keep-selection-reload (#479): the moment the addressee could have
+      // changed under the user, told in the Log.
+      else if (cat === "iframe" && sub === "w2-selection-restore") {
+        var sj = jsonTail(rest);
+        var sids = Array.isArray(sj.ids) ? sj.ids : [];
+        if (sj.op === "restore") simple(t, "selection", "The pane reloaded; I kept your selection: " + names(sids) + ".", false);
+        else if (sj.op === "dropped") simple(t, "selection", "After the reload, " + names(sids) + (sids.length === 1 ? " was" : " were") + " no longer on the Worklist, so I unticked " + (sids.length === 1 ? "it" : "them") + ".", true);
+      }
       else if (cat === "iframe" && sub === "heartbeat-drift") drift = { t: t, focused: jsonTail(rest).focused };
       else if (cat === "iframe" && (sub === "long-task" || sub === "input-latency")) onStall(t, sub, jsonTail(rest));
       else if (cat === "auth-record") onAuth(t, rest);
@@ -20260,8 +20320,8 @@ window.__bramStoryTell = (function () {
   // What the Log shows, opt-in (Jon, 2026-11-05: "show nothing until I ask
   // for it"). Every kind is still told; only these reach the Log. Add a kind
   // here when it's asked for. Known kinds: queue-add, queue, turn, gate,
-  // stall, refusal, launch, queue-delete.
-  var STORY_SHOW = ["queue-add", "queue-delete"];
+  // stall, refusal, launch, queue-delete, selection.
+  var STORY_SHOW = ["queue-add", "queue-delete", "selection"];
 
   return function (payload) {
     try { return tell(payload); } catch (e) { return []; }

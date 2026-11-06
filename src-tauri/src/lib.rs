@@ -2431,6 +2431,9 @@ const STORY_IFRAME_SUBKINDS: &[&str] = &[
     "long-task",
     "input-latency",
     "heartbeat-drift",
+    // keep-selection-reload (#479): a pane reload restoring the Worklist
+    // selection. Its own subkind, so the busy w2-selection lines stay out.
+    "w2-selection-restore",
 ];
 
 // The last `max` bytes of a file, starting at a line boundary.

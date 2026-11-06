@@ -30,6 +30,7 @@ Status: decided YYYY-MM-DD · revisit <when>
 
 ## Index
 
+- [2026-11-06 — The Transcript session-menu experiment is dropped; switching stays on the Sessions tab for now](2026-11-06-sessions-menu-experiment-dropped.md)
 - [2026-11-04 — Delegated work binds to the claim it was spawned under, and is released only on evidence](2026-11-04-delegated-work-binds-to-the-spawning-claim.md)
 - [2026-11-02 — Bram's per-project state folder becomes `.bram/`, moved in three releases](2026-11-02-bram-state-folder-is-dot-bram.md)
 - [2026-10-30 — Bram finds subagent transcripts from each provider's own parent link](2026-10-30-subagent-transcript-provider-discovery.md)

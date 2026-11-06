@@ -11857,21 +11857,35 @@ window.__bramShapePrecedingIntent = function (prose) {
 // - first row of a consecutive same-narration group only — three Reads
 //   under one sentence each captioned identically read as noise;
 // - sentence shaping via __bramShapePrecedingIntent above.
+// row-intent-reads-claude-narration-again (Peggy, 2026-11-05: Claude rows
+// bare until Haiku was switched on). Two later changes had silenced this
+// pass. Claude Code 2.1.280 writes its short notes as `thinking` entries
+// (see Transcript.xmlui's transcript-thinking-inline), and the projection
+// gives each JSONL record its own turn, so a note and the calls it
+// introduces sit in different turns. So: `thinking` counts as narration,
+// and narration carries across consecutive assistant turns, reset only by
+// a user turn (the first guard above, unchanged). Measured on this session
+// with Haiku stripped: 51 of 123 tool rows bare before.
 // Runs once per broadcast, before reference preservation; the field is
-// derived deterministically from turn content, so a reused prior turn
+// derived deterministically from turn content (turns are append-only, so a
+// turn's carried-in narration never changes), so a reused prior turn
 // reference already carries it.
 window.__bramAnnotatePrecedingIntent = function (turns) {
   var list = turns || [];
+  var lastProse = "";
+  var lastApplied = "";
   for (var i = 0; i < list.length; i++) {
     var t = list[i] || {};
-    if (t.role !== "assistant") continue;
-    var lastProse = "";
-    var lastApplied = "";
+    if (t.role !== "assistant") {
+      lastProse = "";
+      lastApplied = "";
+      continue;
+    }
     var es = t.entries || [];
     for (var k = 0; k < es.length; k++) {
       var e = es[k];
       if (!e) continue;
-      if (e.kind === "text" && e.text) {
+      if ((e.kind === "text" || e.kind === "thinking") && e.text) {
         lastProse = e.text;
         lastApplied = "";
         continue;
@@ -16979,7 +16993,11 @@ window.__bramDescribeContextForTool = function (toolId) {
         var es = (turns[ti] && turns[ti].entries) || [];
         for (var p = ei; p >= 0; p--) {
           var t = es[p];
-          if (t && t.kind === "text" && t.text) { prose = t.text; break; }
+          // row-intent-reads-claude-narration-again: Claude's notes are
+          // `thinking` entries now (Claude Code 2.1.280), so without this
+          // Haiku got the user's message as context for Claude rows while
+          // other agents' text notes reached it.
+          if (t && (t.kind === "text" || t.kind === "thinking") && t.text) { prose = t.text; break; }
         }
         if (!prose && ti > 0) {
           // Fall back to the turn's own text (user turns carry their

@@ -34986,7 +34986,10 @@ fn opencode_tool_as_claude(name: &str, input: &serde_json::Value) -> (String, se
                 "replace_all": field("replaceAll"),
             }),
         ),
-        "shell" => (
+        // opencode-bash-tool-maps-to-bash: OpenCode names its shell tool
+        // `bash` (all 32 shell calls in this machine's opencode.db,
+        // 2026-11-05); "shell" is kept for older sessions that used it.
+        "bash" | "shell" => (
             "Bash".into(),
             serde_json::json!({ "command": field("command"), "description": field("description") }),
         ),
@@ -36834,6 +36837,27 @@ mod opencode_rename_tests {
                 .unwrap(),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod opencode_tool_name_tests {
+    use super::opencode_tool_as_claude;
+
+    // opencode-bash-tool-maps-to-bash: a real `bash` part's input from
+    // opencode.db, and the older `shell` name, both become Claude's Bash.
+    #[test]
+    fn bash_and_shell_both_map_to_bash() {
+        let real = serde_json::json!({ "command": "git status --short" });
+        let (name, input) = opencode_tool_as_claude("bash", &real);
+        assert_eq!(name, "Bash");
+        assert_eq!(input["command"], "git status --short");
+        let with_dir = serde_json::json!({ "command": "ls", "workdir": "/tmp" });
+        assert_eq!(opencode_tool_as_claude("bash", &with_dir).0, "Bash");
+        let old = serde_json::json!({ "command": "ls", "description": "List files" });
+        let (name, input) = opencode_tool_as_claude("shell", &old);
+        assert_eq!(name, "Bash");
+        assert_eq!(input["description"], "List files");
     }
 }
 

@@ -4626,14 +4626,17 @@ window.__bramWorklist2StripTooltip = function (item, claim, items) {
   // strip-proposed-says-files-changed: the not-yet-started row whose files
   // have changed explains itself, since nothing on the board credits them.
   if (item && !window.__bramWorklist2Begun(item, claim)) {
-    var moved = window.__bramUnbegunMovedFiles(item);
-    if (moved) {
+    var uncreditedPaths = window.__bramUncreditedDeclaredPaths(item);
+    if (uncreditedPaths.length) {
+      // strip-says-when-declared-file-has-uncredited-changes: the strip's
+      // sentence, with the file in code and the disclosure clause.
       return (
-        moved + " of its files " + (moved === 1 ? "has" : "have") +
-        " changed on disk, but nothing on the board started this row, so " +
-        "those changes aren't credited to it yet.\n\n" +
-        "**Start & commit** lands them under this item. **Drop** removes " +
-        "the row and leaves the changes on disk, belonging to no item."
+        window.__bramUncreditedPhrase(uncreditedPaths, true, true) + "\n\n" +
+        "Nothing on the board started this row, so those changes aren't " +
+        "credited to it yet. **Start** begins work under this item and " +
+        "leaves them on disk until its commit takes the file. **Start & " +
+        "commit** lands them under this item now. **Drop** removes the row " +
+        "and leaves the changes on disk, belonging to no item."
       );
     }
   }
@@ -5716,9 +5719,7 @@ window.__bramFileChangesCell = function (rec, rowBegun) {
   // beside that claim (Jon, 2026-10-07). Show the disk change, marked as not
   // yet credited to the item, since nothing on the board started it.
   if (!rowBegun) {
-    return (rec.added || 0) > 0 || (rec.removed || 0) > 0
-      ? total + suffix + " · not credited"
-      : "";
+    return window.__bramFileRecMoved(rec) ? total + suffix + " · not credited" : "";
   }
   var hasTake = typeof rec.takeAdded === "number";
   if (hasTake && (rec.takeAdded !== rec.added || rec.takeRemoved !== rec.removed)) {
@@ -6216,8 +6217,18 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
     // moved. This retired the __bramWorklistStripAnomaly tripwire (removed),
     // whose `no-changes-yet-with-changed-files` line flagged exactly this
     // label hiding real changes.
+    // strip-says-when-declared-file-has-uncredited-changes: name the file and
+    // what Start & commit does with it. Jon, 2026-11-02, on
+    // orientation-diagrams-first after a direct edit to site/index.html: "if
+    // I can plainly see that there's been a change, then I've already
+    // started by definition". The verbs don't change (Resume means begun
+    // under THIS item, and nothing has), so the line says why Start sits
+    // beside visible changes. Same predicate as the table's `not credited`.
+    var uncredited = window.__bramUncreditedDeclaredPaths(item);
     return withCloses(
-      window.__bramUnbegunMovedFiles(item) ? "Proposed · its files have changed" : "Proposed",
+      uncredited.length
+        ? "Proposed · " + window.__bramUncreditedPhrase(uncredited, false, false)
+        : "Proposed",
     );
   }
   // issue-406: its work was committed outside the Worklist (a plain git
@@ -6292,14 +6303,59 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
 // strip-proposed-says-files-changed: how many of an item's changed files have
 // lines added or removed -- the test the strip uses to say a not-yet-started
 // row's files have changed.
+// strip-says-when-declared-file-has-uncredited-changes: ONE test for "this
+// declared file moved on disk" (lines added or removed), shared by the files
+// table's `not credited` cell, the strip, its tooltip and the Start / Start &
+// commit tooltips, so no two of them can disagree about which files those are.
+window.__bramFileRecMoved = function (rec) {
+  return !!rec && ((rec.added || 0) > 0 || (rec.removed || 0) > 0);
+};
+// A NOT-BEGUN row's declared files that already moved: nothing on the board
+// started the row, so nobody is credited with those lines. Meaningful only
+// where the caller has checked begun-ness; on a begun row the same records
+// are the item's own work.
+window.__bramUncreditedDeclaredPaths = function (item) {
+  return ((item && item.changedFiles) || [])
+    .filter(window.__bramFileRecMoved)
+    .map(function (f) { return f.path; });
+};
 window.__bramUnbegunMovedFiles = function (item) {
-  var files = (item && item.changedFiles) || [];
-  var moved = 0;
-  for (var i = 0; i < files.length; i++) {
-    var f = files[i];
-    if (f && ((f.added || 0) > 0 || (f.removed || 0) > 0)) moved++;
+  return window.__bramUncreditedDeclaredPaths(item).length;
+};
+// The sentence those surfaces share. One file named, "and N more" past the
+// first. `code` wraps the path for Markdown (tooltips); the strip is plain
+// text. `full` adds the disclosure clause, which the terse strip leaves to
+// the tooltips (worklist2-strip-terse).
+window.__bramUncreditedPhrase = function (paths, code, full) {
+  var p = paths || [];
+  if (!p.length) return "";
+  var name = code ? "`" + p[0] + "`" : p[0];
+  var more = p.length > 1 ? " and " + (p.length - 1) + " more" : "";
+  var verb = p.length > 1 ? " already have" : " already has";
+  return (
+    name + more + verb + " changes nobody credits; Start & commit takes them with this item" +
+    (full ? " (they're disclosed as taken at the commit)." : "")
+  );
+};
+// The gate tooltips' input: the selection's uncredited paths, but only when
+// EVERY selected item is not begun -- the strip's own branch -- so a begun
+// row's credited changes are never called uncredited. Mixed selections get
+// their own explainer (__bramStartConsequence).
+window.__bramSelectionUncreditedPaths = function (items, sel, claim) {
+  var chosen = sel || [];
+  var list = items || [];
+  var out = [];
+  var seen = {};
+  for (var s = 0; s < chosen.length; s++) {
+    var it = null;
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === chosen[s]) it = list[i];
+    if (!it || window.__bramWorklist2Begun(it, claim)) return [];
+    var paths = window.__bramUncreditedDeclaredPaths(it);
+    for (var p = 0; p < paths.length; p++) {
+      if (!seen[paths[p]]) { seen[paths[p]] = true; out.push(paths[p]); }
+    }
   }
-  return moved;
+  return out;
 };
 // worklist2-checkbox-during-action: the row checkbox stays ticked and
 // disabled while a live claim covers the item — the tick is part of the
@@ -6713,7 +6769,7 @@ window.__bramPushWithheldNote = function (status) {
   return "These commits ride " + b + "; they reach " + (status.pushWithheld.defaultBranch || "main") + " through its PR.";
 };
 
-window.__bramGateScopeTooltip = function (sel, kind, branch, claim) {
+window.__bramGateScopeTooltip = function (sel, kind, branch, claim, items) {
   // gate-tooltips-multiline: Markdown lines, joined like the Worklist strip
   // tooltip (__bramWorklist2StripTooltip) -- one long single-line tooltip ran
   // past its edge. Rendered via tooltipMarkdown on the gate buttons.
@@ -6740,6 +6796,15 @@ window.__bramGateScopeTooltip = function (sel, kind, branch, claim) {
   // a selected item.
   var delegatedWhy = window.__bramDelegatedWhy(claim, ids);
   if (delegatedWhy) lines.push("**Why it's off:** " + delegatedWhy);
+  // strip-says-when-declared-file-has-uncredited-changes: the strip's
+  // sentence, on the two buttons that act on it. Only for a selection of
+  // not-begun items (__bramSelectionUncreditedPaths returns [] otherwise).
+  if (kind === "start" || kind === "start-commit") {
+    var uncredited = window.__bramSelectionUncreditedPaths(items, ids, claim);
+    if (uncredited.length) {
+      lines.push("**Already on disk:** " + window.__bramUncreditedPhrase(uncredited, true, true));
+    }
+  }
   return lines.join("\n\n");
 };
 

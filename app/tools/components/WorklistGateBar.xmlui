@@ -413,7 +413,7 @@
          one that describes. -->
     <Button
       label="{window.__bramGateQueuedLabel('start', window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value), gateQueue.value)}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start', null, gateClaim.value)}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start', null, gateClaim.value, gateWorklist.value.items)}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
@@ -424,7 +424,7 @@
       label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch, gateClaim.value)}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch, gateClaim.value, gateWorklist.value.items)}"
       onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <Button
       label="{window.__bramGateQueuedLabel('commit', 'Commit', gateQueue.value)}"

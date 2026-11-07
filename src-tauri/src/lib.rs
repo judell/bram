@@ -47062,6 +47062,64 @@ fn st_is_notification_text(text: &str) -> bool {
     tn.starts_with("<task-notification>") || tn.starts_with("[SYSTEM NOTIFICATION")
 }
 
+// transcript-peer-messages-not-you: a queued_command attachment whose
+// origin.kind is "peer" (a subagent's hand-back or another agent's message,
+// delivered while the main agent was mid-turn) as a system note shaped like
+// st_notification_turn's, so the Transcript shows it quietly and Only mine
+// and the message steps skip it. Keyed on the recorded origin, never on the
+// prompt text. The full text stays in the turn's entries.
+fn st_peer_note_turn(att: &serde_json::Value) -> Option<serde_json::Value> {
+    if att.get("type").and_then(|v| v.as_str()) != Some("queued_command") {
+        return None;
+    }
+    let origin = att.get("origin")?;
+    if origin.get("kind").and_then(|v| v.as_str()) != Some("peer") {
+        return None;
+    }
+    let name = origin
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("agent");
+    let handback = origin.get("handback").and_then(|v| v.as_bool()) == Some(true);
+    let body = origin
+        .get("handbackReportText")
+        .and_then(|v| v.as_str())
+        .filter(|_| handback)
+        .or_else(|| origin.get("body").and_then(|v| v.as_str()))
+        .or_else(|| att.get("prompt").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let body = st_strip_control_chars(body);
+    let first = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let label = if handback {
+        format!("Report from subagent ({})", name)
+    } else {
+        format!("Message from {}", name)
+    };
+    let display = st_cap_chars(
+        &if first.is_empty() {
+            label
+        } else {
+            format!("{}: {}", label, first)
+        },
+        300,
+    );
+    Some(serde_json::json!({
+        "role": "system",
+        "notification": true,
+        "peer": true,
+        "from": origin.get("from").and_then(|v| v.as_str()).unwrap_or(""),
+        "name": name,
+        "text": display,
+        "entries": [ { "kind": "text", "text": body } ],
+        "images": [],
+    }))
+}
+
 fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
     if !st_is_notification_text(text_joined) {
         return None;
@@ -47540,6 +47598,14 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             // note. Neither is sufficient alone. Pinned by
             // `task_notification_attachment_is_a_system_note`.
             if let Some(att) = r.get("attachment") {
+                // transcript-peer-messages-not-you: a message from another
+                // agent (a subagent's hand-back, a teammate) delivered
+                // mid-turn carries origin.kind "peer". It is never the
+                // user's, so it becomes a quiet system note, not a You turn.
+                if let Some(note) = st_peer_note_turn(att) {
+                    turns.push(note);
+                    continue;
+                }
                 if att.get("type").and_then(|v| v.as_str()) == Some("queued_command") {
                     if let Some(prompt) = att.get("prompt").and_then(|v| v.as_str()) {
                         let prompt = st_strip_control_chars(prompt);
@@ -77131,6 +77197,37 @@ mod session_turn_tests {
             "the summary reaches the pane, not the envelope: {}",
             text
         );
+    }
+
+    // transcript-peer-messages-not-you: the shape Claude Code records when a
+    // subagent's hand-back arrives mid-turn (2026-11-07, this repo's own
+    // session): origin.kind "peer", handback true, isMeta true.
+    #[test]
+    fn peer_handback_attachment_is_a_system_note() {
+        let content = r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","isMeta":true,"prompt":"<agent-message from=\"aad2\">\n[Subagent hand-back] ...\n</agent-message>","origin":{"kind":"peer","from":"aad2","senderTaskId":"aad2","name":"general-purpose","body":"[Subagent hand-back] The text below is the final report...","handback":true,"handbackReportText":"Both edits are in and node --check passes.\n\n**Files changed**"}}}"#;
+        let turns = st_parse_lines_to_turns(content);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["role"], "system", "never attributed to the user");
+        assert_eq!(turns[0]["notification"], true);
+        assert_eq!(turns[0]["peer"], true);
+        assert_eq!(
+            turns[0]["text"],
+            "Report from subagent (general-purpose): Both edits are in and node --check passes."
+        );
+        assert!(turns[0]["entries"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Files changed"));
+    }
+
+    // The human mid-turn message stays a You turn.
+    #[test]
+    fn human_queued_command_stays_a_user_turn() {
+        let content = r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"meanwhile, a question","origin":{"kind":"human"}}}"#;
+        let turns = st_parse_lines_to_turns(content);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["role"], "user");
+        assert_eq!(turns[0]["text"], "meanwhile, a question");
     }
 
     #[test]

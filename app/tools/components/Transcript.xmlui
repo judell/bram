@@ -74,14 +74,6 @@
        the single canonical menu surface (same place on every tab, always
        visible). The menu-prose provisional block went with it; the real
        assistant record renders when it lands. -->
-  <!-- Session metadata for the header: /__sessions/list flags the live
-       session with current:true and carries title/mtime/size. Auto-detects
-       the provider when none is passed (see list_sessions). Refetched on
-       sessions-list-changed so the size/date track the growing live file. -->
-  <DataSource
-    id="transcriptSessions"
-    url="/__sessions/list"
-    queryParams="{{ limit: 20 }}" />
   <!-- Subagent stream for the chip-selected view (agentId prop from the
        footer chips strip). Refreshed by the dedicated subagents-changed
        signal (subagent JSONL appends never reach sessions-list-changed —
@@ -107,13 +99,6 @@
   <ChangeListener
     listenTo="{transcriptSubagentsChangedEvt.value &amp;&amp; transcriptSubagentsChangedEvt.value.tick}"
     onDidChange="() => { if ($props.agentId) { subagentTurns.refetch(); } }" />
-  <PushSource
-    id="transcriptSessionsChangedEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
-  <ChangeListener
-    listenTo="{transcriptSessionsChangedEvt.value &amp;&amp; transcriptSessionsChangedEvt.value.tick}"
-    onDidChange="() => transcriptSessions.refetch()" />
   <!-- Feedback refs (iterate turns) are resolved inside the host
        projection; no client-side feedback map is needed. -->
   <Theme maxWidth-ModalDialog="95vw">
@@ -176,8 +161,7 @@
     var.findText="{''}"
     var.appliedNeedle="{''}"
     var.findCursor="{0}"
-    var.findPlan="{null}"
-    var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
+    var.findPlan="{null}">
     <!-- transcript-stream-switch-mount-keyed: a chip switch REMOUNTS this
          component (transcript-mount-pin/-restore fire per switch), so
          98b9f84's ChangeListener on $props.agentId never fired — zero
@@ -235,12 +219,9 @@
              where the pane it opens appears (#427's split, below). -->
       </HStack>
     </StickySection>
-    <Text
-      when="{currentSession}"
-      paddingHorizontal="$space-4"
-      fontSize="$fontSize-sm"
-      maxLines="1"
-      value="{window.__bramSessionMetaLine(currentSession)}" />
+    <!-- transcript-session-line-removed (Jon, 2026-11-07): the session line
+         under the header ("CLAUDE peggy asks · id … · size") duplicated the
+         footer's status line, so it and its /__sessions/list source are gone. -->
     <!-- Subagent-view banner: which agent's stream is showing and whether
          it is still running. The footer's Main chip swaps back. -->
     <Text

@@ -310,6 +310,13 @@
           labelPosition="end"
           initialValue="{settingsToolsPaneHotReload(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { toolsPaneHotReload: v } })" />
+        <!-- pane-idle-flush-when-degraded: opt-in workaround for an unexplained
+             pane slowdown (judell/bram#482 for the underlying leak). -->
+        <Switch
+          label="Reload a slowed pane when idle"
+          labelPosition="end"
+          initialValue="{settingsValue &amp;&amp; settingsValue.ui &amp;&amp; settingsValue.ui.paneIdleFlush === true}"
+          onDidChange="(v) => saveSettings.execute({ ui: { paneIdleFlush: v } })" />
         <!-- issue-231: per-user preferences, localStorage-backed (not project
              settings) — tips dismissal state is per-user too. The interval
              governs how long a dismissed tip stays hidden; the footer's

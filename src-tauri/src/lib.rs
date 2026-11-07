@@ -411,6 +411,12 @@ struct UiConfig {
     show_target_app: Option<bool>,
     #[serde(default, rename = "toolsPaneHotReload")]
     tools_pane_hot_reload: Option<bool>,
+    // pane-idle-flush-when-degraded: opt-in WORKAROUND for an unexplained
+    // agent-pane slowdown (judell/bram#482 for the underlying leak). When
+    // on, the pane reloads itself once it has measurably degraded and nobody
+    // is using it. Default off.
+    #[serde(default, rename = "paneIdleFlush")]
+    pane_idle_flush: Option<bool>,
 }
 
 // suggest-fresh-session: when the agent may suggest starting a fresh session.
@@ -29617,7 +29623,7 @@ mod agent_startup_policy_tests {
                 "continueLast": true
             },
             "worklist": { "batchCommitActions": false, "enforcement": "on" },
-            "ui": { "showTargetApp": false, "toolsPaneHotReload": false },
+            "ui": { "showTargetApp": false, "toolsPaneHotReload": false, "paneIdleFlush": false },
             "sessions": {
                 "suggestOnNewItem": true,
                 "suggestOnNewIssue": true,
@@ -29821,6 +29827,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         batch,
         show_target_app,
         tools_pane_hot_reload,
+        pane_idle_flush,
         tracing_enabled,
         inspector_tap,
         archive_after_days,
@@ -29855,7 +29862,11 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                 // Default OFF — the embedded target app is opt-in.
                 ui.as_ref().and_then(|u| u.show_target_app).unwrap_or(false),
                 // Default OFF — only explicit `true` enables.
-                ui.and_then(|u| u.tools_pane_hot_reload).unwrap_or(false),
+                ui.as_ref()
+                    .and_then(|u| u.tools_pane_hot_reload)
+                    .unwrap_or(false),
+                // pane-idle-flush-when-degraded: default OFF, opt-in workaround.
+                ui.and_then(|u| u.pane_idle_flush).unwrap_or(false),
                 // Default ON — tracing is the observability backbone; an
                 // explicit `false` (or BRAM_TRACE=0) turns it off.
                 traces.as_ref().and_then(|t| t.enabled).unwrap_or(true),
@@ -29881,6 +29892,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             false,
             false,
             false,
+            false,
             true,
             false,
             DEFAULT_TRACE_ARCHIVE_AFTER_DAYS,
@@ -29901,7 +29913,11 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                 && startup_policy != AgentStartupPolicy::None.as_str()
         },
         "worklist": { "batchCommitActions": batch, "enforcement": enforcement },
-        "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
+        "ui": {
+            "showTargetApp": show_target_app,
+            "toolsPaneHotReload": tools_pane_hot_reload,
+            "paneIdleFlush": pane_idle_flush
+        },
         "sessions": {
             "suggestOnNewItem": suggest_on_new_item,
             "suggestOnNewIssue": suggest_on_new_issue,
@@ -72352,6 +72368,53 @@ fn pending_background_tasks(tasks: Option<&serde_json::Value>) -> (usize, String
     (pending, seen.join(","))
 }
 
+// delegated-stop-counts-only-the-subagents-own-tasks: `background_tasks` is
+// session-wide (2026-11-04 20:56: a finished subagent's final stop listed the
+// orchestrator's own watcher shell). Returns (pending_any, pending_own, seen):
+// an unfinished non-subagent entry is "own" only when its `id` appears in the
+// stopping subagent's own transcript. `transcript` is that file's text; None
+// means unreadable, and then own is 0: holding errs toward a stuck row (the
+// failure being fixed), releasing errs toward unowned lines, which commits
+// disclose as `unownedTaken`.
+fn pending_own_background_tasks(
+    tasks: Option<&serde_json::Value>,
+    transcript: Option<&str>,
+) -> (usize, usize, String) {
+    let (pending_any, seen) = pending_background_tasks(tasks);
+    let Some(text) = transcript else {
+        return (pending_any, 0, seen);
+    };
+    let mut own = 0;
+    for t in tasks.and_then(|v| v.as_array()).into_iter().flatten() {
+        let kind = t.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        if kind == "subagent" || background_status_finished(status) {
+            continue;
+        }
+        if let Some(id) = t.get("id").and_then(|v| v.as_str()) {
+            if !id.is_empty() && text.contains(id) {
+                own += 1;
+            }
+        }
+    }
+    (pending_any, own, seen)
+}
+
+fn background_status_finished(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "completed"
+            | "complete"
+            | "done"
+            | "failed"
+            | "killed"
+            | "stopped"
+            | "cancelled"
+            | "canceled"
+            | "exited"
+    )
+}
+
 fn handle_agent_subagent<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -72408,14 +72471,39 @@ fn handle_agent_subagent<R: tauri::Runtime>(
             // Keep the binding; its final stop (no pending tasks) releases it.
             // Seen live 2026-11-04: a subagent backgrounded `sleep 600`, ended
             // its turn, and the binding was released ten minutes early.
-            let (pending, seen) = pending_background_tasks(value.get("background_tasks"));
+            // delegated-stop-counts-only-the-subagents-own-tasks: defer on
+            // `own`, the tasks whose ids appear in this subagent's transcript.
+            let tasks = value.get("background_tasks");
+            let (pending_any, _, _) = pending_own_background_tasks(tasks, None);
+            let transcript = if pending_any > 0 {
+                value
+                    .get("agent_transcript_path")
+                    .and_then(|v| v.as_str())
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| std::fs::read_to_string(expand_tilde(p)).ok())
+            } else {
+                None
+            };
+            let (pending_any, pending, seen) =
+                pending_own_background_tasks(tasks, transcript.as_deref());
             if bram_trace_enabled() && !seen.is_empty() {
                 append_bram_trace_line(
                     app,
                     "delegated",
                     &format!(
-                        "op=stop-tasks agent={} pending={} seen=[{}]",
-                        agent, pending, seen
+                        "op=stop-tasks agent={} pending={} own={} transcript={} seen=[{}]",
+                        agent,
+                        pending_any,
+                        pending,
+                        if transcript.is_some() {
+                            "ok"
+                        } else if pending_any == 0 {
+                            // Nothing unfinished: the transcript wasn't read.
+                            "skipped"
+                        } else {
+                            "unreadable"
+                        },
+                        seen
                     ),
                 );
             }
@@ -72521,6 +72609,33 @@ mod delegated_binding_tests {
         // No list, or an empty one: nothing pending, nothing to trace.
         assert_eq!(pending_background_tasks(None), (0, String::new()));
         assert_eq!(pending_background_tasks(Some(&serde_json::json!([]))).0, 0);
+    }
+
+    // delegated-stop-counts-only-the-subagents-own-tasks
+    #[test]
+    fn a_stop_counts_only_the_subagents_own_tasks() {
+        // The 2026-11-04 20:56 case: the shell is the orchestrator's watcher.
+        let tasks = serde_json::json!([
+            { "type": "shell", "status": "running", "id": "bsess123" },
+            { "type": "subagent", "status": "running", "id": "a1" }
+        ]);
+        let (any, own, _) = pending_own_background_tasks(Some(&tasks), Some("no such id here"));
+        assert_eq!((any, own), (1, 0));
+        // The sleep-600 case: the subagent's transcript names its shell.
+        let sleep =
+            serde_json::json!([{ "type": "shell", "status": "running", "id": "b2slumspb" }]);
+        let (_, own, _) =
+            pending_own_background_tasks(Some(&sleep), Some("task b2slumspb started"));
+        assert_eq!(own, 1);
+        // Unreadable transcript releases.
+        assert_eq!(pending_own_background_tasks(Some(&sleep), None).1, 0);
+        // A finished task never counts.
+        let done =
+            serde_json::json!([{ "type": "shell", "status": "completed", "id": "b2slumspb" }]);
+        assert_eq!(
+            pending_own_background_tasks(Some(&done), Some("b2slumspb")).1,
+            0
+        );
     }
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -89799,6 +89914,32 @@ fn handle_queue_save<R: tauri::Runtime>(
 // with a transport=fetch-fallback field, so a line arriving here is itself
 // evidence of which channel died. Same sink and redaction as the invoke
 // command (log_from_right_pane_impl).
+// pane-idle-flush-when-degraded: POST /__pane/flush. The degraded, idle pane
+// asks for a forced reload; it goes through the same deferral as every other
+// forced reload (emit_or_defer_tools_pane_reload), so a turn in flight holds
+// it until the claim clears. Refused unless ui.paneIdleFlush is on. Workaround
+// route; judell/bram#482 for the underlying leak.
+fn handle_pane_flush<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let enabled = project_root(Some(app))
+        .and_then(|root| load_project_config(&root))
+        .and_then(|c| c.ui)
+        .and_then(|u| u.pane_idle_flush)
+        .unwrap_or(false);
+    if !enabled {
+        return (
+            409,
+            JSON,
+            br#"{"ok":false,"error":"ui.paneIdleFlush is off"}"#.to_vec(),
+        );
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "tools-pane-reload", "op=requested source=pane-flush");
+    }
+    emit_or_defer_tools_pane_reload(app, true);
+    (200, JSON, br#"{"ok":true}"#.to_vec())
+}
+
 fn handle_trace_pane<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -101416,6 +101557,12 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_audit_direct_edit(app, &buf)
+        }
+    } else if path == "__pane/flush" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            handle_pane_flush(app)
         }
     } else if path == "__trace/pane" {
         if method != "POST" {

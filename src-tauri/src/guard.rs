@@ -391,6 +391,10 @@ fn subagent_report_body(payload: &serde_json::Value, token: &str) -> Option<serd
             .get("background_tasks")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
+        // delegated-stop-counts-only-the-subagents-own-tasks: the list above is
+        // session-wide; the host reads this transcript to see which tasks are
+        // the subagent's own.
+        "agent_transcript_path": str_field(payload, "agent_transcript_path"),
         "bram_token": token,
     }))
 }
@@ -1494,6 +1498,11 @@ mod guard_mode_tests {
         assert_eq!(body["background_tasks"], serde_json::json!([]));
         // A pause with a pending background task is forwarded as-is, so the
         // host can keep the binding until the subagent's final stop.
+        // delegated-stop-counts-only-the-subagents-own-tasks: forwarded for the host.
+        let mut with_path = stop.clone();
+        with_path["agent_transcript_path"] = serde_json::json!("/tmp/agent-x.jsonl");
+        let body = subagent_report_body(&with_path, "tok").unwrap();
+        assert_eq!(body["agent_transcript_path"], "/tmp/agent-x.jsonl");
         let mut paused = stop.clone();
         paused["background_tasks"] = serde_json::json!([{ "id": "bdv5odlm8" }]);
         let body = subagent_report_body(&paused, "tok").unwrap();

@@ -406,6 +406,166 @@ window.__bramBusyDuring = function (windowStart) {
   return "";
 };
 
+// pane-idle-flush-when-degraded: WORKAROUND (judell/bram#482 for the
+// underlying leak). The agent pane's focused heartbeat-drift spikes climb
+// with age since last reload (~20 to ~121 per active hour over two hours) and
+// a reload clears them. Opt-in via ui.paneIdleFlush: once the pane has
+// measurably degraded AND nobody is using it, ask the host (POST
+// /__pane/flush) for the existing forced reload, which honors the turn-end
+// hold. Constants are tuned here.
+var PANE_FLUSH_WINDOW_MIN = 20; // rolling window for counting spikes
+var PANE_FLUSH_SPIKE_MS = 1000; // a focused drift over this is a spike
+var PANE_FLUSH_ARM_PER_HOUR = 30; // armed at >= this many, scaled per hour
+var PANE_FLUSH_UNFOCUSED_MIN = 3; // unfocused/hidden this long before firing
+var PANE_FLUSH_EVAL_MS = 5000; // guard re-check cadence (DOM queries)
+var PANE_FLUSH_COOLDOWN_MS = 10 * 60 * 1000; // after a fire, before another
+var PANE_FLUSH_KEY = "bram.paneFlushAtMs"; // sessionStorage (focus, not decision)
+
+// Pure decision. state: { enabled, spikes (count in window), windowMin,
+// unfocusedMs (null when focused/visible), turn, dialog, composer, queued }.
+// Returns { action: "none"|"held"|"fire", reason, armed }.
+window.__bramPaneFlushDecision = function (state) {
+  var st = state || {};
+  var windowMin = st.windowMin || PANE_FLUSH_WINDOW_MIN;
+  var perHour = ((st.spikes || 0) * 60) / windowMin;
+  var armed = !!st.enabled && perHour >= PANE_FLUSH_ARM_PER_HOUR;
+  if (!armed) return { action: "none", reason: "", armed: false };
+  if (st.unfocusedMs == null || st.unfocusedMs < PANE_FLUSH_UNFOCUSED_MIN * 60000) {
+    return { action: "held", reason: "focused", armed: true };
+  }
+  if (st.turn) return { action: "held", reason: "turn", armed: true };
+  if (st.dialog) return { action: "held", reason: "dialog", armed: true };
+  if (st.composer) return { action: "held", reason: "composer", armed: true };
+  if (st.queued) return { action: "held", reason: "queued", armed: true };
+  return { action: "fire", reason: "", armed: true };
+};
+
+(function paneIdleFlush() {
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  if (window.location.pathname.indexOf("/tools/") === -1) return;
+  var enabled = false;
+  var spikes = []; // Date.now() of focused drift spikes
+  var unfocusedSince = null;
+  var lastEval = 0;
+  var lastHeldReason = "";
+  var wasArmed = false;
+  var firedAt = 0;
+  var loadedAt = Date.now();
+
+  function loadSetting() {
+    if (typeof window.fetch !== "function") return;
+    window
+      .fetch("/__settings", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) { enabled = !!(s && s.ui && s.ui.paneIdleFlush === true); })
+      .catch(function () {});
+  }
+  loadSetting();
+  setTimeout(function () {
+    try {
+      window.subscribeTauriEvent("__bramPaneIdleFlushSettingsUnsub", "settings-changed", function () { loadSetting(); });
+    } catch (e) {}
+  }, 1500);
+
+  // Report a reload we asked for.
+  setTimeout(function () {
+    try {
+      var raw = window.sessionStorage.getItem(PANE_FLUSH_KEY);
+      if (!raw) return;
+      window.sessionStorage.removeItem(PANE_FLUSH_KEY);
+      var at = Number(raw);
+      if (at > 0) window.__bramIframeTrace("pane-flush", { op: "reloaded", cold_ms: Date.now() - at });
+    } catch (e) {}
+  }, 2000);
+
+  function unfocusedNow() {
+    var hidden = document.hidden === true;
+    var focused = typeof document.hasFocus === "function" ? document.hasFocus() : true;
+    return hidden || !focused;
+  }
+  function markFocus() {
+    if (unfocusedNow()) { if (unfocusedSince == null) unfocusedSince = Date.now(); }
+    else unfocusedSince = null;
+  }
+  try {
+    window.addEventListener("focus", markFocus);
+    window.addEventListener("blur", markFocus);
+    document.addEventListener("visibilitychange", markFocus);
+  } catch (e) {}
+  markFocus();
+
+  function dialogOpen() {
+    try {
+      var els = document.querySelectorAll('[role="dialog"]');
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].offsetParent !== null || (els[i].getClientRects && els[i].getClientRects().length)) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function composerFocused() {
+    try {
+      var a = document.activeElement;
+      if (!a) return false;
+      var tag = (a.tagName || "").toLowerCase();
+      return tag === "textarea" || tag === "input" || a.isContentEditable === true;
+    } catch (e) { return false; }
+  }
+
+  // Called from the heartbeat tick with this tick's drift and focus.
+  window.__bramPaneFlushTick = function (drift, focusedNow) {
+    try {
+      var now = Date.now();
+      markFocus();
+      if (focusedNow && drift > PANE_FLUSH_SPIKE_MS) spikes.push(now);
+      var cutoff = now - PANE_FLUSH_WINDOW_MIN * 60000;
+      while (spikes.length && spikes[0] < cutoff) spikes.shift();
+      if (!enabled || now - lastEval < PANE_FLUSH_EVAL_MS) return;
+      lastEval = now;
+      if (firedAt && now - firedAt < PANE_FLUSH_COOLDOWN_MS) return;
+      var dec = window.__bramPaneFlushDecision({
+        enabled: enabled,
+        spikes: spikes.length,
+        windowMin: PANE_FLUSH_WINDOW_MIN,
+        unfocusedMs: unfocusedSince == null ? null : now - unfocusedSince,
+        turn: typeof window.__bramAgentTurnInFlight === "function" && window.__bramAgentTurnInFlight() === true,
+        dialog: dialogOpen(),
+        composer: composerFocused(),
+        queued: typeof window.__bramGateQueued === "function" && window.__bramGateQueued() === true,
+      });
+      if (dec.armed && !wasArmed) {
+        window.__bramIframeTrace("pane-flush", { op: "armed", spikes: spikes.length, window_min: PANE_FLUSH_WINDOW_MIN });
+      }
+      wasArmed = dec.armed;
+      if (dec.action === "held") {
+        if (dec.reason !== lastHeldReason) {
+          lastHeldReason = dec.reason;
+          window.__bramIframeTrace("pane-flush", { op: "held", reason: dec.reason });
+        }
+      } else {
+        lastHeldReason = "";
+      }
+      if (dec.action !== "fire") return;
+      firedAt = now;
+      window.__bramIframeTrace("pane-flush", {
+        op: "fired",
+        pane_age_min: Math.round((now - loadedAt) / 60000),
+        spikes: spikes.length,
+      });
+      try { window.sessionStorage.setItem(PANE_FLUSH_KEY, String(now)); } catch (e) {}
+      window
+        .fetch("/__pane/flush", { method: "POST" })
+        .then(function (r) {
+          if (!r.ok) throw new Error("status " + r.status);
+        })
+        .catch(function () {
+          firedAt = 0; // not delivered: allow a retry on a later heartbeat
+          try { window.sessionStorage.removeItem(PANE_FLUSH_KEY); } catch (e) {}
+        });
+    } catch (e) {}
+  };
+})();
+
 // Main-thread heartbeat for the drawer iframe. setInterval scheduled
 // every 200ms; if the actual gap exceeds the threshold the main thread
 // was blocked (typically by heavy Markdown re-renders during JSONL
@@ -489,6 +649,8 @@ window.__bramBusyDuring = function (windowStart) {
         : document.hasFocus();
     var bg = hidden || !focused;
     batchTick(drift, bg);
+    // pane-idle-flush-when-degraded: feed the workaround's spike window.
+    if (window.__bramPaneFlushTick) window.__bramPaneFlushTick(drift, !bg);
     if (drift >= DRIFT_THRESHOLD_MS && !window.__bramMenuPending) {
       try {
         window.logToHost({
@@ -3602,7 +3764,7 @@ window.settingsInfoBodies = {
     "## Mirror Worklist lifecycle to GitHub issues\n\nPost Worklist lifecycle comments to linked GitHub issues.\n\n*Project setting, saved in `.bram.json` as `mirrorWorklistLifecycleToIssue` and shared with everyone who works in this repo. Default: off.*" +
     "\n\n## Pause Worklist enforcement for Claude\n\nAn advanced, experimental setting. While it is on, Bram's guard stops denying Claude's edits that no Worklist item covers, and Claude is told the Worklist is paused, so it edits directly and proposes no items. You define the work and manage commits yourself. The guard's other checks (session URLs, forge signatures) still apply. Codex, OpenCode and Antigravity stay enforced. Edits made while paused belong to no item: before turning enforcement back on, commit or stash them, or the next whole-file commit of a begun item may take them.\n\n*Project setting, saved in `.bram.json` as `worklist.enforcement` (`paused` or `on`) and shared with everyone who works in this repo. Default: on.*",
   ui:
-    "## Show target app\n\nShow the embedded target-app preview pane. Usually off.\n\n*Project setting, saved in `.bram.json` as `ui.showTargetApp` and shared with everyone who works in this repo. Default: off.*\n\n## Terminal open at startup\n\nOpen the terminal pane when Bram launches. The agent pane's Worklist and Transcript are the main surface; the toolbar's terminal button still opens and closes it for the current session.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: off.*\n\n## Agent-pane hot-reload\n\nAuto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n*Project setting, saved in `.bram.json` as `ui.toolsPaneHotReload` and shared with everyone who works in this repo. Default: off.*\n\n## Show tips in the footer\n\nShow rotating tips in the footer.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Soft beep on menus and turn completion\n\nPlay a soft beep when a permission menu appears or a turn finishes.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Dismissed tips return after\n\nHow long a dismissed tip stays hidden before showing again.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: 1 week.*\n\n## Search badges start all on\n\nWhether the Search tab opens with all facet badges selected, or none.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*",
+    "## Show target app\n\nShow the embedded target-app preview pane. Usually off.\n\n*Project setting, saved in `.bram.json` as `ui.showTargetApp` and shared with everyone who works in this repo. Default: off.*\n\n## Terminal open at startup\n\nOpen the terminal pane when Bram launches. The agent pane's Worklist and Transcript are the main surface; the toolbar's terminal button still opens and closes it for the current session.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: off.*\n\n## Agent-pane hot-reload\n\nAuto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n*Project setting, saved in `.bram.json` as `ui.toolsPaneHotReload` and shared with everyone who works in this repo. Default: off.*\n\n## Reload a slowed pane when idle\n\nA workaround for an unexplained slowdown: the agent pane gets sluggish the longer it stays loaded, and a reload clears it. With this on, the pane reloads itself once it has measurably slowed down and you are not using it. It never reloads while you are using the pane: not while the window is focused, a turn is running, a dialog is open, the message box has focus, or a Worklist click is queued.\n\n*Project setting, saved in `.bram.json` as `ui.paneIdleFlush` and shared with everyone who works in this repo. Default: off.*\n\n## Show tips in the footer\n\nShow rotating tips in the footer.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Soft beep on menus and turn completion\n\nPlay a soft beep when a permission menu appears or a turn finishes.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Dismissed tips return after\n\nHow long a dismissed tip stays hidden before showing again.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: 1 week.*\n\n## Search badges start all on\n\nWhether the Search tab opens with all facet badges selected, or none.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*",
   // tool-descriptions-prompt-names-the-agent (Jon, 2026-11-05: "i can
   // barely understand this, peggy never would"). Facts and sources are in
   // that item's draft: per-agent behaviour measured on real sessions; cost

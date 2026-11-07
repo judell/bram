@@ -14912,11 +14912,50 @@ window.__bramCompactionEvent = function (ev) {
 // stays aligned. Converted events are cached by source-event identity so an
 // unchanged row keeps an identical object across refetches.
 window.__bramCompactionEventCache = (typeof WeakMap === "function") ? new WeakMap() : null;
+
+// transcript-host-notes-render-as-bram: the host prepends `[bram: <text>]`
+// lines (then a blank line) to the user's next message so the agent sees
+// them; the Transcript showed them at the same weight as what the user
+// typed. Display only: the agent still receives them inline. Only LEADING
+// `[bram: …]` notes count, each ending at the first `]` followed by
+// whitespace or the end; the whitespace between notes and before the user's
+// text is dropped. The host joins them with newlines, but the turn arrives
+// flattened: Claude Code records "[bram: …] hello" with a single space
+// (demo instance, 2026-11-07), so both shapes must match. A `[bram:`
+// mid-message or after the user's text is left alone.
+window.__bramSplitHostNotes = function (text) {
+  var src = String(text == null ? "" : text);
+  if (src.indexOf("[bram: ") !== 0) return { notes: [], text: src };
+  var notes = [];
+  var rest = src;
+  var re = /^\[bram: ([\s\S]*?)\](?=\s|$)\s*/;
+  var m;
+  while ((m = re.exec(rest))) {
+    notes.push(m[1]);
+    rest = rest.slice(m[0].length);
+  }
+  if (!notes.length) return { notes: [], text: src };
+  return { notes: notes, text: rest };
+};
+window.__bramHostNotesEventCache = (typeof WeakMap === "function") ? new WeakMap() : null;
 window.__bramLiveTranscriptEvents = function (payload, menu) {
   var events = window.__bramTranscriptEventsFromTurns(payload, menu);
   for (var i = 0; i < events.length; i++) {
     var ev = events[i];
     if (!ev || ev.kind !== "user") continue;
+    // transcript-host-notes-render-as-bram: split leading host notes off the
+    // user text (cached by source event so unchanged rows keep identity).
+    if (ev.compactSummary !== true && !window.__bramIsCompactSummaryText(ev.text)) {
+      var ncache = window.__bramHostNotesEventCache;
+      var split = ncache && ncache.get(ev);
+      if (split === undefined || split === null) {
+        var sp = window.__bramSplitHostNotes(ev.text);
+        split = sp.notes.length ? Object.assign({}, ev, { text: sp.text, hostNotes: sp.notes }) : false;
+        if (ncache) ncache.set(ev, split);
+      }
+      if (split) events[i] = split;
+      continue;
+    }
     if (ev.compactSummary !== true && !window.__bramIsCompactSummaryText(ev.text)) continue;
     var cache = window.__bramCompactionEventCache;
     var conv = cache && cache.get(ev);

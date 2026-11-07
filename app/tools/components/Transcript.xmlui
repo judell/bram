@@ -321,13 +321,29 @@
           value="Nothing to show." />
       </property>
       <VStack gap="$space-1" paddingVertical="$space-1" paddingHorizontal="$space-4">
+        <!-- transcript-host-notes-render-as-bram: host notes that were
+             prepended to the user's message render as quiet "Bram" lines
+             above the You row (they were shown at the same weight as what
+             the user typed). Display only; the agent still receives them
+             inline. https://www.xmlui.org/docs/reference/components/Items -->
+        <VStack
+          when="{$item.kind === 'user' &amp;&amp; $item.hostNotes &amp;&amp; $item.hostNotes.length}"
+          gap="$space-0_5"
+          paddingHorizontal="$space-2">
+          <Items data="{$item.hostNotes}">
+            <HStack gap="$space-2">
+              <Text value="Bram" fontWeight="bold" fontSize="$fontSize-sm" color="$textColor-secondary" />
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item}" />
+            </HStack>
+          </Items>
+        </VStack>
         <!-- user message. transcript-you-messages-stand-out (Peggy): an
              accent bar and a primary tint mark your turns at a glance; the
              agent's rows stay unboxed. borderLeft is the layout shorthand
              (https://www.xmlui.org/docs/styles-and-themes/theme-variables);
              the tone switch adapts the tint in dark mode. -->
         <VStack
-          when="{$item.kind === 'user'}"
+          when="{$item.kind === 'user' &amp;&amp; $item.text}"
           backgroundColor="$color-primary-50"
           borderLeft="3px solid $color-primary-500"
           padding="$space-2"

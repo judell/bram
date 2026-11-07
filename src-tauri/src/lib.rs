@@ -2417,14 +2417,7 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
 // issue-473-readable-launch-log: what /__story/lines selects. Trace lines in
 // these categories (and these iframe subkinds) mark episodes; everything
 // else, such as [pty-in], [watcher] and event plumbing, is left out. Guard
-// denies come from hook-events.log. Only the tail of each file is read: the
-// Log tells recent history, and the trace can run to tens of megabytes.
-// log-shows-start-commit-push-search: the Log shows five hours now, not one.
-// The trace grew 4.7 MB an hour on 2026-11-07 (32 MB in 6.8 h), so five
-// hours is about 24 MB; a 6 MB tail had already lost a Start & commit click
-// 72 minutes after it, and the Log told its commit as one with no click.
-const STORY_TRACE_TAIL_BYTES: u64 = 32 * 1024 * 1024;
-const STORY_HOOK_TAIL_BYTES: u64 = 1024 * 1024;
+// denies come from hook-events.log.
 const STORY_TRACE_CATEGORIES: &[&str] = &[
     "turn-state",
     "turn-context",
@@ -2452,85 +2445,519 @@ const STORY_IFRAME_SUBKINDS: &[&str] = &[
     "search-query",
 ];
 
-// The last `max` bytes of a file, starting at a line boundary.
-fn read_file_tail(path: &Path, max: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return String::new();
+// log-reads-across-trace-rotation: the Log's lines, held in memory.
+//
+// Every launch rotates the trace (prepare_bram_trace_log), and the route
+// used to read only the live file's last 32 MB, so a relaunch blanked the
+// Log's five-hour window. Measured 2026-11-07 over five hours: 207,843
+// trace lines, 12,612 selected, a 2.6 MB payload, 13 entries shown, and the
+// 32 MB tail re-read at every turn boundary. So the index reads each rotated
+// archive once (they never change) and the live files incrementally, from
+// the offset it stopped at. A refetch costs what the trace gained since the
+// last one. The pane names the kinds it shows (`kinds=`), and only the lines
+// those kinds are told from are sent.
+//
+// Plain archives only: they are gzipped after archiveAfterDays (default
+// 14), far outside any window the Log asks for.
+#[derive(Clone)]
+struct StoryLine {
+    ts: String,
+    src: &'static str,
+    cat: String,
+    text: String,
+}
+
+impl StoryLine {
+    fn subkind(&self, k: &str) -> bool {
+        self.cat == "iframe"
+            && self
+                .text
+                .strip_prefix("subkind=")
+                .and_then(|r| r.strip_prefix(k))
+                .is_some_and(|r| r.starts_with(' ') || r.is_empty())
+    }
+}
+
+#[derive(Default)]
+struct StoryFileCursor {
+    path: PathBuf,
+    // The file's first bytes when the cursor started, so a file replaced by
+    // rotation (hook-events.log rotates at its size cap while Bram runs) is
+    // noticed even after the new file outgrows the old offset.
+    head: Vec<u8>,
+    offset: u64,
+    partial: Vec<u8>,
+    lines: Vec<StoryLine>,
+    // The last session-set line pruned from `lines`, kept so the window's
+    // first entries can still be named with their session.
+    seed: Option<StoryLine>,
+}
+
+#[derive(Default)]
+struct StoryIndex {
+    // Rotated archives: path → (len, mtime ms, selected lines).
+    archives: HashMap<PathBuf, (u64, i64, Vec<StoryLine>)>,
+    live_trace: StoryFileCursor,
+    live_hook: StoryFileCursor,
+}
+
+static STORY_INDEX: OnceLock<Mutex<StoryIndex>> = OnceLock::new();
+
+fn story_select_trace_line(line: &str) -> Option<StoryLine> {
+    let rest = line.strip_prefix('[')?;
+    let (ts, rest) = rest.split_once("] [")?;
+    let (cat, text) = rest.split_once(']')?;
+    let text = text.trim_start();
+    let keep = match cat {
+        "iframe" => STORY_IFRAME_SUBKINDS
+            .iter()
+            .any(|k| text.starts_with(&format!("subkind={} ", k))),
+        "turn-state" => !text.starts_with("from=working to=working "),
+        // log-shows-start-commit-push-search: which session each entry
+        // happened in, for its expanded detail. Only the sets; the
+        // category's offers and refusals stay out.
+        "agent-switch" => text.starts_with("op=live-session-set "),
+        _ => STORY_TRACE_CATEGORIES.contains(&cat),
     };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(max);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
+    keep.then(|| StoryLine {
+        ts: ts.to_string(),
+        src: "trace",
+        cat: cat.to_string(),
+        text: text.to_string(),
+    })
+}
+
+fn story_select_hook_line(line: &str) -> Option<StoryLine> {
+    if !line.contains(" decided=deny ") {
+        return None;
+    }
+    let (ts, text) = line.split_once(' ')?;
+    Some(StoryLine {
+        ts: ts.to_string(),
+        src: "hook",
+        cat: "hook-deny".to_string(),
+        text: text.to_string(),
+    })
+}
+
+fn story_file_head(path: &Path) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.take(64).read_to_end(&mut buf);
+    }
+    buf
+}
+
+// Reads what `path` gained since the cursor's offset and selects from it.
+// Returns the bytes read.
+fn story_cursor_advance(
+    c: &mut StoryFileCursor,
+    path: &Path,
+    select: fn(&str) -> Option<StoryLine>,
+) -> u64 {
+    use std::io::{Seek, SeekFrom};
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let head_now = story_file_head(path);
+    if c.path != path || len < c.offset || (c.offset > 0 && !head_now.starts_with(&c.head)) {
+        *c = StoryFileCursor {
+            path: path.to_path_buf(),
+            ..StoryFileCursor::default()
+        };
+    }
+    if c.offset == 0 {
+        c.head = head_now;
+    }
+    if len <= c.offset {
+        return 0;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return 0;
+    };
+    if f.seek(SeekFrom::Start(c.offset)).is_err() {
+        return 0;
     }
     let mut buf = Vec::new();
-    let _ = f.take(max).read_to_end(&mut buf);
-    let mut s = String::from_utf8_lossy(&buf).into_owned();
-    if start > 0 {
-        match s.find('\n') {
-            Some(i) => {
-                s.drain(..=i);
-            }
-            None => s.clear(),
+    let _ = f.take(len - c.offset).read_to_end(&mut buf);
+    let read = buf.len() as u64;
+    c.offset += read;
+    let mut bytes = std::mem::take(&mut c.partial);
+    bytes.extend_from_slice(&buf);
+    let complete = match bytes.iter().rposition(|&b| b == b'\n') {
+        Some(i) => {
+            c.partial = bytes.split_off(i + 1);
+            bytes
+        }
+        None => {
+            c.partial = bytes;
+            return read;
+        }
+    };
+    for line in String::from_utf8_lossy(&complete).lines() {
+        if let Some(l) = select(line) {
+            c.lines.push(l);
         }
     }
-    s
+    read
+}
+
+// Drops lines before `since`, keeping the last session set among them.
+fn story_cursor_prune(c: &mut StoryFileCursor, since: &str) {
+    let cut = c.lines.partition_point(|l| l.ts.as_str() < since);
+    if cut == 0 {
+        return;
+    }
+    if let Some(set) = c.lines[..cut]
+        .iter()
+        .rev()
+        .find(|l| l.cat == "agent-switch")
+    {
+        c.seed = Some(set.clone());
+    }
+    c.lines.drain(..cut);
+}
+
+// The kinds a Log entry can be, and the lines its episodes are told from
+// (the handlers in helpers.js __bramStoryTell). A kind not listed here gets
+// every selected line, so a kind added in the pane before the host learns
+// it is told correctly, only less cheaply.
+fn story_kind_wants(kind: &str, l: &StoryLine) -> bool {
+    let cat = l.cat.as_str();
+    match kind {
+        "gate" => {
+            l.subkind("click") || matches!(cat, "auth-record" | "turn-send" | "worklist-commit")
+        }
+        "push" => cat == "git-push",
+        "search" => l.subkind("search-query"),
+        "queue-add" | "queue-delete" | "queue" => l.subkind("queue"),
+        "selection" => l.subkind("w2-selection-restore"),
+        "turn" => {
+            matches!(
+                cat,
+                "turn-state" | "turn-context" | "inflight-sentinel" | "turn-send"
+            ) || l.subkind("queue")
+        }
+        "stall" => {
+            l.subkind("long-task") || l.subkind("input-latency") || l.subkind("heartbeat-drift")
+        }
+        "refusal" => l.src == "hook" || matches!(cat, "auth-record" | "queue"),
+        "launch" => cat == "bram-trace",
+        _ => true,
+    }
+}
+
+struct StoryRead {
+    lines: Vec<StoryLine>,
+    read_bytes: u64,
+    files: usize,
+    archives_read: usize,
+}
+
+fn story_read_lines(traces_dir: &Path, since: &str) -> StoryRead {
+    let mut read_bytes = 0u64;
+    let mut archives_read = 0usize;
+    let since_ms = parse_iso_to_epoch_ms(since);
+    let mut idx = STORY_INDEX
+        .get_or_init(|| Mutex::new(StoryIndex::default()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Rotated archives that can hold lines inside the window: an archive's
+    // mtime is its last write, so one older than `since` holds nothing newer.
+    // With no parseable `since`, only the live files are read.
+    let mut wanted: Vec<(PathBuf, u64, i64, bool)> = Vec::new();
+    if let (Some(since_ms), Ok(rd)) = (since_ms, std::fs::read_dir(traces_dir)) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let is_trace = name.starts_with("bram-trace-") && name.ends_with(".log");
+            let is_hook = name.starts_with("hook-events-") && name.ends_with(".log");
+            if !is_trace && !is_hook {
+                continue;
+            }
+            let Ok(meta) = e.metadata() else { continue };
+            let mtime_ms = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            if mtime_ms >= since_ms {
+                wanted.push((e.path(), meta.len(), mtime_ms, is_hook));
+            }
+        }
+    }
+    let wanted_paths: HashSet<PathBuf> = wanted.iter().map(|w| w.0.clone()).collect();
+    idx.archives.retain(|p, _| wanted_paths.contains(p));
+    for (path, len, mtime_ms, is_hook) in &wanted {
+        let fresh = idx
+            .archives
+            .get(path)
+            .is_some_and(|(l, m, _)| l == len && m == mtime_ms);
+        if fresh {
+            continue;
+        }
+        let select = if *is_hook {
+            story_select_hook_line
+        } else {
+            story_select_trace_line
+        };
+        let bytes = std::fs::read(path).unwrap_or_default();
+        read_bytes += bytes.len() as u64;
+        archives_read += 1;
+        let lines: Vec<StoryLine> = String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(select)
+            .collect();
+        idx.archives.insert(path.clone(), (*len, *mtime_ms, lines));
+    }
+
+    let StoryIndex {
+        archives,
+        live_trace,
+        live_hook,
+    } = &mut *idx;
+    read_bytes += story_cursor_advance(
+        live_trace,
+        &traces_dir.join("bram-trace.log"),
+        story_select_trace_line,
+    );
+    read_bytes += story_cursor_advance(
+        live_hook,
+        &traces_dir.join("hook-events.log"),
+        story_select_hook_line,
+    );
+    if !since.is_empty() {
+        story_cursor_prune(live_trace, since);
+        story_cursor_prune(live_hook, since);
+    }
+
+    let mut seed: Option<StoryLine> = live_trace.seed.clone();
+    let mut lines: Vec<StoryLine> = Vec::new();
+    for (_, _, a) in archives.values() {
+        for l in a {
+            if l.ts.as_str() >= since {
+                lines.push(l.clone());
+            } else if l.cat == "agent-switch" && seed.as_ref().is_none_or(|s| s.ts < l.ts) {
+                seed = Some(l.clone());
+            }
+        }
+    }
+    lines.extend(live_trace.lines.iter().cloned());
+    lines.extend(live_hook.lines.iter().cloned());
+    // The session in force when the window opened, told as the window's
+    // first line so every entry can name its session.
+    if let Some(s) = seed {
+        lines.push(s);
+    }
+    lines.sort_by(|a, b| a.ts.cmp(&b.ts));
+    lines.dedup_by(|a, b| a.ts == b.ts && a.cat == b.cat && a.text == b.text);
+    StoryRead {
+        lines,
+        read_bytes,
+        files: wanted.len() + 2,
+        archives_read,
+    }
+}
+
+// log-reads-across-trace-rotation: a trace line that can end an episode the
+// Log shows. The host emits `story-changed` for it (debounced), so a search,
+// a push or a commit reaches an open Log without waiting for a turn boundary.
+fn story_trace_line_triggers(category: &str, body: &str) -> bool {
+    let has_op = |op: &str| body.split(' ').any(|kv| kv == op);
+    match category {
+        "worklist-commit" => has_op("op=committed"),
+        "git-push" => has_op("op=push-result"),
+        "iframe" => {
+            ["search-query", "queue", "w2-selection-restore"]
+                .iter()
+                .any(|k| body.starts_with(&format!("subkind={} ", k)))
+                || (body.starts_with("subkind=click ") && body.contains("gatebar-"))
+        }
+        _ => false,
+    }
+}
+
+static STORY_CHANGED_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// One `story-changed` per burst: the first trigger schedules an emit 1.5 s
+// out, and the triggers inside that wait ride along with it. A commit's
+// staging and committed lines land milliseconds apart; this tells them once.
+fn story_changed_soon<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if STORY_CHANGED_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        STORY_CHANGED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        emit_replayable_signal(&app, "story-changed");
+    });
+}
+
+#[cfg(test)]
+mod story_index_tests {
+    use super::*;
+
+    // log-reads-across-trace-rotation: the window spans a rotation, an
+    // archive older than the window is skipped, a refetch with nothing new
+    // reads nothing, and an append is read alone.
+    #[test]
+    fn reads_across_rotation_and_then_only_what_was_appended() {
+        let d = std::env::temp_dir().join(format!(
+            "bram-story-index-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // A launch whose archive ends before the window: skipped by mtime.
+        std::fs::write(
+            d.join("bram-trace-2026-11-06.log"),
+            "[2026-11-06T01:00:00.000Z] [git-push] op=push-result branch=old ok=true\n",
+        )
+        .unwrap();
+        let old = std::fs::File::options()
+            .write(true)
+            .open(d.join("bram-trace-2026-11-06.log"))
+            .unwrap();
+        old.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000))
+            .unwrap();
+        // The launch the window opens in, rotated.
+        std::fs::write(
+            d.join("bram-trace-2026-11-07-2.log"),
+            concat!(
+                "[2026-11-07T09:00:00.000Z] [agent-switch] op=live-session-set provider=claude session=s1\n",
+                "[2026-11-07T10:00:00.000Z] [git-push] op=push-result branch=main ok=true\n",
+                "[2026-11-07T11:00:00.000Z] [watcher] path=x\n",
+                "[2026-11-07T12:00:00.000Z] [worklist-commit] op=committed sha=abc1234\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("bram-trace.log"),
+            "[2026-11-07T13:00:00.000Z] [iframe] subkind=search-query {\"q\":\"x\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("hook-events.log"),
+            "2026-11-07T13:30:00.000Z claude-rs PreToolUse Bash decided=deny reason=r\n",
+        )
+        .unwrap();
+
+        let since = "2026-11-07T09:30:00.000Z";
+        let r = story_read_lines(&d, since);
+        let got: Vec<(&str, &str)> = r
+            .lines
+            .iter()
+            .map(|l| (l.ts.as_str(), l.cat.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("2026-11-07T09:00:00.000Z", "agent-switch"),
+                ("2026-11-07T10:00:00.000Z", "git-push"),
+                ("2026-11-07T12:00:00.000Z", "worklist-commit"),
+                ("2026-11-07T13:00:00.000Z", "iframe"),
+                ("2026-11-07T13:30:00.000Z", "hook-deny"),
+            ],
+            "the archive's lines, the live file's and the hook's, in order, with \
+             the session set before the window as its first line; the old archive \
+             and the unselected watcher line stay out"
+        );
+        assert_eq!(r.archives_read, 1);
+
+        let again = story_read_lines(&d, since);
+        assert_eq!(again.read_bytes, 0, "nothing new, nothing read");
+        assert_eq!(again.archives_read, 0, "the archive is cached");
+        assert_eq!(again.lines.len(), 5);
+
+        let appended = "[2026-11-07T14:00:00.000Z] [git-push] op=push-result branch=main ok=true\n";
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(d.join("bram-trace.log"))
+            .unwrap();
+        f.write_all(appended.as_bytes()).unwrap();
+        let third = story_read_lines(&d, since);
+        assert_eq!(third.read_bytes, appended.len() as u64, "only the append");
+        assert_eq!(third.lines.len(), 6);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn kinds_keep_only_their_lines() {
+        let line = |cat: &str, text: &str| StoryLine {
+            ts: String::new(),
+            src: "trace",
+            cat: cat.to_string(),
+            text: text.to_string(),
+        };
+        let push = line("git-push", "op=push-result branch=main");
+        let search = line("iframe", "subkind=search-query {}");
+        let drift = line("iframe", "subkind=heartbeat-drift {}");
+        let turn = line("turn-state", "from=idle to=working");
+        assert!(story_kind_wants("push", &push));
+        assert!(story_kind_wants("search", &search));
+        assert!(!story_kind_wants("search", &drift));
+        assert!(!story_kind_wants("gate", &turn));
+        assert!(story_kind_wants("turn", &turn));
+        assert!(
+            story_kind_wants("not-yet-known", &drift),
+            "an unknown kind gets everything"
+        );
+        assert!(story_trace_line_triggers(
+            "git-push",
+            "op=push-result branch=main ok=true"
+        ));
+        assert!(story_trace_line_triggers(
+            "worklist-commit",
+            "op=committed sha=abc"
+        ));
+        assert!(!story_trace_line_triggers(
+            "worklist-commit",
+            "op=staging files=2"
+        ));
+        assert!(story_trace_line_triggers(
+            "iframe",
+            "subkind=click {\"op\":\"act\",\"target\":\"gatebar-commit\"}"
+        ));
+        assert!(!story_trace_line_triggers(
+            "iframe",
+            "subkind=click {\"target\":\"nav-log\"}"
+        ));
+        assert!(!story_trace_line_triggers("iframe", "subkind=queue-x {}"));
+    }
 }
 
 // Trace and hook-events timestamps share one ISO-8601 UTC form
 // (2026-11-05T05:05:52.296Z), so `since` filters by string comparison.
-fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str) -> Vec<u8> {
-    let mut lines: Vec<serde_json::Value> = Vec::new();
-    if let Some(p) = bram_trace_log_file(app) {
-        for line in read_file_tail(&p, STORY_TRACE_TAIL_BYTES).lines() {
-            let Some(rest) = line.strip_prefix('[') else {
-                continue;
-            };
-            let Some((ts, rest)) = rest.split_once("] [") else {
-                continue;
-            };
-            if ts < since {
-                continue;
-            }
-            let Some((cat, text)) = rest.split_once(']') else {
-                continue;
-            };
-            let text = text.trim_start();
-            let keep = match cat {
-                "iframe" => STORY_IFRAME_SUBKINDS
-                    .iter()
-                    .any(|k| text.starts_with(&format!("subkind={} ", k))),
-                "turn-state" => !text.starts_with("from=working to=working "),
-                // log-shows-start-commit-push-search: which session each
-                // entry happened in, for its expanded detail. Only the
-                // sets; the category's offers and refusals stay out.
-                "agent-switch" => text.starts_with("op=live-session-set "),
-                _ => STORY_TRACE_CATEGORIES.contains(&cat),
-            };
-            if keep {
-                lines.push(serde_json::json!({
-                    "ts": ts, "src": "trace", "cat": cat, "text": text,
-                }));
-            }
-        }
-    }
-    if let Some(p) = project_resource_path(app, "bram-traces/hook-events.log") {
-        for line in read_file_tail(&p, STORY_HOOK_TAIL_BYTES).lines() {
-            if !line.contains(" decided=deny ") {
-                continue;
-            }
-            let Some((ts, text)) = line.split_once(' ') else {
-                continue;
-            };
-            if ts < since {
-                continue;
-            }
-            lines.push(serde_json::json!({
-                "ts": ts, "src": "hook", "cat": "hook-deny", "text": text,
-            }));
-        }
-    }
-    lines.sort_by(|a, b| a["ts"].as_str().cmp(&b["ts"].as_str()));
+fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str, kinds: &[String]) -> Vec<u8> {
+    let started = std::time::Instant::now();
+    let read = match bram_trace_log_file(app).and_then(|p| p.parent().map(Path::to_path_buf)) {
+        Some(dir) => story_read_lines(&dir, since),
+        None => StoryRead {
+            lines: Vec::new(),
+            read_bytes: 0,
+            files: 0,
+            archives_read: 0,
+        },
+    };
+    let selected = read.lines.len();
+    let lines: Vec<serde_json::Value> = read
+        .lines
+        .into_iter()
+        .filter(|l| {
+            kinds.is_empty()
+                || l.cat == "agent-switch"
+                || kinds.iter().any(|k| story_kind_wants(k, l))
+        })
+        .map(|l| {
+            serde_json::json!({
+                "ts": l.ts, "src": l.src, "cat": l.cat, "text": l.text,
+            })
+        })
+        .collect();
     let drafts = project_resource_path(app, ".bram-queue.json")
         .and_then(|p| p.parent().map(|s| story_queue_drafts(s, &lines)))
         .unwrap_or_default();
@@ -2571,14 +2998,33 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str) -> Vec<u8> {
         .map(|u| remote_to_html(u.trim()))
         .filter(|b| !b.is_empty())
         .map(|b| format!("{}/commit/", b));
-    serde_json::to_vec(&serde_json::json!({
+    let body = serde_json::to_vec(&serde_json::json!({
         "lines": lines,
         "queueDrafts": drafts,
         "currentSession": current_session,
         "sessionTitles": session_titles,
         "commitUrlBase": commit_url_base,
     }))
-    .unwrap_or_default()
+    .unwrap_or_default();
+    // log-reads-across-trace-rotation: what each request cost, so a claim
+    // about the Log's cost is a number (read_bytes is near zero on a
+    // refetch with nothing new).
+    append_bram_trace_line(
+        app,
+        "story",
+        &format!(
+            "op=lines kinds={} selected={} lines={} bytes={} read_bytes={} files={} archives_read={} ms={}",
+            if kinds.is_empty() { "-".to_string() } else { kinds.join(",") },
+            selected,
+            lines.len(),
+            body.len(),
+            read.read_bytes,
+            read.files,
+            read.archives_read,
+            started.elapsed().as_millis()
+        ),
+    );
+    body
 }
 
 // log-shows-start-commit-push-search: the board as it stood at a moment.
@@ -3524,6 +3970,10 @@ fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str,
             category,
             body
         );
+    }
+    drop(guard);
+    if story_trace_line_triggers(category, body) {
+        story_changed_soon(app);
     }
 }
 
@@ -88271,15 +88721,25 @@ fn route_request<R: tauri::Runtime>(
     // reload, not a rebuild.
     if path == "__story/lines" {
         let mut since = String::new();
+        let mut kinds: Vec<String> = Vec::new();
         for pair in query.split('&') {
             if let Some(enc) = pair.strip_prefix("since=") {
                 since = percent_decode(enc);
+            }
+            // log-reads-across-trace-rotation: the kinds the Log shows;
+            // without it, every selected line (the CLI's view).
+            if let Some(enc) = pair.strip_prefix("kinds=") {
+                kinds = percent_decode(enc)
+                    .split(',')
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+                    .collect();
             }
         }
         return (
             200,
             "application/json; charset=utf-8",
-            story_lines(app, &since),
+            story_lines(app, &since, &kinds),
         );
     }
 

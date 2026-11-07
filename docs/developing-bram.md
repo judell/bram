@@ -473,16 +473,26 @@ marked so far.
 The same narrator, ported to JS (`__bramStoryTell` in `helpers.js`), is the
 **Log** tab, below Settings in the nav (`app/tools/components/Log.xmlui`). The host only selects lines
 (`/__story/lines`); the pane tells them, so a wording change is a pane reload.
-It refreshes when a turn starts or ends, and shows the last five hours (the
-host's trace tail is sized for that; see `/__story/lines` in `apis.md`). Every
+It shows the last five hours, across relaunches: each launch rotates the
+trace, so the host reads the rotated archives as well as the live file. It
+keeps what it selected in memory, reads each archive once, and reads the
+live file only from where it stopped, so a refetch costs what the trace
+gained since the last one. The pane names the kinds it shows (`kinds=`) and
+gets only the lines those are told from. It refreshes when a turn starts or
+ends, and when the host sees a shown kind happen (`story-changed`, debounced:
+a commit, push, search, queue change, selection restore or gate click).
+`[story] op=lines` records each request's cost. Before this
+(log-reads-across-trace-rotation, 2026-11-07), a relaunch blanked the Log,
+and every refetch re-read 32 MB and sent 2.6 MB to show 13 entries. Every
 entry expands to the agent and session it happened in and the board as it
 stood then (`/__worklist-history/at`), and a commit's sha links to the forge.
 What reaches it is opt-in (`STORY_SHOW` in `helpers.js`, Jon's 2026-11-05 rule:
 show nothing until asked): queue messages, selection changes, gate clicks,
 pushes and your searches, as of 2026-11-07. Every other kind (turns, stalls,
 refusals, the launch) is told but held back until someone asks for it; adding
-one is a one-word change there. A search shows at the next turn boundary,
-since nothing else refetches the Log. Item names in a line are links to the
+one is a one-word change there, plus its lines in `story_kind_wants`
+(`lib.rs`); a kind the host doesn't know yet gets every line, so it still
+tells correctly, only less cheaply. Item names in a line are links to the
 item's History entry (`/history?entry=<id>`), so the sentence is rendered as
 Markdown. A gate line names the click and what landed; it doesn't recite the
 approval, the claim and the hand-off, which every click does and the row's

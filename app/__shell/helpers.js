@@ -20896,6 +20896,10 @@ window.__bramStoryTell = (function () {
   // gate, push and search were asked for on 2026-11-07
   // (log-shows-start-commit-push-search: "Start, Commit, Push, Search").
   var STORY_SHOW = ["queue-add", "queue-delete", "selection", "gate", "push", "search"];
+  // log-reads-across-trace-rotation: the Log's URL names these kinds, and the
+  // host sends only the lines they're told from (story_kind_wants in lib.rs),
+  // so held-back kinds cost nothing until they're shown.
+  window.__bramStoryShownKinds = function () { return STORY_SHOW.join(","); };
 
   return function (payload) {
     flushNow = Infinity;

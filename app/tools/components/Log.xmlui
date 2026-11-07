@@ -10,14 +10,23 @@
        trace tail grew to match). The host selects episode lines (/__story/lines);
        helpers.js tells them (__bramStoryTell), so a wording change is a pane
        reload. Fetched when the tab opens and refetched when a turn starts or
-       ends (turn-context-changed); no polling and no Refresh button, since
-       what it shows happens on other tabs. A tick rebuilds the URL, which
-       also moves the window's start. -->
+       ends (turn-context-changed), or when the host sees a shown kind happen
+       (story-changed: a commit, push, search, queue change, selection
+       restore or gate click); no polling and no Refresh button, since what it
+       shows happens on other tabs. A tick rebuilds the URL, which also moves
+       the window's start. The window spans relaunches: the host reads the
+       rotated trace archives too (log-reads-across-trace-rotation), and
+       `kinds` limits the lines to the ones the shown kinds are told from.
+       Push, not polling: docs/developing-bram.md §Push over polling. -->
   <DataSource id="story"
-    url="{'/__story/lines?since=' + window.__bramStorySince(300, mountKey + '.' + storyTick)}" />
+    url="{'/__story/lines?since=' + window.__bramStorySince(300, mountKey + '.' + storyTick) + '&amp;kinds=' + window.__bramStoryShownKinds()}" />
   <PushSource id="storyEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('turn-context-changed')}" />
   <ChangeListener listenTo="{storyEvt.value &amp;&amp; storyEvt.value.tick}"
+    onDidChange="storyTick = storyTick + 1" />
+  <PushSource id="storyChanged" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('story-changed')}" />
+  <ChangeListener listenTo="{storyChanged.value &amp;&amp; storyChanged.value.tick}"
     onDidChange="storyTick = storyTick + 1" />
 
   <!-- A queue message's screenshot opens full size, as in Transcript.xmlui. -->

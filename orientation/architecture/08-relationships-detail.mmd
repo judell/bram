@@ -1,0 +1,58 @@
+---
+config:
+  flowchart:
+    wrappingWidth: 400
+---
+flowchart TD
+  item["Worklist item"]
+  sel["Selection"]
+  msg["A message you send"]
+  agent["Agent"]
+  session["Session"]
+  group["Session group"]
+  sub["Subagent"]
+  claim["Execution claim"]
+  ledger["Item-session ledger"]
+  transcript["Transcript"]
+
+  item -->|"ticked on the board"| sel
+  sel -->|"ticked: feedback on them; none: chat"| msg
+  msg -->|"goes to the current agent"| agent
+  agent -->|"lands in its live session"| session
+  msg -->|"stamps (agent, session) on each item"| ledger
+  ledger -->|"newest shown as Last worked on, with Switch there"| item
+  item -->|"proposing and committing record nothing"| ledger
+  item -->|"no direct link: through its sessions"| agent
+  session -->|"in at most one group, one session per agent"| group
+  group -->|"switching agents resumes its member, or starts one and adds it"| agent
+  msg -->|"claims the items while the turn runs"| claim
+  claim -->|"a subagent spawned under it inherits its ids"| sub
+  sub -->|"edits credited; rows locked until its stop"| item
+  session -->|"its turns"| transcript
+  sub -->|"a chip shows its own turns"| transcript
+
+%% tip: Worklist item :: A row in worklist.json with its draft. It names files, never an agent or a session.
+%% tip: Selection :: The ticked rows. Focus state: survives a pane reload, dies with the window, cleared by Commit and Drop.
+%% tip: A message you send :: Enter in the message box, or a gate click. With items ticked it is feedback on them; with none, chat.
+%% tip: Agent :: The harness in the terminal: Claude, Codex, OpenCode or Antigravity. One at a time; the header switches it.
+%% tip: Session :: One agent's conversation. Bram chooses it by id and marks it current; the CLI can rename its own after launch.
+%% tip: Session group :: One line of work across agents: at most one session per agent, and a session in at most one group.
+%% tip: Subagent :: A child agent inside one of a session's turns. Bram reads what the provider recorded; it never spawns one.
+%% tip: Execution claim :: Which items a running turn is working on. Written at delivery, retired when the turn ends.
+%% tip: Item-session ledger :: Append-only rows (item, agent, session, time) in the state mirror, one per change of session.
+%% tip: Transcript :: The pane's view of a session's turns, main or one subagent's at a time.
+%% tip: ticked on the board :: A tick is per item; several can be ticked. The gate verbs act on all of them.
+%% tip: ticked: feedback on them; none: chat :: The placeholder says where Enter will go. Send as chat instead overrides it once.
+%% tip: goes to the current agent :: Whichever agent the header shows receives the turn. The item itself has no agent.
+%% tip: lands in its live session :: The agent's current session, named at launch or by the CLI's own event.
+%% tip: stamps (agent, session) on each item :: Start, Commit, Drop and feedback turns record (provider, sessionId) on each addressed item, only when it differs from the last.
+%% tip: newest shown as Last worked on, with Switch there :: Only the latest row is served, as lastSession, and only the gate bar reads it.
+%% tip: proposing and committing record nothing :: Writing an item stamps nothing; worklist-commit stamps nothing; history records carry no session.
+%% tip: no direct link: through its sessions :: An item's agent is the agent of each session that worked on it. Nothing stores it.
+%% tip: in at most one group, one session per agent :: Groups are join and leave rows in the state mirror. Members share a name.
+%% tip: switching agents resumes its member, or starts one and adds it :: From inside a group the header switch resumes the group's session for the target agent, or starts a fresh one for the group. A switch never lands in another group.
+%% tip: claims the items while the turn runs :: The host writes the claim before delivering an addressed turn and retires it when the turn ends.
+%% tip: a subagent spawned under it inherits its ids :: Claude only. On SubagentStart with a live claim, the subagent's agent_id is bound to the claim's item ids.
+%% tip: edits credited; rows locked until its stop :: While bound, the subagent's writes count for those items, and Commit and Drop stay locked until SubagentStop, session end, a restart or Release.
+%% tip: its turns :: The provider's own record of the session, read by the host and projected into the pane.
+%% tip: a chip shows its own turns :: Each subagent is a chip on the footer; clicking it swaps the Transcript to that child's turns.

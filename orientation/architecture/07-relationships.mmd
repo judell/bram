@@ -1,0 +1,41 @@
+---
+config:
+  flowchart:
+    wrappingWidth: 300
+---
+flowchart TD
+  item["Worklist item"]
+  subgraph agent["Agent"]
+    direction LR
+    claude["Claude"]
+    codex["Codex"]
+    opencode["OpenCode"]
+    antigravity["Antigravity"]
+    claude ~~~ codex ~~~ opencode ~~~ antigravity
+  end
+  session["Session"]
+  sub["Subagent"]
+  transcript["Transcript"]
+
+  item -->|"last worked on by"| agent
+  item -->|"last touched in"| session
+  agent -->|"runs in"| session
+  agent -->|"spawns, inside a turn"| sub
+  sub -->|"works on, under its parent's claim"| item
+  session -->|"shown in"| transcript
+  sub -->|"shown in"| transcript
+
+%% tip: Worklist item :: A row in worklist.json with its draft. It names files; its agent and session are recorded when a turn addressed to it is delivered.
+%% tip: Claude :: Claude Code, the claude command, launched with a session id Bram reserves. The only harness whose subagents Bram binds to items.
+%% tip: Codex :: Codex CLI. Its subagents are shown; their work isn't bound to items.
+%% tip: OpenCode :: OpenCode, launched standalone so its plugin reports to this Bram.
+%% tip: Antigravity :: Antigravity CLI, the agy command, reporting turn state over OSC 7501.
+%% tip: Session :: One agent's conversation. Bram chooses it by id and marks it current; a group ties one session per agent together.
+%% tip: Subagent :: A child agent inside one of a session's turns. Bram reads what the provider recorded; it never spawns one.
+%% tip: Transcript :: The pane's view of a session's turns, main or one subagent's at a time.
+%% tip: last worked on by :: The agent whose Start, Commit, Drop or feedback turn for this item was delivered most recently. Shown on the gate bar when it isn't the current agent.
+%% tip: last touched in :: The session that turn landed in. Shown on the gate bar as "Last worked on in '…'", with Switch there.
+%% tip: runs in :: One agent runs in the terminal at a time, in one live session; switching agents inside a group moves to that agent's session of the group.
+%% tip: spawns, inside a turn :: A subagent runs within one of the agent's turns and ends before or with it.
+%% tip: works on, under its parent's claim :: Claude only. A subagent spawned while the turn holds a claim inherits its items; its edits count for them and the rows stay locked until it stops.
+%% tip: shown in :: The Transcript shows a session's turns, or one subagent's when its chip on the footer is clicked.

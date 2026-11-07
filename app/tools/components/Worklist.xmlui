@@ -576,13 +576,26 @@
                the strip carried colorized amber text that needed ink to
                register; those colors are gone, so -sm reads fine and reclaims
                vertical space. -->
-          <Text
-            width="*"
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            overflowMode="flow"
-            tooltipMarkdown="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}"
-            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, window.__bramOwnershipRunsByPath(worklist.value), agentStatus.value)}" />
+          <!-- strip-tooltip-wraps-via-template: XMLUI's Tooltip is as wide as
+               its longest line and has no width cap, so every long strip
+               tooltip has been broken by hand. A Tooltip component with a
+               tooltipTemplate renders a component instead of a string, and a
+               width-bound Markdown wraps like any other text; the same
+               string function feeds it.
+               https://www.xmlui.org/docs/reference/components/Tooltip#using-the-tooltip-component -->
+          <Tooltip width="*">
+            <property name="tooltipTemplate">
+              <Markdown
+                maxWidth="44ch"
+                content="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}" />
+            </property>
+            <Text
+              width="*"
+              fontSize="$fontSize-sm"
+              color="$textColor-secondary"
+              overflowMode="flow"
+              value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, window.__bramOwnershipRunsByPath(worklist.value), agentStatus.value)}" />
+          </Tooltip>
           <!-- issue-278: the row backlink is GONE, on live evidence.
                It was redundant and, worse, it put a SECOND meaning of "shared"
                on a line that already had one. Live board, 2026-08-24:

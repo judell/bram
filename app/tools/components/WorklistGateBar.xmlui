@@ -374,12 +374,16 @@
     paddingHorizontal="$space-2"
     paddingTop="$space-1">
     <Text fontSize="$fontSize-sm" value="{window.__bramPlanLine(gateWorklist.value)}" />
-    <Button
-      label="Do recommended"
-      size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramAgentWorking(gateAgent.value)}"
-      tooltipMarkdown="{window.__bramPlanTooltip(gateWorklist.value)}"
-      onClick="window.__bramDoRecommended(gateWorklist.value, gateClaim.value)" />
+    <Tooltip>
+      <property name="tooltipTemplate">
+        <Markdown maxWidth="44ch" content="{window.__bramPlanTooltip(gateWorklist.value)}" />
+      </property>
+      <Button
+        label="Do recommended"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramAgentWorking(gateAgent.value)}"
+        onClick="window.__bramDoRecommended(gateWorklist.value, gateClaim.value)" />
+    </Tooltip>
     <Button
       label="×"
       variant="ghost"
@@ -411,27 +415,44 @@
          control, "is always a bad smell".
          So this is deliberately a bounded signal that points, not a complete
          one that describes. -->
-    <Button
-      label="{window.__bramGateQueuedLabel('start', window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value), gateQueue.value)}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start', null, gateClaim.value, gateWorklist.value.items)}"
-      size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
-      onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+    <!-- strip-tooltip-wraps-via-template: each gate button's tooltip is a
+         Tooltip template (a width-bound Markdown) instead of tooltipMarkdown,
+         so a long reason wraps instead of running off the pane; see the
+         strip in Worklist.xmlui.
+         https://www.xmlui.org/docs/reference/components/Tooltip#using-the-tooltip-component -->
+    <Tooltip>
+      <property name="tooltipTemplate">
+        <Markdown maxWidth="44ch" content="{window.__bramGateScopeTooltip(gateSel.value, 'start', null, gateClaim.value, gateWorklist.value.items)}" />
+      </property>
+      <Button
+        label="{window.__bramGateQueuedLabel('start', window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value), gateQueue.value)}"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
+        onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+    </Tooltip>
     <!-- gate-one-way-to-continue-one-to-finish: dimmed whenever Commit can be
          lit. On a begun `proposed` item both send apply-and-commit, so the row
          offers one way to continue (Resume) and one way to finish (Commit). -->
-    <Button
-      label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
-      size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch, gateClaim.value, gateWorklist.value.items)}"
-      onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
-    <Button
-      label="{window.__bramGateQueuedLabel('commit', 'Commit', gateQueue.value)}"
-      tooltipMarkdown="{window.__bramGateCommitTooltip(gateSel.value, gateGit.value &amp;&amp; gateGit.value.branch, gateWorklist.value.items, gateClaim.value, gateTurnCtx.value)}"
-      size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
-      onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+    <Tooltip>
+      <property name="tooltipTemplate">
+        <Markdown maxWidth="44ch" content="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch, gateClaim.value, gateWorklist.value.items)}" />
+      </property>
+      <Button
+        label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
+        onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+    </Tooltip>
+    <Tooltip>
+      <property name="tooltipTemplate">
+        <Markdown maxWidth="44ch" content="{window.__bramGateCommitTooltip(gateSel.value, gateGit.value &amp;&amp; gateGit.value.branch, gateWorklist.value.items, gateClaim.value, gateTurnCtx.value)}" />
+      </property>
+      <Button
+        label="{window.__bramGateQueuedLabel('commit', 'Commit', gateQueue.value)}"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
+        onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+    </Tooltip>
     <!-- switch-to-transcript-on-action: Refine retired. It was never an
          authorization — the other gate buttons write auth records; Refine
          wrote none, it was conversation squatting among the signatures from
@@ -441,11 +462,15 @@
          __bramWorklist2BatchIterate — one mechanism, same wire payload,
          guards and host untouched). The gate row is pure lifecycle:
          Start / Start & commit / Commit / Drop. -->
-    <Button
-      label="Drop"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'drop', null, gateClaim.value)}"
-      size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value)}"
-      onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+    <Tooltip>
+      <property name="tooltipTemplate">
+        <Markdown maxWidth="44ch" content="{window.__bramGateScopeTooltip(gateSel.value, 'drop', null, gateClaim.value)}" />
+      </property>
+      <Button
+        label="Drop"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value)}"
+        onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+    </Tooltip>
   </HStack>
 </Component>

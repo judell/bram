@@ -4967,17 +4967,16 @@ window.__bramStrandedSentence = function (stranded, others, code, plural) {
     ? "Commit " + obj + " together with " + window.__bramNameList(others) +
       ", or ask the agent to re-anchor " + obj + "."
     : "Ask the agent to re-anchor " + obj + ".";
-  // A tooltip is as wide as its longest line and only a blank line breaks
-  // it, so the Markdown form is three short lines (Jon, 2026-11-07: "need to
-  // wrap the tooltip"); plain text stays one sentence for a wrapping Text.
-  // https://www.xmlui.org/docs/howto/show-a-multi-line-or-formatted-tooltip
-  var lines = [
-    q(path) + " was changed by " + q(c.short || c.sha) + ", a commit outside the Worklist" + more + ",",
-    "after " + subj + " began, so " +
-      (plural ? "their patches no longer apply." : "its patch no longer applies on its own."),
-    fix,
-  ];
-  return lines.join(code ? "\n\n" : " ");
+  // One sentence, no hand breaks: the tooltips that show it are Tooltip
+  // templates with a width-bound Markdown, so they wrap on their own
+  // (strip-tooltip-wraps-via-template; the 2026-11-07 "need to wrap the
+  // tooltip" fix was three hand-broken lines).
+  return (
+    q(path) + " was changed by " + q(c.short || c.sha) + ", a commit outside the Worklist" + more +
+    ", after " + subj + " began, so " +
+    (plural ? "their patches no longer apply." : "its patch no longer applies on its own.") +
+    " " + fix
+  );
 };
 
 // #336: the begun items this one shares CHANGED paths with -- the claimants

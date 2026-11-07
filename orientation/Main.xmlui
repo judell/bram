@@ -68,6 +68,12 @@
       <VStack gap="$space-5"
         var.svgs="{null}" var.detail="{null}"
         onMount="svgs = Arch.diagrams()">
+        <!-- A link to one diagram (diagrams/#item-agent-session) lands on
+             it. The browser's own fragment scroll fires before anything is
+             rendered, and the frames above the target get their height only
+             once the diagrams are in, so the scroll waits for them:
+             https://www.xmlui.org/docs/reference/components/ChangeListener -->
+        <ChangeListener listenTo="{svgs}" onDidChange="() => Arch.scrollToHash()" />
         <!-- A click on a box or arrow inside a diagram frame posts
              {type: 'arch-detail', diagram, key}; open its Markdown section.
              https://www.xmlui.org/docs/reference/components/MessageListener -->
@@ -129,7 +135,10 @@
         <Text when="{!svgs}" variant="caption">Rendering diagrams…</Text>
         <Items items="{Arch.sections}">
           <VStack gap="$space-2">
-            <Heading level="h3">{$item.title}</Heading>
+            <!-- showAnchor: a hover # link carrying the diagram's address, the
+                 slug of its title (Arch.scrollToHash names the rule):
+                 https://www.xmlui.org/docs/reference/components/Heading#showanchor -->
+            <Heading level="h3" showAnchor="true">{$item.title}</Heading>
             <Markdown content="{$item.note}" openLinkInNewTab="{true}" />
             <Text when="{svgs &amp;&amp; svgs[$item.file] &amp;&amp; svgs[$item.file].error}" color="$color-danger-500">
               {svgs[$item.file].error}

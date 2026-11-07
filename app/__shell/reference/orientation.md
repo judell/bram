@@ -87,6 +87,10 @@ Then stop and wait for **Start**.
    - in the `.md`, one `## <label>` section per box **and** per arrow
      label, headed by the label as drawn. Every box and arrow opens its
      detail, so none is left without a section.
+   - Each diagram has an address, `diagrams/#<slug>`, where the slug is its
+     title lowercased with punctuation dropped and spaces as hyphens
+     ("Item, agent, session" is `#item-agent-session`); hovering the heading
+     shows the link. Use it when an issue or a doc points at one diagram.
 5. Screenshots, if the owner wants them: put each image under
    `orientation/screenshots/` (shrunk to at most 1600 px on the long side, for
    example with `sips -Z 1600` on macOS) and add it to the section for the box

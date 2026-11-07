@@ -406,5 +406,24 @@
     // "GitHub" or the forge host, for the "Read on …" line under a detail.
   const forgeLabel = (SITE.forgeHost || "github.com") === "github.com" ? "GitHub" : SITE.forgeHost;
 
-  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page, rawUrl, section, forgeLabel, shotMark: SHOT_MARK, cite, citeExcerpt, pageLinks};
+  // Land on the diagram the URL's fragment names, once the diagrams have
+  // rendered (Main.xmlui calls this from a ChangeListener on the rendered
+  // set). The target is the anchor XMLUI's Heading gives every heading: the
+  // title trimmed, everything but word characters, spaces and hyphens
+  // removed, spaces to hyphens, lowercased, and "heading-" in front when it
+  // starts with a digit. "Item, agent, session" is #item-agent-session. Two
+  // frames let the IFrames above the target take their measured heights
+  // first. No fragment, or no such id, does nothing.
+  function scrollToHash() {
+    let id = "";
+    try { id = decodeURIComponent((root.location?.hash || "").replace(/^#/, "")); } catch (e) { return; }
+    if (!id) return;
+    const raf = root.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
+    raf(() => raf(() => {
+      const target = root.document?.getElementById(id);
+      if (target) target.scrollIntoView({block: "start"});
+    }));
+  }
+
+  root.Arch = {site: SITE, caption, sections: VISIBLE, diagrams, detail, page, rawUrl, section, forgeLabel, shotMark: SHOT_MARK, cite, citeExcerpt, pageLinks, scrollToHash};
 })(globalThis);

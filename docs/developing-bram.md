@@ -484,8 +484,11 @@ a commit, push, search, queue change, selection restore or gate click).
 `[story] op=lines` records each request's cost. Before this
 (log-reads-across-trace-rotation, 2026-11-07), a relaunch blanked the Log,
 and every refetch re-read 32 MB and sent 2.6 MB to show 13 entries. Every
-entry expands to the agent and session it happened in and the board as it
-stood then (`/__worklist-history/at`). A pushed commit's sha links to the
+entry expands, on a click anywhere on its sentence, to the agent and session
+it happened in and the board as it stood then (`/__worklist-history/at`).
+An entry's time links into the Transcript at that moment
+(`/transcript?at=<ms>`, landing on the first turn that began at or after it,
+from each turn's `ts`) when it happened in the session the Transcript shows. A pushed commit's sha links to the
 forge, and a push's range to its compare view; a commit no remote has yet
 links to the Commits tab's local view (`/commits?sha=`), since the forge would
 404 on it.

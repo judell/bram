@@ -154,8 +154,9 @@
     var.atBottom="{!window.__bramVisibleRange || window.__bramVisibleRange.atBottom !== false}"
     var.repinArmed="{false}"
     var.settleArmed="{false}"
-    var.mountReturnState="{window.__bramVisibleRange || null}"
-    var.mountFollow="{window.__bramMountFollow(mountReturnState, $props.agentId)}"
+    var.mountReturnState="{$queryParams.at ? null : (window.__bramVisibleRange || null)}"
+    var.mountFollow="{$queryParams.at ? false : window.__bramMountFollow(mountReturnState, $props.agentId)}"
+    var.linkAt="{$props.agentId ? 0 : (Number($queryParams.at) || 0)}"
     var.mountPinArmed="{true}"
     var.mountPinTicks="{0}"
     var.findText="{''}"
@@ -668,6 +669,18 @@
       interval="250"
       enabled="{mountPinArmed}"
       onTick="() => { mountPinTicks = mountPinTicks + 1; if (!mountFollow) { mountPinArmed = false; atBottom = window.__bramFollowTransition(false, 'mount-restore-reading', $props.agentId); if (mountReturnState &amp;&amp; mountReturnState.startIndex > 0) { transcriptList.scrollToIndex(mountReturnState.startIndex); } window.__bramIframeTrace('transcript-mount-restore', {index: (mountReturnState &amp;&amp; mountReturnState.startIndex) || 0, events: events.length}); } else if (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex >= events.length - 1) { mountPinArmed = false; window.__bramFollowVerify('mount-pin', $props.agentId, events.length); window.__bramIframeTrace('transcript-mount-pin', {ticks: mountPinTicks, events: events.length}); } else if (mountPinTicks > 8) { mountPinArmed = false; window.__bramIframeTrace('follow-state', {op: 'pin-abandoned', cause: 'mount-pin', ticks: mountPinTicks, total: events.length, endIndex: (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex) || -1, agentId: $props.agentId || 'main'}); window.__bramFollowVerify('mount-pin-abandoned', $props.agentId, events.length); } else { transcriptList.scrollToBottom(); } }" />
+    <!-- log-rows-baseline-and-spacing: /transcript?at=<ms>, from a Log
+         entry's time. The mount neither restores the old position nor pins
+         to the bottom (mountReturnState null, mountFollow false: the
+         restore branch above just enters READING), and this Timer lands on
+         the turn that began at or after the moment, retrying until the
+         events load (__bramTranscriptLinkStep returns 0 when done). A
+         Timer, not delay(), for the same unmount reason as the pin above.
+         https://www.xmlui.org/docs/howto/deep-link-to-a-tab-or-section -->
+    <Timer
+      interval="250"
+      enabled="{linkAt > 0}"
+      onTick="() => { linkAt = window.__bramTranscriptLinkStep(transcriptList, events, linkAt, $props.agentId); }" />
     <ChangeListener
       listenTo="{$props.agentId}"
       onDidChange="() => { atBottom = window.__bramFollowTransition(true, 'agent-chip-switch', $props.agentId); repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); window.__bramBottomJumpRetry(transcriptList, 'agent-chip-switch', $props.agentId, events.length); }" />

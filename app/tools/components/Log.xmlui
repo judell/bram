@@ -54,17 +54,35 @@
       <property name="emptyListTemplate">
         <Text color="$textColor-secondary" value="Nothing to show yet. Tell me what you'd like to see here." />
       </property>
-      <!-- The time and the sentence share a baseline: Markdown's paragraph
-           margins are zeroed (marginTop/marginBottom-Text-markdown, as the
-           footer's status line does in Main.xmlui;
-           https://www.xmlui.org/docs/reference/components/Markdown), and the
-           time, the chevron and the sentence share one 1.5rem line box
-           (lineHeight: https://www.xmlui.org/docs/styles-and-themes/layout-props#lineheight).
-           With equal line boxes from the same top, a smaller time sits on
-           the sentence's baseline to within a fraction of a pixel. -->
-      <Theme marginTop-Text-markdown="0" marginBottom-Text-markdown="0">
-      <HStack gap="$space-3" paddingVertical="$space-1" verticalAlignment="start">
-        <Text width="3rem" fontSize="$fontSize-sm" lineHeight="1.5rem" color="$textColor-secondary" value="{$item.at}" />
+      <!-- The time and the sentence share a baseline. A Markdown paragraph
+           is <Text variant="paragraph"> (xmlui MarkdownReact.tsx), whose line
+           height and padding come from theme variables, not from a lineHeight
+           on the Markdown wrapper (that was 497d3c3's miss): so the row's
+           Theme sets the paragraph's line box (lineHeight-Text-paragraph,
+           not lineHeight-Text, which would loosen the detail lines too),
+           zeroes its padding (paddingVertical-Text-paragraph, default
+           $space-1) and margins (as the footer's status line does in
+           Main.xmlui), and flattens the item-name chips' bottom padding
+           (paddingBottom-Text-code). The time gets the same 1.5rem box.
+           https://www.xmlui.org/docs/reference/components/Text
+           https://www.xmlui.org/docs/reference/components/Markdown -->
+      <Theme marginTop-Text-markdown="0" marginBottom-Text-markdown="0"
+        paddingVertical-Text-paragraph="0"
+        lineHeight-Text-paragraph="1.5rem"
+        paddingBottom-Text-code="0">
+      <HStack gap="$space-2" paddingVertical="$space-0_5" verticalAlignment="start">
+        <!-- The time links into the Transcript at that moment
+             (/transcript?at=<ms>) when the entry happened in the session
+             the Transcript shows; otherwise it's plain. -->
+        <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
+          textColor-Link--active="$textColor-secondary">
+          <Link when="{!!window.__bramStoryTranscriptHref($item, story.value)}" noIndicator="true"
+            width="2.5rem" fontSize="$fontSize-sm" lineHeight="1.5rem"
+            tooltip="Open the Transcript here"
+            label="{$item.at}" to="{window.__bramStoryTranscriptHref($item, story.value)}" />
+        </Theme>
+        <Text when="{!window.__bramStoryTranscriptHref($item, story.value)}"
+          width="2.5rem" fontSize="$fontSize-sm" lineHeight="1.5rem" color="$textColor-secondary" value="{$item.at}" />
         <!-- Transcript's ID-keyed fold, so refresh/reordering preserves the
              expanded message rather than the row's former position.
              https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop -->
@@ -126,24 +144,41 @@
              one links in-app to the Commits tab's local view
              (/commits?sha=). A push's range links to the forge's compare
              view. -->
-        <VStack when="{!$item.queueId}" width="*" gap="$space-2">
-          <HStack gap="$space-2" verticalAlignment="start">
+        <!-- The whole sentence is the toggle's click target, not just the
+             chevron; a click on a link inside it (an item name, a sha) keeps
+             the link's meaning (__bramLogRowToggle). Stack click:
+             https://www.xmlui.org/docs/reference/components/Stack#click -->
+        <VStack when="{!$item.queueId}" width="*" gap="$space-0_5">
+          <HStack gap="$space-2" verticalAlignment="start" cursor="pointer"
+            onClick="(e) => expanded = window.__bramLogRowToggle(e, expanded, $item.id)">
             <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
               textColor-Link--active="$textColor-secondary">
-              <Link noIndicator="true" lineHeight="1.5rem" label="{expanded.includes($item.id) ? '▾' : '▸'}"
-                onClick="expanded = window.__bramToggleInArray(expanded, $item.id)" />
+              <Text lineHeight="1.5rem" color="$textColor-secondary" value="{expanded.includes($item.id) ? '▾' : '▸'}" />
             </Theme>
             <Markdown when="{!$item.surprising}" width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             <Theme when="{$item.surprising}" textColor-Text="$color-warn-700">
               <Markdown width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             </Theme>
           </HStack>
-          <VStack when="{expanded.includes($item.id)}" paddingLeft="$space-6" gap="$space-1">
+          <VStack when="{expanded.includes($item.id)}" paddingLeft="$space-5" gap="$space-0_5">
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryEntryContext($item)}" />
             <DataSource id="boardThen" url="/__worklist-history/at" queryParams="{{ ts: $item.t }}" />
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryBoardLine(boardThen.value, boardThen.loaded)}" />
+            <!-- The board as a vertical list, each item linked to its History
+                 entry (/history?entry=<id>, the deep link the Commits tab and
+                 the sentence's item names use), with its state beside it.
+                 https://www.xmlui.org/docs/reference/components/Items -->
+            <VStack gap="0" paddingLeft="$space-3">
+              <Items data="{window.__bramStoryBoardItems(boardThen.value)}">
+                <HStack gap="$space-1" verticalAlignment="center">
+                  <Link noIndicator="true" fontSize="$fontSize-xs" breakMode="word"
+                    label="{$item.id}" to="{$item.href}" />
+                  <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{'(' + $item.state + ')'}" />
+                </HStack>
+              </Items>
+            </VStack>
           </VStack>
         </VStack>
       </HStack>

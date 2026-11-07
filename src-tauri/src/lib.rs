@@ -48528,6 +48528,14 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             "entries": entries,
             "images": images,
         });
+        // log-rows-baseline-and-spacing: when the record was written (Claude
+        // and Codex both stamp a top-level ISO timestamp), so a Log entry can
+        // link to the Transcript at its moment (/transcript?at=<ms>).
+        if let Some(ts) = r.get("timestamp").and_then(|v| v.as_str()) {
+            if let Some(obj) = turn.as_object_mut() {
+                obj.insert("ts".to_string(), serde_json::Value::String(ts.to_string()));
+            }
+        }
         if compact_summary {
             if let Some(obj) = turn.as_object_mut() {
                 obj.insert("compactSummary".to_string(), serde_json::Value::Bool(true));

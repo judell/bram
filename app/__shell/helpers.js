@@ -15159,6 +15159,10 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
       if (t.images && t.images.length) {
         slice.push({ id: baseId + "-images", kind: "images", role: t.role || "", images: t.images });
       }
+      // log-rows-baseline-and-spacing: the turn's time (the host's `ts`) on
+      // its first event, so a Log entry's link can find the turn at its
+      // moment (__bramTranscriptIndexAt).
+      if (t.ts && slice.length) slice[0].turnTs = Date.parse(t.ts) || 0;
       if (window.__bramProjectedEventCache) window.__bramProjectedEventCache.set(t, slice);
     }
     for (var si = 0; si < slice.length; si++) events.push(slice[si]);
@@ -17353,6 +17357,63 @@ window.__bramSetTranscriptMounted = function (mounted) {
 // Immutable toggle of an id in an array (proven per-item expand pattern,
 // matching Workspace's expandedItemIds — avoids object-literal var inits
 // that XMLUI's expression engine mishandles).
+// log-rows-baseline-and-spacing: a Log entry links into the Transcript at
+// its moment (/transcript?at=<ms>). The index is the first event of the
+// first turn that began at or after the moment (turnTs, from the host's
+// per-turn `ts`), or the last event when every turn began earlier; -1
+// when no event carries a time (a provider without timestamps).
+window.__bramTranscriptIndexAt = function (events, atMs) {
+  var list = events || [], seen = false;
+  for (var i = 0; i < list.length; i++) {
+    var ts = list[i] && list[i].turnTs;
+    if (!ts) continue;
+    seen = true;
+    if (ts >= atMs) return i;
+  }
+  return seen ? list.length - 1 : -1;
+};
+// One step of the link's landing, run by a Timer until it returns 0. It
+// waits for the events (up to 20 ticks), scrolls to the moment's turn, and
+// scrolls again on the next tick, since a virtualized List measures rows
+// as it reaches them. Traced as transcript-link.
+var __bramTranscriptLinkTicks = {};
+window.__bramTranscriptLinkStep = function (list, events, atMs, agentId) {
+  var key = String(atMs);
+  var n = (__bramTranscriptLinkTicks[key] = (__bramTranscriptLinkTicks[key] || 0) + 1);
+  var idx = window.__bramTranscriptIndexAt(events, atMs);
+  if (idx < 0) {
+    if (n < 20) return atMs;
+    window.__bramIframeTrace("transcript-link", { op: "gave-up", at: atMs, events: (events || []).length });
+    delete __bramTranscriptLinkTicks[key];
+    return 0;
+  }
+  try { list.scrollToIndex(idx); } catch (e) { /* the List not yet mounted: retry */ }
+  if (n === 1 || !window.__bramTranscriptLinkLanded || window.__bramTranscriptLinkLanded !== key) {
+    window.__bramTranscriptLinkLanded = key;
+    window.__bramFollowTransition(false, "log-link", agentId);
+    window.__bramIframeTrace("transcript-link", { op: "land", at: atMs, index: idx, events: events.length });
+    return atMs;
+  }
+  delete __bramTranscriptLinkTicks[key];
+  return 0;
+};
+// The Transcript link for a Log entry, or null. The Transcript shows the
+// current session, so only an entry that happened in it links.
+window.__bramStoryTranscriptHref = function (item, story) {
+  var cur = story && story.currentSession && story.currentSession.sessionId;
+  if (!item || !item.t || !cur || item.sessionId !== cur) return null;
+  return "/transcript?at=" + item.t;
+};
+// A click anywhere on a Log entry's sentence toggles it, except on a link
+// inside it (an item name, a sha), which keeps its own meaning.
+window.__bramLogRowToggle = function (e, expanded, id) {
+  var t = e && e.target;
+  while (t && t.tagName) {
+    if (t.tagName === "A" || t.tagName === "BUTTON") return expanded;
+    t = t.parentElement;
+  }
+  return window.__bramToggleInArray(expanded, id);
+};
 window.__bramToggleInArray = function (arr, id) {
   arr = arr || [];
   if (arr.indexOf(id) >= 0) return arr.filter(function (x) { return x !== id; });
@@ -20228,11 +20289,21 @@ window.__bramStoryBoardLine = function (board, loaded) {
   if (!loaded && !board) return "Board then: fetching…";
   var items = (board && Array.isArray(board.items)) ? board.items : [];
   if (!items.length) return "Board then: empty.";
-  var parts = items.map(function (it) {
-    var state = it.status === "applied" ? "applied" : it.begun ? "begun" : "proposed";
-    return it.id + " (" + state + ")";
+  // log-rows-baseline-and-spacing: the items themselves are listed below
+  // this line, one per row, linked to History (__bramStoryBoardItems).
+  return "Board then: " + (items.length === 1 ? "1 item" : items.length + " items") + ":";
+};
+// The board's items, each with its state and its History link, for the
+// expanded entry's vertical list.
+window.__bramStoryBoardItems = function (board) {
+  var items = (board && Array.isArray(board.items)) ? board.items : [];
+  return items.map(function (it) {
+    return {
+      id: it.id,
+      state: it.status === "applied" ? "applied" : it.begun ? "begun" : "proposed",
+      href: "/history?entry=" + encodeURIComponent(it.id),
+    };
   });
-  return "Board then: " + (items.length === 1 ? "1 item" : items.length + " items") + ": " + parts.join(", ") + ".";
 };
 
 // log-shows-start-commit-push-search: the Search tab reports each bucket's

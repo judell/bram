@@ -2419,7 +2419,11 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
 // else, such as [pty-in], [watcher] and event plumbing, is left out. Guard
 // denies come from hook-events.log. Only the tail of each file is read: the
 // Log tells recent history, and the trace can run to tens of megabytes.
-const STORY_TRACE_TAIL_BYTES: u64 = 6 * 1024 * 1024;
+// log-shows-start-commit-push-search: the Log shows five hours now, not one.
+// The trace grew 4.7 MB an hour on 2026-11-07 (32 MB in 6.8 h), so five
+// hours is about 24 MB; a 6 MB tail had already lost a Start & commit click
+// 72 minutes after it, and the Log told its commit as one with no click.
+const STORY_TRACE_TAIL_BYTES: u64 = 32 * 1024 * 1024;
 const STORY_HOOK_TAIL_BYTES: u64 = 1024 * 1024;
 const STORY_TRACE_CATEGORIES: &[&str] = &[
     "turn-state",
@@ -2430,6 +2434,9 @@ const STORY_TRACE_CATEGORIES: &[&str] = &[
     "worklist-commit",
     "queue",
     "bram-trace",
+    // log-shows-start-commit-push-search: one op=push-result line per push
+    // (issue-383), told as "You pushed main (a..b)".
+    "git-push",
 ];
 const STORY_IFRAME_SUBKINDS: &[&str] = &[
     "click",
@@ -2440,6 +2447,9 @@ const STORY_IFRAME_SUBKINDS: &[&str] = &[
     // keep-selection-reload (#479): a pane reload restoring the Worklist
     // selection. Its own subkind, so the busy w2-selection lines stay out.
     "w2-selection-restore",
+    // log-shows-start-commit-push-search: the Search tab's results per
+    // bucket, told as "You searched for “…” and got N hits".
+    "search-query",
 ];
 
 // The last `max` bytes of a file, starting at a line boundary.
@@ -2491,6 +2501,10 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str) -> Vec<u8> {
                     .iter()
                     .any(|k| text.starts_with(&format!("subkind={} ", k))),
                 "turn-state" => !text.starts_with("from=working to=working "),
+                // log-shows-start-commit-push-search: which session each
+                // entry happened in, for its expanded detail. Only the
+                // sets; the category's offers and refusals stay out.
+                "agent-switch" => text.starts_with("op=live-session-set "),
                 _ => STORY_TRACE_CATEGORIES.contains(&cat),
             };
             if keep {
@@ -2520,8 +2534,101 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str) -> Vec<u8> {
     let drafts = project_resource_path(app, ".bram-queue.json")
         .and_then(|p| p.parent().map(|s| story_queue_drafts(s, &lines)))
         .unwrap_or_default();
-    serde_json::to_vec(&serde_json::json!({ "lines": lines, "queueDrafts": drafts }))
-        .unwrap_or_default()
+    // log-shows-start-commit-push-search: what an entry's expanded detail
+    // needs beside the lines. The session in force before the window's
+    // first live-session-set line is unknown to the tail; when the tail has
+    // no set at all, the current session held for the whole window.
+    let current_session = current_provider(app).and_then(|p| {
+        let sid = live_session_id(app, p)?;
+        Some(serde_json::json!({
+            "provider": session_provider_label(p),
+            "sessionId": sid,
+            "title": session_title_by_id(app, p, &sid).unwrap_or_default(),
+        }))
+    });
+    let mut session_titles = serde_json::Map::new();
+    for l in &lines {
+        if l["cat"] != "agent-switch" {
+            continue;
+        }
+        let text = l["text"].as_str().unwrap_or("");
+        let field = |k: &str| {
+            text.split(' ')
+                .find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')))
+                .unwrap_or("")
+        };
+        let (prov, sid) = (field("provider"), field("session"));
+        if sid.is_empty() || session_titles.contains_key(sid) {
+            continue;
+        }
+        let title = SessionProvider::from_str(prov)
+            .and_then(|p| session_title_by_id(app, p, sid))
+            .unwrap_or_default();
+        session_titles.insert(sid.to_string(), serde_json::Value::String(title));
+    }
+    let commit_url_base = git_run(app, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|u| remote_to_html(u.trim()))
+        .filter(|b| !b.is_empty())
+        .map(|b| format!("{}/commit/", b));
+    serde_json::to_vec(&serde_json::json!({
+        "lines": lines,
+        "queueDrafts": drafts,
+        "currentSession": current_session,
+        "sessionTitles": session_titles,
+        "commitUrlBase": commit_url_base,
+    }))
+    .unwrap_or_default()
+}
+
+// log-shows-start-commit-push-search: the board as it stood at a moment.
+// Each history snapshot holds the board as it was just before the change
+// stamped in its name, so the board at `ts` is the earliest snapshot stamped
+// at or after `ts`, and the live board when no change has happened since.
+fn worklist_board_at<R: tauri::Runtime>(app: &AppHandle<R>, ts: u64) -> serde_json::Value {
+    let items_of = |doc: &serde_json::Value| -> Vec<serde_json::Value> {
+        doc["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|it| {
+                        serde_json::json!({
+                            "id": it["id"],
+                            "status": it["status"].as_str().unwrap_or("proposed"),
+                            "begun": it.get("begunAtMs").is_some(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let next = worklist_history_dir(app).and_then(|dir| {
+        std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name();
+                let name = name.to_str()?;
+                let stem = name.strip_suffix(".json")?;
+                let stamp: u64 = stem.parse().ok()?;
+                (stamp >= ts).then_some((stamp, e.path()))
+            })
+            .min_by_key(|(stamp, _)| *stamp)
+    });
+    if let Some((stamp, path)) = next {
+        if let Ok(doc) = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .ok_or(())
+        {
+            return serde_json::json!({ "ts": stamp, "live": false, "items": items_of(&doc) });
+        }
+    }
+    let live = worklist_file(app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or_default();
+    serde_json::json!({ "ts": serde_json::Value::Null, "live": true, "items": items_of(&live) })
 }
 
 // The queue's stable ID names its saved draft, even after send/delete removes
@@ -88322,6 +88429,21 @@ fn route_request<R: tauri::Runtime>(
         }
         let map = feedback_ref_map(app, limit);
         let body = serde_json::to_vec(&map).unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
+    // /__worklist-history/at?ts=<unix_ms> — the board as it stood at that
+    // moment: {ts, live, items: [{id, status, begun}]} (see worklist_board_at).
+    // log-shows-start-commit-push-search: a Log entry's expanded detail.
+    if path == "__worklist-history/at" {
+        let ts = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("ts="))
+            .and_then(|v| percent_decode(v).parse::<u64>().ok());
+        let Some(ts) = ts else {
+            return (400, "text/plain; charset=utf-8", b"bad ts".to_vec());
+        };
+        let body = serde_json::to_vec(&worklist_board_at(app, ts)).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }
 

@@ -81,14 +81,22 @@
       : ''
   }" />
 
+  <!-- log-shows-start-commit-push-search: each bucket's results are traced
+       (subkind search-query) so the Log can say what you searched for and
+       how many hits came back. One trace per bucket; the narrator sums them.
+       https://www.xmlui.org/docs/reference/components/DataSource (onLoaded) -->
   <DataSource id="rSession" url="/__search"
-    queryParams="{{ q: effectiveQuery, limit: 100, types: 'session', mode: effectiveMode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'session', mode: effectiveMode }}" when="{ready}"
+    onLoaded="(data) => window.__bramSearchQueryTrace('session', effectiveQuery, effectiveMode, data)" />
   <DataSource id="rCommit" url="/__search"
-    queryParams="{{ q: effectiveQuery, limit: 100, types: 'commit', mode: effectiveMode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'commit', mode: effectiveMode }}" when="{ready}"
+    onLoaded="(data) => window.__bramSearchQueryTrace('commit', effectiveQuery, effectiveMode, data)" />
   <DataSource id="rIssue" url="/__search"
-    queryParams="{{ q: effectiveQuery, limit: 100, types: 'issue', mode: effectiveMode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'issue', mode: effectiveMode }}" when="{ready}"
+    onLoaded="(data) => window.__bramSearchQueryTrace('issue', effectiveQuery, effectiveMode, data)" />
   <DataSource id="rHistory" url="/__search"
-    queryParams="{{ q: effectiveQuery, limit: 100, types: 'worklist-history', mode: effectiveMode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'worklist-history', mode: effectiveMode }}" when="{ready}"
+    onLoaded="(data) => window.__bramSearchQueryTrace('worklist-history', effectiveQuery, effectiveMode, data)" />
 
   <!-- Full relevance-ordered set of the selected buckets (no date filter) — the
        stable domain the slider measures, so moving the handles never shifts it. -->

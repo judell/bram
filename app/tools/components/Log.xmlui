@@ -5,15 +5,16 @@
   var.expanded="{[]}"
   var.fullscreenImage="{null}">
 
-  <!-- issue-473-readable-launch-log: Bram's story of the last hour. The host
-       selects episode lines (/__story/lines); helpers.js tells them
-       (__bramStoryTell), so a wording change is a pane reload. Fetched when
-       the tab opens and refetched when a turn starts or ends
-       (turn-context-changed); no polling and no Refresh button, since what
-       it shows happens on other tabs. A tick rebuilds the URL, which also
-       moves the window's start. -->
+  <!-- issue-473-readable-launch-log: Bram's story of the last five hours
+       (one until log-shows-start-commit-push-search, 2026-11-07; the host's
+       trace tail grew to match). The host selects episode lines (/__story/lines);
+       helpers.js tells them (__bramStoryTell), so a wording change is a pane
+       reload. Fetched when the tab opens and refetched when a turn starts or
+       ends (turn-context-changed); no polling and no Refresh button, since
+       what it shows happens on other tabs. A tick rebuilds the URL, which
+       also moves the window's start. -->
   <DataSource id="story"
-    url="{'/__story/lines?since=' + window.__bramStorySince(60, mountKey + '.' + storyTick)}" />
+    url="{'/__story/lines?since=' + window.__bramStorySince(300, mountKey + '.' + storyTick)}" />
   <PushSource id="storyEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('turn-context-changed')}" />
   <ChangeListener listenTo="{storyEvt.value &amp;&amp; storyEvt.value.tick}"
@@ -45,7 +46,7 @@
         <Text color="$textColor-secondary" value="Nothing to show yet. Tell me what you'd like to see here." />
       </property>
       <HStack gap="$space-3" paddingVertical="$space-1">
-        <Text width="3.5rem" fontFamily="$fontFamily-monospace" color="$textColor-secondary" value="{$item.at}" />
+        <Text width="3.5rem" color="$textColor-secondary" value="{$item.at}" />
         <!-- Transcript's ID-keyed fold, so refresh/reordering preserves the
              expanded message rather than the row's former position.
              https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop -->
@@ -91,10 +92,39 @@
               value="{$item.context}" />
           </VStack>
         </VStack>
-        <Text when="{!$item.queueId}"
-          width="*"
-          color="{$item.surprising ? '$color-warn-700' : '$textColor-primary'}"
-          value="{$item.text}" />
+        <!-- log-shows-start-commit-push-search: the sentence is Markdown so
+             item names link to their History entry (/history?entry=<id>);
+             openLinkInNewTab false keeps the links in-app
+             (https://www.xmlui.org/docs/reference/components/Markdown).
+             A surprising line keeps its warning colour through the
+             textColor-Text variable Markdown's prose reads, scoped by Theme
+             (https://www.xmlui.org/docs/reference/components/Theme). -->
+        <!-- Every other entry expands (same ID-keyed fold as the queue rows)
+             to its context: the agent and session it happened in, from the
+             teller, and the board as it stood then, fetched only once opened
+             (/__worklist-history/at). The forge link on a commit sha opens
+             in the system browser through openExternal (helpers.js routes
+             http links on this tab there). -->
+        <VStack when="{!$item.queueId}" width="*" gap="$space-2">
+          <HStack gap="$space-2" verticalAlignment="start">
+            <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
+              textColor-Link--active="$textColor-secondary">
+              <Link noIndicator="true" label="{expanded.includes($item.id) ? '▾' : '▸'}"
+                onClick="expanded = window.__bramToggleInArray(expanded, $item.id)" />
+            </Theme>
+            <Markdown when="{!$item.surprising}" width="*" content="{$item.text}" openLinkInNewTab="{false}" />
+            <Theme when="{$item.surprising}" textColor-Text="$color-warn-700">
+              <Markdown width="*" content="{$item.text}" openLinkInNewTab="{false}" />
+            </Theme>
+          </HStack>
+          <VStack when="{expanded.includes($item.id)}" paddingLeft="$space-6" gap="$space-1">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{window.__bramStoryEntryContext($item)}" />
+            <DataSource id="boardThen" url="/__worklist-history/at" queryParams="{{ ts: $item.t }}" />
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{window.__bramStoryBoardLine(boardThen.value, boardThen.loaded)}" />
+          </VStack>
+        </VStack>
       </HStack>
     </List>
   </VStack>

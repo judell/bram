@@ -452,9 +452,10 @@ starts with a Timeline.
 `ui-health.py` counts. `bram-story.py` narrates: it reads the trace and
 `hook-events.log` and tells, in Bram's first person, what Bram did around
 the work. It covers turns (why each started, which item, how long, the claim
-released), gate clicks and commits, stalls you'd feel, refusals (with "that's
-the rule working" when it is), and a single quiet line after 20 minutes of
-nothing.
+released), gate clicks and commits, pushes (branch and range, or why one
+failed), what you searched for on the Search tab and how many hits came back,
+stalls you'd feel, refusals (with "that's the rule working" when it is), and a
+single quiet line after 20 minutes of nothing.
 
 ```sh
 python3 -I scripts/bram-story.py                 # the last hour
@@ -472,7 +473,22 @@ marked so far.
 The same narrator, ported to JS (`__bramStoryTell` in `helpers.js`), is the
 **Log** tab, below Settings in the nav (`app/tools/components/Log.xmlui`). The host only selects lines
 (`/__story/lines`); the pane tells them, so a wording change is a pane reload.
-It refreshes when a turn starts or ends. The Log adds what the script can't:
+It refreshes when a turn starts or ends, and shows the last five hours (the
+host's trace tail is sized for that; see `/__story/lines` in `apis.md`). Every
+entry expands to the agent and session it happened in and the board as it
+stood then (`/__worklist-history/at`), and a commit's sha links to the forge.
+What reaches it is opt-in (`STORY_SHOW` in `helpers.js`, Jon's 2026-11-05 rule:
+show nothing until asked): queue messages, selection changes, gate clicks,
+pushes and your searches, as of 2026-11-07. Every other kind (turns, stalls,
+refusals, the launch) is told but held back until someone asks for it; adding
+one is a one-word change there. A search shows at the next turn boundary,
+since nothing else refetches the Log. Item names in a line are links to the
+item's History entry (`/history?entry=<id>`), so the sentence is rendered as
+Markdown. A gate line names the click and what landed; it doesn't recite the
+approval, the claim and the hand-off, which every click does and the row's
+spinner shows live. A Start & commit waits ten minutes for its commit, a
+Commit one; a line told before its deadline says the commit hasn't landed
+yet rather than that it never did. The Log adds what the script can't:
 quoted openings of what you sent, and what each turn did ("ran 1 search, made
 3 edits"), counted from the Transcript projection by order, and left out
 when the order doesn't line up. Change the voice in `helpers.js`; the script

@@ -19029,6 +19029,17 @@ document.addEventListener("click", function (e) {
       tagName: String((e.target && e.target.tagName) || ""),
     });
   } catch (traceErr) {}
+  // log-shows-start-commit-push-search: on the Log tab a Markdown link to
+  // the forge (a commit's URL) opens in the system browser, the way every
+  // forge link in the pane does (openExternal), instead of navigating the
+  // pane away. Scoped to the Log's route; other tabs keep their own rules.
+  if (/^https?:\/\//.test(href) && String(window.location.hash || "").indexOf("#/log") === 0 &&
+      typeof window.openExternal === "function") {
+    e.preventDefault();
+    e.stopPropagation();
+    try { window.openExternal(href); } catch (oe) {}
+    return;
+  }
   if (href.indexOf("://") === -1 && /\.md(?:[?#].*)?$/i.test(href)) {
     if (typeof __contextMemorySelector === "function") {
       e.preventDefault();
@@ -20200,6 +20211,43 @@ window.__bramStorySince = function (minutes, key) {
   return __bramStorySinceCache.value;
 };
 
+// log-shows-start-commit-push-search: a Log entry's expanded context, from
+// the fields the teller attached (agent and session in force when the
+// episode began). "unknown" means the trace tail didn't name it.
+window.__bramStoryEntryContext = function (item) {
+  if (!item) return "";
+  var agent = item.agent ? window.__bramProviderLabel(item.agent) : "an agent the trace doesn't name";
+  var session = item.sessionTitle ? "'" + item.sessionTitle + "'"
+    : item.sessionId ? "session " + String(item.sessionId).slice(0, 8) + "…"
+    : "a session the trace doesn't name";
+  return agent + " · " + session;
+};
+// The board as it stood when the entry happened (/__worklist-history/at):
+// each item with its state, in the board's own order.
+window.__bramStoryBoardLine = function (board, loaded) {
+  if (!loaded && !board) return "Board then: fetching…";
+  var items = (board && Array.isArray(board.items)) ? board.items : [];
+  if (!items.length) return "Board then: empty.";
+  var parts = items.map(function (it) {
+    var state = it.status === "applied" ? "applied" : it.begun ? "begun" : "proposed";
+    return it.id + " (" + state + ")";
+  });
+  return "Board then: " + (items.length === 1 ? "1 item" : items.length + " items") + ": " + parts.join(", ") + ".";
+};
+
+// log-shows-start-commit-push-search: the Search tab reports each bucket's
+// results, so the Log can tell what you searched for. Traced from the pane,
+// not the /__search route, which also serves the agent's searches and can't
+// tell them apart. One line per bucket per query; the narrator sums them.
+window.__bramSearchQueryTrace = function (bucket, q, mode, data) {
+  var query = String(q || "").trim();
+  if (!query) return;
+  window.__bramIframeTrace("search-query", {
+    op: "results", bucket: bucket, q: query.slice(0, 200), mode: mode || "and",
+    hits: Array.isArray(data) ? data.length : 0,
+  });
+};
+
 // log-queue-entry-opens-message: the small-print context under an expanded
 // queue message, from what its saved draft recorded at the time. Older
 // drafts have no agent field and say so rather than guessing.
@@ -20253,7 +20301,10 @@ window.__bramStoryLeadingSentence = function (text) {
 };
 
 window.__bramStoryTell = (function () {
-  var WANT_STALL_GAP = 30000, LATENCY_MS = 200, LONGTASK_MS = 1000;
+  var WANT_STALL_GAP = 30000, LATENCY_MS = 200, LONGTASK_MS = 1000, START_COMMIT_MS = 10 * 60000;
+  // Set just before the final flush; Infinity while the trace is still
+  // being read, so a deadline reached inside the window reads as passed.
+  var flushNow = Infinity;
   var DURING = { "transcript-render": "rendering the Transcript",
     "worklist-refetch": "refetching the Worklist", "worklist-render": "rendering the Worklist" };
 
@@ -20284,6 +20335,19 @@ window.__bramStoryTell = (function () {
     if (!ids || !ids.length) return "no item";
     if (ids.length <= 2) return ids.join(" and ");
     return ids[0] + ", " + ids[1] + " and " + (ids.length - 2) + " more";
+  }
+  // log-shows-start-commit-push-search (Jon, 2026-11-07: "link to the item
+  // in History"): the same list with each id a Markdown link to the item's
+  // History entry (/history?entry=<id>, issue-67's deep link, which groups
+  // the snapshots per item whether or not it has landed). Log.xmlui renders
+  // the sentence as Markdown; the id sits in backticks so its hyphens and
+  // underscores can't be read as emphasis.
+  function itemLink(id) { return "[`" + id + "`](/history?entry=" + encodeURIComponent(id) + ")"; }
+  function linked(ids) {
+    if (!ids || !ids.length) return "no item";
+    var l = ids.map(itemLink);
+    if (l.length <= 2) return l.join(" and ");
+    return l[0] + ", " + l[1] + " and " + (l.length - 2) + " more";
   }
   // head="..." from [turn-send]: unescape, drop the host's own "..." cut,
   // keep ~60 chars. Returns null for machine-made heads.
@@ -20372,9 +20436,34 @@ window.__bramStoryTell = (function () {
     }
     var drift = { t: 0, focused: null };
 
-    function Ep(kind, t) { return { kind: kind, t: t, deadline: t + 5000, d: {} }; }
+    // Context for an entry's expanded detail: the agent and session in force
+    // when its episode began. The agent comes from turn-state lines (and a
+    // session set); the session from [agent-switch] op=live-session-set.
+    // Before the window's first set the tail can't name the session, unless
+    // the window has no set at all, in which case the current session held
+    // throughout (the host sends it as currentSession).
+    var cur = payload && payload.currentSession;
+    var anySet = lines.some(function (l) { return l.cat === "agent-switch"; });
+    var curProvider = anySet ? null : (cur && cur.provider) || null;
+    var curSessionId = anySet ? null : (cur && cur.sessionId) || null;
+    function sessionTitle(sid) {
+      if (!sid) return null;
+      if (cur && cur.sessionId === sid && cur.title) return cur.title;
+      var titles = (payload && payload.sessionTitles) || {};
+      return titles[sid] || null;
+    }
+    function ctxNow() { return { agent: curProvider, sessionId: curSessionId, sessionTitle: sessionTitle(curSessionId) }; }
+    function Ep(kind, t) { return { kind: kind, t: t, deadline: t + 5000, d: {}, ctx: ctxNow() }; }
     function say(ep, kind, text, surprising) {
-      out.push({ t: ep.t, at: hhmm(ep.t), text: text, kind: kind, surprising: !!surprising, _ep: ep });
+      var c = ep.ctx || ctxNow();
+      out.push({ t: ep.t, at: hhmm(ep.t), text: text, kind: kind, surprising: !!surprising, _ep: ep,
+        agent: c.agent, sessionId: c.sessionId, sessionTitle: c.sessionTitle });
+    }
+    // A commit sha as a Markdown link to the forge, when the host knows the
+    // repo's web address (commitUrlBase); the pane opens it externally.
+    function shaLink(sha) {
+      var base = payload && payload.commitUrlBase;
+      return base && sha ? "[" + sha + "](" + base + sha + ")" : sha;
     }
     function find(kind) {
       for (var i = open.length - 1; i >= 0; i--) if (open[i].kind === kind) return open[i];
@@ -20462,7 +20551,10 @@ window.__bramStoryTell = (function () {
       if (j.op !== "act" || tg.indexOf("gatebar-") !== 0) return;
       var g = Ep("gate", t);
       g.d.target = tg.slice(8); g.d.count = j.count || 0;
-      g.deadline = t + ((tg === "gatebar-commit" || tg === "gatebar-start-commit") ? 60000 : 8000);
+      // A Commit lands within a minute; a Start & commit first does the
+      // work, so its commit can be many minutes away (2026-11-07 21:00Z:
+      // 76 s, and the Log said no commit had landed).
+      g.deadline = t + (tg === "gatebar-start-commit" ? START_COMMIT_MS : tg === "gatebar-commit" ? 60000 : 8000);
       open.push(g);
     }
     function gateNow(t) { var g = find("gate"); return g && t - g.t < 60000 ? g : null; }
@@ -20500,7 +20592,7 @@ window.__bramStoryTell = (function () {
         if (g && (g.d.target === "commit" || g.d.target === "start-commit" || g.d.target === null)) {
           g.d.sha = kv(rest, "sha"); g.deadline = t + 4000;
         } else {
-          simple(t, "gate", "A commit landed (" + kv(rest, "sha") + "), but I saw no gate click for it.");
+          simple(t, "gate", "A commit landed (" + shaLink(kv(rest, "sha")) + "), but I saw no gate click for it.");
         }
       } else if (op === "staging" && g) {
         g.d.files = kv(rest, "files");
@@ -20508,9 +20600,13 @@ window.__bramStoryTell = (function () {
         (g.d.unowned = g.d.unowned || []).push([kv(rest, "path"), kv(rest, "added"), kv(rest, "removed")]);
       }
     }
+    // The gate line names the click and, for a commit, what landed. It no
+    // longer recites the approval, the claim and the hand-off (Jon,
+    // 2026-11-07: "remove that sentence"); those are what a click always
+    // does, and the row's spinner shows them live.
     function endGate(ep) {
       var d = ep.d, tg = d.target, ids = d.ids || [], s, surprising = false;
-      var who = ids.length ? names(ids) : (d.count ? plural(d.count, "item") : "an item");
+      var who = ids.length ? linked(ids) : (d.count ? plural(d.count, "item") : "an item");
       if (tg === null) {
         if (!d.recorded) return;
         s = "An approval for " + who + " was recorded, but I saw no click on the gate bar for it" +
@@ -20520,21 +20616,80 @@ window.__bramStoryTell = (function () {
       } else {
         var label = { start: "Start", commit: "Commit", "start-commit": "Start & commit" }[tg] || tg;
         s = "You clicked " + label + " on " + who + ".";
-        if (d.recorded) {
-          s += " I recorded the approval" + (d.claimed ? ", claimed it" : "") + (d.handed ? " and handed Claude the turn." : ".");
-        }
         if (tg === "commit" || tg === "start-commit") {
           if (d.sha) {
-            s += d.files ? " I staged " + plural(+d.files, "file") + " and committed " + d.sha + "." : " I committed " + d.sha + ".";
+            s += d.files ? " I staged " + plural(+d.files, "file") + " and committed " + shaLink(d.sha) + "." : " I committed " + shaLink(d.sha) + ".";
             (d.unowned || []).forEach(function (u) {
               s += " That commit also took lines no item owned in " + u[0] + " (+" + u[1] + "/-" + u[2] +
                 "); that's disclosed, not hidden, but worth a look.";
               surprising = true;
             });
-          } else { s += " I did not see a commit land within a minute."; surprising = true; }
+          } else if (flushNow < ep.deadline) {
+            // Told before its deadline, by the flush at the end of the
+            // window: the commit may still be on its way.
+            s += " The commit hasn't landed yet.";
+          } else if (tg === "commit") {
+            s += " I did not see a commit land within a minute."; surprising = true;
+          } else {
+            s += " No commit had landed " + dur(START_COMMIT_MS / 1000) + " later.";
+          }
         }
       }
       say(ep, "gate", s, surprising);
+    }
+
+    // -- push (log-shows-start-commit-push-search): one [git-push]
+    // op=push-result line per `git push` the host runs, on success and
+    // failure (issue-383). The range comes from git's own stderr
+    // ("   a1b2c3d..e4f5a6b  main -> main"); its rebase and lock-retry ops
+    // are left to the push-result line that follows them.
+    function onPush(t, rest) {
+      if (kv(rest, "op") !== "push-result") return;
+      var branch = kv(rest, "branch") || "the branch", stage = kv(rest, "stage") || "initial";
+      var ok = kv(rest, "ok") === "true";
+      var em = /stderr="((?:[^"\\]|\\.)*)"/.exec(rest);
+      var err = em ? em[1].replace(/\\n/g, "\n").replace(/\\"/g, '"') : "";
+      var rm = /([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})/.exec(err);
+      if (ok) {
+        var s = "You pushed " + branch;
+        if (rm) s += " (" + rm[1].slice(0, 8) + ".." + rm[2].slice(0, 8) + ")";
+        else if (/up-to-date/i.test(err)) s += "; there was nothing new to send";
+        s += stage === "rebase" ? ", after a rebase onto what had been pushed meanwhile." : ".";
+        simple(t, "push", s);
+      } else {
+        var lines = err.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
+        var why = lines.filter(function (l) { return /^(error|fatal):/.test(l); })[0] || lines[lines.length - 1] || "git gave no error text";
+        simple(t, "push", "Your push of " + branch + " failed at the " + stage + " stage: " + why, true);
+      }
+    }
+
+    // -- search: the Search tab's [iframe] subkind=search-query, one line per
+    // bucket per query (window.__bramSearchQueryTrace). The buckets of one
+    // query land within a second, and a query typed in stages replaces the
+    // last within 4 s, so the Log tells the query you settled on and its
+    // total, not every keystroke.
+    function onSearch(t, j) {
+      if (!j || j.op !== "results" || !j.q) return;
+      var ep = find("search");
+      if (ep && t - ep.t > 4000) ep = null;
+      if (!ep) { ep = Ep("search", t); ep.d = { q: j.q, mode: j.mode, hits: {} }; open.push(ep); }
+      else if (ep.d.q !== j.q) { ep.d.q = j.q; ep.d.mode = j.mode; ep.d.hits = {}; ep.t = t; }
+      ep.d.hits[j.bucket || "?"] = Number(j.hits) || 0;
+      ep.deadline = t + 4000;
+    }
+    function endSearch(ep) {
+      var d = ep.d, total = 0, parts = [];
+      var LABEL = { session: "sessions", commit: "commits", issue: "issues", "worklist-history": "history" };
+      Object.keys(d.hits).forEach(function (b) {
+        total += d.hits[b];
+        if (d.hits[b]) parts.push(d.hits[b] + " " + (LABEL[b] || b));
+      });
+      var s = "You searched for “" + window.__bramStoryLeadingSentence(d.q) + "”" +
+        (d.mode && d.mode !== "and" ? " (" + d.mode + " mode)" : "");
+      s += total
+        ? " and got " + plural(total, "hit") + (parts.length > 1 ? " (" + parts.join(", ") + ")" : "") + "."
+        : " and found nothing.";
+      say(ep, "search", s);
     }
 
     // -- stall
@@ -20623,7 +20778,7 @@ window.__bramStoryTell = (function () {
 
     var ENDERS = {
       simple: function (ep) { say(ep, ep.d.k, ep.d.text, ep.d.s); },
-      turn: endTurn, gate: endGate, stall: endStall, refusal: endRefusal, queue: endQueue
+      turn: endTurn, gate: endGate, stall: endStall, refusal: endRefusal, queue: endQueue, search: endSearch
     };
 
     lines.forEach(function (ln) {
@@ -20632,7 +20787,12 @@ window.__bramStoryTell = (function () {
       var cat = ln.cat, rest = ln.text || "";
       tick(t);
       var sub = cat === "iframe" ? kv(rest, "subkind") : null;
-      if (cat === "turn-state") onTurnState(t, rest);
+      if (cat === "turn-state" && kv(rest, "provider")) curProvider = kv(rest, "provider");
+      if (cat === "agent-switch") {
+        if (kv(rest, "session")) curSessionId = kv(rest, "session");
+        if (kv(rest, "provider")) curProvider = kv(rest, "provider");
+      }
+      else if (cat === "turn-state") onTurnState(t, rest);
       else if (cat === "turn-context" && rest.indexOf("op=set") >= 0) recent.push({ t: t, w: "ctx", kind: kv(rest, "kind"), ids: kv(rest, "ids") });
       else if (cat === "inflight-sentinel") onSentinel(t, rest);
       else if (cat === "iframe" && sub === "click") onClick(t, rest);
@@ -20648,14 +20808,19 @@ window.__bramStoryTell = (function () {
       else if (cat === "iframe" && sub === "w2-selection-restore") {
         var sj = jsonTail(rest);
         var sids = Array.isArray(sj.ids) ? sj.ids : [];
-        if (sj.op === "restore") simple(t, "selection", "The pane reloaded; I kept your selection: " + names(sids) + ".", false);
-        else if (sj.op === "dropped") simple(t, "selection", "After the reload, " + names(sids) + (sids.length === 1 ? " was" : " were") + " no longer on the Worklist, so I unticked " + (sids.length === 1 ? "it" : "them") + ".", true);
+        // Nothing ticked before the reload means nothing could change under
+        // the user, so there is nothing to tell (the empty case read "I kept
+        // your selection: no item", 2026-11-07).
+        if (sj.op === "restore" && sids.length) simple(t, "selection", "The pane reloaded; I kept your selection: " + linked(sids) + ".", false);
+        else if (sj.op === "dropped") simple(t, "selection", "After the reload, " + linked(sids) + (sids.length === 1 ? " was" : " were") + " no longer on the Worklist, so I unticked " + (sids.length === 1 ? "it" : "them") + ".", true);
       }
       else if (cat === "iframe" && sub === "heartbeat-drift") drift = { t: t, focused: jsonTail(rest).focused };
       else if (cat === "iframe" && (sub === "long-task" || sub === "input-latency")) onStall(t, sub, jsonTail(rest));
+      else if (cat === "iframe" && sub === "search-query") onSearch(t, jsonTail(rest));
       else if (cat === "auth-record") onAuth(t, rest);
       else if (cat === "turn-send") onSend(t, rest);
       else if (cat === "worklist-commit") onCommit(t, rest);
+      else if (cat === "git-push") onPush(t, rest);
       else if (cat === "hook-deny") {
         var hm = /^(\S+) (\S+) (\S+) (.*)$/.exec(rest);
         if (hm && hm[4].indexOf("decided=deny") >= 0) onHook(t, "tool=" + hm[3] + " " + hm[4]);
@@ -20669,6 +20834,9 @@ window.__bramStoryTell = (function () {
         simple(t, "launch", "I started up (pid " + kv(rest, "pid") + ").");
       }
     });
+    // Episodes still open at the end of the window are told now; their
+    // enders read flushNow to tell "not yet" from "never did".
+    flushNow = Date.now();
     tick(Infinity);
 
     // Research summary: map projection groups onto turn episodes by order.
@@ -20711,6 +20879,9 @@ window.__bramStoryTell = (function () {
         return {
           id: o.kind + ":" + (o.queueId || o.t),
           at: o.at, text: text, kind: o.kind, surprising: o.surprising, queueId: o.queueId || null,
+          // For the expanded detail: when it happened (the board-then fetch
+          // keys on it) and the agent and session in force at the time.
+          t: o.t, agent: o.agent || null, sessionId: o.sessionId || null, sessionTitle: o.sessionTitle || null,
           message: message === null ? "No saved draft is available for this older message." : (message || "This queued message is empty."),
           context: window.__bramQueueDraftContext(draft || null),
           images: (draft && Array.isArray(draft.images)) ? draft.images : [],
@@ -20721,10 +20892,13 @@ window.__bramStoryTell = (function () {
   // What the Log shows, opt-in (Jon, 2026-11-05: "show nothing until I ask
   // for it"). Every kind is still told; only these reach the Log. Add a kind
   // here when it's asked for. Known kinds: queue-add, queue, turn, gate,
-  // stall, refusal, launch, queue-delete, selection.
-  var STORY_SHOW = ["queue-add", "queue-delete", "selection"];
+  // stall, refusal, launch, queue-delete, selection, push, search.
+  // gate, push and search were asked for on 2026-11-07
+  // (log-shows-start-commit-push-search: "Start, Commit, Push, Search").
+  var STORY_SHOW = ["queue-add", "queue-delete", "selection", "gate", "push", "search"];
 
   return function (payload) {
+    flushNow = Infinity;
     try { return tell(payload); } catch (e) { return []; }
   };
 })();

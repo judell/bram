@@ -29,6 +29,10 @@ Episodes (source lines in parentheses):
   refusal  guard denies (hook-events.log),  decided=deny reason=...,
            expired approvals, refused      [auth-record] op=refuse,
            queue saves                     [queue] op=save-refused
+  push     a git push: branch and range,  [git-push] op=push-result
+           or why it failed
+  search   what you searched for on the  [iframe] subkind=search-query
+           Search tab, and the hit count
   quiet    --follow only: one line after 20 minutes with nothing to tell
 
 Not available in the trace today (so not told): a 409 from the commit gate,
@@ -55,10 +59,11 @@ from datetime import datetime, timedelta
 LINE = re.compile(r"^\[(?P<ts>[^\]]+)\] \[(?P<cat>[^\]]+)\] (?P<rest>.*)$")
 HOOK = re.compile(r"^(?P<ts>\S+) (?P<agent>\S+) (?P<event>\S+) (?P<tool>\S+) (?P<rest>.*)$")
 WANT = {"turn-state", "turn-context", "inflight-sentinel", "auth-record", "turn-send",
-        "worklist-commit", "iframe", "queue", "bram-trace", "hook-events"}
+        "worklist-commit", "iframe", "queue", "bram-trace", "hook-events", "git-push"}
 QUIET_SECS = 20 * 60
 STALL_GAP = 30
 LATENCY_MS, LONGTASK_MS = 200, 1000
+START_COMMIT_SECS = 10 * 60
 DURING = {"transcript-render": "rendering the Transcript",
           "worklist-refetch": "refetching the Worklist",
           "worklist-render": "rendering the Worklist"}
@@ -122,7 +127,7 @@ def parse(line, hook=False):
         if not m or m["cat"] not in WANT:
             return None
         cat, rest = m["cat"], m["rest"]
-        if cat == "iframe" and not re.match(r"subkind=(click|long-task|input-latency|heartbeat-drift) ", rest):
+        if cat == "iframe" and not re.match(r"subkind=(click|long-task|input-latency|heartbeat-drift|search-query) ", rest):
             return None
     try:
         return epoch(m["ts"]), cat, rest
@@ -148,6 +153,7 @@ class Narrator:
         self.recent = collections.deque(maxlen=60)  # (t, "ctx"|"claim", kind, ids)
         self.drift = (0, None)
         self.last_hook = {}
+        self.flush_now = None
 
     # ---- plumbing -------------------------------------------------------
     def say(self, ep, text):
@@ -159,7 +165,11 @@ class Narrator:
             getattr(self, "end_" + ep.kind)(ep)
 
     def flush(self):
+        # Episodes still open at the end are told now; end_gate reads
+        # flush_now to tell "not yet" from "never did".
+        self.flush_now = time.time()
         self.tick(float("inf"))
+        self.flush_now = None
 
     def find(self, kind):
         for ep in reversed(self.open):
@@ -181,12 +191,16 @@ class Narrator:
             self.drift = (t, parse_json_tail(rest).get("focused"))
         elif cat == "iframe" and sub in ("long-task", "input-latency"):
             self.on_stall(t, sub, parse_json_tail(rest))
+        elif cat == "iframe" and sub == "search-query":
+            self.on_search(t, parse_json_tail(rest))
         elif cat == "auth-record":
             self.on_auth(t, rest)
         elif cat == "turn-send":
             self.on_send(t, rest)
         elif cat == "worklist-commit":
             self.on_commit(t, rest)
+        elif cat == "git-push":
+            self.on_push(t, rest)
         elif cat == "hook-events":
             self.on_hook(t, rest)
         elif cat == "queue" and "op=save-refused" in rest:
@@ -206,6 +220,64 @@ class Narrator:
 
     def end_simple(self, ep):
         self.say(ep, ep.d["text"])
+
+    # ---- push (log-shows-start-commit-push-search) ----------------------
+    # One [git-push] op=push-result line per `git push` the host runs
+    # (issue-383); the range is read from git's own stderr.
+    def on_push(self, t, rest):
+        if kv(rest, "op") != "push-result":
+            return
+        branch, stage = kv(rest, "branch") or "the branch", kv(rest, "stage") or "initial"
+        em = re.search(r'stderr="((?:[^"\\]|\\.)*)"', rest)
+        err = em[1].replace("\\n", "\n").replace('\\"', '"') if em else ""
+        rm = re.search(r"([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})", err)
+        if kv(rest, "ok") == "true":
+            s = f"You pushed {branch}"
+            if rm:
+                s += f" ({rm[1][:8]}..{rm[2][:8]})"
+            elif "up-to-date" in err.lower():
+                s += "; there was nothing new to send"
+            s += ", after a rebase onto what had been pushed meanwhile." if stage == "rebase" else "."
+            self.simple(t, "git-push push-result", s)
+        else:
+            lines = [l.strip() for l in err.split("\n") if l.strip()]
+            why = next((l for l in lines if re.match(r"^(error|fatal):", l)), lines[-1] if lines else "git gave no error text")
+            self.simple(t, "git-push push-result", f"Your push of {branch} failed at the {stage} stage: {why}")
+
+    # ---- search ---------------------------------------------------------
+    # The Search tab's [iframe] subkind=search-query, one per bucket per
+    # query. Buckets of one query land within a second; a query typed in
+    # stages replaces the last within 4 s, so the final query is told.
+    LABEL = {"session": "sessions", "commit": "commits", "issue": "issues", "worklist-history": "history"}
+
+    def on_search(self, t, j):
+        if j.get("op") != "results" or not j.get("q"):
+            return
+        ep = self.find("search")
+        if ep and t - ep.t > 4:
+            ep = None
+        if not ep:
+            ep = Ep("search", t)
+            ep.d.update(q=j["q"], mode=j.get("mode"), hits={})
+            self.open.append(ep)
+        elif ep.d["q"] != j["q"]:
+            ep.d.update(q=j["q"], mode=j.get("mode"), hits={})
+            ep.t, ep.cites = t, []
+        ep.d["hits"][j.get("bucket") or "?"] = int(j.get("hits") or 0)
+        ep.cite(t, f"search-query {j.get('bucket')}")
+        ep.deadline = t + 4
+
+    def end_search(self, ep):
+        d = ep.d
+        total = sum(d["hits"].values())
+        parts = [f"{n} {self.LABEL.get(b, b)}" for b, n in d["hits"].items() if n]
+        q = d["q"] if len(d["q"]) <= 180 else d["q"][:177] + "…"
+        s = f"You searched for “{q}”" + (f" ({d['mode']} mode)" if d.get("mode") not in (None, "and") else "")
+        if total:
+            s += f" and got {total} hit{'s' * (total != 1)}" + (f" ({', '.join(parts)})" if len(parts) > 1 else "") + "."
+        else:
+            s += " and found nothing."
+        self.say(ep, s)
 
     # ---- turn -----------------------------------------------------------
     def on_sentinel(self, t, rest):
@@ -276,7 +348,9 @@ class Narrator:
             return
         g = Ep("gate", t)
         g.d.update(target=tg[8:], count=j.get("count") or 0)
-        g.deadline = t + (60 if tg in ("gatebar-commit", "gatebar-start-commit") else 8)
+        # A Commit lands within a minute; a Start & commit first does the
+        # work, so its commit can be many minutes away.
+        g.deadline = t + (START_COMMIT_SECS if tg == "gatebar-start-commit" else 60 if tg == "gatebar-commit" else 8)
         g.cite(t, f"click {tg}")
         self.open.append(g)
 
@@ -351,11 +425,9 @@ class Narrator:
             s = f"You clicked Drop on {who}. Feedback-less drops finish in the host, so there's no turn to tell about."
         else:
             label = {"start": "Start", "commit": "Commit", "start-commit": "Start & commit"}.get(tg, tg)
+            # The click and, for a commit, what landed; the approval, claim
+            # and hand-off are no longer recited (Jon, 2026-11-07).
             s = f"You clicked {label} on {who}."
-            if d.get("recorded"):
-                s += " I recorded the approval"
-                s += ", claimed it" if d.get("claimed") else ""
-                s += " and handed Claude the turn." if d.get("handed") else "."
             if tg in ("commit", "start-commit"):
                 if d.get("sha"):
                     f = d.get("files")
@@ -363,8 +435,12 @@ class Narrator:
                     for p, a, r in d.get("unowned", []):
                         s += (f" That commit also took lines no item owned in {p} (+{a}/-{r}); "
                               "that's disclosed, not hidden, but worth a look.")
-                else:
+                elif self.flush_now is not None and self.flush_now < ep.deadline:
+                    s += " The commit hasn't landed yet."
+                elif tg == "commit":
                     s += " I did not see a commit land within a minute."
+                else:
+                    s += f" No commit had landed {dur(START_COMMIT_SECS)} later."
         self.say(ep, s)
 
     # ---- stall ----------------------------------------------------------

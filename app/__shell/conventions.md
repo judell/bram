@@ -80,7 +80,12 @@ Skip the worklist only in these contexts, never because the change is
   Unlike the other prefixes, the host forwards the **entire turn text
   including the prefix**. On seeing it, skip propose-first, make the
   change directly, write no worklist item, and commit only if the turn
-  asks; the PreToolUse hook allows the edits.
+  asks; the PreToolUse hook allows the edits. A direct commit to a file
+  a begun item has already changed strands that item: its own patch no
+  longer applies to HEAD, and its row names the commit. Commit the item
+  first, or re-anchor it afterwards (`POST /__worklist/reanchor
+  {"ids": [...]}`, accepted once the file's uncommitted lines are all
+  that item's).
 - **Correcting code you just wrote in the current iteration.** Fixing a
   typo or off-by-one from your last turn is iteration on in-progress
   work, not a fresh change request.

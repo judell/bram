@@ -65153,6 +65153,16 @@ fn interval_build_patch<R: tauri::Runtime>(
     let mut committed: Vec<String> = Vec::new();
     for id in ids {
         for path in item_files.get(id).cloned().unwrap_or_default() {
+            // gate-names-the-outside-commit-that-strands-an-item: a verified
+            // re-anchor replaces the window patch for this path (see
+            // reanchor_override_patch; a stale record falls through).
+            if let Some(p) = reanchor_override_patch(app, id, &path) {
+                patch.push_str(&p);
+                if !committed.contains(&path) {
+                    committed.push(path);
+                }
+                continue;
+            }
             let d = claim_interval_diff(app, id, &path);
             let Some(p) = d.get("patch").and_then(|v| v.as_str()) else {
                 continue;
@@ -65283,6 +65293,419 @@ mod issue_430_tests {
         assert!(patch_creates_file(create));
         let modify = "diff --git a/s.sh b/s.sh\n--- a/s.sh\n+++ b/s.sh\n@@ -1 +1 @@\n-x\n+y\n";
         assert!(!patch_creates_file(modify));
+    }
+}
+
+// gate-names-the-outside-commit-that-strands-an-item: when an entangled
+// item's interval patch no longer applies to HEAD, the cause is not always
+// another begun item's uncommitted work (issue-430's dependency case). On
+// 2026-11-02 two direct commits (skip-worklist turns, their own lines staged)
+// changed files two applied items had already changed; each item's patch then
+// failed against HEAD, the host blamed the other item (`commitDependsOn`), and
+// the pane drew a loop with every Commit dim ("I can't find any way to light
+// up a commit button"). These helpers name the commits that stranded the
+// item: commits since it began, touching the failing paths, that the
+// Worklist's gate did not make.
+#[derive(Clone, Debug, PartialEq)]
+struct StrandingCommit {
+    sha: String,
+    subject: String,
+    paths: Vec<String>,
+}
+
+// Pure attribution over `git log --format=%x00%H%x09%s --name-only` output:
+// one NUL-led record per commit, its touched paths under the header. A commit
+// counts when it touched one of `paths` (a declared directory covers its
+// files) and `is_gate` says the Worklist did not make it. Newest first, as
+// git lists them.
+fn stranding_commits_from_log(
+    log: &str,
+    paths: &[String],
+    is_gate: &dyn Fn(&str) -> bool,
+) -> Vec<StrandingCommit> {
+    let mut out = Vec::new();
+    for record in log.split('\0').filter(|r| !r.trim().is_empty()) {
+        let mut lines = record.lines();
+        let Some(head) = lines.next() else { continue };
+        let Some((sha, subject)) = head.split_once('\t') else {
+            continue;
+        };
+        let sha = sha.trim();
+        if sha.is_empty() || is_gate(sha) {
+            continue;
+        }
+        let touched: Vec<String> = lines
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && paths.iter().any(|p| declared_covers(p, l)))
+            .collect();
+        if touched.is_empty() {
+            continue;
+        }
+        out.push(StrandingCommit {
+            sha: sha.to_string(),
+            subject: subject.trim().to_string(),
+            paths: touched,
+        });
+    }
+    out
+}
+
+fn outside_commits_touching<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    since_ms: i64,
+    paths: &[String],
+) -> Vec<StrandingCommit> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let since = format!("--since=@{}", since_ms / 1000);
+    let mut args = vec![
+        "log",
+        "--format=%x00%H%x09%s",
+        "--name-only",
+        since.as_str(),
+        "--",
+    ];
+    args.extend(paths.iter().map(|p| p.as_str()));
+    let Ok(out) = git_run(app, &args) else {
+        return Vec::new();
+    };
+    stranding_commits_from_log(&out, paths, &|sha| is_gate_sha(app, sha))
+}
+
+fn stranding_json(list: &[StrandingCommit]) -> serde_json::Value {
+    serde_json::Value::Array(
+        list.iter()
+            .map(|c| {
+                serde_json::json!({
+                    "sha": c.sha,
+                    "short": c.sha.chars().take(7).collect::<String>(),
+                    "subject": c.subject,
+                    "paths": c.paths,
+                })
+            })
+            .collect(),
+    )
+}
+
+// Per item, keyed on HEAD, the item's start and the failing paths: the board
+// is served many times a minute and this answer moves only when a commit
+// lands or the failing set changes.
+fn stranded_by_cached<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    begun_ms: i64,
+    paths: &[String],
+    head: &str,
+) -> Vec<StrandingCommit> {
+    static CACHE: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, (String, Vec<StrandingCommit>)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
+    let key = format!("{}|{}|{}", head, begun_ms, paths.join(","));
+    if let Ok(g) = cache.lock() {
+        if let Some((k, r)) = g.get(id) {
+            if *k == key {
+                return r.clone();
+            }
+        }
+    }
+    let r = outside_commits_touching(app, begun_ms, paths);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!(
+                "op=stranded-by item={} commits={} paths={}",
+                id,
+                r.iter()
+                    .map(|c| c.sha.chars().take(7).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                paths.join(",")
+            ),
+        );
+    }
+    if let Ok(mut g) = cache.lock() {
+        g.insert(id.to_string(), (key, r.clone()));
+    }
+    r
+}
+
+// Re-anchor (`POST /__worklist/reanchor`): a stranded item's way back to a
+// commit of its own, without rewriting history. A record under `reanchors` in
+// the claim-intervals sidecar says: for this item and path, at this HEAD and
+// this file content, `git diff HEAD -- path` IS the item's patch. The handler
+// writes one only when membership credits the path's every uncommitted line
+// to the item alone (`reanchor_refusal_reason`), which is exactly when that
+// diff carries nobody else's work. `interval_build_patch` uses the record in
+// place of the window patch while HEAD and the file's bytes still match; a
+// later commit or edit makes it stale and the window patch is used again
+// (the status quo, never a wrong take). Prune drops records of pruned items.
+const REANCHORS_KEY: &str = "reanchors";
+static REANCHOR_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn claim_intervals_doc<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(std::path::PathBuf, serde_json::Value)> {
+    let root = project_root(Some(app))?;
+    let sidecar = resource_relative_path(&root, CLAIM_INTERVALS_REL);
+    let text = std::fs::read_to_string(&sidecar).ok()?;
+    let doc = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    Some((sidecar, doc))
+}
+
+fn write_claim_intervals_doc(sidecar: &Path, doc: &serde_json::Value) -> bool {
+    let Ok(body) = serde_json::to_string_pretty(doc) else {
+        return false;
+    };
+    let tmp = sidecar.with_extension("json.tmp");
+    std::fs::write(&tmp, format!("{}\n", body)).is_ok() && std::fs::rename(&tmp, sidecar).is_ok()
+}
+
+fn prune_reanchor_records(
+    doc: &mut serde_json::Value,
+    live: &std::collections::HashSet<String>,
+) -> usize {
+    let Some(arr) = doc.get_mut(REANCHORS_KEY).and_then(|v| v.as_array_mut()) else {
+        return 0;
+    };
+    let before = arr.len();
+    arr.retain(|r| {
+        r.get("id")
+            .and_then(|v| v.as_str())
+            .map(|id| live.contains(id))
+            .unwrap_or(false)
+    });
+    before - arr.len()
+}
+
+// Pure, and only a courtesy: when membership credits another begun item with
+// lines on the path, name it, since the way out is then a joint commit, not a
+// re-anchor. The soundness decision itself is `reanchor_verified_blob`, not
+// membership. Membership's removed-line attribution is computed against
+// HEAD, and the outside commit that strands an item moves HEAD, so in
+// exactly the stranded case it reports the item's own deletions as unowned
+// (the first live probe: `unowned-lines:+0-3` on a file only the item had
+// touched).
+fn reanchor_refusal_reason(b: &MembershipPathBuckets, id: &str) -> Option<String> {
+    let others: Vec<&str> = b
+        .owners
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|o| *o != id)
+        .collect();
+    if !others.is_empty() {
+        return Some(format!("other-owners:{}", others.join("+")));
+    }
+    None
+}
+
+// The proof that `git diff HEAD -- path` is exactly this item's work: the
+// item's own window patch for the path, applied to HEAD's copy of the file,
+// must reproduce the worktree file byte for byte. Then the worktree differs
+// from HEAD on that path by the item's windows and nothing else: no other
+// item's lines, no unowned lines, no drift. The apply is tried with normal
+// context, then one line, then none: the stranding commit changed the lines
+// around the item's hunks, so the context is what fails, and line numbers
+// still place the hunks; a misplacement cannot pass the equality. Returns
+// the blob the item's work produced on HEAD (equal to the worktree's) or
+// None with a reason.
+fn reanchor_verified_blob<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: &str,
+    own_patch: &str,
+    worktree_blob: &str,
+) -> Result<String, String> {
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let idx = std::env::temp_dir().join(format!(
+        "bram-reanchor-index-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let pfile = idx.with_extension("patch");
+    if std::fs::write(&pfile, own_patch).is_err() {
+        return Err("patch-write-failed".to_string());
+    }
+    let git_idx = |args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .env("GIT_INDEX_FILE", &idx)
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let pfile_s = pfile.to_string_lossy().to_string();
+    let mut last = String::from("apply-failed");
+    let mut found: Option<String> = None;
+    for ctx in [None, Some("-C1"), Some("-C0")] {
+        let _ = std::fs::remove_file(&idx);
+        if git_idx(&["read-tree", "HEAD"]).is_err() {
+            last = "scratch-index-failed".to_string();
+            break;
+        }
+        let mut args: Vec<&str> = vec!["apply", "--cached"];
+        if let Some(c) = ctx {
+            args.push(c);
+        }
+        args.push(&pfile_s);
+        if git_idx(&args).is_err() {
+            continue;
+        }
+        // "100644 <blob> 0	<path>"
+        let staged = git_idx(&["ls-files", "--stage", "--", path]).unwrap_or_default();
+        let blob = staged.split_whitespace().nth(1).unwrap_or("").to_string();
+        if blob == worktree_blob {
+            found = Some(blob);
+            break;
+        }
+        last = "not-only-this-items-work".to_string();
+    }
+    let _ = std::fs::remove_file(&idx);
+    let _ = std::fs::remove_file(&pfile);
+    found.ok_or(last)
+}
+
+fn reanchor_override_patch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    path: &str,
+) -> Option<String> {
+    let (_, doc) = claim_intervals_doc(app)?;
+    let rec = doc
+        .get(REANCHORS_KEY)
+        .and_then(|v| v.as_array())?
+        .iter()
+        .find(|r| {
+            r.get("id").and_then(|v| v.as_str()) == Some(id)
+                && r.get("path").and_then(|v| v.as_str()) == Some(path)
+        })?
+        .clone();
+    let head_rec = rec.get("head").and_then(|v| v.as_str())?.to_string();
+    let blob_rec = rec.get("blob").and_then(|v| v.as_str())?.to_string();
+    let head = git_run(app, &["rev-parse", "HEAD"])
+        .ok()?
+        .trim()
+        .to_string();
+    if head != head_rec {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=reanchor-stale id={} path={} reason=head", id, path),
+        );
+        return None;
+    }
+    let blob = git_run(app, &["hash-object", "--", path])
+        .ok()?
+        .trim()
+        .to_string();
+    if blob != blob_rec {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=reanchor-stale id={} path={} reason=blob", id, path),
+        );
+        return None;
+    }
+    let mut patch = git_run(app, &["diff", "--no-color", "HEAD", "--", path]).ok()?;
+    if patch.trim().is_empty() {
+        return None;
+    }
+    if !patch.ends_with('\n') {
+        patch.push('\n');
+    }
+    append_bram_trace_line(
+        app,
+        "worklist-commit",
+        &format!("op=reanchor-used id={} path={}", id, path),
+    );
+    Some(patch)
+}
+
+#[cfg(test)]
+mod stranding_tests {
+    use super::{
+        prune_reanchor_records, reanchor_refusal_reason, stranding_commits_from_log,
+        MembershipPathBuckets, StrandingCommit,
+    };
+
+    const LOG: &str = "\0aaaa111\tDirect commit to arch\n\norientation/arch.js\nREADME.md\n\
+                       \0bbbb222\tGate commit of a sibling\n\norientation/arch.js\n\
+                       \0cccc333\tUnrelated\n\ndocs/x.md\n";
+
+    #[test]
+    fn names_outside_commits_and_skips_gate_commits() {
+        let paths = vec!["orientation/arch.js".to_string()];
+        let got = stranding_commits_from_log(LOG, &paths, &|sha| sha == "bbbb222");
+        assert_eq!(
+            got,
+            vec![StrandingCommit {
+                sha: "aaaa111".to_string(),
+                subject: "Direct commit to arch".to_string(),
+                paths: vec!["orientation/arch.js".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_declared_directory_covers_its_files() {
+        let paths = vec!["orientation".to_string()];
+        let got = stranding_commits_from_log(LOG, &paths, &|_| false);
+        let shas: Vec<&str> = got.iter().map(|c| c.sha.as_str()).collect();
+        assert_eq!(shas, vec!["aaaa111", "bbbb222"]);
+        assert_eq!(got[0].paths, vec!["orientation/arch.js".to_string()]);
+    }
+
+    #[test]
+    fn no_touching_commit_means_a_genuine_dependency() {
+        let paths = vec!["src/other.rs".to_string()];
+        assert!(stranding_commits_from_log(LOG, &paths, &|_| false).is_empty());
+    }
+
+    fn bucket(owners: &[&str]) -> MembershipPathBuckets {
+        let mut b = MembershipPathBuckets::default();
+        for o in owners {
+            b.owners.insert(o.to_string());
+        }
+        b
+    }
+
+    #[test]
+    fn reanchor_names_other_owners_and_nothing_else() {
+        assert_eq!(reanchor_refusal_reason(&bucket(&["a"]), "a"), None);
+        // Membership's own-line counts are not consulted: in the stranded
+        // case they misreport the item's deletions as unowned.
+        let mut partial = bucket(&["a"]);
+        partial.per_item.insert(vec!["a".to_string()], (3, 0));
+        partial.universe = (3, 3);
+        assert_eq!(reanchor_refusal_reason(&partial, "a"), None);
+        assert_eq!(
+            reanchor_refusal_reason(&bucket(&["a", "b"]), "a").as_deref(),
+            Some("other-owners:b")
+        );
+        assert_eq!(reanchor_refusal_reason(&bucket(&[]), "a"), None);
+    }
+
+    #[test]
+    fn prune_drops_records_of_items_no_longer_on_the_board() {
+        let mut doc = serde_json::json!({
+            "intervals": [],
+            "reanchors": [
+                {"id": "live", "path": "a.txt"},
+                {"id": "gone", "path": "b.txt"},
+                {"path": "no-id.txt"}
+            ]
+        });
+        let live: std::collections::HashSet<String> = ["live".to_string()].into_iter().collect();
+        assert_eq!(prune_reanchor_records(&mut doc, &live), 2);
+        assert_eq!(doc["reanchors"].as_array().map(|a| a.len()), Some(1));
+        let mut none = serde_json::json!({"intervals": []});
+        assert_eq!(prune_reanchor_records(&mut none, &live), 0);
     }
 }
 
@@ -69437,7 +69860,15 @@ fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
         })
         .unwrap_or_default();
     let (keep, retire) = claim_intervals_partition(&intervals, &live);
+    let reanchors_dropped = prune_reanchor_records(&mut doc, &live);
     if retire.is_empty() {
+        if reanchors_dropped > 0 && write_claim_intervals_doc(&sidecar, &doc) {
+            append_bram_trace_line(
+                app,
+                "claim-interval",
+                &format!("op=prune-reanchors removed={}", reanchors_dropped),
+            );
+        }
         // The ORDINARY steady state, not a fault: every boundary still bounds a
         // live interval. Emitted so that the presence of a prune line means "the
         // sweep ran" -- silence here was indistinguishable from the sweep never
@@ -87309,6 +87740,12 @@ fn route_request<R: tauri::Runtime>(
                             precheck_content_hash(idx, &declared).hash(&mut h);
                         }
                         declared.hash(&mut h);
+                        // A re-anchor changes what the patch is built from
+                        // without moving HEAD or the file (same bytes, new
+                        // base), so it has to move the key itself.
+                        REANCHOR_EPOCH
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            .hash(&mut h);
                         let key = format!("{}|{:016x}", wc_head, h.finish());
                         Some(commit_precheck_cached(app, &id, &declared, &key))
                     } else {
@@ -87416,6 +87853,23 @@ fn route_request<R: tauri::Runtime>(
                         }
                         _ => None,
                     };
+                    // gate-names-the-outside-commit-that-strands-an-item: a
+                    // failing patch may be stranded by a commit made outside
+                    // the gate after the item began, not by a sibling's
+                    // uncommitted lines. Name those commits so the pane can
+                    // say what happened instead of "commit that first".
+                    let stranded: Vec<StrandingCommit> =
+                        match (&depends_on, item.get("begunAtMs").and_then(|v| v.as_i64())) {
+                            (Some((_, failing)), Some(begun_ms)) if begun_ms > 0 => {
+                                let paths: Vec<String> = if failing.is_empty() {
+                                    declared.to_vec()
+                                } else {
+                                    failing.clone()
+                                };
+                                stranded_by_cached(app, &id, begun_ms, &paths, &wc_head)
+                            }
+                            _ => Vec::new(),
+                        };
                     let refusal = last_commit_refusal_for(&id, &wc_head);
                     if let Some(obj) = item.as_object_mut() {
                         if let Some((owners, failing)) = &depends_on {
@@ -87424,6 +87878,9 @@ fn route_request<R: tauri::Runtime>(
                                 "commitCheckFailedPaths".to_string(),
                                 serde_json::json!(failing),
                             );
+                        }
+                        if !stranded.is_empty() {
+                            obj.insert("commitStrandedBy".to_string(), stranding_json(&stranded));
                         }
                         if let Some((at_ms, reason)) = &refusal {
                             obj.insert(
@@ -91933,6 +92390,179 @@ fn landed_seen_cell() -> &'static Mutex<HashSet<String>> {
 // at call time and prunes nothing else; the pane's "Clear them" button and an
 // agent asked in chat ("clear those") both use it. Ids that aren't landed are
 // refused and listed.
+// gate-names-the-outside-commit-that-strands-an-item: `POST
+// /__worklist/reanchor { ids }`. For each begun item whose interval patch no
+// longer applies to HEAD, record a re-anchor for every failing declared path
+// whose uncommitted lines membership credits to that item alone (see
+// REANCHORS_KEY). Nothing in the worktree, the index or history moves; the
+// next precheck and commit build that path's chunk from `git diff HEAD`. 409
+// with every refusal named when nothing could be re-anchored. Authorization:
+// none beyond the loopback gate. It grants nothing and commits nothing; it
+// changes only how an already-begun item's own lines are cut into a patch,
+// under a condition the commit re-verifies.
+fn handle_worklist_reanchor<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let _mutate_guard = worklist_mutate_cell().lock();
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return worklist_json_error(400, format!("invalid JSON: {}", e)),
+    };
+    let ids = worklist_json_ids(&req, "ids");
+    if ids.is_empty() {
+        return worklist_json_error(400, "ids[] required");
+    }
+    let items: Vec<serde_json::Value> = worklist_file(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("items").and_then(|i| i.as_array()).cloned())
+        .unwrap_or_default();
+    let Some((partition, _fresh)) = membership_partition(app) else {
+        return worklist_json_error(503, "membership has no partition yet; retry shortly");
+    };
+    let head = match git_run(app, &["rev-parse", "HEAD"]) {
+        Ok(h) => h.trim().to_string(),
+        Err(e) => return worklist_json_error(500, format!("rev-parse HEAD failed: {}", e)),
+    };
+    let short: String = head.chars().take(7).collect();
+    let mut recorded: Vec<serde_json::Value> = Vec::new();
+    let mut refused: Vec<serde_json::Value> = Vec::new();
+    let mut new_records: Vec<serde_json::Value> = Vec::new();
+    let now = unix_now_ms();
+    let refuse = |id: &str, path: &str, reason: &str, refused: &mut Vec<serde_json::Value>| {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!(
+                "op=reanchor id={} path={} head={} outcome=refused reason={}",
+                id,
+                if path.is_empty() { "-" } else { path },
+                short,
+                reason
+            ),
+        );
+        refused.push(serde_json::json!({ "id": id, "path": path, "reason": reason }));
+    };
+    for id in &ids {
+        let Some(item) = items
+            .iter()
+            .find(|i| i.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        else {
+            refuse(id, "", "unknown-item", &mut refused);
+            continue;
+        };
+        let begun = item.get("status").and_then(|v| v.as_str()) == Some("applied")
+            || item.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+        if !begun {
+            refuse(id, "", "not-begun", &mut refused);
+            continue;
+        }
+        let files = worklist_item_files(item);
+        let mut fmap: std::collections::HashMap<String, Vec<String>> = Default::default();
+        fmap.insert(id.clone(), files.clone());
+        let failing = match interval_commit_precheck(app, &[id.clone()], &fmap) {
+            Ok(_) => {
+                refuse(id, "", "already-applies", &mut refused);
+                continue;
+            }
+            Err(f) => f,
+        };
+        let candidates: Vec<String> = partition
+            .keys()
+            .filter(|p| files.iter().any(|d| declared_covers(d, p)))
+            .filter(|p| failing.is_empty() || failing.contains(p))
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            refuse(id, "", "no-failing-path", &mut refused);
+            continue;
+        }
+        for path in candidates {
+            let Some(bucket) = partition.get(&path) else {
+                continue;
+            };
+            if let Some(reason) = reanchor_refusal_reason(bucket, id) {
+                refuse(id, &path, &reason, &mut refused);
+                continue;
+            }
+            if git_run(app, &["cat-file", "-e", &format!("HEAD:{}", path)]).is_err() {
+                refuse(id, &path, "untracked", &mut refused);
+                continue;
+            }
+            let blob = match git_run(app, &["hash-object", "--", &path]) {
+                Ok(b) => b.trim().to_string(),
+                Err(_) => {
+                    refuse(id, &path, "hash-failed", &mut refused);
+                    continue;
+                }
+            };
+            let own_patch = claim_interval_diff(app, id, &path)
+                .get("patch")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if own_patch.trim().is_empty() {
+                refuse(id, &path, "no-window-patch", &mut refused);
+                continue;
+            }
+            if let Err(reason) = reanchor_verified_blob(app, &path, &own_patch, &blob) {
+                refuse(id, &path, &reason, &mut refused);
+                continue;
+            }
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!(
+                    "op=reanchor id={} path={} head={} outcome=recorded",
+                    id, path, short
+                ),
+            );
+            new_records.push(serde_json::json!({
+                "id": id, "path": path, "head": head, "blob": blob, "atMs": now,
+            }));
+            recorded.push(serde_json::json!({ "id": id, "path": path }));
+        }
+    }
+    if !new_records.is_empty() {
+        let Some((sidecar, mut doc)) = claim_intervals_doc(app) else {
+            return worklist_json_error(500, "claim-intervals sidecar unreadable");
+        };
+        let mut arr: Vec<serde_json::Value> = doc
+            .get(REANCHORS_KEY)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // One record per (id, path): a repeat re-anchor replaces the old one.
+        arr.retain(|r| {
+            !new_records
+                .iter()
+                .any(|n| n.get("id") == r.get("id") && n.get("path") == r.get("path"))
+        });
+        arr.extend(new_records);
+        if let Some(obj) = doc.as_object_mut() {
+            obj.insert(REANCHORS_KEY.to_string(), serde_json::Value::Array(arr));
+        }
+        if !write_claim_intervals_doc(&sidecar, &doc) {
+            return worklist_json_error(500, "claim-intervals sidecar write failed");
+        }
+        REANCHOR_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        emit_replayable_signal(app, "worklist-changed");
+    }
+    let status = if recorded.is_empty() { 409 } else { 200 };
+    let body = serde_json::json!({
+        "ok": !recorded.is_empty(),
+        "head": short,
+        "reanchored": recorded,
+        "refused": refused,
+    });
+    (
+        status,
+        "application/json; charset=utf-8",
+        serde_json::to_vec(&body).unwrap_or_default(),
+    )
+}
+
 fn handle_worklist_clear_landed<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -92689,6 +93319,9 @@ fn worklist_selection_prediction<R: tauri::Runtime>(
     };
     let mut begun: std::collections::HashSet<String> = Default::default();
     let mut files_map: std::collections::HashMap<String, Vec<String>> = Default::default();
+    // The earliest start among the requested items bounds the outside-commit
+    // search (gate-names-the-outside-commit-that-strands-an-item).
+    let mut since_ms: Option<i64> = None;
     if let Some(wf) = worklist_file(app) {
         if let Some(doc) = std::fs::read_to_string(&wf)
             .ok()
@@ -92710,6 +93343,13 @@ fn worklist_selection_prediction<R: tauri::Runtime>(
                 }
                 if ids.iter().any(|r| r == id) {
                     files_map.insert(id.to_string(), worklist_item_files(it));
+                    if let Some(b) = it
+                        .get("begunAtMs")
+                        .and_then(|v| v.as_i64())
+                        .filter(|b| *b > 0)
+                    {
+                        since_ms = Some(since_ms.map_or(b, |s: i64| s.min(b)));
+                    }
                 }
             }
         }
@@ -92734,10 +93374,25 @@ fn worklist_selection_prediction<R: tauri::Runtime>(
                     "added": a, "removed": r, "entangledWith": entangled_with,
                 })
             }
-            Err(paths) => serde_json::json!({
-                "ready": true, "stale": !fresh, "stateKey": state_key, "mode": "interval",
-                "dependentPaths": paths, "entangledWith": entangled_with,
-            }),
+            Err(paths) => {
+                let stranded = match since_ms {
+                    Some(s) => outside_commits_touching(
+                        app,
+                        s,
+                        if paths.is_empty() {
+                            &requested_files
+                        } else {
+                            &paths
+                        },
+                    ),
+                    None => Vec::new(),
+                };
+                serde_json::json!({
+                    "ready": true, "stale": !fresh, "stateKey": state_key, "mode": "interval",
+                    "dependentPaths": paths, "entangledWith": entangled_with,
+                    "strandedBy": stranding_json(&stranded),
+                })
+            }
         };
     }
     selection_whole_file_json(&partition, fresh, state_key, &requested_files)
@@ -101533,6 +102188,16 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_clear_landed(app, &buf)
+        }
+    } else if path == "__worklist/reanchor" {
+        // gate-names-the-outside-commit-that-strands-an-item: see
+        // handle_worklist_reanchor.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_worklist_reanchor(app, &buf)
         }
     } else if path == "__worklist/reorder" {
         if method != "POST" {

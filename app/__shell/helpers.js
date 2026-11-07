@@ -4640,6 +4640,11 @@ window.__bramWorklist2StripTooltip = function (item, claim, items) {
       );
     }
   }
+  // gate-names-the-outside-commit-that-strands-an-item: the strip's
+  // "Stranded by" expands to what happened and the way out.
+  if (item && (item.commitStrandedBy || []).length) {
+    return window.__bramStrandedSentence(item.commitStrandedBy, item.commitDependsOn, true, false);
+  }
   var split = window.__bramItemChangedSplit(item, items, claim);
   // For a committable row, the terse label dropped the on-disk total, the
   // shared paths, the plan denominator and the last-change time; the tooltip
@@ -4849,6 +4854,9 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
     var it = list.filter(function (x) { return x.id === chosen[i]; })[0];
     if (!it) continue;
     if (!window.__bramWorklist2Begun(it, claim)) return it.id + " hasn't been started; use Start first.";
+    if ((it.commitStrandedBy || []).length) {
+      return window.__bramStrandedSentence(it.commitStrandedBy, it.commitDependsOn, true, false);
+    }
     if ((it.commitCheckFailedPaths || []).length) {
       return it.id + "'s change doesn't apply to HEAD on its own (" + it.commitCheckFailedPaths.join(", ") + ").";
     }
@@ -4936,6 +4944,40 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     }
   }
   return true;
+};
+
+// gate-names-the-outside-commit-that-strands-an-item: the sentence for an
+// item whose patch no longer applies because a commit outside the Worklist
+// changed its file after it began (host: commitStrandedBy, strandedBy). It
+// names the file and the commit, then the way out: together with the file's
+// other owners when there are any, or a re-anchor by the agent. `code` wraps
+// names for Markdown; `plural` phrases it for a selection.
+window.__bramStrandedSentence = function (stranded, others, code, plural) {
+  var list = stranded || [];
+  if (!list.length) return "";
+  var c = list[0];
+  var path = (c.paths || [])[0] || "a declared file";
+  var q = function (s) { return code ? "`" + s + "`" : s; };
+  var more = list.length > 1
+    ? " and " + (list.length - 1) + " more commit" + (list.length > 2 ? "s" : "")
+    : "";
+  var subj = plural ? "these items" : "this item";
+  var obj = plural ? "them" : "it";
+  var fix = (others || []).length
+    ? "Commit " + obj + " together with " + window.__bramNameList(others) +
+      ", or ask the agent to re-anchor " + obj + "."
+    : "Ask the agent to re-anchor " + obj + ".";
+  // A tooltip is as wide as its longest line and only a blank line breaks
+  // it, so the Markdown form is three short lines (Jon, 2026-11-07: "need to
+  // wrap the tooltip"); plain text stays one sentence for a wrapping Text.
+  // https://www.xmlui.org/docs/howto/show-a-multi-line-or-formatted-tooltip
+  var lines = [
+    q(path) + " was changed by " + q(c.short || c.sha) + ", a commit outside the Worklist" + more + ",",
+    "after " + subj + " began, so " +
+      (plural ? "their patches no longer apply." : "its patch no longer applies on its own."),
+    fix,
+  ];
+  return lines.join(code ? "\n\n" : " ");
 };
 
 // #336: the begun items this one shares CHANGED paths with -- the claimants
@@ -5450,6 +5492,10 @@ window.__bramSelectionTakeLine = function (pred, sel, board) {
   if ((pred.ids || []).slice().sort().join(",") !== sel.slice().sort().join(",")) return "";
   if (!board || !board.membershipStateKey || pred.stateKey !== board.membershipStateKey) return "";
   if ((pred.dependentPaths || []).length) {
+    if ((pred.strandedBy || []).length) {
+      return "Together these can't commit: " +
+        window.__bramStrandedSentence(pred.strandedBy, [], false, true);
+    }
     return "Together these can't commit: their changes depend on work by " +
       window.__bramNameList(pred.entangledWith || []) + ".";
   }
@@ -6187,7 +6233,24 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
     if (ownLines === 0 || !window.__bramOwnClause(item, attribution)) {
       return withCloses("No changes of its own yet");
     }
+    // gate-names-the-outside-commit-that-strands-an-item: name the commit
+    // that stranded it, never the neighbour the host would otherwise blame.
+    var strandedBy = item.commitStrandedBy || [];
+    if (strandedBy.length) {
+      return withCloses(
+        "Stranded by " + (strandedBy[0].short || strandedBy[0].sha) + " · " +
+          ((strandedBy[0].paths || [])[0] || "its file") +
+          " changed outside the Worklist after it began",
+      );
+    }
     var blockers = window.__bramItemShareBlockers(item, items, claim);
+    // gate-names-the-outside-commit-that-strands-an-item: two items whose
+    // patches each depend on the other's lines can't be ordered. "Commit that
+    // first" on both rows was the loop Jon hit on 2026-11-02; say what's true.
+    var mutual = blockers.length > 0 && blockers.every(function (b) {
+      var o = (items || []).filter(function (x) { return x && x.id === b; })[0];
+      return !!o && (o.commitDependsOn || []).indexOf(item.id) !== -1;
+    });
     // issue-419-header-from-membership: superseded. The item did work in its
     // windows (ownLines > 0 above), but membership credits it no line in any
     // of its changed files: another item rewrote them. "Shares its changed
@@ -6198,6 +6261,8 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
       rewritten
         ? "Its lines here were rewritten by " + blockers.join(", ") + " · commit " +
             (blockers.length === 1 ? "that" : "those") + " first"
+        : mutual
+        ? "Commits only together with " + blockers.join(", ")
         : blockers.length
         ? "Shares its changed files with " + blockers.join(", ") + " · commit " +
             (blockers.length === 1 ? "that" : "those") + " first"

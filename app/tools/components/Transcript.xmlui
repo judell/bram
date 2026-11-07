@@ -561,12 +561,14 @@
          worklist-bar-on-every-page: the pane no longer remounts the List
          (no Splitter here), so a close needs no re-landing, and the
          splitter's onResize re-jump becomes a jump on the measured height
-         changing, which is when the shrink or growth actually lands. The
-         helper yields if the user has scrolled up. Event driven, no timed
-         wait. -->
+         changing, which is when the shrink or growth actually lands.
+         transcript-worklist-open-keeps-reading: the contract is that opening
+         the Worklist lands the newest turn ONLY for a reader who was
+         following; a reader who scrolled up stays put, and so does follow
+         (helpers.js __bramWorklistOpenLand). Event driven, no timed wait. -->
     <ChangeListener
       listenTo="{$props.worklistOpen}"
-      onDidChange="() => { if ($props.worklistOpen) { atBottom = window.__bramFollowTransition(true, 'worklist-open', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'worklist-open', $props.agentId, events.length); } }" />
+      onDidChange="() => atBottom = window.__bramWorklistOpenLand($props.worklistOpen, atBottom, transcriptList, $props.agentId, events.length)" />
     <ChangeListener
       listenTo="{splitHeight.value}"
       onDidChange="window.__bramBottomJumpRetry(transcriptList, 'worklist-resize', $props.agentId, null)" />

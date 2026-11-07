@@ -13846,6 +13846,25 @@ function __bramLastRowProbe(total) {
 // No fixed offset correction: the two misses differed by an order of
 // magnitude, which points at content settling after the scroll rather than a
 // constant error, so a fudge factor would fix one and miss the other.
+// transcript-worklist-open-keeps-reading: opening the Worklist pane lands
+// the newest turn only for a reader who was following. The old listener
+// set follow to true unconditionally before the (yielding) jump, so a
+// scrolled-up reader was pinned to the bottom by the next turn's repin
+// (since 14fe5bb3, #427). Reads the synchronous follow truth, like
+// __bramFollowRepinOk. Returns the Transcript's next atBottom: unchanged
+// when the pane closes or the reader is reading.
+window.__bramWorklistOpenLand = function (open, atBottom, listRef, agentId, total) {
+  if (!open) return atBottom;
+  if (window.__bramFollowAtBottom === false) {
+    window.__bramIframeTrace("follow-state", {
+      op: "worklist-open-yielded", agentId: agentId || "main",
+    });
+    return false;
+  }
+  var next = window.__bramFollowTransition(true, "worklist-open", agentId);
+  window.__bramBottomJumpRetry(listRef, "worklist-open", agentId, total);
+  return next;
+};
 window.__bramBottomJumpRetry = function (listRef, cause, agentId, total) {
   window.__bramJumpListRef = listRef;
   // #427: one live retry loop at a time. The Transcript's Worklist split

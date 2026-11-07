@@ -54,8 +54,17 @@
       <property name="emptyListTemplate">
         <Text color="$textColor-secondary" value="Nothing to show yet. Tell me what you'd like to see here." />
       </property>
-      <HStack gap="$space-3" paddingVertical="$space-1">
-        <Text width="3.5rem" color="$textColor-secondary" value="{$item.at}" />
+      <!-- The time and the sentence share a baseline: Markdown's paragraph
+           margins are zeroed (marginTop/marginBottom-Text-markdown, as the
+           footer's status line does in Main.xmlui;
+           https://www.xmlui.org/docs/reference/components/Markdown), and the
+           time, the chevron and the sentence share one 1.5rem line box
+           (lineHeight: https://www.xmlui.org/docs/styles-and-themes/layout-props#lineheight).
+           With equal line boxes from the same top, a smaller time sits on
+           the sentence's baseline to within a fraction of a pixel. -->
+      <Theme marginTop-Text-markdown="0" marginBottom-Text-markdown="0">
+      <HStack gap="$space-3" paddingVertical="$space-1" verticalAlignment="start">
+        <Text width="3rem" fontSize="$fontSize-sm" lineHeight="1.5rem" color="$textColor-secondary" value="{$item.at}" />
         <!-- Transcript's ID-keyed fold, so refresh/reordering preserves the
              expanded message rather than the row's former position.
              https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop -->
@@ -68,7 +77,7 @@
                (textColor-Link: https://www.xmlui.org/docs/reference/components/Link). -->
           <Theme textColor-Link="$textColor-primary" textColor-Link--hover="$textColor-secondary"
             textColor-Link--active="$textColor-primary">
-            <Link noIndicator="true" breakMode="word"
+            <Link noIndicator="true" breakMode="word" lineHeight="1.5rem"
               label="{(expanded.includes($item.id) ? '▾ ' : '▸ ') + $item.text}"
               onClick="expanded = window.__bramToggleInArray(expanded, $item.id)" />
           </Theme>
@@ -111,19 +120,22 @@
         <!-- Every other entry expands (same ID-keyed fold as the queue rows)
              to its context: the agent and session it happened in, from the
              teller, and the board as it stood then, fetched only once opened
-             (/__worklist-history/at). The forge link on a commit sha opens
-             in the system browser through openExternal (helpers.js routes
-             http links on this tab there). -->
+             (/__worklist-history/at). A pushed commit's sha links to the
+             forge, opened in the system browser through openExternal
+             (helpers.js routes http links on this tab there); an unpushed
+             one links in-app to the Commits tab's local view
+             (/commits?sha=). A push's range links to the forge's compare
+             view. -->
         <VStack when="{!$item.queueId}" width="*" gap="$space-2">
           <HStack gap="$space-2" verticalAlignment="start">
             <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
               textColor-Link--active="$textColor-secondary">
-              <Link noIndicator="true" label="{expanded.includes($item.id) ? '▾' : '▸'}"
+              <Link noIndicator="true" lineHeight="1.5rem" label="{expanded.includes($item.id) ? '▾' : '▸'}"
                 onClick="expanded = window.__bramToggleInArray(expanded, $item.id)" />
             </Theme>
-            <Markdown when="{!$item.surprising}" width="*" content="{$item.text}" openLinkInNewTab="{false}" />
+            <Markdown when="{!$item.surprising}" width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             <Theme when="{$item.surprising}" textColor-Text="$color-warn-700">
-              <Markdown width="*" content="{$item.text}" openLinkInNewTab="{false}" />
+              <Markdown width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             </Theme>
           </HStack>
           <VStack when="{expanded.includes($item.id)}" paddingLeft="$space-6" gap="$space-1">
@@ -135,6 +147,7 @@
           </VStack>
         </VStack>
       </HStack>
+      </Theme>
     </List>
   </VStack>
 

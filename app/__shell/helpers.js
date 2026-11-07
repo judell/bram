@@ -20459,11 +20459,24 @@ window.__bramStoryTell = (function () {
       out.push({ t: ep.t, at: hhmm(ep.t), text: text, kind: kind, surprising: !!surprising, _ep: ep,
         agent: c.agent, sessionId: c.sessionId, sessionTitle: c.sessionTitle });
     }
-    // A commit sha as a Markdown link to the forge, when the host knows the
-    // repo's web address (commitUrlBase); the pane opens it externally.
+    // A commit sha as a Markdown link: to the forge once it's pushed (the
+    // host knows the repo's web address, commitUrlBase, and the pane opens
+    // it externally), and to the Commits tab's local view while no remote
+    // has it (unpushedShas; the forge would 404), as it is without a remote.
     function shaLink(sha) {
+      if (!sha) return sha;
       var base = payload && payload.commitUrlBase;
-      return base && sha ? "[" + sha + "](" + base + sha + ")" : sha;
+      var unpushed = (payload && payload.unpushedShas) || [];
+      var local = !base || unpushed.some(function (u) { return u.indexOf(sha) === 0; });
+      return local ? "[" + sha + "](/commits?sha=" + sha + ")" : "[" + sha + "](" + base + sha + ")";
+    }
+    // A pushed range as a link to the forge's compare view, when the host
+    // knows the repo's web address; plain text otherwise.
+    function rangeLink(a, b) {
+      var base = payload && payload.commitUrlBase;
+      var text = a + ".." + b;
+      if (!base || !/\/commit\/$/.test(base)) return text;
+      return "[" + text + "](" + base.replace(/\/commit\/$/, "/compare/") + a + "..." + b + ")";
     }
     function find(kind) {
       for (var i = open.length - 1; i >= 0; i--) if (open[i].kind === kind) return open[i];
@@ -20652,7 +20665,7 @@ window.__bramStoryTell = (function () {
       var rm = /([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})/.exec(err);
       if (ok) {
         var s = "You pushed " + branch;
-        if (rm) s += " (" + rm[1].slice(0, 8) + ".." + rm[2].slice(0, 8) + ")";
+        if (rm) s += " (" + rangeLink(rm[1].slice(0, 8), rm[2].slice(0, 8)) + ")";
         else if (/up-to-date/i.test(err)) s += "; there was nothing new to send";
         s += stage === "rebase" ? ", after a rebase onto what had been pushed meanwhile." : ".";
         simple(t, "push", s);

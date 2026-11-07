@@ -485,7 +485,10 @@ a commit, push, search, queue change, selection restore or gate click).
 (log-reads-across-trace-rotation, 2026-11-07), a relaunch blanked the Log,
 and every refetch re-read 32 MB and sent 2.6 MB to show 13 entries. Every
 entry expands to the agent and session it happened in and the board as it
-stood then (`/__worklist-history/at`), and a commit's sha links to the forge.
+stood then (`/__worklist-history/at`). A pushed commit's sha links to the
+forge, and a push's range to its compare view; a commit no remote has yet
+links to the Commits tab's local view (`/commits?sha=`), since the forge would
+404 on it.
 What reaches it is opt-in (`STORY_SHOW` in `helpers.js`, Jon's 2026-11-05 rule:
 show nothing until asked): queue messages, selection changes, gate clicks,
 pushes and your searches, as of 2026-11-07. Every other kind (turns, stalls,

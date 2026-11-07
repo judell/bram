@@ -2998,12 +2998,27 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str, kinds: &[Stri
         .map(|u| remote_to_html(u.trim()))
         .filter(|b| !b.is_empty())
         .map(|b| format!("{}/commit/", b));
+    // The commits on HEAD that no remote has yet: the Log links these to
+    // the Commits tab's local view (/commits?sha=), since the forge would
+    // 404 on them, and every other sha to the forge.
+    let unpushed: Vec<String> = git_run(
+        app,
+        &["rev-list", "HEAD", "--not", "--remotes", "--max-count=500"],
+    )
+    .map(|out| {
+        out.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    })
+    .unwrap_or_default();
     let body = serde_json::to_vec(&serde_json::json!({
         "lines": lines,
         "queueDrafts": drafts,
         "currentSession": current_session,
         "sessionTitles": session_titles,
         "commitUrlBase": commit_url_base,
+        "unpushedShas": unpushed,
     }))
     .unwrap_or_default();
     // log-reads-across-trace-rotation: what each request cost, so a claim

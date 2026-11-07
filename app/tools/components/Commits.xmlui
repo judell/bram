@@ -1,6 +1,7 @@
 <Component
   name="Commits"
   var.commitsExpanded="{false}"
+  var.linkedSha="{$queryParams.sha || ''}"
   var.searchQuery="{getLastSearchQuery()}"
   var.pullError="{null}"
   var.pullWarningDismissed="{false}"
@@ -18,6 +19,19 @@
   <!-- Browse list with a local metadata filter and inline CommitDetail.
        Unified Search remains the cross-bucket/full-text path. -->
   <DataSource id="commits" url="/__commits" />
+  <!-- /commits?sha=<sha>: one commit's local view, from the Log's link on a
+       commit no remote has yet (the forge would 404). The var default covers
+       landing here fresh and the ChangeListener a second link while mounted,
+       as History's entry param does
+       (https://www.xmlui.org/docs/howto/deep-link-to-a-tab-or-section).
+       CommitDetail in a modal is ResultList's shape for a row's detail. -->
+  <ChangeListener listenTo="{$queryParams.sha || ''}"
+    onDidChange="(c) => linkedSha = c.newValue" />
+  <Theme maxWidth-ModalDialog="95vw">
+    <ModalDialog when="{!!linkedSha}" onClose="linkedSha = ''" title="{'Commit ' + linkedSha}">
+      <CommitDetail sha="{linkedSha}" url="" height="70vh" />
+    </ModalDialog>
+  </Theme>
   <!-- The filter is local-fields only: sha, author, and the FULL commit
        message (subject + body). The former FTS union (commits-issues-
        filter-use-fts) was retired at the browse-tabs-adopt-searchresults

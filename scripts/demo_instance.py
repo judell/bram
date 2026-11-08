@@ -1484,6 +1484,32 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
+def trace_in_source(op: str, **fields: Any) -> None:
+    """log-records-demo-instances: one `[demo-instance]` line in the working
+    Bram's trace (the checkout this script runs from), so its Log can say a
+    demo instance ran. Appended the way the guard appends its lines (append
+    mode, one write); skipped when that trace doesn't exist (tracing off, or
+    no Bram has run here). A failure to write never fails the launch."""
+    path = bram_state.state_dir(SOURCE_ROOT) / "bram-traces" / "bram-trace.log"
+    if not path.is_file():
+        return
+    now = time.time()
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
+    body = " ".join(f"{k}={v}" for k, v in fields.items() if v not in (None, ""))
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] [demo-instance] op={op} {body}".rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def _active_scenario(repo: Path) -> str:
+    active_path = _runtime_root(repo) / "active.json"
+    if not active_path.exists():
+        return ""
+    return str(read_json(active_path).get("name", "")).replace(" ", "_")
+
+
 def launch_demo(repo: Path, binary: Path) -> dict[str, Any]:
     repo = validate_demo(repo)
     binary = binary.expanduser().absolute()
@@ -1530,6 +1556,7 @@ def launch_demo(repo: Path, binary: Path) -> dict[str, Any]:
     }
     _LAUNCHED_PROCESSES[proc.pid] = proc
     write_json(pid_path, record)
+    trace_in_source("launch", scenario=_active_scenario(repo), pid=proc.pid, repo=repo.name)
     return record
 
 
@@ -1567,6 +1594,7 @@ def stop_demo(repo: Path, timeout: float = 5.0) -> int:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=1)
     pid_path.unlink(missing_ok=True)
+    trace_in_source("stop", scenario=_active_scenario(repo), pid=pid, repo=repo.name)
     return pid
 
 

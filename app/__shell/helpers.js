@@ -21087,6 +21087,14 @@ window.__bramStoryTell = (function () {
       else if (cat === "turn-send") onSend(t, rest);
       else if (cat === "worklist-commit") onCommit(t, rest);
       else if (cat === "git-push") onPush(t, rest);
+      // log-records-demo-instances: scripts/demo_instance.py's launch and
+      // stop, appended to this trace.
+      else if (cat === "demo-instance") {
+        var dop = kv(rest, "op"), dsc = kv(rest, "scenario"), dpid = kv(rest, "pid");
+        var board = dsc ? " on the `" + dsc + "` board" : "";
+        if (dop === "launch") simple(t, "demo", "A demo instance started" + board + (dpid ? " (PID " + dpid + ")" : "") + ".");
+        else if (dop === "stop") simple(t, "demo", "The demo instance" + board + " stopped" + (dpid ? " (PID " + dpid + ")" : "") + ".");
+      }
       else if (cat === "hook-deny") {
         var hm = /^(\S+) (\S+) (\S+) (.*)$/.exec(rest);
         if (hm && hm[4].indexOf("decided=deny") >= 0) onHook(t, "tool=" + hm[3] + " " + hm[4]);
@@ -21162,10 +21170,12 @@ window.__bramStoryTell = (function () {
   // What the Log shows, opt-in (Jon, 2026-11-05: "show nothing until I ask
   // for it"). Every kind is still told; only these reach the Log. Add a kind
   // here when it's asked for. Known kinds: queue-add, queue, turn, gate,
-  // stall, refusal, launch, queue-delete, selection, push, search.
+  // stall, refusal, launch, queue-delete, selection, push, search, demo.
   // gate, push and search were asked for on 2026-11-07
   // (log-shows-start-commit-push-search: "Start, Commit, Push, Search").
-  var STORY_SHOW = ["queue-add", "queue-delete", "selection", "gate", "push", "search"];
+  // demo: asked for 2026-11-07 (log-records-demo-instances, "log when we
+  // run a demo instance").
+  var STORY_SHOW = ["queue-add", "queue-delete", "selection", "gate", "push", "search", "demo"];
   // log-reads-across-trace-rotation: the Log's URL names these kinds, and the
   // host sends only the lines they're told from (story_kind_wants in lib.rs),
   // so held-back kinds cost nothing until they're shown.

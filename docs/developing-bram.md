@@ -494,7 +494,9 @@ links to the Commits tab's local view (`/commits?sha=`), since the forge would
 404 on it.
 What reaches it is opt-in (`STORY_SHOW` in `helpers.js`, Jon's 2026-11-05 rule:
 show nothing until asked): queue messages, selection changes, gate clicks,
-pushes and your searches, as of 2026-11-07. Every other kind (turns, stalls,
+pushes, your searches, and demo instances starting and stopping
+(`scripts/demo_instance.py` appends `[demo-instance]` lines to this checkout's
+trace), as of 2026-11-07. Every other kind (turns, stalls,
 refusals, the launch) is told but held back until someone asks for it; adding
 one is a one-word change there, plus its lines in `story_kind_wants`
 (`lib.rs`); a kind the host doesn't know yet gets every line, so it still

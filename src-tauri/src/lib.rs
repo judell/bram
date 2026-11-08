@@ -2430,6 +2430,9 @@ const STORY_TRACE_CATEGORIES: &[&str] = &[
     // log-shows-start-commit-push-search: one op=push-result line per push
     // (issue-383), told as "You pushed main (a..b)".
     "git-push",
+    // log-records-demo-instances: scripts/demo_instance.py appends
+    // op=launch / op=stop here when a demo instance starts or stops.
+    "demo-instance",
 ];
 const STORY_IFRAME_SUBKINDS: &[&str] = &[
     "click",
@@ -2641,6 +2644,7 @@ fn story_kind_wants(kind: &str, l: &StoryLine) -> bool {
         }
         "refusal" => l.src == "hook" || matches!(cat, "auth-record" | "queue"),
         "launch" => cat == "bram-trace",
+        "demo" => cat == "demo-instance",
         _ => true,
     }
 }
@@ -2902,6 +2906,11 @@ mod story_index_tests {
         assert!(!story_kind_wants("search", &drift));
         assert!(!story_kind_wants("gate", &turn));
         assert!(story_kind_wants("turn", &turn));
+        assert!(story_kind_wants(
+            "demo",
+            &line("demo-instance", "op=launch scenario=s pid=1")
+        ));
+        assert!(!story_kind_wants("demo", &push));
         assert!(
             story_kind_wants("not-yet-known", &drift),
             "an unknown kind gets everything"

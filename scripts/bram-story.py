@@ -33,6 +33,8 @@ Episodes (source lines in parentheses):
            or why it failed
   search   what you searched for on the  [iframe] subkind=search-query
            Search tab, and the hit count
+  demo     a demo instance started or    [demo-instance] op=launch|stop
+           stopped (scripts/demo_instance.py)
   quiet    --follow only: one line after 20 minutes with nothing to tell
 
 Not available in the trace today (so not told): a 409 from the commit gate,
@@ -59,7 +61,8 @@ from datetime import datetime, timedelta
 LINE = re.compile(r"^\[(?P<ts>[^\]]+)\] \[(?P<cat>[^\]]+)\] (?P<rest>.*)$")
 HOOK = re.compile(r"^(?P<ts>\S+) (?P<agent>\S+) (?P<event>\S+) (?P<tool>\S+) (?P<rest>.*)$")
 WANT = {"turn-state", "turn-context", "inflight-sentinel", "auth-record", "turn-send",
-        "worklist-commit", "iframe", "queue", "bram-trace", "hook-events", "git-push"}
+        "worklist-commit", "iframe", "queue", "bram-trace", "hook-events", "git-push",
+        "demo-instance"}
 QUIET_SECS = 20 * 60
 STALL_GAP = 30
 LATENCY_MS, LONGTASK_MS = 200, 1000
@@ -201,6 +204,16 @@ class Narrator:
             self.on_commit(t, rest)
         elif cat == "git-push":
             self.on_push(t, rest)
+        elif cat == "demo-instance":
+            # log-records-demo-instances: scripts/demo_instance.py's launch
+            # and stop, appended to this trace.
+            op, sc, pid = kv(rest, "op"), kv(rest, "scenario"), kv(rest, "pid")
+            board = f" on the `{sc}` board" if sc else ""
+            ptxt = f" (PID {pid})" if pid else ""
+            if op == "launch":
+                self.simple(t, "demo-instance launch", f"A demo instance started{board}{ptxt}.")
+            elif op == "stop":
+                self.simple(t, "demo-instance stop", f"The demo instance{board} stopped{ptxt}.")
         elif cat == "hook-events":
             self.on_hook(t, rest)
         elif cat == "queue" and "op=save-refused" in rest:

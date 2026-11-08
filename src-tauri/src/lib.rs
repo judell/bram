@@ -91098,11 +91098,42 @@ fn handle_audit_direct_edit<R: tauri::Runtime>(
 // POST {"op":"resend","feedbackRef"}  the pane's button; must be the pending
 //                                     ref; appends the note, returns the text
 // POST {"op":"dismiss"}               the pane, on the next send
+//
+// misaddressed-chat-resends-as-feedback: the other direction. A message sent
+// as chat (nothing ticked) that is plainly feedback on an item on the board:
+// POST {"op":"flag-chat","turnRef","id"}       the agent; turnRef is the
+//                                     running chat turn's outbound record
+//                                     (<ms>-turn), the newest one; id is on
+//                                     the board
+// POST {"op":"resend-as-feedback","turnRef"}   the pane's button; must be the
+//                                     pending ref; returns the turn's text,
+//                                     images and a note to send as feedback
+// The pending flag carries its kind ("feedback" or "chat"); GET names a chat
+// flag's ref as turnRef.
 #[derive(Clone)]
 struct MisaddressedFeedback {
     fref: String,
     item_id: String,
     at_ms: i64,
+    kind: &'static str,
+}
+
+// An outbound turn id is "<unix_ms>-turn". Anything else, including
+// path-shaped input, is refused.
+fn misaddressed_turn_ref_ok(turn_ref: &str) -> bool {
+    match turn_ref.strip_suffix("-turn") {
+        Some(ms) => !ms.is_empty() && ms.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
+// The note sent with a chat message resent as feedback, so the item's
+// record says where the message first went.
+fn misaddressed_chat_note(turn_ref: &str, at_iso: &str) -> String {
+    format!(
+        "\n\n---\n*Resent as feedback {}: first sent as chat (turn `{}`).*\n",
+        at_iso, turn_ref
+    )
 }
 
 static MISADDRESSED_FEEDBACK: OnceLock<Mutex<Option<MisaddressedFeedback>>> = OnceLock::new();
@@ -91155,9 +91186,15 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
         let pending = misaddressed_cell().lock().ok().and_then(|g| g.clone());
         return misaddressed_json(
             200,
-            serde_json::json!({ "pending": pending.map(|p| serde_json::json!({
-                "feedbackRef": p.fref, "itemId": p.item_id, "atMs": p.at_ms,
-            })) }),
+            serde_json::json!({ "pending": pending.map(|p| if p.kind == "chat" {
+                serde_json::json!({
+                    "kind": "chat", "turnRef": p.fref, "itemId": p.item_id, "atMs": p.at_ms,
+                })
+            } else {
+                serde_json::json!({
+                    "kind": "feedback", "feedbackRef": p.fref, "itemId": p.item_id, "atMs": p.at_ms,
+                })
+            }) }),
         );
     }
     if method != "POST" {
@@ -91221,6 +91258,7 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
                     fref: fref.clone(),
                     item_id: item_id.clone(),
                     at_ms: unix_now_ms(),
+                    kind: "feedback",
                 });
             }
             trace(format!("op=flag ref={} item={}", fref, item_id));
@@ -91229,7 +91267,7 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
         }
         "resend" => {
             let pending = misaddressed_cell().lock().ok().and_then(|g| g.clone());
-            let Some(p) = pending.filter(|p| p.fref == fref) else {
+            let Some(p) = pending.filter(|p| p.kind == "feedback" && p.fref == fref) else {
                 trace(format!("op=resend-refused reason=not-pending ref={}", fref));
                 return misaddressed_json(
                     409,
@@ -91273,6 +91311,189 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
                 serde_json::json!({ "ok": true, "itemId": p.item_id, "text": text.trim() }),
             )
         }
+        "flag-chat" => {
+            let turn_ref = req
+                .get("turnRef")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let item_id = req
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !misaddressed_turn_ref_ok(&turn_ref) {
+                trace("op=flag-chat-refused reason=bad-ref".to_string());
+                return misaddressed_json(400, serde_json::json!({ "error": "bad turnRef" }));
+            }
+            // The turn must be a plain chat message (not skip-worklist, not a
+            // gate action), and the newest one: the message being answered.
+            let dir = outbound_turns_dir(app);
+            let record = dir
+                .as_ref()
+                .and_then(|d| std::fs::read_to_string(d.join(format!("{}.json", turn_ref))).ok())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let Some(record) = record else {
+                trace(format!(
+                    "op=flag-chat-refused reason=no-turn ref={}",
+                    turn_ref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "no outbound turn with that ref" }),
+                );
+            };
+            let is_chat = record.get("kind").and_then(|v| v.as_str()) == Some("message")
+                && record
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty();
+            if !is_chat {
+                trace(format!(
+                    "op=flag-chat-refused reason=not-chat ref={}",
+                    turn_ref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "that turn was not sent as chat" }),
+                );
+            }
+            let newest = dir
+                .as_ref()
+                .and_then(|d| std::fs::read_dir(d).ok())
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            let n = e.file_name().to_string_lossy().to_string();
+                            let stem = n.strip_suffix(".json")?.to_string();
+                            let ms: u64 = stem.strip_suffix("-turn")?.parse().ok()?;
+                            Some((ms, stem))
+                        })
+                        .max_by_key(|(ms, _)| *ms)
+                        .map(|(_, stem)| stem)
+                })
+                .unwrap_or(None);
+            if newest.as_deref() != Some(turn_ref.as_str()) {
+                trace(format!(
+                    "op=flag-chat-refused reason=not-newest ref={}",
+                    turn_ref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "that is not the message being answered" }),
+                );
+            }
+            let ctx_general = project_root(Some(app))
+                .and_then(|root| {
+                    std::fs::read_to_string(resource_relative_path(&root, TURN_CONTEXT_REL)).ok()
+                })
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|c| {
+                    c.get("kind")
+                        .and_then(|k| k.as_str())
+                        .map(|k| k == "general")
+                })
+                .unwrap_or(false);
+            if !ctx_general {
+                trace(format!(
+                    "op=flag-chat-refused reason=not-chat-turn ref={}",
+                    turn_ref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "the running turn is not a chat turn" }),
+                );
+            }
+            let on_board = worklist_file(app)
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|w| {
+                    w.get("items").and_then(|a| a.as_array()).map(|a| {
+                        a.iter().any(|it| {
+                            it.get("id").and_then(|v| v.as_str()) == Some(item_id.as_str())
+                        })
+                    })
+                })
+                .unwrap_or(false);
+            if item_id.is_empty() || !on_board {
+                trace(format!(
+                    "op=flag-chat-refused reason=not-on-board ref={} item={}",
+                    turn_ref, item_id
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "that item is not on the board" }),
+                );
+            }
+            if let Ok(mut g) = misaddressed_cell().lock() {
+                *g = Some(MisaddressedFeedback {
+                    fref: turn_ref.clone(),
+                    item_id: item_id.clone(),
+                    at_ms: unix_now_ms(),
+                    kind: "chat",
+                });
+            }
+            trace(format!("op=flag-chat ref={} item={}", turn_ref, item_id));
+            emit_replayable_signal(app, "feedback-misaddressed-changed");
+            misaddressed_json(200, serde_json::json!({ "ok": true, "itemId": item_id }))
+        }
+        "resend-as-feedback" => {
+            let turn_ref = req
+                .get("turnRef")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let pending = misaddressed_cell().lock().ok().and_then(|g| g.clone());
+            let Some(p) = pending.filter(|p| p.kind == "chat" && p.fref == turn_ref) else {
+                trace(format!(
+                    "op=resend-as-feedback-refused reason=not-pending ref={}",
+                    turn_ref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "that ref is not the pending flag" }),
+                );
+            };
+            let record = outbound_turns_dir(app)
+                .and_then(|d| std::fs::read_to_string(d.join(format!("{}.json", p.fref))).ok())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let Some(record) = record else {
+                trace(format!(
+                    "op=resend-as-feedback-refused reason=turn-gone ref={}",
+                    p.fref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "the chat turn's record is gone" }),
+                );
+            };
+            let text = record
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let images = record
+                .get("images")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            if let Ok(mut g) = misaddressed_cell().lock() {
+                *g = None;
+            }
+            let note = misaddressed_chat_note(&p.fref, &format_iso_utc(unix_now_ms()));
+            trace(format!(
+                "op=resend-as-feedback ref={} item={}",
+                p.fref, p.item_id
+            ));
+            emit_replayable_signal(app, "feedback-misaddressed-changed");
+            misaddressed_json(
+                200,
+                serde_json::json!({
+                    "ok": true, "itemId": p.item_id, "text": text, "images": images, "note": note,
+                }),
+            )
+        }
         "dismiss" => {
             let cleared = misaddressed_cell().lock().ok().and_then(|mut g| g.take());
             if let Some(p) = cleared {
@@ -91283,14 +91504,36 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
         }
         _ => misaddressed_json(
             400,
-            serde_json::json!({ "error": "op must be flag, resend or dismiss" }),
+            serde_json::json!({
+                "error": "op must be flag, resend, flag-chat, resend-as-feedback or dismiss"
+            }),
         ),
     }
 }
 
 #[cfg(test)]
 mod misaddressed_feedback_tests {
-    use super::{misaddressed_note, misaddressed_ref_item};
+    use super::{
+        misaddressed_chat_note, misaddressed_note, misaddressed_ref_item, misaddressed_turn_ref_ok,
+    };
+
+    #[test]
+    fn turn_ref_accepts_only_outbound_turn_ids() {
+        assert!(misaddressed_turn_ref_ok("1794093936375-turn"));
+        assert!(!misaddressed_turn_ref_ok("1794093936375"));
+        assert!(!misaddressed_turn_ref_ok("-turn"));
+        assert!(!misaddressed_turn_ref_ok("abc-turn"));
+        assert!(!misaddressed_turn_ref_ok("../1-turn"));
+        assert!(!misaddressed_turn_ref_ok("1/2-turn"));
+    }
+
+    #[test]
+    fn chat_note_names_the_turn() {
+        let note = misaddressed_chat_note("1794093936375-turn", "2026-11-07T23:00:00Z");
+        assert!(note.starts_with("\n\n---\n"));
+        assert!(note.contains("Resent as feedback 2026-11-07T23:00:00Z"));
+        assert!(note.contains("`1794093936375-turn`"));
+    }
 
     #[test]
     fn ref_item_parses_only_well_formed_refs() {

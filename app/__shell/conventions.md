@@ -489,6 +489,8 @@ about work just done, is not drift. The test: would a reader six months
 from now, seeing this feedback on this item, be misled about why it
 changed?
 
+- **Chat that is plainly feedback on an item on the board** (the other direction) → read `.claude/bram-reference/worklist-mechanics.md` (§Chat that should have been feedback).
+
 ### Authoring conventions
 
 - **Ids.** Items from a single GitHub issue: `issue-<N>-<slug>`

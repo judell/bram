@@ -888,3 +888,39 @@ the session; the reminder carries it across.
   expected, honorable ending, not a failure.
 - **Boundary.** Not a door back to investigation items: a reminder
   records a *decided future action*; an open question is chat's job.
+
+## Chat that should have been feedback
+
+The reverse of a misaddressed feedback message: a message sent as **chat**
+(nothing ticked) that is plainly feedback on an item still on the board,
+usually a follow-up on work you just did for it. Answering it as chat files
+it under no item and grants no edits.
+
+1. Flag it. The `turnRef` is the outbound turn you were handed (the
+   `<ms>-turn` in `Read and follow this Bram turn: @<state>/outbound-turns/<ms>-turn.json`);
+   `id` is the item. Build the body in its own call, then:
+
+   ```
+   curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST \
+     -H "Content-Type: application/json" --data @/tmp/misaddressed.json \
+     "http://127.0.0.1:61455/__worklist/misaddressed"
+   ```
+
+   with `{"op":"flag-chat","turnRef":"<ms>-turn","id":"<item-id>"}`.
+   The host accepts it only for the running chat turn's own record (the
+   newest one, sent as chat, not `skip-worklist`) and an item on the board.
+2. Reply with one line: "That reads as feedback on `<item-id>`." The message
+   box now offers **Resend as feedback**, which ticks that item alone and
+   sends the same text and images to it as feedback, noting that it was
+   first sent as chat. Don't ask the user to retype it.
+3. **Stop.** The resend arrives as an `iterate:` turn for the item.
+
+**Which item.** The one the message is about. When it doesn't say, the
+most recent: the item most recently started, committed or given feedback
+that is still on the board. If none fits (its item was already committed
+and pruned), don't flag; propose an item as for any change request.
+
+Fire on plain cases only, once per message. A question about the item, or
+chat that merely mentions it, is chat. If the flag is refused, or you can't
+call the route (Codex, until its file transport gains it), propose an item
+or ask, as before.

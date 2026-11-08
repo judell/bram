@@ -81,8 +81,10 @@
       verticalAlignment="center" paddingLeft="3rem">
       <Text fontSize="$fontSize-sm" color="$textColor-secondary"
         value="{window.__bramMisaddressedLabel(misaddressed.value)}" />
-      <Button label="Resend as chat" variant="outlined" size="xs"
-        tooltip="Untick the item, send the same message as chat, and note on the item's feedback record that it was resent"
+      <!-- misaddressed-chat-resends-as-feedback: the same row serves both
+           directions; the flag's kind picks the words. -->
+      <Button label="{window.__bramMisaddressedButton(misaddressed.value)}" variant="outlined" size="xs"
+        tooltip="{window.__bramMisaddressedTooltip(misaddressed.value)}"
         onClick="window.__bramMisaddressedResend(misaddressed)" />
     </HStack>
     <!-- composer-addressee-in-placeholder: the placeholder always names the

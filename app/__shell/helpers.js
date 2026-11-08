@@ -3090,9 +3090,23 @@ window.__bramMisaddressedAccept = function (d) {
   return { pending: window.__bramMisaddressedPending };
 };
 // Takes the DataSource's value ({pending}); "" when nothing is flagged.
+// misaddressed-chat-resends-as-feedback: a flag now carries its direction.
+// kind "chat" is a message sent as chat that was feedback on an item; the
+// offer reads "About <item>?" and resends it as feedback to that item.
 window.__bramMisaddressedLabel = function (v) {
   var p = v && v.pending;
-  return p && p.itemId ? "Not about " + p.itemId + "?" : "";
+  if (!p || !p.itemId) return "";
+  return p.kind === "chat" ? "About " + p.itemId + "?" : "Not about " + p.itemId + "?";
+};
+window.__bramMisaddressedButton = function (v) {
+  var p = v && v.pending;
+  return p && p.kind === "chat" ? "Resend as feedback" : "Resend as chat";
+};
+window.__bramMisaddressedTooltip = function (v) {
+  var p = v && v.pending;
+  return p && p.kind === "chat"
+    ? "Tick the item, send the same message and its images to it as feedback, and note that it was first sent as chat"
+    : "Untick the item, send the same message as chat, and note on the item's feedback record that it was resent";
 };
 function __bramMisaddressedPost(body) {
   if (typeof window.fetch !== "function") return Promise.resolve(null);
@@ -3107,6 +3121,7 @@ function __bramMisaddressedPost(body) {
 }
 window.__bramMisaddressedResend = function (ds) {
   var pending = ds && ds.value && ds.value.pending;
+  if (pending && pending.kind === "chat") return window.__bramMisaddressedResendAsFeedback(ds, pending);
   if (!pending || !pending.feedbackRef) return;
   window.__bramIframeTrace("click", { target: "resend-as-chat", op: "act", item: String(pending.itemId || "") });
   __bramMisaddressedPost({ op: "resend", feedbackRef: pending.feedbackRef }).then(function (res) {
@@ -3119,6 +3134,28 @@ window.__bramMisaddressedResend = function (ds) {
     var sel = (window.__bramW2Selection || []).filter(function (id) { return id !== res.itemId; });
     if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection(sel);
     window.__bramPrepareWorklistMessageSubmission({ text: res.text, mode: "", voiceTarget: "message-agent" });
+  });
+};
+// The chat direction: the host returns the chat turn's text, its images and
+// a note; the pane ticks the item, alone, and sends them through the same
+// feedback path Enter uses (images as the composer's own screenshot markers,
+// so the agent reads them as it would a pasted one). The selection survives,
+// as after any feedback send.
+window.__bramMisaddressedResendAsFeedback = function (ds, pending) {
+  if (!pending || !pending.turnRef) return;
+  window.__bramIframeTrace("click", { target: "resend-as-feedback", op: "act", item: String(pending.itemId || "") });
+  __bramMisaddressedPost({ op: "resend-as-feedback", turnRef: pending.turnRef }).then(function (res) {
+    window.__bramMisaddressedPending = null;
+    if (ds && typeof ds.refetch === "function") ds.refetch();
+    if (!res || !res.ok || !res.itemId || (!res.text && !(res.images || []).length)) {
+      window.__bramIframeTrace("click", { target: "resend-as-feedback", op: "refused", reason: String((res && res.error) || "no-response") });
+      return;
+    }
+    var markers = (res.images || []).map(function (p) { return "Read this screenshot: @" + p + "\n[Image: source: " + p + "]"; }).join("\n");
+    var body = (markers ? markers + "\n\n" : "") + (res.text || "") + (res.note || "");
+    if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection([res.itemId]);
+    window.__bramWorklist2BatchIterate([res.itemId], body);
+    if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript();
   });
 };
 window.__bramMisaddressedDismiss = function () {

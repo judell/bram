@@ -42,6 +42,8 @@ UI section.
 
 - History: Lists and searches your Worklist items.
 
+- Log: Under **More**, tells what Bram did around your work (Start, Commit and Push, your searches, queued messages, session switches, a kept selection after a pane reload, demo instances) over the last five hours and across relaunches. Entries expand and link to History, Commits and the Transcript.
+
 - Settings: Shows and changes global (repo-independent) settings.
 
 - Footer: Shows agent status and the current session, and lets you message the agent.

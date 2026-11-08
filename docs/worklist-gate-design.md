@@ -155,6 +155,26 @@ items.
 A row's tickbox stays ticked and frozen while its action is in flight, because
 the tick is part of the sentence just submitted.
 
+Under the buttons, the gate bar keeps to one quiet line. With two or more items
+ticked and no posted plan, it ends in a **What's my next move?** button. The
+button asks the agent for the order and posts it as a plan
+(`__bramNextMoveSlot` puts it at the end of the gate's consequence line, else
+the take line, else on a row of its own). Two lines speak only to warn:
+
+- **Commits only together with X.** Commit is withheld while a same-click
+  partner that still has changes is unticked, because the host would refuse a
+  commit of one (`op=refuse-joint-interval`).
+- **The whole-file take line** (`__bramSelectionTakeLine`). It appears only when
+  Commit would take whole files that include lines no item wrote, as "Together,
+  Commit takes these files whole: +A −R, including +a −r no item wrote." A
+  whole-file take with no unowned lines, and the ordinary case of taking only
+  the items' own lines, say nothing.
+
+Two lines were retired: "Committable together with X — select both." and
+"Together, Commit takes only these items' own lines …". The button and the plan
+answer what to tick, and the ordinary case needs no sentence (`5e9eb4ab`,
+`2df62db2`; `e60b455b` added the button).
+
 Row expansion is keyed by item id and persisted to `sessionStorage`
 (`__bramRestoreWorklist2Expansion` / `__bramPersistWorklist2Expansion`), so it
 survives tab switches and pane reloads but not an app quit. It used to be

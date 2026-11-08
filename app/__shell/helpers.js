@@ -3394,6 +3394,17 @@ window.__bramSequenceQuestion = "What's my next move?";
 window.__bramShowSequenceButton = function (board, sel) {
   return (sel || []).length > 1 && !window.__bramPlanVisible(board, sel);
 };
+// next-move-button-inline-and-quiet (Jon, 2026-11-08: "at the end of the
+// line above it"): which row carries the button. The gate's consequence
+// line if it's showing, else the take line if that's showing, else a row of
+// its own; "" when the button isn't shown at all. Each row's `when` asks for
+// its own slot, so exactly one draws it.
+window.__bramNextMoveSlot = function (board, sel, claim, pred) {
+  if (!window.__bramShowSequenceButton(board, sel)) return "";
+  if (window.__bramStartConsequence(board && board.items, sel, claim)) return "consequence";
+  if (window.__bramSelectionTakeLine(pred, sel, board)) return "take";
+  return "own";
+};
 window.__bramAskSequence = function (sel) {
   var ids = (sel || []).slice();
   window.__bramIframeTrace("click", { target: "gatebar-sequence", selected: ids.length });
@@ -5598,7 +5609,12 @@ window.__bramSelectionPredictionKey = function (board, sel) {
   // already carry the final key, marked stale. The ready signal refetches the
   // board, which flips it to fresh under the same key; this makes that flip
   // change the request, so the prediction refetches instead of staying hidden.
-  return k ? ids.join(",") + "|" + k + "|" + (board.membershipStale ? "stale" : "fresh") : "";
+  return k ? window.__bramSelectionIdsParam(ids) + "|" + k + "|" + (board.membershipStale ? "stale" : "fresh") : "";
+};
+// The will-commit request's ids, sorted: one selection is one request
+// whatever order it was ticked in (next-move-button-inline-and-quiet).
+window.__bramSelectionIdsParam = function (sel) {
+  return (sel || []).slice().sort().join(",");
 };
 
 window.__bramSelectionTakeLine = function (pred, sel, board) {
@@ -5619,8 +5635,13 @@ window.__bramSelectionTakeLine = function (pred, sel, board) {
     var un = pred.unowned || [];
     var ua = 0, ur = 0;
     for (var i = 0; i < un.length; i++) { ua += un[i].added || 0; ur += un[i].removed || 0; }
+    // next-move-button-inline-and-quiet (Jon, 2026-11-08: "There should only
+    // be one top line in this situation"): a bare whole-file count repeats
+    // the one-commit line above it. It speaks only to warn, when the take
+    // includes lines no item wrote.
+    if (!un.length) return "";
     return "Together, Commit takes these files whole: " + take +
-      (un.length ? ", including +" + ua + " \u2212" + ur + " no item wrote" : "") + ".";
+      ", including +" + ua + " \u2212" + ur + " no item wrote.";
   }
   // Taking only the items' own lines is the ordinary case, and says nothing
   // (Jon, 2026-11-08: "we can lose this verbiage now"). The two lines above
@@ -13523,6 +13544,41 @@ function __bramW2ReportRestoreDrops(next) {
     window.__bramIframeTrace("w2-selection-restore", { op: "dropped", count: dropped.length, ids: dropped });
   }
 }
+// next-move-button-inline-and-quiet (Jon, 2026-11-08: "And if it does
+// happen, we'll capture the evidence?"): the selection store's writers.
+// The 2026-11-08 jitter could be counted (will-commit requests, publish and
+// receive lines) but not attributed: nothing said which code wrote each
+// selection, so the second writer was never named. Each real change now
+// traces its ids and caller, and a churn alarm (more than 20 changes in 10 s)
+// traces once per 30 s with the writers behind it.
+var __bramW2SelEvidence = { reorders: 0, recent: [], churnAt: 0 };
+function __bramW2Caller() {
+  try {
+    var lines = String(new Error().stack || "").split("\n").map(function (l) { return l.trim(); });
+    // Skip this helper and the store's own frames; the first other frame is
+    // the writer.
+    for (var i = 1; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l || /__bramW2Caller|__bramW2SetSelection|__bramW2NoteSelectionChange/.test(l)) continue;
+      return l.slice(0, 160);
+    }
+  } catch (e) {}
+  return "";
+}
+function __bramW2NoteSelectionChange(next, prev) {
+  var now = Date.now();
+  var from = __bramW2Caller();
+  window.__bramIframeTrace("w2-selection-store", { op: "set", ids: next, prev: prev, from: from });
+  var ev = __bramW2SelEvidence;
+  ev.recent.push({ t: now, from: from });
+  ev.recent = ev.recent.filter(function (r) { return now - r.t <= 10000; });
+  if (ev.recent.length > 20 && now - ev.churnAt > 30000) {
+    ev.churnAt = now;
+    var writers = {};
+    ev.recent.forEach(function (r) { writers[r.from] = (writers[r.from] || 0) + 1; });
+    window.__bramIframeTrace("w2-selection-store", { op: "churn", changes: ev.recent.length, windowMs: 10000, writers: writers });
+  }
+}
 window.bramSubscribeW2Selection = (function () {
   var factory;
   return function () {
@@ -13531,9 +13587,27 @@ window.bramSubscribeW2Selection = (function () {
     window.__bramW2SetSelection = function (ids) {
       var next = (ids || []).slice();
       var prev = window.__bramW2Selection || [];
-      if (next.length === prev.length && next.every(function (v, i) { return v === prev[i]; })) {
+      // next-move-button-inline-and-quiet: the same items in another order
+      // are the same selection. The Worklist's prune rewrites it in board
+      // order on every board refresh while other writers keep tick order
+      // (a restored selection, for one), and an order-sensitive check let
+      // the two ping-pong: 531 alternating /__worklist/will-commit requests
+      // in 23 s after the 07:32:03 restore on 2026-11-08, felt as jitter.
+      var sameSet = next.length === prev.length && next.every(function (v) { return prev.indexOf(v) !== -1; });
+      var sameOrder = sameSet && next.every(function (v, i) { return v === prev[i]; });
+      if (sameSet) {
+        // Evidence if the fight recurs underneath: who wrote the other order.
+        // The first ignored reorder and every 50th after it, so a live
+        // ping-pong names both writers without flooding the trace.
+        if (!sameOrder && (__bramW2SelEvidence.reorders++ % 50) === 0) {
+          window.__bramIframeTrace("w2-selection-store", {
+            op: "reorder-ignored", ids: next, prev: prev,
+            from: __bramW2Caller(), n: __bramW2SelEvidence.reorders,
+          });
+        }
         return;
       }
+      __bramW2NoteSelectionChange(next, prev);
       window.__bramW2Selection = next;
       __bramW2PersistSelection(next);
       __bramW2ReportRestoreDrops(next);

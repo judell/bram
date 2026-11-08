@@ -104,11 +104,28 @@
   <HStack
     when="{!!window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
     horizontalAlignment="center"
+    verticalAlignment="center"
+    gap="$space-2"
     paddingHorizontal="$space-8"
     paddingTop="$space-1">
+    <!-- next-move-button-inline-and-quiet: the text hugs its words (it was
+         width="100%") so the next-move button can sit right after it. -->
     <Text
-      width="100%"
       value="{window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}" />
+    <Theme borderColor-Button-primary-outlined="$textColor-secondary"
+      textColor-Button-primary-outlined="$textColor-secondary"
+      borderColor-Button-primary-outlined--hover="$textColor-secondary"
+      textColor-Button-primary-outlined--hover="$textColor-primary"
+      fontSize-Button="$fontSize-sm">
+      <Button
+        when="{window.__bramNextMoveSlot(gateWorklist.value, gateSel.value, gateClaim.value, gateTake.value) === 'consequence'}"
+        label="What's my next move?"
+        variant="outlined"
+        size="xs"
+        tooltip="If unclear, ask the agent."
+        enabled="{!window.__bramAgentWorking(gateAgent.value)}"
+        onClick="window.__bramAskSequence(gateSel.value)" />
+    </Theme>
   </HStack>
   <!-- item-last-session-switch-there: a ticked item last worked on in
        another session offers to switch there. lastSession is computed by the
@@ -170,16 +187,32 @@
     id="gateTake"
     when="{!!window.__bramSelectionPredictionKey(gateWorklist.value, gateSel.value)}"
     url="/__worklist/will-commit"
-    queryParams="{{ ids: (gateSel.value || []).join(','), k: window.__bramSelectionPredictionKey(gateWorklist.value, gateSel.value) }}" />
+    queryParams="{{ ids: window.__bramSelectionIdsParam(gateSel.value), k: window.__bramSelectionPredictionKey(gateWorklist.value, gateSel.value) }}" />
   <HStack
     when="{!!window.__bramSelectionTakeLine(gateTake.value, gateSel.value, gateWorklist.value)}"
     horizontalAlignment="center"
+    verticalAlignment="center"
+    gap="$space-2"
     paddingHorizontal="$space-8"
     paddingTop="$space-1">
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
       value="{window.__bramSelectionTakeLine(gateTake.value, gateSel.value, gateWorklist.value)}" />
+    <Theme borderColor-Button-primary-outlined="$textColor-secondary"
+      textColor-Button-primary-outlined="$textColor-secondary"
+      borderColor-Button-primary-outlined--hover="$textColor-secondary"
+      textColor-Button-primary-outlined--hover="$textColor-primary"
+      fontSize-Button="$fontSize-sm">
+      <Button
+        when="{window.__bramNextMoveSlot(gateWorklist.value, gateSel.value, gateClaim.value, gateTake.value) === 'take'}"
+        label="What's my next move?"
+        variant="outlined"
+        size="xs"
+        tooltip="If unclear, ask the agent."
+        enabled="{!window.__bramAgentWorking(gateAgent.value)}"
+        onClick="window.__bramAskSequence(gateSel.value)" />
+    </Theme>
   </HStack>
   <!-- issue-328: close consent AT THE GATE. When the selection carries
        closesIssues, one real checkbox per issue renders here — where the
@@ -411,18 +444,27 @@
        this line. Dimmed while the agent works, like Do recommended, since it
        starts a turn. -->
   <HStack
-    when="{window.__bramShowSequenceButton(gateWorklist.value, gateSel.value)}"
+    when="{window.__bramNextMoveSlot(gateWorklist.value, gateSel.value, gateClaim.value, gateTake.value) === 'own'}"
     horizontalAlignment="center"
     verticalAlignment="center"
     paddingHorizontal="$space-2"
     paddingTop="$space-1">
-    <Button
-      label="What's my next move?"
-      variant="outlined"
-      size="sm"
-      tooltip="Ask the agent what order to take the ticked items in"
-      enabled="{!window.__bramAgentWorking(gateAgent.value)}"
-      onClick="window.__bramAskSequence(gateSel.value)" />
+    <!-- next-move-button-inline-and-quiet: small and gray, like the gate's
+         secondary lines, here and where it joins one of them (above). Button
+         theme variables: https://www.xmlui.org/docs/reference/components/Button -->
+    <Theme borderColor-Button-primary-outlined="$textColor-secondary"
+      textColor-Button-primary-outlined="$textColor-secondary"
+      borderColor-Button-primary-outlined--hover="$textColor-secondary"
+      textColor-Button-primary-outlined--hover="$textColor-primary"
+      fontSize-Button="$fontSize-sm">
+      <Button
+        label="What's my next move?"
+        variant="outlined"
+        size="xs"
+        tooltip="If unclear, ask the agent."
+        enabled="{!window.__bramAgentWorking(gateAgent.value)}"
+        onClick="window.__bramAskSequence(gateSel.value)" />
+    </Theme>
   </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"

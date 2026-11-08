@@ -1952,7 +1952,9 @@ window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, 
 // nothing. "Current" comes from the live /__sessions/list (refetched on
 // sessions-list-changed), so a switch updates the line without refetching
 // the board; the host's isCurrent is the fallback until that list loads.
-window.__bramGateLastSession = function (items, sel, sessions) {
+// gate-last-session-line-dismissable: the trailing `tick` is the gate bar's
+// reactive var, passed only so bindings re-evaluate after a dismissal.
+window.__bramGateLastSession = function (items, sel, sessions, tick) {
   var ids = Array.isArray(sel) ? sel : [];
   if (!ids.length) return null;
   var byId = {};
@@ -1967,11 +1969,37 @@ window.__bramGateLastSession = function (items, sel, sessions) {
   }
   var cur = Array.isArray(sessions) && sessions.length ? window.__bramCurrentSessionOf(sessions) : null;
   if (cur ? shared.sessionId === cur.id : shared.isCurrent) return null;
-  return { id: ids.join(","), provider: shared.provider, sessionId: shared.sessionId, atMs: shared.atMs, title: shared.title };
+  var b = { id: ids.join(","), provider: shared.provider, sessionId: shared.sessionId, atMs: shared.atMs, title: shared.title };
+  if (window.__bramGateLastSessionDismissedMap()[b.id + ":" + b.sessionId]) return null;
+  return b;
+};
+// Dismissals are focus (what is ticked right now), so sessionStorage, keyed
+// per project; null key means neither read nor write.
+window.__bramGateLastSessionDismissedMap = function () {
+  try {
+    var k = window.__bramProjectScopedKey("bram.gateLastSessionDismissed");
+    if (!k) return {};
+    var m = JSON.parse(window.sessionStorage.getItem(k) || "{}");
+    return m && typeof m === "object" ? m : {};
+  } catch (e) { return {}; }
+};
+window.__bramGateLastSessionDismissClick = function (items, sel, sessions, tick) {
+  var b = window.__bramGateLastSession(items, sel, sessions);
+  if (!b) return tick || 0;
+  window.__bramIframeTrace("worklist-last-session", { op: "dismiss", id: b.id, session: b.sessionId, provider: b.provider });
+  try {
+    var k = window.__bramProjectScopedKey("bram.gateLastSessionDismissed");
+    if (k) {
+      var m = window.__bramGateLastSessionDismissedMap();
+      m[b.id + ":" + b.sessionId] = 1;
+      window.sessionStorage.setItem(k, JSON.stringify(m));
+    }
+  } catch (e) {}
+  return (tick || 0) + 1;
 };
 var __bramGateLastSessionShown = {};
-window.__bramGateLastSessionLine = function (items, sel, sessions) {
-  var b = window.__bramGateLastSession(items, sel, sessions);
+window.__bramGateLastSessionLine = function (items, sel, sessions, tick) {
+  var b = window.__bramGateLastSession(items, sel, sessions, tick);
   if (!b) return "";
   var key = b.id + ":" + b.sessionId;
   if (!__bramGateLastSessionShown[key]) {

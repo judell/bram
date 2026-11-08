@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateLastSessionTick="{0}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -132,19 +132,24 @@
        host from the state-mirror ledger; the switch is the Sessions tab's,
        and lands on the Transcript. -->
   <HStack
-    when="{!!window.__bramGateLastSession(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value)}"
+    when="{!!window.__bramGateLastSession(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, gateLastSessionTick)}"
     horizontalAlignment="center"
     verticalAlignment="center"
     gap="$space-2"
     paddingHorizontal="$space-8"
     paddingTop="$space-1">
-    <Text value="{window.__bramGateLastSessionLine(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value)}" />
+    <Text value="{window.__bramGateLastSessionLine(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, gateLastSessionTick)}" />
     <Button
       label="Switch there"
       size="xs"
       variant="outlined"
       icon="swap"
       onClick="window.__bramGateSwitchToLastSession(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, toast)" />
+    <!-- gate-last-session-line-dismissable: × declines the offer for this
+         selection and session; same ghost × as the composer's. -->
+    <Button label="×" variant="ghost" size="xs"
+      tooltip="Dismiss: stay in this session"
+      onClick="gateLastSessionTick = window.__bramGateLastSessionDismissClick(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, gateLastSessionTick)" />
   </HStack>
   <!-- gate-remove-commit-share-radio: the commit-time "One commit / A commit
        each" radio is gone. For disjoint selections it changed nothing (the

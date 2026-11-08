@@ -3163,6 +3163,18 @@ window.__bramMisaddressedDismiss = function () {
   window.__bramMisaddressedPending = null;
   __bramMisaddressedPost({ op: "dismiss" });
 };
+// misaddressed-offer-dismissable (Jon, 2026-11-08: "should be dismissable"):
+// the offer's ×. Declines the resend and nothing else; the flag stays on
+// the feedback record. Refetches once the host has dropped the offer, so the
+// line goes at once instead of at the next push.
+window.__bramMisaddressedDismissClick = function (ds) {
+  var pending = ds && ds.value && ds.value.pending;
+  window.__bramIframeTrace("click", { target: "misaddressed-dismiss", item: String((pending && pending.itemId) || "") });
+  window.__bramMisaddressedPending = null;
+  __bramMisaddressedPost({ op: "dismiss" }).then(function () {
+    if (ds && typeof ds.refetch === "function") ds.refetch();
+  });
+};
 
 window.__bramGateCloseComment = function (itemId, issueNumber, text, closesIssues) {
   window.__bramW2CloseMap = window.__bramInlineCloseComment(

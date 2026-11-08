@@ -86,6 +86,11 @@
       <Button label="{window.__bramMisaddressedButton(misaddressed.value)}" variant="outlined" size="xs"
         tooltip="{window.__bramMisaddressedTooltip(misaddressed.value)}"
         onClick="window.__bramMisaddressedResend(misaddressed)" />
+      <!-- misaddressed-offer-dismissable: × declines the offer without
+           resending; the gate bar's plan line has the same ×. -->
+      <Button label="×" variant="ghost" size="xs"
+        tooltip="Dismiss: keep it where it was sent"
+        onClick="window.__bramMisaddressedDismissClick(misaddressed)" />
     </HStack>
     <!-- composer-addressee-in-placeholder: the placeholder always names the
          addressee (composer-addressee-always-in-box, Jon: the "To: Claude"

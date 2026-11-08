@@ -24,6 +24,12 @@
     subscribe="{window.bramSubscribeTauriEvent('turn-context-changed')}" />
   <ChangeListener listenTo="{storyEvt.value &amp;&amp; storyEvt.value.tick}"
     onDidChange="storyTick = storyTick + 1" />
+  <!-- log-demo-restart-and-expanders: confirms parent state changes.
+       A row can still show stale state; this trace alone is not proof that
+       the visible entry expanded.
+       https://www.xmlui.org/docs/reference/components/ChangeListener -->
+  <ChangeListener listenTo="{expanded.join(',')}"
+    onDidChange="window.__bramLogExpandedTrace(expanded)" />
   <PushSource id="storyChanged" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('story-changed')}" />
   <ChangeListener listenTo="{storyChanged.value &amp;&amp; storyChanged.value.tick}"
@@ -49,7 +55,11 @@
     <!-- No firm height: the List hands its scroll to the page, which is the
          tab's own scroll container
          (https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region). -->
-    <List data="{window.__bramStoryTell(story.value)}">
+    <!-- Expansion must be part of the row data: this List's cached rows
+         otherwise retain the old expanded array in both bindings and click
+         handlers, even while the parent ChangeListener sees the update.
+         https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop -->
+    <List data="{window.__bramLogRows(window.__bramStoryTell(story.value), expanded)}" idKey="id">
       <!-- While the story loads, a spinner; once loaded, an empty Log is
            just empty (Jon, 2026-11-07: remove "Nothing to show yet").
            https://www.xmlui.org/docs/reference/components/Spinner -->
@@ -98,10 +108,10 @@
           <Theme textColor-Link="$textColor-primary" textColor-Link--hover="$textColor-secondary"
             textColor-Link--active="$textColor-primary">
             <Link noIndicator="true" breakMode="word" lineHeight="1.5rem"
-              label="{(expanded.includes($item.id) ? '▾ ' : '▸ ') + $item.text}"
+              label="{($item.isExpanded ? '▾ ' : '▸ ') + $item.text}"
               onClick="expanded = window.__bramToggleInArray(expanded, $item.id)" />
           </Theme>
-          <VStack when="{expanded.includes($item.id)}" padding="$space-2">
+          <VStack when="{$item.isExpanded}" padding="$space-2">
             <!-- The message, then Open in Queue at its stable id
                  (https://www.xmlui.org/docs/reference/components/Link), then
                  the context recorded with its draft, in small print. -->
@@ -147,24 +157,26 @@
              (/commits?sha=). A push's range links to the forge's compare
              view. -->
         <!-- The whole sentence is the toggle's click target, not just the
-             chevron; a click on a link inside it (an item name, a sha) keeps
-             the link's meaning (__bramLogRowToggle). Stack click:
+             chevron. Embedded links still navigate and also toggle the row.
+             Stack click:
              https://www.xmlui.org/docs/reference/components/Stack#click -->
         <VStack when="{!$item.queueId}" width="*" gap="$space-0_5">
-          <HStack gap="$space-2" verticalAlignment="start" cursor="pointer"
-            onClick="(e) => expanded = window.__bramLogRowToggle(e, expanded, $item.id)">
+          <HStack testId="log-row" gap="$space-2" verticalAlignment="start" cursor="pointer"
+            onClick="expanded = window.__bramLogRowToggle(null, expanded, $item.id)">
             <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
               textColor-Link--active="$textColor-secondary">
-              <Text lineHeight="1.5rem" color="$textColor-secondary" value="{expanded.includes($item.id) ? '▾' : '▸'}" />
+              <Text lineHeight="1.5rem" color="$textColor-secondary" value="{$item.isExpanded ? '▾' : '▸'}" />
             </Theme>
             <Markdown when="{!$item.surprising}" width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             <Theme when="{$item.surprising}" textColor-Text="$color-warn-700">
               <Markdown width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             </Theme>
           </HStack>
-          <VStack when="{expanded.includes($item.id)}" paddingLeft="$space-5" gap="$space-0_5">
+          <VStack when="{$item.isExpanded}" paddingLeft="$space-5" gap="$space-0_5">
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryEntryContext($item)}" />
+            <Text when="{!!$item.scenario}" fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{window.__bramStoryScenarioLine($item)}" />
             <!-- log-push-lists-its-commits: a push lists what it carried,
                  sliced from the Commits tab's list (/__commits, fetched only
                  when a push is opened), one Markdown line per commit: its sha

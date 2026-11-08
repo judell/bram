@@ -17530,15 +17530,43 @@ window.__bramStoryTranscriptHref = function (item, story) {
   if (!item || !item.t || !cur || item.sessionId !== cur) return null;
   return "/transcript?at=" + item.t;
 };
-// A click anywhere on a Log entry's sentence toggles it, except on a link
-// inside it (an item name, a sha), which keeps its own meaning.
+// Carry expansion in the List's data so cached rows receive fresh bindings
+// and handlers. Parent state alone changed without updating visible rows in
+// the vendored XMLUI bundle; reproduced with both plain and arrow handlers.
+// https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop
+window.__bramLogRows = function (entries, expanded) {
+  var open = new Set(expanded || []);
+  return (entries || []).map(function (entry) {
+    return Object.assign({}, entry, { isExpanded: open.has(entry.id) });
+  });
+};
+// A sentence click toggles its entry. The current plain handler passes no
+// event, so embedded links navigate and also toggle. Event-aware callers
+// skip in-row links/buttons and stop the ancestor walk at the row marker.
 window.__bramLogRowToggle = function (e, expanded, id) {
   var t = e && e.target;
   while (t && t.tagName) {
-    if (t.tagName === "A" || t.tagName === "BUTTON") return expanded;
+    var tid = (t.getAttribute && t.getAttribute("data-testid")) || "";
+    if (tid === "log-row") break;
+    if (t.tagName === "A" || t.tagName === "BUTTON") {
+      window.__bramIframeTrace("log-row-toggle", { op: "link", id: String(id), tag: t.tagName });
+      return expanded;
+    }
     t = t.parentElement;
   }
-  return window.__bramToggleInArray(expanded, id);
+  var next = window.__bramToggleInArray(expanded, id);
+  window.__bramIframeTrace("log-row-toggle", {
+    op: "toggle", id: String(id), open: next.indexOf(id) >= 0, reachedRow: !!(t && t.tagName),
+  });
+  return next;
+};
+// log-demo-restart-and-expanders: the Log's open-entries state changed.
+window.__bramLogExpandedTrace = function (expanded) {
+  window.__bramIframeTrace("log-row-expanded", { open: (expanded || []).length, ids: (expanded || []).slice(-3) });
+};
+// The expanded detail's line for a demo entry: which saved demo board it ran.
+window.__bramStoryScenarioLine = function (item) {
+  return item && item.scenario ? "Scenario: " + item.scenario + " (a saved demo board)" : "";
 };
 window.__bramToggleInArray = function (arr, id) {
   arr = arr || [];
@@ -21047,6 +21075,7 @@ window.__bramStoryTell = (function () {
       turn: endTurn, gate: endGate, stall: endStall, refusal: endRefusal, queue: endQueue, search: endSearch
     };
 
+    var demoStop = null;
     lines.forEach(function (ln) {
       var t = Date.parse(ln.ts);
       if (isNaN(t)) return;
@@ -21089,11 +21118,29 @@ window.__bramStoryTell = (function () {
       else if (cat === "git-push") onPush(t, rest);
       // log-records-demo-instances: scripts/demo_instance.py's launch and
       // stop, appended to this trace.
+      // log-demo-restart-and-expanders: a stop is held 10 s, and a launch
+      // inside that window turns it into one restart line (Jon: the two
+      // lines read backward, newest first). The scenario name stays off
+      // the sentence and goes to the entry's detail.
       else if (cat === "demo-instance") {
         var dop = kv(rest, "op"), dsc = kv(rest, "scenario"), dpid = kv(rest, "pid");
-        var board = dsc ? " on the `" + dsc + "` board" : "";
-        if (dop === "launch") simple(t, "demo", "A demo instance started" + board + (dpid ? " (PID " + dpid + ")" : "") + ".");
-        else if (dop === "stop") simple(t, "demo", "The demo instance" + board + " stopped" + (dpid ? " (PID " + dpid + ")" : "") + ".");
+        var pidTxt = dpid ? " (PID " + dpid + ")" : "";
+        if (dop === "stop") {
+          var sep = simple(t, "demo", "The demo instance stopped" + pidTxt + ".");
+          sep.deadline = t + 10000;
+          sep.d.scenario = dsc;
+          demoStop = { t: t, pid: dpid, ep: sep };
+        } else if (dop === "launch") {
+          if (demoStop && t - demoStop.t <= 10000 && open.indexOf(demoStop.ep) >= 0) {
+            demoStop.ep.d.text = "The demo instance restarted" +
+              (demoStop.pid && dpid ? " (PID " + demoStop.pid + " \u2192 " + dpid + ")" : pidTxt) + ".";
+            demoStop.ep.d.scenario = dsc || demoStop.ep.d.scenario;
+            demoStop = null;
+          } else {
+            var lep = simple(t, "demo", "A demo instance started" + pidTxt + ".");
+            lep.d.scenario = dsc;
+          }
+        }
       }
       else if (cat === "hook-deny") {
         var hm = /^(\S+) (\S+) (\S+) (.*)$/.exec(rest);
@@ -21160,6 +21207,7 @@ window.__bramStoryTell = (function () {
           // log-push-lists-its-commits: a gate entry's commit, so an
           // expanded commit can list the files it changed.
           commitSha: (o.kind === "gate" && o._ep && o._ep.d && o._ep.d.sha) || null,
+          scenario: (o.kind === "demo" && o._ep && o._ep.d && o._ep.d.scenario) || null,
           message: message === null ? "No saved draft is available for this older message." : (message || "This queued message is empty."),
           context: window.__bramQueueDraftContext(draft || null),
           images: (draft && Array.isArray(draft.images)) ? draft.images : [],

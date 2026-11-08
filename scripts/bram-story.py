@@ -207,13 +207,24 @@ class Narrator:
         elif cat == "demo-instance":
             # log-records-demo-instances: scripts/demo_instance.py's launch
             # and stop, appended to this trace.
-            op, sc, pid = kv(rest, "op"), kv(rest, "scenario"), kv(rest, "pid")
-            board = f" on the `{sc}` board" if sc else ""
+            # log-demo-restart-and-expanders: a stop is held 10 s; a launch
+            # inside it makes one restart line. No scenario name in the
+            # sentence (it's a session-made label).
+            op, pid = kv(rest, "op"), kv(rest, "pid")
             ptxt = f" (PID {pid})" if pid else ""
-            if op == "launch":
-                self.simple(t, "demo-instance launch", f"A demo instance started{board}{ptxt}.")
-            elif op == "stop":
-                self.simple(t, "demo-instance stop", f"The demo instance{board} stopped{ptxt}.")
+            stop = getattr(self, "demo_stop", None)
+            if op == "stop":
+                ep = self.simple(t, "demo-instance stop", f"The demo instance stopped{ptxt}.")
+                ep.deadline = t + 10
+                self.demo_stop = (t, pid, ep)
+            elif op == "launch":
+                if stop and t - stop[0] <= 10 and stop[2] in self.open:
+                    both = f" (PID {stop[1]} \u2192 {pid})" if stop[1] and pid else ptxt
+                    stop[2].d["text"] = f"The demo instance restarted{both}."
+                    stop[2].cite(t, "demo-instance launch")
+                    self.demo_stop = None
+                else:
+                    self.simple(t, "demo-instance launch", f"A demo instance started{ptxt}.")
         elif cat == "hook-events":
             self.on_hook(t, rest)
         elif cat == "queue" and "op=save-refused" in rest:
@@ -230,6 +241,7 @@ class Narrator:
         ep.d["text"] = text
         ep.deadline = t
         self.open.append(ep)
+        return ep
 
     def end_simple(self, ep):
         self.say(ep, ep.d["text"])

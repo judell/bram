@@ -4676,6 +4676,11 @@ window.__bramWorklist2StripTooltip = function (item, claim, items) {
         "and leaves the changes on disk, belonging to no item."
       );
     }
+    // strip-uncredited-checks-membership: changes another item owns.
+    var ownedPaths = window.__bramOwnedDeclaredPaths(item);
+    if (ownedPaths.length) {
+      return window.__bramOwnedPhrase(ownedPaths, true, true);
+    }
   }
   // gate-names-the-outside-commit-that-strands-an-item: the strip's
   // "Stranded by" expands to what happened and the way out.
@@ -5801,7 +5806,12 @@ window.__bramFileChangesCell = function (rec, rowBegun) {
   // beside that claim (Jon, 2026-10-07). Show the disk change, marked as not
   // yet credited to the item, since nothing on the board started it.
   if (!rowBegun) {
-    return window.__bramFileRecMoved(rec) ? total + suffix + " · not credited" : "";
+    if (!window.__bramFileRecMoved(rec)) return "";
+    // strip-uncredited-checks-membership: name the owner when another item
+    // owns the change; "not credited" only for lines no item owns.
+    var o = rec.path ? window.__bramPathOwners(rec.path, null) : null;
+    if (o && o.owners.length && !o.unowned) return total + suffix + " · owned by " + o.owners.join(", ");
+    return total + suffix + " · not credited";
   }
   var hasTake = typeof rec.takeAdded === "number";
   if (hasTake && (rec.takeAdded !== rec.added || rec.takeRemoved !== rec.removed)) {
@@ -6326,10 +6336,13 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
     // under THIS item, and nothing has), so the line says why Start sits
     // beside visible changes. Same predicate as the table's `not credited`.
     var uncredited = window.__bramUncreditedDeclaredPaths(item);
+    var owned = uncredited.length ? [] : window.__bramOwnedDeclaredPaths(item);
     return withCloses(
       uncredited.length
         ? "Proposed · " + window.__bramUncreditedPhrase(uncredited, false, false)
-        : "Proposed",
+        : owned.length
+          ? "Proposed · " + window.__bramOwnedPhrase(owned, false, false)
+          : "Proposed",
     );
   }
   // issue-406: its work was committed outside the Worklist (a plain git
@@ -6415,10 +6428,65 @@ window.__bramFileRecMoved = function (rec) {
 // started the row, so nobody is credited with those lines. Meaningful only
 // where the caller has checked begun-ness; on a begun row the same records
 // are the item's own work.
+// strip-uncredited-checks-membership: who owns a changed path's lines, from
+// the board's membership. null when membership has no fresh answer (the
+// callers then keep the plain "moved on disk" rule). `owners` excludes
+// `exceptId`; `unowned` is whether any line belongs to no item. A changed
+// path membership doesn't list belongs to no begun item at all.
+window.__bramPathOwners = function (path, exceptId) {
+  var m = window.__bramBoardMembership();
+  if (!m || m.stale) return null;
+  var e = m.byPath[path];
+  if (!e) return { owners: [], unowned: true };
+  var u = e.unowned || {};
+  return {
+    owners: (e.owners || []).filter(function (id) { return id !== exceptId; }),
+    unowned: ((u.added || 0) + (u.removed || 0)) > 0,
+  };
+};
+// Since strip-uncredited-checks-membership, "uncredited" means what it
+// says: lines no item owns. Before it, any moved declared file counted, so
+// a row whose files held another begun item's work read "changes nobody
+// credits" (2026-11-07: log-reads-across-trace-rotation beside the applied
+// log-shows-start-commit-push-search, whose lines membership credited).
 window.__bramUncreditedDeclaredPaths = function (item) {
+  var id = item && item.id;
   return ((item && item.changedFiles) || [])
     .filter(window.__bramFileRecMoved)
+    .filter(function (f) {
+      var o = window.__bramPathOwners(f.path, id);
+      return !o || o.unowned || !o.owners.length;
+    })
     .map(function (f) { return f.path; });
+};
+// A not-begun row's declared files whose changes another item owns, with
+// those owners: [{path, owners}].
+window.__bramOwnedDeclaredPaths = function (item) {
+  var id = item && item.id;
+  var out = [];
+  ((item && item.changedFiles) || []).filter(window.__bramFileRecMoved).forEach(function (f) {
+    var o = window.__bramPathOwners(f.path, id);
+    if (o && o.owners.length) out.push({ path: f.path, owners: o.owners });
+  });
+  return out;
+};
+// The sentence for those: one file named, "and N more" past the first, and
+// the owners. `full` adds the way out, for the tooltips.
+window.__bramOwnedPhrase = function (list, code, full) {
+  var l = list || [];
+  if (!l.length) return "";
+  var owners = [];
+  l.forEach(function (x) { x.owners.forEach(function (o) { if (owners.indexOf(o) < 0) owners.push(o); }); });
+  var q = function (t) { return code ? "`" + t + "`" : t; };
+  var who = owners.map(q).join(" and ");
+  var name = q(l[0].path);
+  var more = l.length > 1 ? " and " + (l.length - 1) + " more" : "";
+  var verb = l.length > 1 ? " already have " : " already has ";
+  return (
+    name + more + verb + "changes owned by " + who +
+    "; starting this item mixes its edits into them" +
+    (full ? ". Commit " + who + " first, or start this one and commit them together." : "")
+  );
 };
 window.__bramUnbegunMovedFiles = function (item) {
   return window.__bramUncreditedDeclaredPaths(item).length;
@@ -6455,6 +6523,23 @@ window.__bramSelectionUncreditedPaths = function (items, sel, claim) {
     for (var p = 0; p < paths.length; p++) {
       if (!seen[paths[p]]) { seen[paths[p]] = true; out.push(paths[p]); }
     }
+  }
+  return out;
+};
+// strip-uncredited-checks-membership: the same, for changes another item
+// owns, with the same not-begun-only rule.
+window.__bramSelectionOwnedPaths = function (items, sel, claim) {
+  var chosen = sel || [];
+  var list = items || [];
+  var out = [];
+  var seen = {};
+  for (var s = 0; s < chosen.length; s++) {
+    var it = null;
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === chosen[s]) it = list[i];
+    if (!it || window.__bramWorklist2Begun(it, claim)) return [];
+    window.__bramOwnedDeclaredPaths(it).forEach(function (x) {
+      if (!seen[x.path]) { seen[x.path] = true; out.push(x); }
+    });
   }
   return out;
 };
@@ -6904,6 +6989,10 @@ window.__bramGateScopeTooltip = function (sel, kind, branch, claim, items) {
     var uncredited = window.__bramSelectionUncreditedPaths(items, ids, claim);
     if (uncredited.length) {
       lines.push("**Already on disk:** " + window.__bramUncreditedPhrase(uncredited, true, true));
+    }
+    var ownedSel = window.__bramSelectionOwnedPaths(items, ids, claim);
+    if (ownedSel.length) {
+      lines.push("**Already on disk:** " + window.__bramOwnedPhrase(ownedSel, true, true));
     }
   }
   return lines.join("\n\n");

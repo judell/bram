@@ -73,19 +73,13 @@ Skip the worklist only in these contexts, never because the change is
   this", "don't bother with the worklist") no longer opt out. Every
   agent honors the same phrase.
 - **`skip-worklist:` structured prefix on this turn.** The turn begins
-  literally with `skip-worklist: ` followed by the request. Same family
-  as `approved:` / `drop:` / `iterate:`, but it authorizes a direct
-  edit rather than a lifecycle transition. The user types it, or sends
-  with ⌘Enter / Ctrl+Enter, adding a closing "Just do it and commit."
-  Unlike the other prefixes, the host forwards the **entire turn text
-  including the prefix**. On seeing it, skip propose-first, make the
-  change directly, write no worklist item, and commit only if the turn
-  asks; the PreToolUse hook allows the edits. A direct commit to a file
-  a begun item has already changed strands that item: its own patch no
-  longer applies to HEAD, and its row names the commit. Commit the item
-  first, or re-anchor it afterwards (`POST /__worklist/reanchor
-  {"ids": [...]}`, accepted once the file's uncommitted lines are all
-  that item's).
+  literally with `skip-worklist: ` followed by the request (typed, or
+  sent with ⌘Enter / Ctrl+Enter, which adds "Just do it and commit.").
+  The host forwards the **entire turn text including the prefix**. Skip
+  propose-first, make the change directly, write no worklist item, and
+  commit only if the turn asks. A direct commit to a file a begun item
+  already changed **strands** that item: commit the item first, or
+  re-anchor it (§Opt-out plumbing).
 - **Correcting code you just wrote in the current iteration.** Fixing a
   typo or off-by-one from your last turn is iteration on in-progress
   work, not a fresh change request.
@@ -288,16 +282,12 @@ status; the user's Commit button judges committability independently.
    apply; `{"op":"prune","ids":[...]}` after a drop, or after a commit of
    already-`applied` items. Never rewrite `"status": "applied"` directly.
 
-**Selection decides who a message is addressed to.** With one or more
-Worklist items selected, a message the user sends (Enter in the message
-box) is **feedback addressed to those items**, and arrives as an
-`iterate:` turn. With nothing selected, it is **general chat** with you.
-The box's placeholder shows where Enter will send ("To <item>
-(feedback)", "To Claude (chat)"). With items selected, a line above it
-carries **Send as chat instead**, which sends that one message as
-general chat without clearing the selection; changing the selection
-switches it back to feedback. After **Start** or feedback the items stay
-selected, so follow-ups arrive as `iterate:`; other gate verbs clear it.
+**Selection decides who a message is addressed to.** With Worklist
+items selected, a message the user sends is **feedback to those items**
+(an `iterate:` turn); with nothing selected, it is **general chat**.
+**Send as chat instead** sends one message as chat without clearing the
+selection. After **Start** or feedback the items stay selected (a pane
+reload keeps them); other gate verbs clear it.
 
 **The gate verbs.** The gate row is pure lifecycle: **Start / Start &
 commit / Commit / Drop**, each acting on the ticked items (hover names
@@ -321,11 +311,9 @@ establish the drop claim, and advance/prune retire the affected ids.
 Respond to any per-item feedback, whatever the kind.
 
 - **Recommending Drop / Commit / Start on named items** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
-- **The user asks "What's my next move? (a, b, …)"** (the gate bar's
-  **What's my next move?** button sends that, as chat, with two or more
-  items ticked) → answer with the order for those items and post it as a
-  plan whose `why` says what would go wrong in another order, or that the
-  order doesn't matter; same section.
+- **"What's my next move? (a, b, …)"** (a gate-bar button, sent as chat)
+  → post the order as a plan whose `why` says what another order would
+  break, or that order doesn't matter; same section.
 
 **`/__worklist/resolve`** returns `{"kind":"approved"|"drop", "items":
 [<recorded content>]}` — execute those items; don't re-read
@@ -462,38 +450,12 @@ Feedback sent with a row ticked is filed to that item's audit trail
 (`<state>/feedback-drafts/`, then `feedback-history/`), so feedback
 about something else makes the record **false**. When a turn's feedback
 is plainly about something else — a different subsystem, bug or
-project — **flag it, say so in one line, and stop**:
+project — **flag it, say so in one line, and stop**; don't do the work
+in this turn. Fire on obvious drift only, **once per drift**; a tangent
+that touches the item, or a follow-up about work just done, is not
+drift.
 
-1. Flag the message you're answering (its `feedbackRef` from the
-   `iterate:` payload). Build the body in its own call, then:
-
-   ```
-   curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST \
-     -H "Content-Type: application/json" --data @/tmp/misaddressed.json \
-     "http://127.0.0.1:61455/__worklist/misaddressed"
-   ```
-
-   with `{"op":"flag","feedbackRef":"<ref>"}`. The host accepts only a
-   live draft whose item this turn is addressed to.
-2. Reply with one line: "That looks like chat, not feedback on
-   `<item-id>`." The message box now offers **Resend as chat**, which
-   unticks the item, sends the same text as chat, and notes on the
-   record that it was resent. Don't tell the user to retype it.
-3. **Stop.** Don't do the work in this turn: it would land in the
-   item's context.
-
-If the flag is refused, or you can't call the route (Codex, until its
-file transport gains it), fall back to asking, verbatim, "Did you mean
-to address `<item-id>` just now?", pointing at **Send as chat instead**,
-and wait. It is not a refusal — the answer is usually "that was meant as
-chat", after which you do the work — but it *is* blocking: proceeding
-writes a false audit record and does the work in the wrong context. Asking and then
-proceeding regardless is the worst option. Fire on obvious drift only,
-**once per drift**; a tangent that touches the item, or a follow-up
-about work just done, is not drift. The test: would a reader six months
-from now, seeing this feedback on this item, be misled about why it
-changed?
-
+- **Feedback plainly about something else** → read `.claude/bram-reference/worklist-mechanics.md` (§Flagging feedback that drifts from its item) before replying.
 - **Chat that is plainly feedback on an item on the board** (the other direction) → read `.claude/bram-reference/worklist-mechanics.md` (§Chat that should have been feedback).
 
 ### Authoring conventions

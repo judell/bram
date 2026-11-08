@@ -51,6 +51,7 @@ resources/worklist-drafts/
 resources/feedback-drafts/
 resources/feedback-history/
 resources/message-drafts/
+resources/queue-drafts/
 resources/outbound-turns/
 resources/session-digests/
 # build-log-real-builds: scripts/build.sh's per-build log (machine-local).

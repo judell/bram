@@ -13,6 +13,16 @@ it applies; the core conventions stay authoritative for ordinary turns.
 How the two direct-edit opt-outs ("just do it" and `skip-worklist:`)
 are honored. The user-facing contract is identical for every agent.
 
+`skip-worklist:` is in the same family as `approved:` / `drop:` /
+`iterate:`, but it authorizes a direct edit rather than a lifecycle
+transition; the PreToolUse hook allows the edits.
+
+**A direct commit strands a begun item.** When a direct commit changes a
+file a begun item has already changed, the item's own patch no longer
+applies to HEAD, and its row names the commit. Commit the item first, or
+re-anchor it afterwards (`POST /__worklist/reanchor {"ids": [...]}`,
+accepted once the file's uncommitted lines are all that item's).
+
 - **Claude, prose opt-out.** Claude's guard matches `_OPT_OUT_PATTERNS`
   against `transcript_path` on every `PreToolUse` and allows inline.
   Claude prose opt-outs have no host chokepoint on their allow path, so
@@ -941,6 +951,42 @@ the session; the reminder carries it across.
   expected, honorable ending, not a failure.
 - **Boundary.** Not a door back to investigation items: a reminder
   records a *decided future action*; an open question is chat's job.
+
+## Flagging feedback that drifts from its item
+
+When a turn's item feedback is plainly about something else (a
+different subsystem, bug or project), flag it, say so in one line, and
+stop:
+
+1. Flag the message you're answering (its `feedbackRef` from the
+   `iterate:` payload). Build the body in its own call, then:
+
+   ```
+   curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST \
+     -H "Content-Type: application/json" --data @/tmp/misaddressed.json \
+     "http://127.0.0.1:61455/__worklist/misaddressed"
+   ```
+
+   with `{"op":"flag","feedbackRef":"<ref>"}`. The host accepts only a
+   live draft whose item this turn is addressed to.
+2. Reply with one line: "That looks like chat, not feedback on
+   `<item-id>`." The message box now offers **Resend as chat**, which
+   unticks the item, sends the same text as chat, and notes on the
+   record that it was resent. Don't tell the user to retype it.
+3. **Stop.** Don't do the work in this turn: it would land in the
+   item's context.
+
+If the flag is refused, or you can't call the route (Codex, until its
+file transport gains it), fall back to asking, verbatim, "Did you mean
+to address `<item-id>` just now?", pointing at **Send as chat instead**,
+and wait. It is not a refusal — the answer is usually "that was meant as
+chat", after which you do the work — but it *is* blocking: proceeding
+writes a false audit record and does the work in the wrong context. Asking and then
+proceeding regardless is the worst option. Fire on obvious drift only,
+**once per drift**; a tangent that touches the item, or a follow-up
+about work just done, is not drift. The test: would a reader six months
+from now, seeing this feedback on this item, be misled about why it
+changed?
 
 ## Chat that should have been feedback
 

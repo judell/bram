@@ -447,32 +447,22 @@ A real subagent run in this project still costs up to a second per roster
 refetch (the 2026-10-28 04:00 hour had 141 spikes). That's open, and it
 starts with a Timeline.
 
-### The story of a stretch: `scripts/bram-story.py`
+### The story of a stretch: the Log
 
-`ui-health.py` counts. `bram-story.py` narrates: it reads the trace and
-`hook-events.log` and tells, in Bram's first person, what Bram did around
-the work. It covers turns (why each started, which item, how long, the claim
-released), gate clicks and commits, pushes (branch and range, or why one
-failed), what you searched for on the Search tab and how many hits came back,
-stalls you'd feel, refusals (with "that's the rule working" when it is), and a
-single quiet line after 20 minutes of nothing.
-
-```sh
-python3 -I scripts/bram-story.py                 # the last hour
-python3 -I scripts/bram-story.py --since 19:00   # a stretch (local time or ISO)
-python3 -I scripts/bram-story.py --follow        # live, beside a working session
-python3 -I scripts/bram-story.py --cite          # each sentence's source lines
-```
-
+The **Log** tab (`app/tools/components/Log.xmlui`) narrates what Bram did
+around the work. Rust selects lines from the trace and `hook-events.log`
+through `/__story/lines`; JavaScript (`__bramStoryTell` in
+`app/__shell/helpers.js`) turns them into episodes; XMLUI displays them.
 Every sentence comes from a fixed template over trace fields, with no model
-call, so `--cite` can check it. When a signal is missing, it says so
-("the trace doesn't name the work") rather than guessing. A stall names its
-work through the `during` field on `long-task`; only `transcript-render` is
-marked so far.
+call. When a signal is missing, the narrator says so rather than guessing.
+A wording change needs a pane reload.
 
-The same narrator, ported to JS (`__bramStoryTell` in `helpers.js`), is the
-**Log** tab, below Settings in the nav (`app/tools/components/Log.xmlui`). The host only selects lines
-(`/__story/lines`); the pane tells them, so a wording change is a pane reload.
+The original Python narrator and its standalone replay CLI were retired on
+2026-11-07 (`retire-python-narrator`). Its `--follow`, `--since`, `--until`,
+`--cite`, and `--root` commands are no longer available. The Log is the
+narration surface, and JavaScript is the sole maintained narrator; it has no
+Python runtime dependency.
+
 It shows the last five hours, across relaunches: each launch rotates the
 trace, so the host reads the rotated archives as well as the live file. It
 keeps what it selected in memory, reads each archive once, and reads the
@@ -506,11 +496,10 @@ Markdown. A gate line names the click and what landed; it doesn't recite the
 approval, the claim and the hand-off, which every click does and the row's
 spinner shows live. A Start & commit waits ten minutes for its commit, a
 Commit one; a line told before its deadline says the commit hasn't landed
-yet rather than that it never did. The Log adds what the script can't:
+yet rather than that it never did. The Log also includes
 quoted openings of what you sent, and what each turn did ("ran 1 search, made
 3 edits"), counted from the Transcript projection by order, and left out
-when the order doesn't line up. Change the voice in `helpers.js`; the script
-is the CLI copy for replays.
+when the order doesn't line up. Change the voice in `helpers.js`.
 
 ### Does the pane slow with age, or with session size?
 

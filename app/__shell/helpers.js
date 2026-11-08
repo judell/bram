@@ -20401,7 +20401,7 @@ window.__bramInstallCodeBlockTools();
 try { document.addEventListener("keydown", window.__bramComposerDirectEnterKeydown, true); } catch (e) {}
 
 // ---- Bram's story (issue-473-readable-launch-log, iteration 2) -------------
-// JS port of scripts/bram-story.py. Pure and synchronous: takes the payload of
+// The Log's narrator. Pure and synchronous: takes the payload of
 // GET /__story/lines and returns first-person episodes, newest first. Only
 // definitions run at load time. The one outside read is the Transcript
 // projection (window.getProjectedTurns), used for the research summary.

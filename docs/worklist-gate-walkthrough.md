@@ -132,11 +132,10 @@ The line above the buttons comes from the same predicates that light them
 (`__bramStartConsequence`), so it should never describe an action that
 isn't on screen.
 
-- **Started + not started**, ticked together:
-  *"<a> already has changes and <b> has not started, so this selection has
-  no joint Start or Commit. Select the started item alone to commit, or the
-  proposed one to start it."* The clause "(their edits would then mix)" is
-  added when they share a file.
+- **Started + not started**, ticked together: no line. The gate bar's
+  **What's my next move?** button shows instead, and its plan says which to
+  commit and which to start, in order (whats-my-sequence-button, 2026-11-08;
+  until then the line told you which half to tick for each button).
 - **Two not started that share a file**:
   *"These share <file>. Started together, they'll be committed together. To
   commit them separately, start and commit one before starting the

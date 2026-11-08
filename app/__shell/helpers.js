@@ -3316,7 +3316,8 @@ window.__bramPlanLine = function (board) {
   var parts = steps.map(function (s) {
     var ids = (s.ids || []).join(", ");
     if (s.verb === "feedback") return "Send feedback to " + ids;
-    var verb = s.verb === "drop" ? "Drop" : s.verb === "commit" ? "Commit" : String(s.verb || "");
+    var verb = s.verb === "drop" ? "Drop" : s.verb === "commit" ? "Commit"
+      : s.verb === "start" ? "Start" : String(s.verb || "");
     return verb + " " + ids;
   });
   if (parts.length) {
@@ -3335,25 +3336,59 @@ window.__bramPlanLine = function (board) {
 // decide, and are not part of the message, so they sit under a rule in
 // italics, one short line per sentence. XMLUI's Tooltip has no width limit, so a long
 // paragraph would run off the edge instead of wrapping (8045e8f).
+// whats-my-sequence-button (Jon, 2026-11-08, on the summary + feedback +
+// decide-lines hover: "This is total overkill"): the hover says only what one
+// click would send that the line can't show, a feedback step's text. The
+// reasoning is Why?'s; "" means no hover.
 window.__bramPlanTooltip = function (board) {
-  var plan = board && board.plan;
-  var summary = String((plan && plan.summary) || "").trim();
-  var steps = __bramPlanSteps(board);
-  var feedback = steps
+  return __bramPlanSteps(board)
     .filter(function (s) { return s.verb === "feedback"; })
     .map(function (s) {
       return "**Feedback to " + (s.ids || []).join(", ") + ":**\n\n> " + String(s.text || "").split("\n").join("\n> ");
-    });
-  // What helps decide (Jon, 2026-10-04): it's all or nothing, and the
-  // feedback goes as written. Not the mechanics of each step.
-  var decide = ["*One click does all of it.*", "*Skip it if you disagree with any step" +
-    (feedback.length ? " or would word the feedback differently" : "") + "; × dismisses it.*"];
-  var parts = [];
-  if (summary) parts.push(summary);
-  parts = parts.concat(feedback);
-  parts.push("---");
-  parts.push(decide.join("  \n"));
-  return parts.join("\n\n");
+    })
+    .join("\n\n");
+};
+// whats-my-sequence-button (Jon, 2026-11-08: "there should be no
+// recommendation when there is only one or zero items selected ... That's
+// when the sequence matters"): the plan line shows only while two or more
+// items are ticked.
+window.__bramPlanVisible = function (board, sel) {
+  return (sel || []).length > 1 && !!window.__bramPlanLine(board);
+};
+// whats-my-sequence-button: what the plan line's Why? button opens: why this
+// order, nothing else. The agent's `why` (Markdown, posted with the plan),
+// else its one-line summary, so a plan from an agent that predates `why`
+// still explains itself.
+window.__bramPlanWhy = function (board) {
+  var plan = board && board.plan;
+  var why = String((plan && plan.why) || "").trim();
+  if (why) return why;
+  var summary = String((plan && plan.summary) || "").trim();
+  return summary || "No explanation was posted with this plan.";
+};
+// whats-my-sequence-button (Jon, 2026-11-08: "What's my sequence here? ...
+// we should put that on the surface of the app"). The gate bar's button
+// sends this fixed question, naming the ticked items, as an ordinary chat
+// turn (not feedback to them); the seeded conventions tell every agent to
+// answer it with the order and a posted plan. Straight to toTurn, not
+// through the composer's send, which would clear a half-typed draft and
+// take any staged images with it.
+// Renamed from "What's my sequence here?" (Jon, 2026-11-08: "change what's
+// my sequence to what's my next move").
+window.__bramSequenceQuestion = "What's my next move?";
+// The button sits in the plan line's slot: shown when two or more items are
+// ticked (Jon, 2026-11-08: a sequence only matters then) and no plan is
+// showing (a posted plan is the answer, with its own Why?).
+window.__bramShowSequenceButton = function (board, sel) {
+  return (sel || []).length > 1 && !window.__bramPlanVisible(board, sel);
+};
+window.__bramAskSequence = function (sel) {
+  var ids = (sel || []).slice();
+  window.__bramIframeTrace("click", { target: "gatebar-sequence", selected: ids.length });
+  if (typeof window.toTurn === "function") {
+    window.toTurn(window.__bramSequenceQuestion + (ids.length ? " (" + ids.join(", ") + ")" : ""));
+  }
+  window.__bramGateGoTranscript();
 };
 // Runs the plan through the gate buttons' own paths, for exactly the named
 // ids: feedback-less drops host-direct (POST /__worklist/drop, as Drop does),
@@ -3368,23 +3403,50 @@ window.__bramDoRecommended = function (board, claim) {
   var steps = __bramPlanSteps(board);
   var dropIds = [];
   var commitIds = [];
+  var startIds = [];
   var feedbackSteps = [];
   steps.forEach(function (s) {
     var ids = s.ids || [];
     if (s.verb === "drop") dropIds = dropIds.concat(ids);
     else if (s.verb === "commit") commitIds = commitIds.concat(ids);
+    else if (s.verb === "start") startIds = startIds.concat(ids);
     else if (s.verb === "feedback" && ids.length && s.text) feedbackSteps.push(s);
   });
   window.__bramIframeTrace("click", {
     target: "gatebar-do-recommended",
     drop: dropIds.length,
     commit: commitIds.length,
+    start: startIds.length,
     feedback: feedbackSteps.length,
   });
   var items = (board && board.items) || [];
   // After any drops, like commits. The host refuses a plan that mixes
-  // feedback with commit, so at most one of the two runs.
+  // feedback with commit or start, so at most one kind of turn runs.
   var commit = function () {
+    // whats-my-sequence-button: commits and starts go as ONE approval, so
+    // one agent turn commits and then starts (the authorization record holds
+    // one approval at a time; a second click would replace the first). Each
+    // item keeps its own gate: the host accepts a start beside commits only
+    // when every commit id is applied, so that's "to commit", and a start
+    // id is "to apply". Commit's own path can't carry it: it would make
+    // every item apply-and-commit as soon as one isn't applied.
+    if (startIds.length && commitIds.length) {
+      var ids = commitIds.concat(startIds);
+      var body = window.__bramWithShareMode("", "together", items, commitIds, null);
+      var r = window.__bramPrepareBatchWorklistActionSubmission({
+        items: items,
+        selectedIds: ids,
+        feedbackDraftsById: window.__bramFanFeedback(ids, body),
+        kind: "approved",
+        oneShot: false,
+        closeMap: window.__bramW2CloseMap,
+      });
+      window.__bramW2SetSelection(startIds);
+      window.__bramWorklistActApply(r);
+      window.__bramGateGoTranscript();
+      return;
+    }
+    if (startIds.length) window.__bramGateAct("start", items, startIds, null, claim);
     if (commitIds.length) window.__bramGateAct("commit", items, commitIds, "together", claim);
     feedbackSteps.forEach(function (s) {
       window.__bramWorklist2BatchIterate(s.ids, String(s.text));
@@ -6299,6 +6361,17 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
       var o = (items || []).filter(function (x) { return x && x.id === b; })[0];
       return !!o && (o.commitDependsOn || []).indexOf(item.id) !== -1;
     });
+    // whats-my-sequence-button: a still-begun JOINT partner (lines written
+    // while both items' claims were open) can't commit first either: the
+    // host refuses either one alone (op=refuse-joint-interval), so "commit
+    // that first" on both rows was the same loop (Jon, 2026-11-08, on
+    // log-tells-session-switches and whats-my-sequence-button). Say what's
+    // true: they commit together.
+    var joint = (item.jointWith || []).filter(function (j) {
+      var o = (items || []).filter(function (x) { return x && x.id === j; })[0];
+      return !!o && window.__bramWorklist2Begun(o, claim);
+    });
+    if (joint.length) return withCloses("Commits only together with " + joint.join(", "));
     // issue-419-header-from-membership: superseded. The item did work in its
     // windows (ownLines > 0 above), but membership credits it no line in any
     // of its changed files: another item rewrote them. "Shares its changed
@@ -7048,24 +7121,13 @@ window.__bramStartConsequence = function (items, sel, claim) {
   }
   var n = window.__bramSelectionSharedFileCount(items, sel, claim);
 
-  // Mixed begun + unbegun: Start is foreclosed by the begun items, Commit by
-  // the unbegun ones, so no joint Start or Commit exists for this selection.
-  // Direct the selection change that unlocks each half. Names appear once, in
-  // the first half; the guidance half refers back ("the started item") rather
-  // than repeating long kebab-case ids.
-  if (begun.length && unbegun.length) {
-    return (
-      window.__bramNameList(begun) +
-      (begun.length === 1 ? " already has" : " already have") +
-      " changes and " + window.__bramNameList(unbegun) +
-      (unbegun.length === 1 ? " has" : " have") +
-      " not started, so this selection has no joint Start or Commit. Select " +
-      (begun.length === 1 ? "the started item alone" : "only the started items") +
-      " to commit, or " +
-      (unbegun.length === 1 ? "the proposed one to start it" : "one or more proposed ones to start them") +
-      (n ? " (their edits would then mix)" : "") + "."
-    );
-  }
+  // Mixed begun + unbegun: no joint Start or Commit exists for this
+  // selection, and nothing is said here. This branch used to spell out which
+  // half to tick for each button; the gate bar's What's my next move? and
+  // its plan now answer that for a multi-item selection (Jon, 2026-11-08:
+  // "we tell the story more clearly now and better without it";
+  // whats-my-sequence-button).
+  if (begun.length && unbegun.length) return "";
 
   // All unbegun: Start is lit, and the consequence of clicking it is the
   // one thing worth saying -- and only when the items share files.
@@ -20433,6 +20495,17 @@ window.__bramStorySince = function (minutes, key) {
 // episode began). "unknown" means the trace tail didn't name it.
 window.__bramStoryEntryContext = function (item) {
   if (!item) return "";
+  // log-tells-session-switches: a switch reads from → to, each side with its
+  // short id; the single context line would name only one of the two.
+  if (item.kind === "switch" && (item.fromSessionId || item.fromAgent)) {
+    var side = function (a, sid, title) {
+      return (a ? window.__bramProviderLabel(a) : "an agent the trace doesn't name") + " · " +
+        (title ? "'" + title + "' (" + String(sid).slice(0, 8) + "…)"
+          : sid ? "session " + String(sid).slice(0, 8) + "…" : "a session the trace doesn't name");
+    };
+    return "From " + side(item.fromAgent, item.fromSessionId, item.fromSessionTitle) +
+      " → to " + side(item.agent, item.sessionId, item.sessionTitle);
+  }
   var agent = item.agent ? window.__bramProviderLabel(item.agent) : "an agent the trace doesn't name";
   var session = item.sessionTitle ? "'" + item.sessionTitle + "'"
     : item.sessionId ? "session " + String(item.sessionId).slice(0, 8) + "…"
@@ -20722,7 +20795,9 @@ window.__bramStoryTell = (function () {
     // the window has no set at all, in which case the current session held
     // throughout (the host sends it as currentSession).
     var cur = payload && payload.currentSession;
-    var anySet = lines.some(function (l) { return l.cat === "agent-switch"; });
+    // Only a session set changes the session; the category's other ops
+    // (log-tells-session-switches) say why it changed.
+    var anySet = lines.some(function (l) { return l.cat === "agent-switch" && /^op=live-session-set /.test(l.text || ""); });
     var curProvider = anySet ? null : (cur && cur.provider) || null;
     var curSessionId = anySet ? null : (cur && cur.sessionId) || null;
     function sessionTitle(sid) {
@@ -21072,6 +21147,106 @@ window.__bramStoryTell = (function () {
       say(ep, "queue", "You sent " + what + q + ", and I handed it to Claude.", false);
     }
 
+    // -- switch (log-tells-session-switches): told when the session actually
+    // changes, at an [agent-switch] op=live-session-set naming a session
+    // other than the one before it. The ops just before a set say why: a
+    // switch to another agent (op=start, with its resume_reason), a fresh
+    // partner (op=fresh-partner), the resume at launch (op=autostart), or
+    // the New session dialog ([session-new] op=create). A set with none of
+    // those came from the Sessions tab (source=explicit-resume) or from the
+    // agent itself (source=agent-event), and is told as that, without
+    // guessing a cause. A launch that times out or exits is told on its own.
+    var lastSet = null, pendingSwitch = null, PENDING_SWITCH_MS = 120000;
+    function agentName(p) { return p ? window.__bramProviderLabel(p) : "the agent"; }
+    // "session ‘title’" (Jon, 2026-11-08: "I resumed ‘Bava…’ -> session
+    // ‘Bava…’"), or "session 01a1b891…" untitled. bareName is the title alone,
+    // for sentences that already say "a new session" or "its most recent
+    // session".
+    function bareName(sid) {
+      var title = sessionTitle(sid);
+      return title ? "‘" + title + "’" : String(sid).slice(0, 8) + "…";
+    }
+    function sessName(sid) { return "session " + bareName(sid); }
+    // "Claude's ‘x’" when the agents differ, so each side says whose it is.
+    function sideName(p, sid, withAgent) { return (withAgent ? agentName(p) + "'s " : "") + sessName(sid); }
+    function pushSwitch(t, text, surprising, to, from) {
+      var c = to || ctxNow();
+      out.push({ t: t, at: hhmm(t), text: text, kind: "switch", surprising: !!surprising, _ep: { d: {} },
+        agent: c.agent, sessionId: c.sessionId, sessionTitle: c.sessionTitle,
+        fromAgent: from ? from.agent : null, fromSessionId: from ? from.sessionId : null,
+        fromSessionTitle: from ? from.sessionTitle : null });
+    }
+    function onSessionNew(t, rest) {
+      if (kv(rest, "op") === "create") pendingSwitch = { t: t, why: "new", provider: kv(rest, "provider") };
+    }
+    function onAgentSwitch(t, rest) {
+      var op = kv(rest, "op"), prov = kv(rest, "provider");
+      if (pendingSwitch && t - pendingSwitch.t > PENDING_SWITCH_MS) pendingSwitch = null;
+      if (op === "start") {
+        pendingSwitch = { t: t, why: "start", provider: prov, reason: kv(rest, "resume_reason") };
+      } else if (op === "fresh-partner") {
+        if (!pendingSwitch || pendingSwitch.provider !== prov) pendingSwitch = { t: t, why: "start", provider: prov, reason: "fresh" };
+        pendingSwitch.partnerOf = kv(rest, "from");
+      } else if (op === "autostart") {
+        pendingSwitch = { t: t, why: "launch", provider: prov };
+      } else if (op === "launch-superseded") {
+        if (pendingSwitch && pendingSwitch.provider === prov) pendingSwitch = null;
+      } else if (op === "launch-timeout" || op === "launch-exited") {
+        if (pendingSwitch && pendingSwitch.provider === prov && pendingSwitch.why !== "launch") {
+          var how = op === "launch-timeout" ? "the launch timed out" : "it exited as it launched";
+          var away = lastSet && lastSet.provider !== prov ? " from " + agentName(lastSet.provider) : "";
+          pushSwitch(t, "You switched" + away + " to " + agentName(prov) + ", but it didn't start (" + how + ").", true);
+          pendingSwitch = null;
+        }
+      } else if (op === "live-session-set") {
+        onSessionSet(t, rest, prov);
+      }
+    }
+    function onSessionSet(t, rest, prov) {
+      var sid = kv(rest, "session"), src = kv(rest, "source"), prev = kv(rest, "previous");
+      if (!sid) return;
+      var from = lastSet || (prev ? { provider: prov, id: prev } : null);
+      var p = pendingSwitch && pendingSwitch.provider === prov ? pendingSwitch : null;
+      if (p) pendingSwitch = null;
+      lastSet = { provider: prov, id: sid };
+      curSessionId = sid;
+      if (prov) curProvider = prov;
+      var isNew = src === "reserved-id" || !!(p && (p.why === "new" || p.reason === "fresh-for-new-session" || p.reason === "fresh"));
+      if (from ? from.id === sid : !isNew) return;
+      var other = !!(from && from.provider !== prov);
+      var A = from ? agentName(from.provider) : "", B = agentName(prov), to = sessName(sid);
+      var was = from ? sideName(from.provider, from.id, other) : "";
+      var s;
+      if (isNew) {
+        // A new session is named only when its title says something: a fresh
+        // partner takes the title of the session it's grouped with, and an
+        // untitled one would read as "a new session, session 01a1…".
+        var newTitle = sessionTitle(sid);
+        var partnerTitle = p && p.partnerOf ? sessionTitle(p.partnerOf) : null;
+        var named = newTitle && newTitle !== partnerTitle ? ", ‘" + newTitle + "’" : "";
+        if (p && p.partnerOf) s = "You switched" + (other ? " from " + A : "") + " to " + B + " in a new session" + named + ", grouped with " + sessName(p.partnerOf) + ".";
+        else if (other) s = "You switched from " + A + " to " + B + ", in a new session" + named + ".";
+        else s = "You started a new " + B + " session" + named + (from ? ", leaving " + was : "") + ".";
+      } else if (p && p.why === "launch") {
+        s = "At launch I resumed " + sideName(prov, sid, other) + "; before the relaunch you were in " + was + ".";
+      } else if (p && p.why === "start" && other) {
+        s = "You switched from " + A + " to " + B + ", resuming " +
+          (p.reason === "partner" ? to + ", the session grouped with " + was
+            : p.reason === "latest" ? "its most recent session, " + bareName(sid)
+            : to) + ".";
+      } else if (src === "agent-event" && !p) {
+        s = other
+          ? "The session changed from " + was + " to " + sideName(prov, sid, true) + ". " + B + " reported it; I saw no switch that explains it."
+          : B + " moved to a new session, " + bareName(sid) + ", from " + was + ". I didn't start that; " + B + " reported it.";
+      } else {
+        s = other ? "You switched from " + was + " to " + sideName(prov, sid, true) + "."
+          : "You switched to " + to + ", from " + was + ".";
+      }
+      pushSwitch(t, s, false,
+        { agent: prov, sessionId: sid, sessionTitle: sessionTitle(sid) },
+        from ? { agent: from.provider, sessionId: from.id, sessionTitle: sessionTitle(from.id) } : null);
+    }
+
     var ENDERS = {
       simple: function (ep) { say(ep, ep.d.k, ep.d.text, ep.d.s); },
       turn: endTurn, gate: endGate, stall: endStall, refusal: endRefusal, queue: endQueue, search: endSearch
@@ -21085,10 +21260,10 @@ window.__bramStoryTell = (function () {
       tick(t);
       var sub = cat === "iframe" ? kv(rest, "subkind") : null;
       if (cat === "turn-state" && kv(rest, "provider")) curProvider = kv(rest, "provider");
-      if (cat === "agent-switch") {
-        if (kv(rest, "session")) curSessionId = kv(rest, "session");
-        if (kv(rest, "provider")) curProvider = kv(rest, "provider");
-      }
+      // A session set moves the session every later entry happened in; the
+      // other ops only explain the next set (log-tells-session-switches).
+      if (cat === "agent-switch") onAgentSwitch(t, rest);
+      else if (cat === "session-new") onSessionNew(t, rest);
       else if (cat === "turn-state") onTurnState(t, rest);
       else if (cat === "turn-context" && rest.indexOf("op=set") >= 0) recent.push({ t: t, w: "ctx", kind: kv(rest, "kind"), ids: kv(rest, "ids") });
       else if (cat === "inflight-sentinel") onSentinel(t, rest);
@@ -21205,6 +21380,9 @@ window.__bramStoryTell = (function () {
           // For the expanded detail: when it happened (the board-then fetch
           // keys on it) and the agent and session in force at the time.
           t: o.t, agent: o.agent || null, sessionId: o.sessionId || null, sessionTitle: o.sessionTitle || null,
+          // log-tells-session-switches: a switch's other side, for its
+          // from → to detail line.
+          fromAgent: o.fromAgent || null, fromSessionId: o.fromSessionId || null, fromSessionTitle: o.fromSessionTitle || null,
           pushFrom: (o._ep && o._ep.d && o._ep.d.from) || null, pushTo: (o._ep && o._ep.d && o._ep.d.to) || null,
           // log-push-lists-its-commits: a gate entry's commit, so an
           // expanded commit can list the files it changed.
@@ -21220,12 +21398,13 @@ window.__bramStoryTell = (function () {
   // What the Log shows, opt-in (Jon, 2026-11-05: "show nothing until I ask
   // for it"). Every kind is still told; only these reach the Log. Add a kind
   // here when it's asked for. Known kinds: queue-add, queue, turn, gate,
-  // stall, refusal, launch, queue-delete, selection, push, search, demo.
+  // stall, refusal, launch, queue-delete, selection, push, search, demo,
+  // switch. switch: asked for 2026-11-07 (log-tells-session-switches).
   // gate, push and search were asked for on 2026-11-07
   // (log-shows-start-commit-push-search: "Start, Commit, Push, Search").
   // demo: asked for 2026-11-07 (log-records-demo-instances, "log when we
   // run a demo instance").
-  var STORY_SHOW = ["queue-add", "queue-delete", "selection", "gate", "push", "search", "demo"];
+  var STORY_SHOW = ["queue-add", "queue-delete", "selection", "gate", "push", "search", "demo", "switch"];
   // log-reads-across-trace-rotation: the Log's URL names these kinds, and the
   // host sends only the lines they're told from (story_kind_wants in lib.rs),
   // so held-back kinds cost nothing until they're shown.

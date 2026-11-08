@@ -2433,7 +2433,30 @@ const STORY_TRACE_CATEGORIES: &[&str] = &[
     // log-records-demo-instances: scripts/demo_instance.py appends
     // op=launch / op=stop here when a demo instance starts or stops.
     "demo-instance",
+    // log-tells-session-switches: op=create, the New session dialog, so a
+    // switch into a new session is told as one.
+    "session-new",
 ];
+// log-tells-session-switches: the [agent-switch] ops a switch is told from.
+// The session sets name each entry's session too; the rest say why the
+// session changed (a switch to another agent, a fresh partner, the resume
+// at launch) or that the agent never came up. Its mechanics (interrupts,
+// the launch gate, digests, pair offers, pane reloads) stay out.
+const STORY_AGENT_SWITCH_OPS: &[&str] = &[
+    "live-session-set",
+    "start",
+    "fresh-partner",
+    "autostart",
+    "launch-timeout",
+    "launch-exited",
+    "launch-superseded",
+];
+// The line that changes which session is current. The window's seed and the
+// lines every kind receives for context are these, not the category's other
+// ops, so a later op=start can't displace the session the window opened in.
+fn story_is_session_set(l: &StoryLine) -> bool {
+    l.cat == "agent-switch" && l.text.starts_with("op=live-session-set ")
+}
 const STORY_IFRAME_SUBKINDS: &[&str] = &[
     "click",
     "queue",
@@ -2517,9 +2540,12 @@ fn story_select_trace_line(line: &str) -> Option<StoryLine> {
             .any(|k| text.starts_with(&format!("subkind={} ", k))),
         "turn-state" => !text.starts_with("from=working to=working "),
         // log-shows-start-commit-push-search: which session each entry
-        // happened in, for its expanded detail. Only the sets; the
-        // category's offers and refusals stay out.
-        "agent-switch" => text.starts_with("op=live-session-set "),
+        // happened in, for its expanded detail. log-tells-session-switches:
+        // and the ops a switch is told from; the category's offers,
+        // refusals and mechanics stay out.
+        "agent-switch" => STORY_AGENT_SWITCH_OPS
+            .iter()
+            .any(|op| text.starts_with(&format!("op={} ", op))),
         _ => STORY_TRACE_CATEGORIES.contains(&cat),
     };
     keep.then(|| StoryLine {
@@ -2612,7 +2638,7 @@ fn story_cursor_prune(c: &mut StoryFileCursor, since: &str) {
     if let Some(set) = c.lines[..cut]
         .iter()
         .rev()
-        .find(|l| l.cat == "agent-switch")
+        .find(|l| story_is_session_set(l))
     {
         c.seed = Some(set.clone());
     }
@@ -2645,6 +2671,7 @@ fn story_kind_wants(kind: &str, l: &StoryLine) -> bool {
         "refusal" => l.src == "hook" || matches!(cat, "auth-record" | "queue"),
         "launch" => cat == "bram-trace",
         "demo" => cat == "demo-instance",
+        "switch" => matches!(cat, "agent-switch" | "session-new"),
         _ => true,
     }
 }
@@ -2741,7 +2768,7 @@ fn story_read_lines(traces_dir: &Path, since: &str) -> StoryRead {
         for l in a {
             if l.ts.as_str() >= since {
                 lines.push(l.clone());
-            } else if l.cat == "agent-switch" && seed.as_ref().is_none_or(|s| s.ts < l.ts) {
+            } else if story_is_session_set(l) && seed.as_ref().is_none_or(|s| s.ts < l.ts) {
                 seed = Some(l.clone());
             }
         }
@@ -2771,6 +2798,13 @@ fn story_trace_line_triggers(category: &str, body: &str) -> bool {
     match category {
         "worklist-commit" => has_op("op=committed"),
         "git-push" => has_op("op=push-result"),
+        // log-tells-session-switches: the session changed, or a switch's
+        // agent never came up.
+        "agent-switch" => {
+            has_op("op=live-session-set")
+                || has_op("op=launch-timeout")
+                || has_op("op=launch-exited")
+        }
         "iframe" => {
             ["search-query", "queue", "w2-selection-restore"]
                 .iter()
@@ -2937,6 +2971,69 @@ mod story_index_tests {
         ));
         assert!(!story_trace_line_triggers("iframe", "subkind=queue-x {}"));
     }
+
+    // log-tells-session-switches: the ops a switch is told from pass, its
+    // mechanics don't, and only a session set seeds the window.
+    #[test]
+    fn switch_lines_are_selected_and_seed_only_on_sets() {
+        let sel = |l: &str| story_select_trace_line(l);
+        for op in [
+            "live-session-set provider=claude session=s2 source=explicit-resume",
+            "start provider=codex command=codex pending=none resume_reason=partner",
+            "fresh-partner provider=codex reason=new-session from=s1 sid=unbound",
+            "autostart provider=claude policy=lastActive exact_session=s1",
+            "launch-timeout provider=claude source=switch waited_ms=45010",
+            "launch-exited provider=opencode source=switch status=0",
+            "launch-superseded provider=claude source=switch stage=confirm",
+        ] {
+            let l = format!("[2026-11-07T09:00:00.000Z] [agent-switch] op={}", op);
+            let got = sel(&l).unwrap_or_else(|| panic!("kept: {}", op));
+            assert!(story_kind_wants("switch", &got));
+        }
+        for op in [
+            "switch provider=codex step=escape",
+            "launch-gated provider=codex source=switch",
+            "digest-written provider=claude session=s1",
+            "pair-offer active=false",
+            "resync provider=claude session=s1",
+        ] {
+            let l = format!("[2026-11-07T09:00:00.000Z] [agent-switch] op={}", op);
+            assert!(sel(&l).is_none(), "left out: {}", op);
+        }
+        let create =
+            sel("[2026-11-07T09:00:00.000Z] [session-new] op=create provider=claude named=true")
+                .expect("New session kept");
+        assert!(story_kind_wants("switch", &create));
+        assert!(!story_kind_wants("push", &create));
+
+        let set = sel("[2026-11-07T09:00:00.000Z] [agent-switch] op=live-session-set provider=claude session=s1")
+            .unwrap();
+        let start = sel("[2026-11-07T09:00:01.000Z] [agent-switch] op=start provider=codex resume_reason=latest")
+            .unwrap();
+        assert!(story_is_session_set(&set));
+        assert!(!story_is_session_set(&start));
+        let mut c = StoryFileCursor::default();
+        c.lines = vec![set.clone(), start];
+        story_cursor_prune(&mut c, "2026-11-07T10:00:00.000Z");
+        assert_eq!(
+            c.seed.as_ref().map(|s| s.text.as_str()),
+            Some(set.text.as_str()),
+            "a later op=start doesn't displace the session the window opened in"
+        );
+
+        assert!(story_trace_line_triggers(
+            "agent-switch",
+            "op=live-session-set provider=claude session=s2 source=agent-event"
+        ));
+        assert!(story_trace_line_triggers(
+            "agent-switch",
+            "op=launch-timeout provider=claude source=switch waited_ms=45010"
+        ));
+        assert!(!story_trace_line_triggers(
+            "agent-switch",
+            "op=switch provider=codex step=escape"
+        ));
+    }
 }
 
 // Trace and hook-events timestamps share one ISO-8601 UTC form
@@ -2958,7 +3055,7 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str, kinds: &[Stri
         .into_iter()
         .filter(|l| {
             kinds.is_empty()
-                || l.cat == "agent-switch"
+                || story_is_session_set(l)
                 || kinds.iter().any(|k| story_kind_wants(k, l))
         })
         .map(|l| {
@@ -90599,19 +90696,27 @@ fn validate_worklist_plan_steps(
     let mut summary_parts = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     if steps.iter().any(|s| plan_step_verb(s) == "feedback")
-        && steps.iter().any(|s| plan_step_verb(s) == "commit")
+        && steps
+            .iter()
+            .any(|s| matches!(plan_step_verb(s), "commit" | "start"))
     {
         return Err(
-            "a plan can't both send feedback and commit: both start agent turns, so post them \
-             as separate plans"
+            "a plan can't both send feedback and commit or start: each starts an agent turn, \
+             so post them as separate plans"
                 .to_string(),
         );
     }
+    // whats-my-sequence-button: a start step rides in the same approval as
+    // the plan's commits (one agent turn), and an approval's commit consent
+    // (commit_too) is record-wide. So a start may share a plan only with
+    // commits of applied items, which need no apply-and-commit consent;
+    // otherwise the started item would gain consent to commit.
+    let has_start = steps.iter().any(|s| plan_step_verb(s) == "start");
     for step in steps {
         let verb = plan_step_verb(step);
-        if verb != "drop" && verb != "commit" && verb != "feedback" {
+        if verb != "drop" && verb != "commit" && verb != "feedback" && verb != "start" {
             return Err(format!(
-                "step verb must be \"drop\", \"commit\" or \"feedback\", got {:?}",
+                "step verb must be \"drop\", \"commit\", \"feedback\" or \"start\", got {:?}",
                 verb
             ));
         }
@@ -90644,15 +90749,31 @@ fn validate_worklist_plan_steps(
             let Some(item) = worklist_plan_item(doc, id) else {
                 return Err(format!("{} is not on the board", id));
             };
+            let applied = item.get("status").and_then(|v| v.as_str()) == Some("applied");
+            let begun = item.get("begunAtMs").is_some();
             // Commit needs work to commit: the item has begun or is applied.
             if verb == "commit" {
-                let applied = item.get("status").and_then(|v| v.as_str()) == Some("applied");
-                if !applied && item.get("begunAtMs").is_none() {
+                if !applied && !begun {
                     return Err(format!(
                         "{} hasn't started, so there is nothing to commit",
                         id
                     ));
                 }
+                if has_start && !applied {
+                    return Err(format!(
+                        "{} isn't applied, so committing it needs apply-and-commit consent that \
+                         a start in the same plan would share; post the commit first and the \
+                         start as its own plan",
+                        id
+                    ));
+                }
+            }
+            // Start is for work not yet begun; a begun item resumes from its row.
+            if verb == "start" && (applied || begun) {
+                return Err(format!(
+                    "{} has already begun, so there is nothing to start",
+                    id
+                ));
             }
         }
         summary_parts.push(format!("{}={}", verb, ids.join(",")));
@@ -90718,6 +90839,42 @@ mod validate_worklist_plan_steps_tests {
         );
         assert!(check(json!([{"verb": "rename", "ids": ["a"]}])).is_err());
     }
+
+    // whats-my-sequence-button: start steps.
+    #[test]
+    fn start_steps_name_unbegun_items_and_share_only_plain_commits() {
+        let b = json!({"version": 3, "items": [
+            {"id": "a", "status": "proposed"},
+            {"id": "b", "status": "applied"},
+            {"id": "c", "status": "proposed", "begunAtMs": 1},
+            {"id": "d", "status": "proposed"}
+        ]});
+        let check = |steps: serde_json::Value| {
+            super::validate_worklist_plan_steps(steps.as_array().unwrap(), &b).map(|(s, _)| s)
+        };
+        assert!(check(json!([{"verb": "start", "ids": ["a", "d"]}])).is_ok());
+        assert!(
+            check(json!([{"verb": "commit", "ids": ["b"]}, {"verb": "start", "ids": ["a"]}]))
+                .is_ok()
+        );
+        assert!(
+            check(json!([{"verb": "drop", "ids": ["d"]}, {"verb": "start", "ids": ["a"]}])).is_ok()
+        );
+        let begun = check(json!([{"verb": "start", "ids": ["c"]}]));
+        assert!(begun.unwrap_err().contains("already begun"));
+        assert!(check(json!([{"verb": "start", "ids": ["b"]}])).is_err());
+        // c is begun but not applied: its commit needs commit_too, which a
+        // start in the same approval would share.
+        let consent =
+            check(json!([{"verb": "commit", "ids": ["c"]}, {"verb": "start", "ids": ["a"]}]));
+        assert!(consent.unwrap_err().contains("apply-and-commit"));
+        assert!(check(json!([{"verb": "commit", "ids": ["c"]}])).is_ok());
+        let fb = check(json!([
+            {"verb": "start", "ids": ["a"]},
+            {"verb": "feedback", "ids": ["d"], "text": "x"}
+        ]));
+        assert!(fb.unwrap_err().contains("separate plans"));
+    }
 }
 
 fn handle_worklist_plan<R: tauri::Runtime>(
@@ -90765,6 +90922,9 @@ fn handle_worklist_plan<R: tauri::Runtime>(
     let version = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
     let plan = serde_json::json!({
         "summary": req.get("summary").and_then(|v| v.as_str()).unwrap_or(""),
+        // whats-my-sequence-button: the plan's reasoning, Markdown, shown by
+        // the gate bar's Why? button. Optional; it goes stale with the plan.
+        "why": req.get("why").and_then(|v| v.as_str()).unwrap_or("").trim(),
         "steps": clean_steps,
         "version": version,
         "postedAtMs": unix_now_ms(),

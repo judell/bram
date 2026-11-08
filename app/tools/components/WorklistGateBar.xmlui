@@ -152,7 +152,7 @@
        withheld when a still-begun same-click partner is unselected (the host
        would refuse it, op=refuse-joint-interval), but the "Committable
        together with … — select both." line that explained it is gone (Jon,
-       2026-11-08: "we can lose this verbiage now"); What's my sequence? and
+       2026-11-08: "we can lose this verbiage now"); What's my next move? and
        its plan answer what to tick. -->
   <!-- issue-425-retire-replay (Codex review): what Commit takes for two or
        more ticked items. Each row's "Will commit" assumes that item commits
@@ -352,20 +352,24 @@
       value="{window.__bramGateStrandedExitLine(gateClaim.value, gateAgent.value, gateLockTick)}" />
   </HStack>
   <!-- issue-413: the agent's recommended next steps (POST /__worklist/plan),
-       shown while they still apply to the board, with or without a
-       selection. Do recommended runs the same Drop and Commit paths as the
-       buttons below, for exactly the ids the line names; it grants nothing
-       the buttons don't. Dimmed while the agent is working, like Commit's
+       shown while they still apply to the board and two or more items are
+       ticked (whats-my-sequence-button: a sequence only matters then). Do
+       recommended runs the same Drop, Commit and Start paths as the buttons
+       below, for exactly the ids the line names; it grants nothing the
+       buttons don't. Dimmed while the agent is working, like Commit's
        caution. × dismisses. -->
   <HStack
-    when="{!!window.__bramPlanLine(gateWorklist.value)}"
+    when="{window.__bramPlanVisible(gateWorklist.value, gateSel.value)}"
     horizontalAlignment="center"
     verticalAlignment="center"
     gap="$space-2"
     paddingHorizontal="$space-2"
     paddingTop="$space-1">
     <Text fontSize="$fontSize-sm" value="{window.__bramPlanLine(gateWorklist.value)}" />
-    <Tooltip>
+    <!-- A hover only for a feedback step's text, the one thing the line
+         can't show; the reasoning is Why?'s (Jon, 2026-11-08: the old
+         summary + feedback + decide-lines hover was "total overkill"). -->
+    <Tooltip when="{!!window.__bramPlanTooltip(gateWorklist.value)}">
       <property name="tooltipTemplate">
         <Markdown maxWidth="44ch" content="{window.__bramPlanTooltip(gateWorklist.value)}" />
       </property>
@@ -376,11 +380,49 @@
         onClick="window.__bramDoRecommended(gateWorklist.value, gateClaim.value)" />
     </Tooltip>
     <Button
+      when="{!window.__bramPlanTooltip(gateWorklist.value)}"
+      label="Do recommended"
+      size="sm"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramAgentWorking(gateAgent.value)}"
+      onClick="window.__bramDoRecommended(gateWorklist.value, gateClaim.value)" />
+    <!-- whats-my-sequence-button: Why? opens the agent's reasoning for the
+         plan (its `why`, else its summary) in a modal; nothing else happens.
+         https://www.xmlui.org/docs/reference/components/ModalDialog -->
+    <Button
+      label="Why?"
+      variant="outlined"
+      size="sm"
+      tooltip="Why this order"
+      onClick="planWhyDialog.open()" />
+    <Button
       label="×"
       variant="ghost"
       size="sm"
       tooltip="Dismiss the recommendation"
       onClick="window.__bramDismissPlan()" />
+  </HStack>
+  <ModalDialog id="planWhyDialog" title="Why this order">
+    <Markdown content="{window.__bramPlanWhy(gateWorklist.value)}" />
+  </ModalDialog>
+  <!-- whats-my-sequence-button (Jon, 2026-11-08: "What's my sequence here?
+       ... put that on the surface of the app"). In the plan line's slot,
+       while two or more items are ticked and no plan is showing: it asks the
+       agent about those items, as chat, and the answer arrives as a plan on
+       this line. Dimmed while the agent works, like Do recommended, since it
+       starts a turn. -->
+  <HStack
+    when="{window.__bramShowSequenceButton(gateWorklist.value, gateSel.value)}"
+    horizontalAlignment="center"
+    verticalAlignment="center"
+    paddingHorizontal="$space-2"
+    paddingTop="$space-1">
+    <Button
+      label="What's my next move?"
+      variant="outlined"
+      size="sm"
+      tooltip="Ask the agent what order to take the ticked items in"
+      enabled="{!window.__bramAgentWorking(gateAgent.value)}"
+      onClick="window.__bramAskSequence(gateSel.value)" />
   </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"

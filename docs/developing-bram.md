@@ -470,7 +470,8 @@ live file only from where it stopped, so a refetch costs what the trace
 gained since the last one. The pane names the kinds it shows (`kinds=`) and
 gets only the lines those are told from. It refreshes when a turn starts or
 ends, and when the host sees a shown kind happen (`story-changed`, debounced:
-a commit, push, search, queue change, selection restore or gate click).
+a commit, push, search, queue change, selection restore, gate click, or a
+session change or failed agent launch).
 `[story] op=lines` records each request's cost. Before this
 (log-reads-across-trace-rotation, 2026-11-07), a relaunch blanked the Log,
 and every refetch re-read 32 MB and sent 2.6 MB to show 13 entries. Every
@@ -486,7 +487,15 @@ What reaches it is opt-in (`STORY_SHOW` in `helpers.js`, Jon's 2026-11-05 rule:
 show nothing until asked): queue messages, selection changes, gate clicks,
 pushes, your searches, and demo instances starting and stopping
 (`scripts/demo_instance.py` appends `[demo-instance]` lines to this checkout's
-trace), as of 2026-11-07. Every other kind (turns, stalls,
+trace), as of 2026-11-07. Session switches joined them the same day
+(log-tells-session-switches). A switch is told when the session actually
+changes (an `[agent-switch] op=live-session-set` naming a different session),
+and the ops just before it say why: `op=start` (another agent, with its
+`resume_reason`), `op=fresh-partner`, `op=autostart` (the resume at launch),
+or `[session-new] op=create`. A set with none of those is the Sessions tab or
+the agent itself, and is told as that. A switch expands to from → to instead
+of the single context line. Session names aren't linked: the Sessions tab has
+no per-session deep link. Every other kind (turns, stalls,
 refusals, the launch) is told but held back until someone asks for it; adding
 one is a one-word change there, plus its lines in `story_kind_wants`
 (`lib.rs`); a kind the host doesn't know yet gets every line, so it still

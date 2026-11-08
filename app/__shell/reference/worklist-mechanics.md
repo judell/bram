@@ -614,8 +614,8 @@ the discipline for completing them serially.
 
 ## Recommending next steps
 
-When you recommend Drop or Commit steps on named items ("Drop `a` and `b`,
-then Commit `c`"), also post them as a plan, so the user can approve all of
+When you recommend Drop, Commit or Start steps on named items ("Drop `a` and
+`b`, then Commit `c`"), also post them as a plan, so the user can approve all of
 them with one click instead of ticking rows button by button (#413):
 
 ```
@@ -644,6 +644,59 @@ routes.
   reasoning. Don't post a plan the user hasn't seen described.
 - An empty `steps` list clears the plan. Push, PRs and other non-board steps
   don't belong in it.
+
+**Recommending Start.** A `{"verb": "start", "ids": [...]}` step starts
+items that haven't begun, so "Commit `a`, then Start `b`" is one click:
+
+```
+{"summary": "why, in a sentence", "why": "the reasoning, Markdown", "steps": [
+  {"verb": "commit", "ids": ["a"]},
+  {"verb": "start", "ids": ["b"]}
+]}
+```
+
+- **One approval, one turn.** **Do recommended** sends the commits and starts
+  as a single `approved:` turn, each item with its own gate (`to commit`,
+  `to apply`). Handle it in order: `worklist-commit` the commit items first,
+  then make the started items' edits and `mutate op:"advance"` them. The
+  commit retires only its own ids (§Incremental claim and authorization
+  retirement), so the started items' approval survives it.
+- **The host refuses**, naming the id:
+  - a start on an item that has already begun;
+  - a start beside a commit of an item that isn't `applied`. That commit
+    needs apply-and-commit consent, which is per approval, so the started
+    item would share it. Post that commit alone, then the start.
+  - a start beside a `feedback` step: each starts an agent turn.
+
+**The plan line shows only while two or more items are ticked.** A sequence
+only matters for a multi-item selection, so a plan posted while one item (or
+none) is ticked waits, unseen, until two are. Don't post a plan for a single
+item; say the one click in chat.
+
+**Explain the plan in `why`: why this order and not another.** Markdown,
+briefly. For each ordering choice, say what would go wrong the other way:
+which lines would entangle, which commit would be refused, which work would
+be wasted. **Where the order doesn't matter, say so, and say which you'll
+do** ("the start can go first or last. We'll do it last."). Don't recite the steps, what each item is, or that work
+is done: the line already shows the steps, and "A comes first because A is
+done" explains nothing (Jon, 2026-11-08: "You tautologically recite the
+sequence, but you don't say why things are in that order. If it doesn't
+matter, then we say that it doesn't matter."). The gate bar's **Why?**
+button opens it in a modal, so the reasoning stays on the board after the
+chat scrolls away. Without it, **Why?** shows `summary`.
+
+**"What's my next move? (a, b, …)"** is what the gate bar's **What's my next
+move?** button sends, as chat, when two or more items are ticked; the
+parentheses name them. Answer with the order for those items, then post it
+as a plan with a `why`. Order by what the board shows:
+
+- commit a committable item before starting one whose `files` overlap it
+  (it would entangle);
+- finish begun work before starting proposed work;
+- recommend Drop for an item that turned out to need nothing.
+
+A step a plan can't hold (Resume, Start & commit, Push) goes in the chat
+answer as a click to make.
 
 **Recommending feedback.** When you'd tell the user to tick an item and send
 it some text as feedback ("tick `x` and send: name your prerequisites"),

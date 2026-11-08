@@ -320,7 +320,12 @@ turn; it also establishes claims for addressed feedback. Resolve can
 establish the drop claim, and advance/prune retire the affected ids.
 Respond to any per-item feedback, whatever the kind.
 
-- **Recommending Drop / Commit on named items** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
+- **Recommending Drop / Commit / Start on named items** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
+- **The user asks "What's my next move? (a, b, …)"** (the gate bar's
+  **What's my next move?** button sends that, as chat, with two or more
+  items ticked) → answer with the order for those items and post it as a
+  plan whose `why` says what would go wrong in another order, or that the
+  order doesn't matter; same section.
 
 **`/__worklist/resolve`** returns `{"kind":"approved"|"drop", "items":
 [<recorded content>]}` — execute those items; don't re-read

@@ -20332,6 +20332,58 @@ window.__bramStoryBoardLine = function (board, loaded) {
 };
 // The board's items, each with its state and its History link, for the
 // expanded entry's vertical list.
+// log-push-lists-its-commits: the commits a push carried, from the Commits
+// tab's list (/__commits: newest first along the branch, each with its
+// Worklist itemIds). The slice runs from the push's newer sha back to, not
+// including, its older one. Each row is one Markdown line: the sha linked
+// to the forge (pushed, so html_url) or the local view, the subject, and
+// its items linked to History, or "no Worklist item". null when either end
+// isn't in the list.
+window.__bramStoryPushCommits = function (commits, from, to) {
+  var list = Array.isArray(commits) ? commits : [];
+  if (!from || !to) return null;
+  var at = function (prefix) {
+    for (var i = 0; i < list.length; i++) if (String(list[i].sha || "").indexOf(prefix) === 0) return i;
+    return -1;
+  };
+  var i = at(to), j = at(from);
+  if (i < 0 || j < 0 || j <= i) return null;
+  return list.slice(i, j).map(function (c) {
+    var sha = String(c.sha || "").slice(0, 7);
+    var url = c.html_url || ("/commits?sha=" + sha);
+    var subject = String((c.commit && c.commit.message) || "").split("\n")[0];
+    var items = (c.itemIds || []).map(function (id) {
+      return "[" + id + "](/history?entry=" + encodeURIComponent(id) + ")";
+    });
+    return {
+      sha: sha,
+      md: "[" + sha + "](" + url + ") " + subject.replace(/([\[\]])/g, "\\$1") +
+        " · " + (items.length ? items.join(", ") : "no Worklist item"),
+    };
+  });
+};
+// A commit's changed files (/__commit?sha=), one row each: the path and
+// its added and removed line counts. The heading names the totals.
+window.__bramStoryCommitFiles = function (commit) {
+  var files = (commit && Array.isArray(commit.files)) ? commit.files : [];
+  return files.map(function (f) {
+    return { path: f.filename || "", added: "+" + (f.additions || 0), removed: (f.deletions || 0) > 0 ? "\u2212" + f.deletions : "" };
+  });
+};
+window.__bramStoryCommitFilesHeading = function (commit, loaded) {
+  if (!loaded && !commit) return "Files: fetching…";
+  var files = (commit && Array.isArray(commit.files)) ? commit.files : [];
+  if (!files.length) return "No changed files.";
+  var st = (commit && commit.stats) || {};
+  return "Changed " + (files.length === 1 ? "1 file" : files.length + " files") +
+    " (+" + (st.additions || 0) + " \u2212" + (st.deletions || 0) + "):";
+};
+// The heading over that list, or what to say when it can't be listed.
+window.__bramStoryPushHeading = function (rows, loaded) {
+  if (!loaded) return "Pushed commits: fetching…";
+  if (!rows) return "The pushed commits are older than the Commits list holds; the range link shows them.";
+  return rows.length === 1 ? "Pushed 1 commit:" : "Pushed " + rows.length + " commits:";
+};
 window.__bramStoryBoardItems = function (board) {
   var items = (board && Array.isArray(board.items)) ? board.items : [];
   return items.map(function (it) {
@@ -20593,6 +20645,7 @@ window.__bramStoryTell = (function () {
     function simple(t, kind, text, surprising) {
       var ep = Ep("simple", t); ep.deadline = t; ep.d = { text: text, k: kind, s: surprising };
       open.push(ep);
+      return ep;
     }
     function tick(now) {
       var due = open.filter(function (e) { return e.deadline <= now; });
@@ -20776,7 +20829,10 @@ window.__bramStoryTell = (function () {
         if (rm) s += " (" + rangeLink(rm[1].slice(0, 8), rm[2].slice(0, 8)) + ")";
         else if (/up-to-date/i.test(err)) s += "; there was nothing new to send";
         s += stage === "rebase" ? ", after a rebase onto what had been pushed meanwhile." : ".";
-        simple(t, "push", s);
+        var pep = simple(t, "push", s);
+        // log-push-lists-its-commits: the range's two ends, so an expanded
+        // push can list what it carried (__bramStoryPushCommits).
+        if (rm) { pep.d.from = rm[1]; pep.d.to = rm[2]; }
       } else {
         var lines = err.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
         var why = lines.filter(function (l) { return /^(error|fatal):/.test(l); })[0] || lines[lines.length - 1] || "git gave no error text";
@@ -21003,6 +21059,10 @@ window.__bramStoryTell = (function () {
           // For the expanded detail: when it happened (the board-then fetch
           // keys on it) and the agent and session in force at the time.
           t: o.t, agent: o.agent || null, sessionId: o.sessionId || null, sessionTitle: o.sessionTitle || null,
+          pushFrom: (o._ep && o._ep.d && o._ep.d.from) || null, pushTo: (o._ep && o._ep.d && o._ep.d.to) || null,
+          // log-push-lists-its-commits: a gate entry's commit, so an
+          // expanded commit can list the files it changed.
+          commitSha: (o.kind === "gate" && o._ep && o._ep.d && o._ep.d.sha) || null,
           message: message === null ? "No saved draft is available for this older message." : (message || "This queued message is empty."),
           context: window.__bramQueueDraftContext(draft || null),
           images: (draft && Array.isArray(draft.images)) ? draft.images : [],

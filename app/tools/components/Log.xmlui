@@ -50,9 +50,11 @@
          tab's own scroll container
          (https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region). -->
     <List data="{window.__bramStoryTell(story.value)}">
-      <!-- https://www.xmlui.org/docs/reference/components/List (emptyListTemplate) -->
+      <!-- While the story loads, a spinner; once loaded, an empty Log is
+           just empty (Jon, 2026-11-07: remove "Nothing to show yet").
+           https://www.xmlui.org/docs/reference/components/Spinner -->
       <property name="emptyListTemplate">
-        <Text color="$textColor-secondary" value="Nothing to show yet. Tell me what you'd like to see here." />
+        <Spinner when="{!story.loaded}" />
       </property>
       <!-- The time and the sentence share a baseline. A Markdown paragraph
            is <Text variant="paragraph"> (xmlui MarkdownReact.tsx), whose line
@@ -70,7 +72,7 @@
         paddingVertical-Text-paragraph="0"
         lineHeight-Text-paragraph="1.5rem"
         paddingBottom-Text-code="0">
-      <HStack gap="$space-2" paddingVertical="$space-0_5" verticalAlignment="start">
+      <HStack gap="$space-2" paddingVertical="$space-1" verticalAlignment="start">
         <!-- The time links into the Transcript at that moment
              (/transcript?at=<ms>) when the entry happened in the session
              the Transcript shows; otherwise it's plain. -->
@@ -163,6 +165,40 @@
           <VStack when="{expanded.includes($item.id)}" paddingLeft="$space-5" gap="$space-0_5">
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryEntryContext($item)}" />
+            <!-- log-push-lists-its-commits: a push lists what it carried,
+                 sliced from the Commits tab's list (/__commits, fetched only
+                 when a push is opened), one Markdown line per commit: its sha
+                 to the forge, its subject, its items to History. Small,
+                 secondary text through the paragraph's theme variables, the
+                 way the row's Theme sets its line box.
+                 https://www.xmlui.org/docs/reference/components/Markdown -->
+            <!-- A commit entry lists the files it changed (/__commit, fetched
+                 only when opened), with their line counts, the way the
+                 Commits tab's rows show +/- in color. -->
+            <DataSource id="commitFiles" url="/__commit" queryParams="{{ sha: $item.commitSha }}" when="{!!$item.commitSha}" />
+            <Text when="{!!$item.commitSha}" fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{window.__bramStoryCommitFilesHeading(commitFiles.value, commitFiles.loaded)}" />
+            <VStack when="{!!$item.commitSha}" gap="0" paddingLeft="$space-3">
+              <Items data="{window.__bramStoryCommitFiles(commitFiles.value)}">
+                <HStack gap="$space-2" verticalAlignment="center">
+                  <Text fontSize="$fontSize-xs" fontFamily="$fontFamily-monospace" color="$textColor-secondary"
+                    breakMode="anywhere" value="{$item.path}" />
+                  <Text fontSize="$fontSize-xs" fontFamily="$fontFamily-monospace" color="$color-success-700" value="{$item.added}" />
+                  <Text when="{!!$item.removed}" fontSize="$fontSize-xs" fontFamily="$fontFamily-monospace" color="$color-danger-700" value="{$item.removed}" />
+                </HStack>
+              </Items>
+            </VStack>
+            <DataSource id="pushCommits" url="/__commits" when="{!!$item.pushTo}" />
+            <Text when="{!!$item.pushTo}" fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{window.__bramStoryPushHeading(window.__bramStoryPushCommits(pushCommits.value, $item.pushFrom, $item.pushTo), pushCommits.loaded)}" />
+            <Theme fontSize-Text-paragraph="$fontSize-xs" fontSize-Text-markdown="$fontSize-xs"
+              lineHeight-Text-paragraph="1.4" textColor-Text="$textColor-secondary">
+              <VStack when="{!!$item.pushTo}" gap="0" paddingLeft="$space-3">
+                <Items data="{window.__bramStoryPushCommits(pushCommits.value, $item.pushFrom, $item.pushTo) || []}">
+                  <Markdown content="{$item.md}" openLinkInNewTab="{false}" />
+                </Items>
+              </VStack>
+            </Theme>
             <DataSource id="boardThen" url="/__worklist-history/at" queryParams="{{ ts: $item.t }}" />
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryBoardLine(boardThen.value, boardThen.loaded)}" />

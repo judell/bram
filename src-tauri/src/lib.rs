@@ -5112,21 +5112,36 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         let pending_handoff = pending_latest.is_some();
         let latest_path = pending_latest.or(ordinary_latest);
         let (sid, len) = session_change_snapshot(provider, latest_path.as_deref());
-        // Bram-level last-active state advances only with the foreground
-        // provider. Watchers also emit for inactive-provider files, so writing
-        // every observed session here would redefine "last active" as merely
-        // "last file touched" and revive the original conflation.
-        // delete-live-session-leaves-stub: with the shell at its prompt no
-        // agent is running, so this write is an exiting or failed CLI (at
-        // 2026-10-27 20:49:39 a resume that hit "No conversation found"),
-        // not the session the user is in. Don't make it the one to resume.
-        let sf = shell_foreground();
-        if current_provider(app) == Some(provider) && !(sf.seen && sf.at_prompt) {
+        // last-active-only-from-bram-evidence: this path no longer writes the
+        // last-active record. The newest session file can't say whose it is:
+        // on 2026-11-07 a Claude session started outside Bram's terminal
+        // (20:16) became the newest file, the next launch's startup seed
+        // recorded it here (20:21:32.797) and autostart resumed it. The record
+        // now advances only on evidence the session is Bram's: a resume,
+        // switch or New session Bram ran (resync, OpenCode and Antigravity
+        // resumes) and the token-checked /__agent/session report from the agent
+        // in Bram's terminal (Claude, Codex, Antigravity), which also covers an
+        // id change such as Claude's /clear. What this inference would have
+        // written is traced, so a case only it covered shows up here rather
+        // than as a wrong resume.
+        if current_provider(app) == Some(provider) && bram_trace_enabled() {
             if let Some(session_id) = latest_path
                 .as_deref()
                 .and_then(|path| session_id_for_path(provider, path))
             {
-                remember_last_active_session(app, provider, &session_id);
+                let recorded = read_last_active_session(app).map(|r| r.session_id);
+                if recorded.as_deref() != Some(session_id.as_str()) {
+                    append_bram_trace_line(
+                        app,
+                        "agent-switch",
+                        &format!(
+                            "op=remember-last-active-skipped reason=inferred provider={} session={} recorded={}",
+                            session_provider_label(provider),
+                            session_id,
+                            recorded.as_deref().unwrap_or("")
+                        ),
+                    );
+                }
             }
         }
         merge_json_object_fields(

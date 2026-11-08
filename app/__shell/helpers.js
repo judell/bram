@@ -5548,8 +5548,10 @@ window.__bramSelectionTakeLine = function (pred, sel, board) {
     return "Together, Commit takes these files whole: " + take +
       (un.length ? ", including +" + ua + " \u2212" + ur + " no item wrote" : "") + ".";
   }
-  return "Together, Commit takes only these items' own lines: " + take +
-    " (shared with " + window.__bramNameList(pred.entangledWith || []) + ").";
+  // Taking only the items' own lines is the ordinary case, and says nothing
+  // (Jon, 2026-11-08: "we can lose this verbiage now"). The two lines above
+  // stay: each warns of something a click would otherwise do unseen.
+  return "";
 };
 
 // Removed-line ownership for one path ({startLine, endLine, itemId | itemIds},

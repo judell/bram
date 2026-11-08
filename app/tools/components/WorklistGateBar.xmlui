@@ -148,21 +148,12 @@
   <ChangeListener
     listenTo="{(gateSel.value || []).join(',')}"
     onDidChange="window.__bramW2ResetStartMode()" />
-  <!-- gate-withholds-futile-joint-commit-offer, commit side: when Commit is
-       withheld because a still-begun same-click partner is unselected, say
-       so as an instruction — the host would refuse this selection every
-       time (op=refuse-joint-interval), so the missing button must read as
-       guidance, not regression (the __bramItemShareBlockers precedent). -->
-  <HStack
-    when="{(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value) || []).length > 0}"
-    horizontalAlignment="center"
-    paddingHorizontal="$space-8"
-    paddingTop="$space-1">
-    <Text
-      fontSize="$fontSize-sm"
-      color="$textColor-secondary"
-      value="{'Committable together with ' + window.__bramNameList(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)) + ' — select both.'}" />
-  </HStack>
+  <!-- gate-withholds-futile-joint-commit-offer, commit side: Commit is still
+       withheld when a still-begun same-click partner is unselected (the host
+       would refuse it, op=refuse-joint-interval), but the "Committable
+       together with … — select both." line that explained it is gone (Jon,
+       2026-11-08: "we can lose this verbiage now"); What's my sequence? and
+       its plan answer what to tick. -->
   <!-- issue-425-retire-replay (Codex review): what Commit takes for two or
        more ticked items. Each row's "Will commit" assumes that item commits
        alone; together they can route differently (both owners of a file

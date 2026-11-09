@@ -974,17 +974,45 @@
     if (!p || !n || /[.?!]["'\u201d\u2019)\]]*$/.test(p)) return n;
     return /^[A-Z][a-z]/.test(n) ? n.charAt(0).toLowerCase() + n.slice(1) : n;
   };
+  // A pause inside a question: whisper closes the window with ? (or !) and
+  // opens the next with a capital. When the next part itself ends in ? or
+  // opens with a continuation word, drop the earlier ?/! and lowercase the
+  // capital (capital-then-lowercase only, so I, I'm and acronyms stay), so
+  // the two read as one sentence. A boundary ending in . is never touched.
+  // Known limit: a real question followed by a new sentence that opens with
+  // a listed word ("Is it ready? The build says so.") is merged wrongly;
+  // the closed list is the trade.
+  const CONTINUATION_WORDS = new Set([
+    "what", "that", "which", "who", "whom", "whose", "how", "when", "where", "why",
+    "whether", "if", "and", "but", "or", "so", "to", "of", "in", "on", "for", "with",
+    "the", "a", "an",
+  ]);
+  const QUESTION_END = /[?!](["'\u201d\u2019)\]]*)$/;
+  const joinQuestionAcrossPause = (prev, next) => {
+    const p = String(prev || "").trim();
+    const n = String(next || "").trim();
+    if (!p || !n || !QUESTION_END.test(p) || !/^[A-Z][a-z]/.test(n)) return null;
+    const first = n.split(/\s+/)[0].toLowerCase().replace(/[^a-z']/g, "");
+    const continues = /\?["'\u201d\u2019)\]]*$/.test(n) || CONTINUATION_WORDS.has(first);
+    if (!continues) return null;
+    return {
+      prev: p.replace(QUESTION_END, "$1"),
+      next: n.charAt(0).toLowerCase() + n.slice(1),
+    };
+  };
   const joinWindows = (list) => {
     let out = "";
     for (const part of list || []) {
       const t = String(part || "").trim();
       if (!t) continue;
-      out = out ? out + " " + lowerAfterPause(out, t) : t;
+      if (!out) { out = t; continue; }
+      const q = joinQuestionAcrossPause(out, t);
+      out = q ? q.prev + " " + q.next : out + " " + lowerAfterPause(out, t);
     }
     return out;
   };
 
-  const api = { engines, joinWindows, lowerAfterPause, createLoop, createField, attach, LIVE_PAUSE_MS };
+  const api = { engines, joinWindows, lowerAfterPause, joinQuestionAcrossPause, createLoop, createField, attach, LIVE_PAUSE_MS };
   root.BramDictation = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

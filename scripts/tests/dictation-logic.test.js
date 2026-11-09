@@ -265,6 +265,19 @@ test("joinWindows lowercases a capital after a mid-sentence pause and trims", ()
   assert.strictEqual(j(["", "  First", "Second"]), "First second");
 });
 
+test("joinWindows joins a question across a pause, and only then", () => {
+  const j = BramDictation.joinWindows;
+  assert.strictEqual(
+    j(["Can you just write down?", "What the agent on that machine will need to know to recreate the Zed config that I have here?"]),
+    "Can you just write down what the agent on that machine will need to know to recreate the Zed config that I have here?",
+  );
+  assert.strictEqual(j(["Is it ready?", "Yes."]), "Is it ready? Yes.");
+  assert.strictEqual(j(["Wait!", "And then"]), "Wait and then");
+  assert.strictEqual(j(["It ended.", "What happened?"]), "It ended. What happened?");
+  assert.strictEqual(j(["Can you?", "I think so"]), "Can you? I think so");
+  assert.strictEqual(j(['He asked "why?"', "But how"]), 'He asked "why" but how');
+});
+
 (async () => {
   let failed = 0;
   for (const { name, fn } of tests) {

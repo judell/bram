@@ -616,6 +616,10 @@ Rules:
   with `--body-file` in the next, never both in one command — the guard
   runs before the command, so a body written by the same command can't
   be checked.
+- **A PR may take the details-summary form:** the user's own opener
+  above a `<details>` fold whose `<summary>` is the signature → read
+  `.claude/bram-reference/environment.md` (§Pull requests in
+  details-summary form) first. Never write the opener yourself.
 - Commit messages don't take the forge signature (they carry an author
   field), but a commit message another session will read should still
   say who wrote it and from which build.

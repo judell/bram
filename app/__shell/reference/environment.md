@@ -140,6 +140,40 @@ the version field of `GET /__app-info` on the loopback port. If neither
 is available — an old seed, no running instance — say so in the report
 rather than omitting the version silently.
 
+## Pull requests in details-summary form
+
+A PR description can follow Simon Willison's
+[details-summary](https://simonwillison.net/2026/Nov/9/details-summary/)
+form (judell/bram#484): a short opener a person wrote stays visible, and
+the agent's full description is folded below it. Offer it when the user
+asks you to file a PR. A plain body that opens with the signature stays
+valid.
+
+- **The opener is the user's, verbatim.** Ask for it, or quote what they
+  already said about this PR. Never draft or polish it. Above the fold
+  it reads as human judgement, and nothing can tell who wrote it. Keep
+  it a sentence or two: the guards refuse an opener over 600 characters.
+- **The `<summary>` is your full signature line.** It stays visible when
+  the fold is closed, and it already names the agent and model. The
+  guards accept the body when the first `<details>` block's `<summary>`
+  is a valid signature for this checkout.
+- **Everything you wrote goes inside the fold**, in Markdown, after a
+  blank line, or GitHub won't render it.
+- Build the body file in its own step and post it with `--body-file`, as
+  for any forge write.
+
+```markdown
+<the user's opener, verbatim>
+
+<details>
+<summary>Jon's Claude (Bram 0.8.5, main thread, Opus 5.5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):</summary>
+
+## What changed
+
+…
+</details>
+```
+
 ## Resource-heavy test suites
 
 When running a multi-worker browser test suite (Playwright, or anything

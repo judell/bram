@@ -3351,11 +3351,24 @@ function __bramPlanSteps(board) {
 // issue-420: once per plan, so a plan the host served but nobody saw can be
 // told apart from one the host withheld (op=plan-withheld, host side).
 var __bramPlanShown = {};
+// plan-line-shows-feedback-text: the opening of what a feedback step will
+// send, so the line says what the words are. First maxWords (default 8)
+// words, whitespace collapsed, "…" when cut, in curly quotes; "" when empty.
+window.__bramPlanExcerpt = function (text, maxWords) {
+  var words = String(text == null ? "" : text).trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "";
+  var n = maxWords > 0 ? maxWords : 8;
+  var cut = words.length > n;
+  return "\u201C" + words.slice(0, n).join(" ") + (cut ? "\u2026" : "") + "\u201D";
+};
 window.__bramPlanLine = function (board) {
   var steps = __bramPlanSteps(board);
   var parts = steps.map(function (s) {
     var ids = (s.ids || []).join(", ");
-    if (s.verb === "feedback") return "Send feedback to " + ids;
+    if (s.verb === "feedback") {
+      var quote = window.__bramPlanExcerpt(s.text);
+      return "Send feedback to " + ids + (quote ? ": " + quote : "");
+    }
     var verb = s.verb === "drop" ? "Drop" : s.verb === "commit" ? "Commit"
       : s.verb === "start" ? "Start" : String(s.verb || "");
     return verb + " " + ids;

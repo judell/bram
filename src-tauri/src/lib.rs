@@ -820,6 +820,26 @@ fn parse_cli_flags() {
             );
             std::process::exit(0);
         }
+        // issue-483-task-candidates-report: the same report as
+        // GET /__tasks/candidates, headless (Claude and Codex sessions by
+        // root; the route also reads OpenCode and Antigravity).
+        "--task-candidates" => {
+            let Some(dir) = args.get(2) else {
+                eprintln!("bram: --task-candidates requires a project root path");
+                std::process::exit(1);
+            };
+            let root = Path::new(dir);
+            if !root.is_dir() {
+                eprintln!("bram: {} is not a directory", dir);
+                std::process::exit(1);
+            }
+            let report = task_candidates_for_cli(root);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
+            );
+            std::process::exit(0);
+        }
         s if is_launch_flag(s) => {}
         s if s.starts_with('-') => {
             eprintln!("bram: unknown option '{}'", s);
@@ -88859,6 +88879,18 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body.into_bytes());
     }
 
+    // /__tasks/candidates[?all=1] — issue-483-task-candidates-report: the
+    // read-only report of recurring shell commands across this project's
+    // agent sessions. `bram --task-candidates <root>` prints the same JSON.
+    if path == "__tasks/candidates" {
+        let all = query.split('&').any(|p| p == "all=1");
+        return (
+            200,
+            "application/json; charset=utf-8",
+            task_candidates_route(app, all),
+        );
+    }
+
     // /__story/lines?since=<ISO> — issue-473-readable-launch-log: the lines
     // the Status tab's Log narrator (helpers.js) tells episodes from. The host
     // only selects; the pane does the telling, so wording changes are a pane
@@ -108388,5 +108420,1609 @@ mod index_lock_retry_tests {
         );
         assert_eq!(calls, 1);
         assert!(!index_lock_gave_up(&out.unwrap_err()));
+    }
+}
+
+// --- issue-483-task-candidates-report ----------------------------------
+//
+// Read-only report: which shell commands recur across this project's agent
+// sessions, after Bram's own traffic, forge/git traffic and read-only
+// investigation are set aside. `task_candidates_core` is pure (no filesystem,
+// no AppHandle); the wrappers below gather steps from session files.
+
+#[derive(Clone, Debug)]
+struct TaskStep {
+    // One raw shell command as the transcript shows it (a tool call).
+    command: String,
+    agent: String,
+    session: String,
+    ts_ms: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TaskSpelling {
+    text: String,
+    runs: usize,
+    name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TaskCandidate {
+    key: String,
+    runs: usize,
+    sessions: usize,
+    agents: Vec<String>,
+    first_seen_ms: i64,
+    last_seen_ms: i64,
+    spellings: Vec<TaskSpelling>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TaskCandidatesReport {
+    commands: usize,
+    steps: usize,
+    sessions: usize,
+    excluded: [usize; 4], // bramProtocol, forge, git, shell
+    candidates: Vec<TaskCandidate>,
+    excluded_steps: Vec<(String, &'static str, usize)>,
+}
+
+const TASK_BUCKETS: [&str; 4] = ["bramProtocol", "forge", "git", "shell"];
+const TASK_MIN_RUNS: usize = 3;
+const TASK_SPELLINGS_MAX: usize = 8;
+const TASK_EXCLUDED_STEPS_MAX: usize = 200;
+const TASK_CANDIDATES_MAX: usize = 500;
+
+// The Transcript shows single-line commands broken after `|`; undo that so a
+// pipeline stays one step. Other newlines are step boundaries.
+fn task_join_pipe_continuations(command: &str) -> String {
+    let text = command.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::new();
+    for line in text.lines() {
+        // A trailing backslash continues the command on the next line.
+        if let Some(stripped) = line.strip_suffix('\\') {
+            out.push_str(stripped);
+            out.push(' ');
+            continue;
+        }
+        out.push_str(line);
+        // A heredoc body is data, not commands: stop at the line that opens it.
+        if line.contains("<<") {
+            out.push('\n');
+            break;
+        }
+        if line.trim_end().ends_with('|') {
+            out.push(' ');
+        } else {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+// Quote-aware split on `&&`, `;` and newline. `|` and `||` are not split
+// points: a pipeline is one step.
+fn task_split_steps(command: &str) -> Vec<String> {
+    let text = task_join_pipe_continuations(command);
+    let chars: Vec<char> = text.chars().collect();
+    let mut steps: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut i = 0usize;
+    let flush = |cur: &mut String, steps: &mut Vec<String>| {
+        let t = cur.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !t.is_empty() {
+            steps.push(t);
+        }
+        cur.clear();
+    };
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' && quote != Some('\'') {
+            cur.push(ch);
+            if let Some(n) = chars.get(i + 1) {
+                cur.push(*n);
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(q) = quote {
+            cur.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            cur.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ';' || ch == '\n' {
+            flush(&mut cur, &mut steps);
+            i += 1;
+            continue;
+        }
+        if ch == '&' && chars.get(i + 1) == Some(&'&') {
+            flush(&mut cur, &mut steps);
+            i += 2;
+            continue;
+        }
+        cur.push(ch);
+        i += 1;
+    }
+    flush(&mut cur, &mut steps);
+    steps
+}
+
+// Whitespace collapsed, the absolute project root made relative. `$VAR`
+// paths are left as written.
+fn task_normalize_step(step: &str, root: &str) -> String {
+    let collapsed = step.split_whitespace().collect::<Vec<_>>().join(" ");
+    let root = root.trim_end_matches('/');
+    if root.is_empty() || root == "/" {
+        return collapsed;
+    }
+    let mut out = String::new();
+    let mut rest = collapsed.as_str();
+    while let Some(pos) = rest.find(root) {
+        let before_ok = rest[..pos]
+            .chars()
+            .last()
+            .map(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/'))
+            .unwrap_or(true);
+        let after = &rest[pos + root.len()..];
+        out.push_str(&rest[..pos]);
+        if !before_ok {
+            out.push_str(root);
+            rest = after;
+            continue;
+        }
+        if let Some(stripped) = after.strip_prefix('/') {
+            rest = stripped;
+        } else if after
+            .chars()
+            .next()
+            .map(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+            .unwrap_or(true)
+        {
+            out.push('.');
+            rest = after;
+        } else {
+            out.push_str(root);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn task_tokens(step: &str) -> Vec<&str> {
+    let mut toks: Vec<&str> = step.split_whitespace().collect();
+    // Loop and branch keywords that lead a line of a multi-line script.
+    while let Some(t) = toks.first() {
+        if matches!(*t, "do" | "then" | "else" | "elif") && toks.len() > 1 {
+            toks.remove(0);
+        } else {
+            break;
+        }
+    }
+    // Wrappers are not the command: leading VAR=value assignments, `env`
+    // with its `-u VAR` / VAR=value args, sudo, time, nice, caffeinate, nohup.
+    let is_assign = |t: &str| {
+        t.split_once('=')
+            .map(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(false)
+            && !t.starts_with('-')
+    };
+    loop {
+        let Some(t) = toks.first().copied() else {
+            break;
+        };
+        if toks.len() <= 1 {
+            break;
+        }
+        let tbase = t.rsplit('/').next().unwrap_or(t);
+        if is_assign(t) {
+            // `F=$(sqlite3 …)`: the command is inside the substitution.
+            let value = t.split_once('=').map(|(_, v)| v).unwrap_or("");
+            match value.strip_prefix("$(").or_else(|| value.strip_prefix('`')) {
+                Some(rest) if !rest.is_empty() => toks[0] = rest,
+                _ => {
+                    toks.remove(0);
+                }
+            }
+        } else if tbase == "env" {
+            toks.remove(0);
+            while let Some(a) = toks.first().copied() {
+                if toks.len() <= 1 {
+                    break;
+                }
+                if a == "-u" && toks.len() > 2 {
+                    toks.drain(0..2);
+                } else if a.starts_with('-') || is_assign(a) {
+                    toks.remove(0);
+                } else {
+                    break;
+                }
+            }
+        } else if matches!(tbase, "sudo" | "time" | "nice" | "caffeinate" | "nohup") {
+            toks.remove(0);
+            while let Some(a) = toks.first().copied() {
+                if toks.len() <= 1 || !a.starts_with('-') {
+                    break;
+                }
+                toks.remove(0);
+                if a == "-n" && toks.len() > 1 && toks[0].chars().all(|c| c.is_ascii_digit()) {
+                    toks.remove(0);
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    toks
+}
+
+fn task_is_bram_protocol(step: &str) -> bool {
+    let loopback = step.contains("127.0.0.1:") || step.contains("localhost:");
+    if loopback && step.contains("/__") {
+        return true;
+    }
+    if step.contains(".bram/") || step.contains(".bram-port") {
+        return true;
+    }
+    const STATE: [&str; 6] = [
+        "worklist.json",
+        "worklist-drafts",
+        "worklist-history",
+        "feedback-drafts",
+        "outbound-turns",
+        "bram-traces",
+    ];
+    // Historical command text named the pre-0.8.4 state folder by its old
+    // name; this matches what agents typed, not where the folder is now.
+    let old_state = step.contains("resources/"); // state-dir: literal ok (text agents typed before 0.8.4)
+    if old_state && STATE.iter().any(|s| step.contains(s)) {
+        return true;
+    }
+    let scratch =
+        step.contains("/scratchpad/") || step.contains("/tmp/") || step.contains("/private/tmp");
+    if scratch && loopback && step.contains("curl") {
+        return true;
+    }
+    // A request body being built for one of those: `jq -n … > …/scratchpad/…`.
+    if scratch && step.contains("jq -n") && step.contains('>') {
+        return true;
+    }
+    false
+}
+
+// A path under a temp or scratch directory, or under a shell variable that
+// names one (`$S/…`, `$T/…`: the sessions' scratchpad and temp shorthands).
+fn task_is_scratch_path(tok: &str) -> bool {
+    tok.starts_with("/private/tmp/")
+        || tok.starts_with("/tmp/")
+        || tok.starts_with("/var/folders/")
+        || tok.contains("/scratchpad/")
+        || (tok.starts_with('$') && tok.contains('/'))
+}
+
+fn task_bucket(step: &str) -> Option<usize> {
+    if task_is_bram_protocol(step) {
+        return Some(0);
+    }
+    let toks = task_tokens(step);
+    let first = toks.first().copied().unwrap_or("");
+    let base = first.rsplit('/').next().unwrap_or(first);
+    if base == "gh" || base == "glab" {
+        return Some(1);
+    }
+    if base == "git" {
+        return Some(2);
+    }
+    // curl/wget/nc to this machine: Bram's routes under /__, else a local probe.
+    if matches!(base, "curl" | "wget" | "nc" | "ncat")
+        && (step.contains("127.0.0.1") || step.contains("localhost"))
+    {
+        return Some(if step.contains("/__") { 0 } else { 3 });
+    }
+    // Reads, edits, process and file chores, plumbing, inline one-liners and
+    // fragments of multi-line scripts: none is a recurring project task.
+    const SHELL: &[&str] = &[
+        "ls",
+        "cat",
+        "grep",
+        "rg",
+        "head",
+        "tail",
+        "find",
+        "wc",
+        "jq",
+        "stat",
+        "which",
+        "echo",
+        "readlink",
+        "awk",
+        "sort",
+        "uniq",
+        "cut",
+        "tr",
+        "cd",
+        "pwd",
+        "export",
+        "sed",
+        "date",
+        "hostname",
+        "lsof",
+        "ps",
+        "pgrep",
+        "pkill",
+        "kill",
+        "du",
+        "df",
+        "shasum",
+        "sha256sum",
+        "md5",
+        "cmp",
+        "diff",
+        "chmod",
+        "touch",
+        "rm",
+        "mv",
+        "cp",
+        "ln",
+        "mkdir",
+        "open",
+        "say",
+        "osascript",
+        "sleep",
+        "true",
+        "false",
+        "xattr",
+        "file",
+        "basename",
+        "dirname",
+        "realpath",
+        "uname",
+        "sw_vers",
+        "caffeinate",
+        "defaults",
+        "launchctl",
+        "security",
+        "pbcopy",
+        "pbpaste",
+        "tee",
+        "xargs",
+        "column",
+        "paste",
+        "comm",
+        "for",
+        "while",
+        "until",
+        "if",
+        "case",
+        "done",
+        "fi",
+        "esac",
+        "exit",
+        "printf",
+        "nl",
+        "test",
+        "set",
+        "unset",
+        "trap",
+        "read",
+        "local",
+        "wait",
+        "const",
+        "let",
+        "var",
+        "await",
+        "return",
+        "source",
+        "[",
+        "[[",
+        "break",
+        "continue",
+        "do",
+        "then",
+        "else",
+        "elif",
+        "command",
+        "type",
+        "sqlite3",
+    ];
+    if SHELL.contains(&base) {
+        return Some(3);
+    }
+    // A helper left in a scratch or temp directory is not a project task.
+    // Checked on the command itself and on the script an interpreter runs
+    // (`node /private/tmp/x.mjs`, `python3 $S/harness/serve.py`): the
+    // recipe key would otherwise be that path, and xmlui's report had 7
+    // such rows of 40 (tasks-page-prioritizes, 2026-11-09).
+    if task_is_scratch_path(first) {
+        return Some(3);
+    }
+    if matches!(
+        base,
+        "python"
+            | "python3"
+            | "bash"
+            | "sh"
+            | "zsh"
+            | "node"
+            | "pwsh"
+            | "powershell"
+            | "ruby"
+            | "perl"
+            | "deno"
+            | "bun"
+            | "uv"
+    ) {
+        if let Some(script) = toks.iter().skip(1).find(|t| !t.starts_with('-')) {
+            if task_is_scratch_path(script) {
+                return Some(3);
+            }
+        }
+    }
+    // Not a plausible command word (leaked fragments like `i<rs.length`).
+    if first.is_empty()
+        || first.starts_with('-')
+        || !first
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '~' | '-'))
+    {
+        return Some(3);
+    }
+    if step.contains("<<") {
+        return Some(3);
+    }
+    // Inline one-liners: `python3 -I -c …`, `node -e …`, `bash -c …`.
+    if matches!(
+        base,
+        "python" | "python3" | "node" | "perl" | "ruby" | "bash" | "sh" | "zsh"
+    ) && toks
+        .iter()
+        .skip(1)
+        .take_while(|t| t.starts_with('-'))
+        .any(|t| matches!(*t, "-c" | "-e" | "-ce" | "-pe" | "-ne"))
+    {
+        return Some(3);
+    }
+    None
+}
+
+fn task_looks_like_path(tok: &str) -> bool {
+    tok.contains('/')
+        || [".sh", ".py", ".js", ".ts", ".rb", ".ps1", ".pl", ".mjs"]
+            .iter()
+            .any(|e| tok.ends_with(e))
+}
+
+fn task_strip_dot_slash(tok: &str) -> String {
+    match tok.strip_prefix("./") {
+        Some(rest) if rest.contains('/') => rest.to_string(),
+        _ => tok.to_string(),
+    }
+}
+
+fn task_recipe_key(step: &str) -> String {
+    let toks = task_tokens(step);
+    let Some(first) = toks.first().copied() else {
+        return String::new();
+    };
+    let base = first.rsplit('/').next().unwrap_or(first);
+    let non_flag = |from: usize| -> Option<&str> {
+        toks.iter()
+            .skip(from)
+            .copied()
+            .find(|t| !t.starts_with('-'))
+    };
+    match base {
+        "python" | "python3" | "bash" | "sh" | "zsh" | "node" | "pwsh" | "powershell" | "ruby"
+        | "perl" | "deno" | "bun" | "uv" => {
+            let mut i = 1;
+            while i < toks.len() {
+                let t = toks[i];
+                if t == "--check" && base == "node" {
+                    return "node --check".to_string();
+                }
+                if t == "-m" {
+                    return match toks.get(i + 1) {
+                        Some(m) => format!("{} -m {}", first, m),
+                        None => first.to_string(),
+                    };
+                }
+                if t == "-c" || t == "-e" || t == "-Command" {
+                    return format!("{} {}", first, t);
+                }
+                if t == "-File" {
+                    if let Some(f) = toks.get(i + 1) {
+                        return task_strip_dot_slash(f);
+                    }
+                }
+                if t.starts_with('-') {
+                    i += 1;
+                    continue;
+                }
+                if task_looks_like_path(t) {
+                    return task_strip_dot_slash(t);
+                }
+                return first.to_string();
+            }
+            first.to_string()
+        }
+        "cargo" => {
+            let sub = toks
+                .iter()
+                .skip(1)
+                .copied()
+                .find(|t| !t.starts_with('-') && !t.starts_with('+'));
+            match sub {
+                Some(s) => format!("cargo {}", s),
+                None => "cargo".to_string(),
+            }
+        }
+        "npm" | "pnpm" | "yarn" => match non_flag(1) {
+            Some("run") | Some("run-script") => match toks
+                .iter()
+                .skip(1)
+                .copied()
+                .filter(|t| !t.starts_with('-'))
+                .nth(1)
+            {
+                Some(s) => format!("{} run {}", base, s),
+                None => format!("{} run", base),
+            },
+            Some(s) => format!("{} {}", base, s),
+            None => base.to_string(),
+        },
+        "make" | "just" | "task" | "doit" | "gmake" => match non_flag(1) {
+            Some(s) => format!("{} {}", base, s),
+            None => base.to_string(),
+        },
+        _ => {
+            // Tools that take a subcommand keep tool + first non-flag arg;
+            // every other tool keys as its first word only.
+            const SUBCOMMAND_TOOLS: &[&str] = &[
+                "npx",
+                "docker",
+                "docker-compose",
+                "kubectl",
+                "gh",
+                "glab",
+                "git",
+                "brew",
+                "pip",
+                "pip3",
+                "poetry",
+                "conda",
+                "go",
+                "dotnet",
+                "gradle",
+                "mvn",
+                "rake",
+                "bundle",
+                "mix",
+                "swift",
+                "xcodebuild",
+                "tauri",
+                "bram",
+            ];
+            if SUBCOMMAND_TOOLS.contains(&base) {
+                let name = task_strip_dot_slash(first);
+                return match toks
+                    .iter()
+                    .skip(1)
+                    .copied()
+                    .find(|t| !t.starts_with('-'))
+                    .filter(|t| !task_looks_like_path(t))
+                {
+                    Some(sub) => format!("{} {}", name, sub),
+                    None => name,
+                };
+            }
+            if first.contains('/') {
+                return task_strip_dot_slash(first);
+            }
+            first.to_string()
+        }
+    }
+}
+
+// Cut a command at its first `|` outside quotes: the pipeline tail is output
+// processing, not the task.
+fn task_cut_pipeline(text: &str) -> String {
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            out.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch == '|' {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn task_slug(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let mut out = out.trim_matches('-').to_string();
+    if out.len() > 40 {
+        out.truncate(40);
+        out = out.trim_matches('-').to_string();
+    }
+    out
+}
+
+fn task_is_ident(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+// Filter / codec words inside ffmpeg-style option values, in order.
+fn task_media_words(toks: &[&str]) -> Vec<String> {
+    const FLAGS: [&str; 12] = [
+        "-af",
+        "-vf",
+        "-filter_complex",
+        "-lavfi",
+        "-c:v",
+        "-c:a",
+        "-codec:a",
+        "-codec:v",
+        "-filter:a",
+        "-filter:v",
+        "-acodec",
+        "-vcodec",
+    ];
+    let mut words = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if !FLAGS.contains(t) {
+            continue;
+        }
+        let Some(val) = toks.get(i + 1) else { continue };
+        let val = val.trim_matches(|c| c == '"' || c == '\'');
+        for part in val.split(|c| c == ',' || c == ';') {
+            let mut part = part;
+            while part.starts_with('[') {
+                match part.find(']') {
+                    Some(p) => part = &part[p + 1..],
+                    None => break,
+                }
+            }
+            let name = part.split('=').next().unwrap_or("");
+            if task_is_ident(name) {
+                words.push(name.to_string());
+            }
+        }
+    }
+    words
+}
+
+// The last one or two URL path segments that are words.
+fn task_url_words(toks: &[&str]) -> Vec<String> {
+    for t in toks.iter().skip(1) {
+        let t = t.trim_matches(|c| c == '"' || c == '\'');
+        let is_url = t.contains("://") || (t.starts_with('$') && t.contains('/'));
+        if !is_url {
+            continue;
+        }
+        let t = t.split(['?', '#']).next().unwrap_or("");
+        let mut segs: Vec<&str> = t.split('/').collect();
+        if !segs.is_empty() {
+            segs.remove(0); // scheme or $BASE
+        }
+        let words: Vec<String> = segs
+            .into_iter()
+            .filter(|s| {
+                !s.is_empty()
+                    && !s.contains(':')
+                    && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            })
+            .map(|s| s.to_string())
+            .collect();
+        let skip = words.len().saturating_sub(2);
+        return words.into_iter().skip(skip).collect();
+    }
+    Vec::new()
+}
+
+// A suggested, overwriteable name for one spelling of a cluster: the
+// flattened key plus up to two distinctive words from the spelling.
+fn task_suggest_name(key: &str, text: &str) -> String {
+    let words: Vec<&str> = key.split_whitespace().collect();
+    // Flatten the key.
+    let flat_words: Vec<&str> =
+        if words.len() >= 3 && matches!(words[0], "python" | "python3") && words[1] == "-m" {
+            words[2..].to_vec()
+        } else {
+            words.clone()
+        };
+    let flat: Vec<String> = flat_words
+        .iter()
+        .map(|w| {
+            let w = w.trim_start_matches('-');
+            let w = w.rsplit('/').next().unwrap_or(w);
+            match w.rsplit_once('.') {
+                Some((stem, ext))
+                    if !stem.is_empty()
+                        && ext.len() <= 4
+                        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                        && words.len() == 1 =>
+                {
+                    stem.to_string()
+                }
+                _ => w.to_string(),
+            }
+        })
+        .collect();
+    let cut = task_cut_pipeline(text);
+    let mut toks: Vec<&str> = task_tokens(&cut);
+    // Drop redirections.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skip_next = false;
+    for t in toks.drain(..) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let digits_gt = t.trim_start_matches(|c: char| c.is_ascii_digit());
+        if digits_gt.starts_with('>') || digits_gt.starts_with('<') || t == "&" {
+            if digits_gt == ">" || digits_gt == "<" || digits_gt == ">>" {
+                skip_next = true;
+            }
+            continue;
+        }
+        kept.push(t);
+    }
+    let toks = kept;
+    let tool = words
+        .first()
+        .map(|w| w.rsplit('/').next().unwrap_or(w))
+        .unwrap_or("");
+    let mut extra: Vec<String> = Vec::new();
+    if matches!(tool, "ffmpeg" | "ffprobe" | "ffplay" | "sox") {
+        extra = task_media_words(&toks);
+    } else if matches!(tool, "curl" | "wget") {
+        extra = task_url_words(&toks);
+    } else if key == "python3 -m unittest" || key == "python -m unittest" {
+        if let Some(pos) = toks.iter().position(|t| *t == "unittest") {
+            if let Some(m) = toks.iter().skip(pos + 1).find(|t| !t.starts_with('-')) {
+                extra.push(m.to_string());
+            }
+        }
+    } else if key == "node --check" {
+        if let Some(f) = toks.iter().skip(1).find(|t| !t.starts_with('-')) {
+            let base = f.rsplit('/').next().unwrap_or(f);
+            extra.push(base.split('.').next().unwrap_or(base).to_string());
+        }
+    } else {
+        // Skip the tokens that spell the key itself.
+        let mut consumed = 1;
+        for (i, t) in toks.iter().take(4).enumerate() {
+            let stripped = task_strip_dot_slash(t);
+            if words.contains(t) || words.contains(&stripped.as_str()) {
+                consumed = i + 1;
+            }
+        }
+        let rest = &toks[consumed.min(toks.len())..];
+        let mut i = 0;
+        while i < rest.len() && extra.len() < 2 {
+            let t = rest[i];
+            i += 1;
+            let plain = |s: &str| {
+                !s.contains('/')
+                    && !s.starts_with('$')
+                    && !s.contains(['"', '\'', '=', '.', '*', '(', ')', '`'])
+                    && !s.chars().all(|c| c.is_ascii_digit())
+            };
+            if let Some(flag) = t.strip_prefix("--") {
+                if flag.is_empty() || flag.contains('=') {
+                    continue;
+                }
+                // A flag followed by a path, variable, number or quoted
+                // string has a value: not a distinctive word.
+                let valued = rest.get(i).is_some_and(|n| {
+                    !n.starts_with('-') && (!plain(n) || n.chars().all(|c| c.is_ascii_digit()))
+                });
+                if valued {
+                    i += 1;
+                } else if flag.len() > 2 && task_is_ident(&flag.replace('-', "_")) {
+                    extra.push(flag.to_string());
+                }
+                continue;
+            }
+            if t.starts_with('-') {
+                // Short flags carry no name; skip a value they may take.
+                if rest
+                    .get(i)
+                    .is_some_and(|n| !n.starts_with('-') && !plain(n))
+                {
+                    i += 1;
+                }
+                continue;
+            }
+            if plain(t) && task_is_ident(&t.replace('-', "_")) {
+                extra.push(t.to_string());
+            }
+        }
+    }
+    extra.truncate(2);
+    let mut name = flat.join("-");
+    for e in &extra {
+        name.push('-');
+        name.push_str(e);
+    }
+    let slug = task_slug(&name);
+    if slug.is_empty() {
+        "task".to_string()
+    } else {
+        slug
+    }
+}
+
+#[derive(Default)]
+struct TaskCluster {
+    runs: usize,
+    sessions: std::collections::BTreeSet<String>,
+    agents: std::collections::BTreeSet<String>,
+    first: i64,
+    last: i64,
+    spellings: std::collections::HashMap<String, usize>,
+}
+
+fn task_candidates_core(root: &str, steps: &[TaskStep]) -> TaskCandidatesReport {
+    let mut report = TaskCandidatesReport::default();
+    let mut sessions: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut clusters: std::collections::HashMap<String, TaskCluster> =
+        std::collections::HashMap::new();
+    let mut excluded: std::collections::HashMap<(String, usize), usize> =
+        std::collections::HashMap::new();
+    for rec in steps {
+        report.commands += 1;
+        sessions.insert(rec.session.as_str());
+        for raw in task_split_steps(&rec.command) {
+            report.steps += 1;
+            let text = task_normalize_step(&raw, root);
+            if let Some(b) = task_bucket(&text) {
+                report.excluded[b] += 1;
+                *excluded.entry((text, b)).or_insert(0) += 1;
+                continue;
+            }
+            let key = task_recipe_key(&text);
+            if key.is_empty() {
+                continue;
+            }
+            let c = clusters.entry(key).or_default();
+            c.runs += 1;
+            c.sessions.insert(rec.session.clone());
+            c.agents.insert(rec.agent.clone());
+            if rec.ts_ms > 0 {
+                if c.first == 0 || rec.ts_ms < c.first {
+                    c.first = rec.ts_ms;
+                }
+                if rec.ts_ms > c.last {
+                    c.last = rec.ts_ms;
+                }
+            }
+            *c.spellings.entry(text).or_insert(0) += 1;
+        }
+    }
+    report.sessions = sessions.len();
+    for (key, c) in clusters {
+        if c.runs < TASK_MIN_RUNS {
+            continue;
+        }
+        let mut spellings: Vec<TaskSpelling> = c
+            .spellings
+            .into_iter()
+            .map(|(text, runs)| TaskSpelling {
+                name: task_suggest_name(&key, &text),
+                text,
+                runs,
+            })
+            .collect();
+        spellings.sort_by(|a, b| b.runs.cmp(&a.runs).then_with(|| a.text.cmp(&b.text)));
+        spellings.truncate(TASK_SPELLINGS_MAX);
+        // Two spellings with one name get -2, -3 in spelling order.
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for sp in spellings.iter_mut() {
+            let n = seen.entry(sp.name.clone()).or_insert(0);
+            *n += 1;
+            if *n > 1 {
+                sp.name = format!("{}-{}", sp.name, n);
+            }
+        }
+        report.candidates.push(TaskCandidate {
+            key,
+            runs: c.runs,
+            sessions: c.sessions.len(),
+            agents: c.agents.into_iter().collect(),
+            first_seen_ms: c.first,
+            last_seen_ms: c.last,
+            spellings,
+        });
+    }
+    report
+        .candidates
+        // Ranked by breadth, not volume (tasks-page-prioritizes, 2026-11-09):
+        // the command typed many ways in many sessions is the one a saved
+        // command fixes; 21 runs of a one-afternoon loop in one session are
+        // not. Sessions, then ways typed, then runs.
+        .sort_by(|a, b| {
+            b.sessions
+                .cmp(&a.sessions)
+                .then_with(|| b.spellings.len().cmp(&a.spellings.len()))
+                .then_with(|| b.runs.cmp(&a.runs))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+    report.candidates.truncate(TASK_CANDIDATES_MAX);
+    let mut ex: Vec<(String, &'static str, usize)> = excluded
+        .into_iter()
+        .map(|((t, b), n)| (t, TASK_BUCKETS[b], n))
+        .collect();
+    ex.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    ex.truncate(TASK_EXCLUDED_STEPS_MAX);
+    report.excluded_steps = ex;
+    report
+}
+
+fn task_report_json(
+    root: &str,
+    report: &TaskCandidatesReport,
+    runner: serde_json::Value,
+    all: bool,
+    ms: u128,
+) -> serde_json::Value {
+    let candidates: Vec<serde_json::Value> = report
+        .candidates
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "key": c.key,
+                "runs": c.runs,
+                "sessions": c.sessions,
+                "agents": c.agents,
+                "firstSeenMs": c.first_seen_ms,
+                "lastSeenMs": c.last_seen_ms,
+                "spellings": c.spellings.iter().map(|s| serde_json::json!({
+                    "text": s.text.chars().take(400).collect::<String>(),
+                    "runs": s.runs,
+                    "name": s.name,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let mut doc = serde_json::json!({
+        "root": root,
+        "sessions": report.sessions,
+        "commands": report.commands,
+        "steps": report.steps,
+        "excluded": {
+            "bramProtocol": report.excluded[0],
+            "forge": report.excluded[1],
+            "git": report.excluded[2],
+            "shell": report.excluded[3],
+        },
+        "runner": runner,
+        "candidates": candidates,
+        "ms": ms as u64,
+    });
+    if all {
+        doc["excludedSteps"] = serde_json::Value::Array(
+            report
+                .excluded_steps
+                .iter()
+                .map(|(t, b, n)| {
+                    serde_json::json!({
+                        "text": t.chars().take(400).collect::<String>(),
+                        "bucket": b,
+                        "runs": n,
+                    })
+                })
+                .collect(),
+        );
+    }
+    doc
+}
+
+// Runner files and their parseable targets. Never shells out.
+fn task_runner_state(root: &Path) -> serde_json::Value {
+    let mut files: Vec<&str> = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
+    let mut push = |t: String| {
+        if !targets.contains(&t) {
+            targets.push(t);
+        }
+    };
+    for name in [
+        "Makefile",
+        "justfile",
+        "dodo.py",
+        "Taskfile.yml",
+        "package.json",
+    ] {
+        let path = root.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        match name {
+            "Makefile" => {
+                files.push(name);
+                for line in text.lines() {
+                    let Some((head, tail)) = line.split_once(':') else {
+                        continue;
+                    };
+                    if tail.starts_with('=') || head.is_empty() {
+                        continue;
+                    }
+                    if head.starts_with('.') || head.starts_with('\t') || head.starts_with(' ') {
+                        continue;
+                    }
+                    if head
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+                    {
+                        push(head.to_string());
+                    }
+                }
+            }
+            "justfile" => {
+                files.push(name);
+                for line in text.lines() {
+                    let Some((head, tail)) = line.split_once(':') else {
+                        continue;
+                    };
+                    if tail.starts_with('=') {
+                        continue;
+                    }
+                    let name_part = head.split_whitespace().next().unwrap_or("");
+                    let mut cs = name_part.chars();
+                    if cs.next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
+                        && name_part
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                        && !head.starts_with(' ')
+                    {
+                        push(name_part.to_string());
+                    }
+                }
+            }
+            "package.json" => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(scripts) = v.get("scripts").and_then(|s| s.as_object()) {
+                        files.push(name);
+                        for k in scripts.keys() {
+                            push(k.clone());
+                        }
+                    }
+                }
+            }
+            _ => files.push(name),
+        }
+    }
+    serde_json::json!({ "files": files, "targets": targets })
+}
+
+#[derive(Clone, Debug)]
+struct TaskSessionFile {
+    agent: String,
+    id: String,
+    path: PathBuf,
+    mtime_ms: i64,
+}
+
+fn task_mtime_ms(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+// Claude and Codex session files for a project root, from the root alone
+// (no AppHandle), so the headless CLI and the route share it.
+fn task_session_files_for_root(root: &Path) -> Vec<TaskSessionFile> {
+    let mut out: Vec<TaskSessionFile> = Vec::new();
+    let Some(home) = home_dir() else {
+        return out;
+    };
+    if let Ok(canon) = root.canonicalize() {
+        let abs = strip_unc_prefix(canon);
+        let lookup =
+            find_existing_claude_sessions_dir(&home.join(".claude").join("projects"), &abs);
+        if let Ok(entries) = std::fs::read_dir(&lookup.chosen) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mtime_ms = task_mtime_ms(&path);
+                out.push(TaskSessionFile {
+                    agent: "claude".into(),
+                    id,
+                    path,
+                    mtime_ms,
+                });
+            }
+        }
+        let cwd = canonical_path_string(root);
+        let mut paths = Vec::new();
+        let _ = collect_codex_session_paths(&home.join(".codex").join("sessions"), &mut paths);
+        for path in paths {
+            if let Ok(Some(id)) = codex_main_session_id(&path, &cwd) {
+                let mtime_ms = task_mtime_ms(&path);
+                out.push(TaskSessionFile {
+                    agent: "codex".into(),
+                    id,
+                    path,
+                    mtime_ms,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn task_is_shell_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "Bash" | "Search" | "bash" | "shell" | "exec" | "exec_command" | "shell_command"
+    )
+}
+
+// The shell commands of one session, from the Transcript's own projection
+// (not its cache: this must not disturb the live pane's window).
+fn task_steps_from_session(file: &TaskSessionFile) -> Vec<TaskStep> {
+    let Ok(text) = std::fs::read_to_string(&file.path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for turn in st_parse_lines_to_turns(&text) {
+        let ts_ms = turn
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso_to_epoch_ms)
+            .unwrap_or(file.mtime_ms);
+        let Some(entries) = turn.get("entries").and_then(|e| e.as_array()) else {
+            continue;
+        };
+        for e in entries {
+            if e.get("kind").and_then(|k| k.as_str()) != Some("tool") {
+                continue;
+            }
+            let name = e.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if !task_is_shell_tool(name) {
+                continue;
+            }
+            let cmd = e
+                .get("commandDisplay")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            // Heredoc bodies project as fenced Markdown; not a recurring command.
+            if cmd.trim().is_empty() || cmd.trim_start().starts_with("```") {
+                continue;
+            }
+            out.push(TaskStep {
+                command: cmd.to_string(),
+                agent: file.agent.clone(),
+                session: file.id.clone(),
+                ts_ms,
+            });
+        }
+    }
+    out
+}
+
+// Returns the JSON document plus (sessions, commands, clusters, excluded).
+fn task_candidates_run(
+    root: &Path,
+    extra: Vec<TaskSessionFile>,
+    all: bool,
+) -> (serde_json::Value, [usize; 4]) {
+    let started = std::time::Instant::now();
+    let mut files = task_session_files_for_root(root);
+    for f in extra {
+        if !files.iter().any(|g| g.path == f.path) {
+            files.push(f);
+        }
+    }
+    let mut steps: Vec<TaskStep> = Vec::new();
+    for f in &files {
+        steps.extend(task_steps_from_session(f));
+    }
+    let root_str = root
+        .canonicalize()
+        .map(|p| strip_unc_prefix(p).to_string_lossy().to_string())
+        .unwrap_or_else(|_| root.to_string_lossy().to_string());
+    let mut report = task_candidates_core(&root_str, &steps);
+    report.sessions = files.len();
+    let ms = started.elapsed().as_millis();
+    let doc = task_report_json(&root_str, &report, task_runner_state(root), all, ms);
+    let excluded_total: usize = report.excluded.iter().sum();
+    (
+        doc,
+        [
+            report.sessions,
+            report.commands,
+            report.candidates.len(),
+            excluded_total,
+        ],
+    )
+}
+
+fn task_candidates_for_cli(root: &Path) -> serde_json::Value {
+    task_candidates_run(root, Vec::new(), false).0
+}
+
+fn task_candidates_route<R: tauri::Runtime>(app: &AppHandle<R>, all: bool) -> Vec<u8> {
+    let started = std::time::Instant::now();
+    let Some(root) = project_root(Some(app)) else {
+        return br#"{"error":"could not resolve project root"}"#.to_vec();
+    };
+    let mut extra: Vec<TaskSessionFile> = Vec::new();
+    let others = [
+        discover_opencode_sessions(app, None),
+        discover_antigravity_sessions(app, None),
+    ];
+    for recs in others.into_iter().flatten() {
+        for rec in recs {
+            extra.push(TaskSessionFile {
+                agent: session_provider_label(rec.provider).to_string(),
+                id: rec.id,
+                mtime_ms: (rec.mtime as i64).saturating_mul(1000),
+                path: rec.path,
+            });
+        }
+    }
+    let (doc, stats) = task_candidates_run(&root, extra, all);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "tasks",
+            &format!(
+                "op=candidates sessions={} commands={} clusters={} excluded={} ms={}",
+                stats[0],
+                stats[1],
+                stats[2],
+                stats[3],
+                started.elapsed().as_millis()
+            ),
+        );
+    }
+    serde_json::to_vec(&doc).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod task_candidates_tests {
+    use super::*;
+
+    fn step(cmd: &str, session: &str) -> TaskStep {
+        TaskStep {
+            command: cmd.to_string(),
+            agent: "claude".into(),
+            session: session.into(),
+            ts_ms: 1000,
+        }
+    }
+
+    #[test]
+    fn splits_on_and_and_semicolon_not_pipes_or_quotes() {
+        assert_eq!(
+            task_split_steps("cd a && cargo test; echo done"),
+            vec!["cd a", "cargo test", "echo done"]
+        );
+        assert_eq!(
+            task_split_steps("echo 'a && b; c' && ls"),
+            vec!["echo 'a && b; c'", "ls"]
+        );
+        assert_eq!(
+            task_split_steps("cat f | grep x | wc -l"),
+            vec!["cat f | grep x | wc -l"]
+        );
+        // The Transcript's pipe-broken display is one step again.
+        assert_eq!(task_split_steps("cat f |\ngrep x"), vec!["cat f | grep x"]);
+        // A backslash continuation joins lines.
+        assert_eq!(
+            task_split_steps("sqlite3 \\\n  studio.db \"select 1\""),
+            vec!["sqlite3 studio.db \"select 1\""]
+        );
+        // A heredoc body is not split into steps.
+        assert_eq!(
+            task_split_steps("cat > f <<'EOF'\nfn a() {}\n}\nEOF"),
+            vec!["cat > f <<'EOF'"]
+        );
+    }
+
+    #[test]
+    fn normalizes_paths_vars_and_whitespace() {
+        let root = "/Users/me/proj";
+        assert_eq!(
+            task_normalize_step(
+                "cargo   test --manifest-path /Users/me/proj/src-tauri/Cargo.toml",
+                root
+            ),
+            "cargo test --manifest-path src-tauri/Cargo.toml"
+        );
+        assert_eq!(task_normalize_step("cd /Users/me/proj", root), "cd .");
+        assert_eq!(
+            task_normalize_step("cargo test --manifest-path $M/Cargo.toml", root),
+            "cargo test --manifest-path $M/Cargo.toml"
+        );
+        assert_eq!(
+            task_normalize_step("ls /Users/me/proj-other/x", root),
+            "ls /Users/me/proj-other/x"
+        );
+    }
+
+    fn bucket(cmd: &str) -> Option<&'static str> {
+        task_bucket(&task_normalize_step(cmd, "/r")).map(|b| TASK_BUCKETS[b])
+    }
+
+    #[test]
+    fn exclusion_buckets() {
+        assert_eq!(
+            bucket("curl -4 -sS http://127.0.0.1:49775/__worklist"),
+            Some("bramProtocol")
+        );
+        assert_eq!(bucket("cat .bram/worklist.json"), Some("bramProtocol"));
+        assert_eq!(
+            bucket("tail resources/bram-traces/bram-trace.log"),
+            Some("bramProtocol")
+        );
+        assert_eq!(bucket("cat .bram/.bram-port"), Some("bramProtocol"));
+        assert_eq!(
+            bucket("curl -X POST --data @/tmp/claude/scratchpad/b.json http://127.0.0.1:1/x"),
+            Some("bramProtocol")
+        );
+        assert_eq!(
+            bucket("jq -n --arg a 1 '{a:$a}' > /tmp/x/scratchpad/body.json"),
+            Some("bramProtocol")
+        );
+        assert_eq!(bucket("gh issue view 3"), Some("forge"));
+        assert_eq!(bucket("glab mr list"), Some("forge"));
+        assert_eq!(bucket("git status"), Some("git"));
+        for c in [
+            "ls -la",
+            "cat x",
+            "grep a b",
+            "rg a",
+            "head f",
+            "tail f",
+            "find . -name x",
+            "wc -l f",
+            "jq . f",
+            "sed -n 1,5p f",
+            "stat f",
+            "which x",
+            "echo hi",
+            "readlink f",
+            "awk 1 f",
+            "sort f",
+            "uniq f",
+            "cut -d, -f1 f",
+            "tr a b",
+        ] {
+            assert_eq!(bucket(c), Some("shell"), "{}", c);
+        }
+        assert_eq!(bucket("sed -i s/a/b/ f"), Some("shell"));
+        assert_eq!(bucket("touch x"), Some("shell"));
+        assert_eq!(bucket("cargo test"), None);
+        assert_eq!(bucket("curl http://localhost:3000/health"), Some("shell"));
+        assert_eq!(
+            bucket("curl http://localhost:3000/__x"),
+            Some("bramProtocol")
+        );
+        assert_eq!(bucket("curl https://example.com/a"), None);
+        // inline one-liners, chores and leaked fragments
+        for c in [
+            "python3 -I -c 'print(1)'",
+            "perl -e 'print 1'",
+            "node -e \"x\"",
+            "bash -c ls",
+            "date -u",
+            "lsof -nP",
+            "ps -p 1",
+            "rm -rf x",
+            "i<rs.length",
+            "$M/foo",
+            "hostname -s",
+        ] {
+            assert_eq!(bucket(c), Some("shell"), "{}", c);
+        }
+        assert_eq!(bucket("/tmp/x/helper.sh run"), Some("shell"));
+        assert_eq!(bucket("F=$(sqlite3 studio.db \"select 1\")"), Some("shell"));
+        assert_eq!(bucket("/private/tmp/claude/scratchpad/a.py"), Some("shell"));
+        // the same paths behind an interpreter (xmlui's report, 2026-11-09)
+        assert_eq!(
+            bucket("node /private/tmp/review-truncate-howto.mjs"),
+            Some("shell")
+        );
+        assert_eq!(bucket("python3 $S/harness/serve.py 8080"), Some("shell"));
+        assert_eq!(bucket("python3 -I $T/probe.py"), Some("shell"));
+        assert_eq!(bucket("python3 -I scripts/x.py"), None);
+        assert_eq!(
+            bucket("sqlite3 studio.db \"select count(*) from takes;\""),
+            Some("shell")
+        );
+        // wrappers do not hide a real task
+        assert_eq!(bucket("env -u A -u B scripts/x.sh"), None);
+        assert_eq!(bucket("env -u A git status"), Some("git"));
+    }
+
+    #[test]
+    fn recipe_keys() {
+        let k = |s: &str| task_recipe_key(s);
+        assert_eq!(k("scripts/build.sh"), "scripts/build.sh");
+        assert_eq!(k("./scripts/build.sh --fast"), "scripts/build.sh");
+        assert_eq!(k("python3 -I scripts/x.py --a"), "scripts/x.py");
+        assert_eq!(k("bash scripts/x.sh"), "scripts/x.sh");
+        assert_eq!(k("cargo test --lib -q -- foo"), "cargo test");
+        assert_eq!(k("cargo +nightly fmt"), "cargo fmt");
+        assert_eq!(k("RUST_LOG=1 cargo build"), "cargo build");
+        assert_eq!(k("npm run lint -- --fix"), "npm run lint");
+        assert_eq!(k("make -j4 build"), "make build");
+        assert_eq!(k("just test"), "just test");
+        assert_eq!(k("./bram /tmp/x"), "./bram");
+        assert_eq!(k("pytest -q tests"), "pytest");
+        assert_eq!(k("ffmpeg -v quiet -i a b"), "ffmpeg");
+        assert_eq!(k("ffmpeg -hide_banner -i a"), "ffmpeg");
+        assert_eq!(k("curl -sS https://x.org/a"), "curl");
+        assert_eq!(k("docker compose up"), "docker compose");
+        assert_eq!(k("docker build ."), "docker build");
+        assert_eq!(k("../render.py a"), "../render.py");
+        assert_eq!(k("serve_media.py"), "serve_media.py");
+        assert_eq!(k("node --check app/main.js"), "node --check");
+        assert_eq!(k("xmllint --noout app/x.xmlui"), "xmllint");
+        assert_eq!(k("/usr/bin/time -l cargo test"), "cargo test");
+        assert_eq!(k("python3 -m py_compile a.py"), "python3 -m py_compile");
+        assert_eq!(k("python3 -m unittest foo"), "python3 -m unittest");
+        assert_eq!(
+            k("env -u ANTHROPIC_API_KEY scripts/demo-instance.sh launch"),
+            "scripts/demo-instance.sh"
+        );
+        assert_eq!(k("BRAM_TRACE=1 ./bram /tmp/x"), "./bram");
+        assert_eq!(k("sudo -E time cargo build"), "cargo build");
+        assert_eq!(k("caffeinate -d cargo test"), "cargo test");
+        assert_eq!(k("nice -n 5 make build"), "make build");
+        assert_eq!(k("python3 -m http.server 8000"), "python3 -m http.server");
+    }
+
+    #[test]
+    fn clusters_min_runs_spellings_and_exclusions() {
+        let mut steps = Vec::new();
+        for i in 0..5 {
+            steps.push(step("cargo test --lib", &format!("s{}", i % 2)));
+        }
+        steps.push(step("cargo test", "s0"));
+        steps.push(step("cargo test", "s0"));
+        steps.push(step("make deploy && make deploy", "s1")); // 2 runs: dropped
+        steps.push(step("git status", "s0"));
+        steps.push(step("gh pr list; ls", "s0"));
+        steps.push(step("curl http://127.0.0.1:1/__x", "s0"));
+        let r = task_candidates_core("/r", &steps);
+        assert_eq!(r.commands, 11);
+        assert_eq!(r.excluded, [1, 1, 1, 1]);
+        assert_eq!(r.candidates.len(), 1);
+        let c = &r.candidates[0];
+        assert_eq!(c.key, "cargo test");
+        assert_eq!(c.runs, 7);
+        assert_eq!(c.sessions, 2);
+        assert_eq!(c.spellings[0].text, "cargo test --lib");
+        assert_eq!(c.spellings[0].runs, 5);
+        assert_eq!(c.spellings[1].runs, 2);
+        assert!(r.excluded_steps.iter().any(|(_, b, _)| *b == "forge"));
+    }
+
+    #[test]
+    fn ranked_by_sessions_then_spellings_then_runs() {
+        let mut steps = Vec::new();
+        // 20 runs, 1 session, 1 spelling: an afternoon's loop
+        for _ in 0..20 {
+            steps.push(step("show", "s0"));
+        }
+        // 6 runs, 3 sessions, 1 spelling
+        for s in ["s0", "s1", "s2"] {
+            steps.push(step("ffprobe a", s));
+            steps.push(step("ffprobe a", s));
+        }
+        // 5 runs, 3 sessions, 3 spellings: typed many ways, many places
+        for (i, s) in ["s0", "s1", "s2", "s0", "s1"].iter().enumerate() {
+            steps.push(step(&format!("ffmpeg -i a{} b", i % 3), s));
+        }
+        let r = task_candidates_core("/r", &steps);
+        let keys: Vec<&str> = r.candidates.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, vec!["ffmpeg", "ffprobe", "show"]);
+    }
+
+    #[test]
+    fn spellings_capped_at_eight() {
+        let steps: Vec<TaskStep> = (0..12)
+            .map(|i| step(&format!("make build V={}", i), "s"))
+            .collect();
+        let r = task_candidates_core("/r", &steps);
+        assert_eq!(r.candidates[0].spellings.len(), 8);
+        assert_eq!(r.candidates[0].runs, 12);
+    }
+
+    #[test]
+    fn suggested_names() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("ffmpeg", "ffmpeg -hide_banner -nostats -i ~/Desktop/x.mp4 -vn -af ebur128=peak=true -f null - 2>&1 | grep -A14 Summary", "ffmpeg-ebur128"),
+            ("ffmpeg", "ffmpeg -hide_banner -i \"$f\" -af \"loudnorm=print_format=summary\" -f null -", "ffmpeg-loudnorm"),
+            ("ffmpeg", "ffmpeg -v info -i $f -af silencedetect=n=-40dB:d=0.7 -f null - 2>&1 | grep x", "ffmpeg-silencedetect"),
+            ("ffmpeg", "c=$(ffmpeg -ss $2 -t $3 -i \"$1\" -vn -af \"pan=mono|c0=c0,highpass=f=8000,astats\" -f null - 2>&1)", "ffmpeg-pan-highpass"),
+            ("ffmpeg", "ffmpeg -i a.mp4 b.mp4", "ffmpeg"),
+            ("curl", "curl -sS $B/record/status", "curl-record-status"),
+            ("curl", "curl -4 -sS $B/projects | jq .", "curl-projects"),
+            ("cargo test", "cargo test --manifest-path src-tauri/Cargo.toml --lib", "cargo-test-lib"),
+            ("cargo test", "cargo test", "cargo-test"),
+            ("scripts/demo-instance.sh", "scripts/demo-instance.sh launch", "demo-instance-launch"),
+            ("scripts/demo-instance.sh", "env -u A scripts/demo-instance.sh stop 2>&1", "demo-instance-stop"),
+            ("scripts/build.sh", "scripts/build.sh 2>&1 | tail -3", "build"),
+            ("python3 -m py_compile", "python3 -m py_compile a.py", "py-compile"),
+            ("python3 -m unittest", "python3 -m unittest tests.test_foo", "unittest-tests-test-foo"),
+            ("node --check", "node --check app/__shell/helpers.js", "node-check-helpers"),
+        ];
+        for (key, text, want) in cases {
+            assert_eq!(task_suggest_name(key, text), *want, "{}", text);
+        }
+    }
+
+    #[test]
+    fn duplicate_names_get_suffixes() {
+        let steps: Vec<TaskStep> = [
+            "make deploy -n",
+            "make deploy -v",
+            "make deploy -x",
+            "make deploy -y",
+        ]
+        .iter()
+        .map(|c| step(c, "s"))
+        .collect();
+        let r = task_candidates_core("/r", &steps);
+        let names: Vec<&str> = r.candidates[0]
+            .spellings
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "make-deploy",
+                "make-deploy-2",
+                "make-deploy-3",
+                "make-deploy-4"
+            ]
+        );
     }
 }

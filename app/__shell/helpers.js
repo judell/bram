@@ -12018,7 +12018,7 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   // opens a "File unavailable" preview instead of the page (the /queue
   // launch bug, 2026-07-23).
   var routeMatch = raw.match(
-    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|files|sessions|tips|settings|status|context|log)(\/.*)?$/
+    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|files|sessions|tips|settings|status|context|log|tasks)(\/.*)?$/
   );
   if (routeMatch) {
     var rest = routeMatch[2] ? routeMatch[2].slice(1) : "";
@@ -17750,6 +17750,61 @@ window.__bramToggleInArray = function (arr, id) {
   arr = arr || [];
   if (arr.indexOf(id) >= 0) return arr.filter(function (x) { return x !== id; });
   return arr.concat([id]);
+};
+
+// Tasks page (issue-483-task-candidates-report; tasks-page-prioritizes,
+// Jon 2026-11-09: "the output is pretty overwhelming. how can we help people
+// prioritize?"). The host ranks candidates by sessions, then ways typed,
+// then runs; the sort is repeated here so a pane served by an older host
+// reads the same. The open view shows the rows that recur widely (3+
+// sessions, falling back to 2+ and then all when a small project has
+// fewer than 5 such rows), capped at 10; the rest fold under one line.
+// In the 2026-11-09 runs this took xmlui from 33 rows to 8 and bram-studio
+// from 54 to 8; Bram's 159 rows (62 in 3+ sessions) hit the cap.
+window.__bramTaskRanked = function (report) {
+  var rows = (report && report.candidates) || [];
+  return rows.slice().sort(function (a, b) {
+    return (b.sessions - a.sessions)
+      || ((b.spellings || []).length - (a.spellings || []).length)
+      || (b.runs - a.runs)
+      || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  });
+};
+window.__bramTaskRows = function (report, showAll) {
+  var ranked = window.__bramTaskRanked(report);
+  if (showAll) return ranked;
+  var MIN_ROWS = 5, CAP = 10;
+  var picked = ranked;
+  for (var min = 3; min >= 1; min--) {
+    picked = ranked.filter(function (c) { return (c.sessions || 0) >= min; });
+    if (picked.length >= MIN_ROWS) break;
+  }
+  return picked.slice(0, CAP);
+};
+window.__bramTaskHidden = function (report, showAll) {
+  var all = (report && report.candidates) || [];
+  return all.length - window.__bramTaskRows(report, showAll).length;
+};
+// One sentence that does the prioritizing: which few commands hold most of
+// the repetition. Empty when the table itself is short enough to be the
+// answer (5 rows or fewer), or when nothing recurs.
+window.__bramTaskHeadline = function (report) {
+  var all = (report && report.candidates) || [];
+  if (all.length <= 5) return "";
+  var total = all.reduce(function (n, c) { return n + (c.runs || 0); }, 0);
+  if (!total) return "";
+  var top = all.slice().sort(function (a, b) { return b.runs - a.runs; }).slice(0, 5);
+  var share = top.reduce(function (n, c) { return n + (c.runs || 0); }, 0);
+  var pct = Math.round(share * 100 / total);
+  return "Five commands account for " + pct + "% of the repeated runs: "
+    + top.map(function (c) { return c.key; }).join(", ") + ".";
+};
+window.__bramTaskFoldLine = function (report, showAll) {
+  var hidden = window.__bramTaskHidden(report, showAll);
+  var all = ((report && report.candidates) || []).length;
+  if (showAll) return "Showing all " + all + ".";
+  if (hidden <= 0) return "";
+  return hidden + " more recur in fewer sessions.";
 };
 
 // ai-describe (haiku-command-descriptions): tool-row expand handler.

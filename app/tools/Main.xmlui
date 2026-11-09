@@ -731,6 +731,9 @@
          above Settings (nav-history-files-above-settings), so the Worklist
          tab's History button no longer depends on that. -->
     <NavGroup label="More">
+      <!-- issue-483-task-candidates-report: under More, as agreed (Jon,
+           2026-11-09); a measurement, not yet a working surface. -->
+      <NavLink label="Tasks" to="/tasks" tooltip="Commands the agents keep running, and how many ways they've been typed" />
       <NavLink label="Tips" to="/tips" tooltip="All the footer tips, including ones you dismissed" />
       <NavLink label="Context" to="/context" tooltip="What the agent reads: CLAUDE.md, memory, hooks and settings" />
       <NavLink label="Status" to="/status" tooltip="Bram&apos;s health: guards, session size, state checks" />
@@ -1063,6 +1066,7 @@
       <Page url="/queue"><AgentMessageQueue /></Page>
       <Page url="/status"><Status /></Page>
       <Page url="/log"><Log /></Page>
+      <Page url="/tasks"><Tasks /></Page>
       <Page url="/settings"><Settings /></Page>
       <Page url="/sessions"><Sessions /></Page>
       <Page url="/tips"><Tips /></Page>

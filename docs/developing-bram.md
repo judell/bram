@@ -538,6 +538,96 @@ sluggish pane is fixed by a reload, not a new session. Start a new
 session for the agent's reasons. Use `--build-since` to score a pane change
 against the age curve.
 
+### What the agents keep running: the Tasks report
+
+judell/bram#483 asks for a Tasks feature: a repeatable command, once it
+appears in a session, saved to a file the project owns (a Makefile, a
+`dodo.py`) so it runs the same way every time and CI can run it without
+Bram. Before building any of that we shipped the measurement
+(`issue-483-task-candidates-report`, 2026-11-09): **More › Tasks** in the
+pane, `GET /__tasks/candidates`, and `bram --task-candidates <root>` for a
+headless run. It reads every provider's sessions for the project, takes
+each shell tool call, sets aside Bram's own protocol traffic (loopback
+curls, state-folder paths), git, forge CLI calls and shell plumbing, and
+clusters what's left by recipe. The route documents the shape in
+`apis.md`; the exclusion counts are shown, not hidden, so the filter can
+be judged from any project's numbers.
+
+The pane's words are for a reader new to repos (Jon: "joyce will not
+have any idea what a runner is"): it says *commands the agents keep
+running*, *ways typed*, and *a file of saved commands*, never "runner",
+"target" or "recipe". Each repeated spelling (the unit a saved command
+would name: `ffmpeg … -af ebur128 …` is a task, `ffmpeg` isn't) carries
+a placeholder name from the host (`ffmpeg-ebur128`, `cargo-test-lib`),
+shown read-only under a note saying so. The real name is the agent's to
+propose when a task is saved, from the context the command ran in, the
+way it names Worklist items (Jon, 2026-11-09), and is editable then. The
+report names single commands: a compound line is split into steps before
+clustering, so a repeated *sequence* of commands (build, stop, launch) is
+not seen as one thing. That gap is the part of #483 Make's dependencies
+address, and it is open.
+
+**Bram's own baseline (2026-11-09, 424 sessions, 43,585 shell commands,
+96,281 steps):** 15,592 steps talked to Bram, 10,654 were git, 2,255
+forge, 62,533 shell plumbing. 159 commands recur three times or more;
+the top of the list:
+
+| runs | sessions | ways typed | command |
+|---|---|---|---|
+| 826 | 89 | 8+ | `cargo test` |
+| 687 | 35 | 8+ | `scripts/demo-instance.sh` |
+| 562 | 84 | 8+ | `cargo fmt` |
+| 473 | 57 | 8+ | `node --check` |
+| 350 | 49 | 8+ | `cargo build` |
+| 309 | 57 | 4 | `cargo check` |
+| 93 | 17 | 8+ | `scripts/build.sh` |
+
+Two readings. `cargo build` outruns `scripts/build.sh` almost four to
+one, though this file has said "build through `scripts/build.sh`" since
+#452: the documented recipe loses to the one the agent already knows, and
+every one of those plain builds left no record in `build-log.jsonl`. And
+the test command has at least eight spellings (bare, `--manifest-path`,
+`--lib`, shell-variable paths, an absolute worktree path). Zero runs of
+`cargo build --release`: a simple rule holds, a recipe doesn't. This repo
+has 46 scripts and no file of saved commands; the recipes in this document
+are the task list, in prose. Bram is the first case for #483.
+
+The same CLI on `~/bram-studio` (13 sessions, 4,138 commands, 57
+candidates) put `ffmpeg` first (349 runs, 5 sessions, 8+ spellings), then
+`ffprobe` (84), `serve_media.py` (77) and `whisper-cli` (26): a project's
+own compositions, with Bram protocol filtered out. Bare words such as
+`post` and `band` there are shell functions the agent defined in-session;
+the report can't see their bodies and leaves them as they are. That is what the report is for in a project
+that isn't Bram.
+
+**The page prioritizes; the JSON keeps everything** (Jon, 2026-11-09,
+after reading the xmlui and bram-studio pages: "the output is pretty
+overwhelming. how can we help people prioritize?"). Three kinds of row
+crowded out the ones that matter: commands run many times in a single
+session (half or more of every list: one afternoon's loop, which a saved
+command doesn't fix), one-word shell functions the agent defined
+in-session (27 of bram-studio's 57 rows), and helpers left in scratch or
+temp directories (7 of xmlui's 40). So the host ranks candidates by
+sessions, then ways typed, then runs, and files scratch and temp paths,
+including the script an interpreter runs, under `shell`. The page opens
+with one sentence naming the five commands that hold most of the repeated
+runs (59–65% in all three projects), then the rows seen in three or more
+sessions (falling back to two, then all, when a small project has fewer
+than five such rows), at most ten, with the rest behind "N more recur in
+fewer sessions" and a **Show all** button. That took xmlui from 33 rows to
+8 and bram-studio from 54 to 8 (40 and 57 before the scratch rule); Bram's 62 widely recurring rows hit the
+cap. The agent-defined functions stay in the list for now, below the
+widely recurring rows; giving them their own fold is the next step if the
+folded list still reads as clutter. The ranking and fold are in
+`helpers.js` (`__bramTaskRows`, `__bramTaskHeadline`), repeated client-side
+so a pane served by an older host reads the same.
+
+The run costs about 13 s here (`[tasks] op=candidates … ms=`), all in
+parsing session files, so the pane fetches on open and Refresh only.
+What the feature itself should be (which runner, a save flow, whether
+the agent or the host runs a saved command) is to be decided from these
+numbers and Greg's; the notes are in the item's draft.
+
 ## Build vs. reload boundary
 
 **Settled 2026-08-26 (the helpers.js-needs-rebuild mantra was wrong,

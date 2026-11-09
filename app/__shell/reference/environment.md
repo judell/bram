@@ -140,14 +140,20 @@ the version field of `GET /__app-info` on the loopback port. If neither
 is available — an old seed, no running instance — say so in the report
 rather than omitting the version silently.
 
-## Pull requests in details-summary form
+## Forge posts in details-summary form
 
-A PR description can follow Simon Willison's
+Pull requests, issue bodies and issue comments can follow Simon Willison's
 [details-summary](https://simonwillison.net/2026/Nov/9/details-summary/)
-form (judell/bram#484): a short opener a person wrote stays visible, and
-the agent's full description is folded below it. Offer it when the user
-asks you to file a PR. A plain body that opens with the signature stays
-valid.
+form (judell/bram#484): what a person reads stays visible, and the
+evidence is folded below it. A plain body that opens with the signature
+stays valid. The guards accept a signed `<summary>` under a short opener
+on any forge body.
+
+### Pull requests
+
+A PR description can keep a short opener a person wrote visible, with the
+agent's full description folded below it. Offer it when the user asks you
+to file a PR.
 
 - **The opener is the user's, verbatim.** Ask for it, or quote what they
   already said about this PR. Never draft or polish it. Above the fold
@@ -171,6 +177,60 @@ valid.
 ## What changed
 
 …
+</details>
+```
+
+### Issue bodies and comments
+
+For an issue post the point is readability of a long agent-written post,
+not only marking human words. So an opener is welcome but not required.
+
+- **Offer an opener when the post is long.** Ask once. If the user gives
+  one, use it verbatim and never draft it. If not, open with the
+  signature on the first line, as for any forge write. With an opener,
+  the PR rules apply to the signature: it is the `<summary>` of a
+  `<details>` block under the opener.
+- **Keep the part a person reads visible.** Under the signature, one
+  bold sentence saying what the post is, with its key numbers. Then
+  "Three findings:" (or however many) as bullets that each lead with a
+  bold claim.
+- **Name the source in one line** before the folds: `Data:` and the
+  route or command, with the Bram version.
+- **Fold what a reader needs only on demand:** evidence, tables, logs,
+  command output, file-by-file detail. Use one `<details>` block per
+  topic, and give each `<summary>` a name for its content. A fold that
+  backs finding N is numbered and bold, `<summary><b>1. …</b></summary>`,
+  and ends with a **Suggestion:** line when you have one. A reference
+  fold such as "Totals" goes last, with a plain summary. Never put one
+  fold around the whole post.
+- **A post short enough to read whole takes no folds.**
+- Leave a blank line after each `<summary>`, or GitHub won't render the
+  Markdown inside.
+- Build the body file in its own step and post it with `--body-file`.
+
+```markdown
+Jon's Claude (Bram 0.8.5, main thread, Opus 5.5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):
+
+**What this post is:** 33 candidates from 3,141 commands in 18 sessions. Three findings:
+
+- **First finding, as a claim.** One sentence of why.
+- **Second finding.** …
+- **Third finding.** …
+
+Data: `GET /__tasks/candidates` on Bram 0.8.5.
+
+<details>
+<summary><b>1. The first finding, in a line</b></summary>
+
+Evidence: a table, a code block, a count.
+
+**Suggestion:** …
+</details>
+
+<details>
+<summary>Totals</summary>
+
+- The report's own fields.
 </details>
 ```
 

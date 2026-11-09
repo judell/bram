@@ -15741,7 +15741,10 @@ window.bramSubscribeYouNav = (function () {
 // (__bramTranscriptOnMount), like the top/bottom arrows do.
 window.__bramTranscriptYouStep = function (dir) {
   var a = window.__bramTranscriptScrollActions;
-  if (!a || !a.you) return;
+  if (!a || !a.you) {
+    window.__bramIframeTrace("transcript-you", { op: "step-unregistered", dir: dir });
+    return;
+  }
   try { a.you(dir); } catch (e) { /* ignore */ }
 };
 
@@ -15749,6 +15752,12 @@ window.__bramTranscriptYouStep = function (dir) {
 // that changes only when the You nav's state does.
 window.__bramSetVisibleRangeYou = function (range, listRef, agentId, shown) {
   window.__bramSetVisibleRange(range, listRef, agentId);
+  // transcript-you-first-step-noop: cache the fresh list, keyed by agent. The
+  // onMount-registered step closure holds the `events` captured at mount
+  // (before the projection filled), so the first click after a mount scanned
+  // a stale list and found no row (trace 2026-11-09 18:14:16, to=-1). This
+  // handler's arrow is re-created per render, so its list is current.
+  if (shown) window.__bramYouShown = { agentId: agentId || "main", list: shown };
   window.__bramYouNavState(shown);
   return __bramYouNavCache.key;
 };
@@ -15758,6 +15767,13 @@ window.__bramSetVisibleRangeYou = function (range, listRef, agentId, shown) {
 var __bramYouStepSeq = 0;
 window.__bramYouStep = function (dir, shown, list, agentId) {
   shown = shown || [];
+  var src = "arg";
+  var cached = window.__bramYouShown;
+  if (cached && cached.agentId === (agentId || "main") && cached.list.length >= shown.length) {
+    shown = cached.list; src = "cache";
+  }
+  var userRows = 0;
+  for (var u = 0; u < shown.length; u++) if (shown[u] && shown[u].kind === "user") userRows++;
   var ref = __bramYouRefIndex(shown);
   var target = __bramYouTarget(dir, shown, ref);
   window.__bramFollowTransition(false, "you-step", agentId);
@@ -15766,7 +15782,7 @@ window.__bramYouStep = function (dir, shown, list, agentId) {
     try { list.scrollToIndex(target); } catch (e) { /* ignore */ }
   }
   window.__bramIframeTrace("transcript-you", {
-    op: "step", dir: dir, from: ref, to: target, agentId: agentId || "main",
+    op: "step", dir: dir, from: ref, to: target, shownLen: shown.length, userRows: userRows, src: src, agentId: agentId || "main",
   });
   __bramYouStepSeq += 1;
   return __bramYouStepSeq;

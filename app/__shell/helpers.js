@@ -21518,7 +21518,9 @@ window.__bramStoryTell = (function () {
   // (log-shows-start-commit-push-search: "Start, Commit, Push, Search").
   // demo: asked for 2026-11-07 (log-records-demo-instances, "log when we
   // run a demo instance").
-  var STORY_SHOW = ["queue-add", "queue-delete", "selection", "gate", "push", "search", "demo", "switch"];
+  // queue: asked for by Jon, 2026-11-08 (log-shows-queue-sends,
+  // "I sent a queue message that should have been logged.").
+  var STORY_SHOW = ["queue-add", "queue", "queue-delete", "selection", "gate", "push", "search", "demo", "switch"];
   // log-reads-across-trace-rotation: the Log's URL names these kinds, and the
   // host sends only the lines they're told from (story_kind_wants in lib.rs),
   // so held-back kinds cost nothing until they're shown.

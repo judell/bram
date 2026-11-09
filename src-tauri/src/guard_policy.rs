@@ -2170,23 +2170,47 @@ fn signature_line_locator(line: &str) -> Option<&str> {
     parse_agent_signature(line).map(|s| s.locator)
 }
 
-/// True iff the first non-empty line carries the full canonical signature and
+/// issue-484-details-summary-prs: the most text a details-summary body may
+/// carry above its fold. Willison's opener is a sentence or two of the
+/// human's own judgement; the cap keeps a whole agent-written description
+/// from sitting unsigned above it.
+const DETAILS_SUMMARY_OPENER_MAX: usize = 600;
+
+/// The line that signs `body`: its first non-empty line when that parses as
+/// a signature, else, for the details-summary form (issue-484), the
+/// `<summary>` of its first `<details>` block when the opener above that
+/// block is at most `DETAILS_SUMMARY_OPENER_MAX` characters. None when
+/// neither shape holds.
+fn body_signature_line(body: &str) -> Option<&str> {
+    let first = body.split('\n').find(|l| !l.trim().is_empty())?;
+    if parse_agent_signature(first).is_some() {
+        return Some(first);
+    }
+    let details_at = body.find("<details")?;
+    if body[..details_at].trim().chars().count() > DETAILS_SUMMARY_OPENER_MAX {
+        return None;
+    }
+    let after = &body[details_at..];
+    let open = after.find("<summary>")? + "<summary>".len();
+    let close = after[open..].find("</summary>")?;
+    let summary = after[open..open + close].trim();
+    if summary.contains('\n') {
+        return None;
+    }
+    parse_agent_signature(summary).map(|_| summary)
+}
+
+/// True iff the body is signed (see `body_signature_line`) and the signature
 /// names this checkout's normalized origin when one is discoverable.
 fn body_is_signed(body: &str, cwd: &Path) -> bool {
     let expected = expected_repo_locator(cwd);
-    for line in body.split('\n') {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Some(actual) = signature_line_locator(line) else {
-            return false;
-        };
-        return expected
-            .as_deref()
-            .map(|want| actual.eq_ignore_ascii_case(want))
-            .unwrap_or(true);
-    }
-    false
+    let Some(actual) = body_signature_line(body).and_then(signature_line_locator) else {
+        return false;
+    };
+    expected
+        .as_deref()
+        .map(|want| actual.eq_ignore_ascii_case(want))
+        .unwrap_or(true)
 }
 
 /// The `crossboundary-unsigned` deny text, shared by the Claude and Codex
@@ -2275,20 +2299,15 @@ fn signature_version_verdict(command: &str, cwd: &Path) -> (&'static str, String
         // denied) by the signature check ahead of this one.
         return skip();
     };
-    for line in body.split('\n') {
-        if line.trim().is_empty() {
-            continue;
-        }
-        // An unparsable first line is the unsigned case, denied ahead of this.
-        let Some(sig) = parse_agent_signature(line) else {
-            return skip();
-        };
-        return match sig.version {
-            Some(v) if v != env!("CARGO_PKG_VERSION") => ("mismatch", v.to_string()),
-            _ => ("ok", String::new()),
-        };
+    // An unsigned body is denied ahead of this. The signature may be the
+    // first line or a details-summary `<summary>` (issue-484).
+    let Some(sig) = body_signature_line(&body).and_then(parse_agent_signature) else {
+        return skip();
+    };
+    match sig.version {
+        Some(v) if v != env!("CARGO_PKG_VERSION") => ("mismatch", v.to_string()),
+        _ => ("ok", String::new()),
     }
-    skip()
 }
 
 /// The stale-version deny text, shared by the Claude and Codex deny sites so
@@ -6682,6 +6701,54 @@ mod guard_policy_tests {
             &td
         ));
         assert!(!body_is_signed("", &td));
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    // issue-484-details-summary-prs: a human opener above the fold, the
+    // signature as the first <details> block's <summary>.
+    #[test]
+    fn details_summary_body_is_signed_by_its_summary() {
+        let td = scratch("signature-details-summary");
+        std::fs::create_dir_all(td.join(".git").join("refs")).unwrap();
+        std::fs::create_dir_all(td.join(".git").join("objects")).unwrap();
+        std::fs::write(td.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            td.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/judell/bram.git\n",
+        )
+        .unwrap();
+        let sig = "Jon's Claude (Bram 0.8.5, main thread, Opus 5.5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+        let wrong = "Jon's Claude (main thread, Opus 5.5) speaking from the Bram project (github.com/xmlui-org/xmlui):";
+        let opener = "Lets Bram file PRs with a human opener and the agent's text folded.\n\n";
+
+        // One line, and split across lines.
+        let one = format!("{opener}<details><summary>{sig}</summary>\n\nThe hook.\n</details>\n");
+        let split =
+            format!("{opener}<details>\n  <summary>{sig}</summary>\n\nThe hook.\n</details>\n");
+        assert!(body_is_signed(&one, &td));
+        assert!(body_is_signed(&split, &td));
+        assert_eq!(body_signature_line(&split), Some(sig));
+
+        // A wrong locator in the summary is refused, as on a top line.
+        let wrong_repo = format!("{opener}<details><summary>{wrong}</summary>\n\nx\n</details>");
+        assert!(!body_is_signed(&wrong_repo, &td));
+
+        // A summary that isn't a signature is refused.
+        let model_only =
+            format!("{opener}<details><summary>Claude Opus 5.5</summary>\n\nx\n</details>");
+        assert!(!body_is_signed(&model_only, &td));
+
+        // An opener over the cap is refused.
+        let long = format!(
+            "{}\n\n<details><summary>{sig}</summary>\n\nx\n</details>",
+            "word ".repeat(DETAILS_SUMMARY_OPENER_MAX / 4)
+        );
+        assert!(!body_is_signed(&long, &td));
+
+        // The plain top-line form is unchanged, and wins when present.
+        assert!(body_is_signed(&format!("{sig}\n\nBody."), &td));
+        let both = format!("{wrong}\n\n<details><summary>{sig}</summary>\n</details>");
+        assert!(!body_is_signed(&both, &td));
         let _ = std::fs::remove_dir_all(&td);
     }
 

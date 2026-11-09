@@ -10068,6 +10068,12 @@ window.voiceStart = function (onStarted, onFailed) {
     "voice-" + Date.now() + "-" + Math.random().toString(36).slice(2);
   window._voiceSession = requestId;
   window._voiceSessionTarget = meta.target || "";
+  window.__bramVoicePendingTarget = window._voiceSessionTarget;
+  window.__bramVoicePendingSel = {};
+  try {
+    var pendSel = window.__bramVoiceCaptureSelection(window._voiceSessionTarget);
+    if (pendSel) window.__bramVoicePendingSel[window._voiceSessionTarget] = pendSel;
+  } catch (e) {}
   _voiceLog("voiceStart", { requestId: requestId, target: window._voiceSessionTarget });
   function onStartedMsg(ev) {
     var data = ev && ev.data;
@@ -11119,6 +11125,122 @@ window.bramSubscribeEnhanceStatusTick = (function () {
 // window.bumpWorklistVoiceSeq calls returned without entering the
 // function body. Defining the append helper directly on window
 // guarantees the call lands.
+// Dictating over a selection (voice-replaces-selection). The mic click can
+// move focus off the textarea, so a document-level listener remembers the
+// last textarea that had a non-empty selection; voiceStart captures from
+// the focused one, else from the remembered one (within 15 s), into a
+// pending slot keyed by target. The live record (or the non-live append)
+// consumes it. The base is the DOM textarea's own value, never the
+// component's (a frozen snapshot, #417).
+window.__bramVoicePendingSel = {};
+window.__bramVoicePendingTarget = "";
+window.__bramLastTextSel = null;
+(function () {
+  // A non-empty range is remembered from any event; a collapsed caret only
+  // from a user gesture (mouseup, keyup, select), since a restored or
+  // code-focused textarea can report selectionStart 0 unplaced.
+  var remember = function (ev) {
+    try {
+      var el = document.activeElement;
+      if (!el || el.tagName !== "TEXTAREA") return;
+      var gesture = !!ev && (ev.type === "mouseup" || ev.type === "keyup" || ev.type === "select");
+      if (typeof el.selectionStart !== "number") return;
+      var prev = window.__bramLastTextSel;
+      if (el.selectionStart < el.selectionEnd) {
+        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: gesture || (!!prev && prev.el === el && prev.gesture) };
+      } else if (gesture) {
+        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: true };
+      } else if (prev && prev.el === el) {
+        // Caret moved without a gesture we saw: keep the position, not the claim.
+        prev.start = el.selectionStart; prev.end = el.selectionEnd;
+      }
+    } catch (e) {}
+  };
+  document.addEventListener("selectionchange", remember);
+  document.addEventListener("select", remember, true);
+  document.addEventListener("mouseup", remember, true);
+  document.addEventListener("keyup", remember, true);
+  // Focus leaving the textarea (the mic click): its selection is still set.
+  document.addEventListener("focusout", function (ev) {
+    try {
+      var el = ev && ev.target;
+      if (el && el.tagName === "TEXTAREA" && el.selectionStart < el.selectionEnd) {
+        var prev = window.__bramLastTextSel;
+        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: !!prev && prev.el === el && prev.gesture };
+      }
+    } catch (e) {}
+  }, true);
+})();
+window.__bramVoiceCaptureSelection = function (target) {
+  var skip = function (reason) {
+    try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "selection-skipped", target: target, reason: reason }); } catch (e) {}
+    return null;
+  };
+  try {
+    var el = document.activeElement;
+    var m = window.__bramLastTextSel;
+    var fresh = !!m && !!m.el && document.contains(m.el) && Date.now() - m.at <= 15000;
+    var start, end;
+    if (el && el.tagName === "TEXTAREA" && el.selectionStart < el.selectionEnd) {
+      start = el.selectionStart; end = el.selectionEnd;
+    } else if (el && el.tagName === "TEXTAREA" && typeof el.selectionStart === "number") {
+      // Collapsed caret in the focused box: only if a gesture placed it.
+      if (!(fresh && m.el === el && m.gesture)) return skip("caret-no-gesture");
+      start = end = el.selectionStart;
+    } else {
+      var why = "active:" + (el ? el.tagName : "none");
+      if (!m) return skip(why + ",no-memory");
+      if (!fresh) return skip("stale");
+      if (m.start === m.end && !m.gesture) return skip("caret-no-gesture");
+      if (m.start === m.end && m.el.selectionStart === m.el.selectionEnd) {
+        start = end = m.el.selectionStart;
+      } else if (m.el.selectionStart < m.el.selectionEnd) {
+        start = m.el.selectionStart; end = m.el.selectionEnd;
+      } else {
+        return skip("empty");
+      }
+      el = m.el;
+    }
+    var base = String(el.value || "");
+    if (start === end && start >= base.length) return skip("at-end");
+    var sel = { el: el, start: start, end: end, base: base };
+    try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "selection-captured", target: target, kind: start === end ? "caret" : "range", start: start, end: end, len: end - start }); } catch (e) {}
+    return sel;
+  } catch (e) { return skip("error"); }
+};
+// before + cleaned + after, with a space at either edge that needs one.
+// Returns { text, caret }.
+window.__bramVoiceReplaceSpan = function (sel, cleaned) {
+  var before = sel.base.slice(0, sel.start);
+  var after = sel.base.slice(sel.end);
+  if (!cleaned) return { text: sel.base, caret: sel.end };
+  // The dictated text takes the shape of what it replaces: whisper frames a
+  // lone utterance as a sentence ("However..."), which is wrong mid-sentence.
+  var span = sel.base.slice(sel.start, sel.end);
+  var trail = /(\.\.\.|\u2026|[.,;:!?])+$/;
+  var lowerRule = function (prev, t) {
+    return window.BramDictation && window.BramDictation.lowerAfterPause
+      ? window.BramDictation.lowerAfterPause(prev, t)
+      : t;
+  };
+  if (span) {
+    if (/^[a-z]/.test(span)) cleaned = lowerRule("x", cleaned);
+    else if (/^[A-Z]/.test(span) && /^[a-z]/.test(cleaned)) cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  } else {
+    cleaned = lowerRule(before, cleaned);
+  }
+  var spanTrail = span.match(trail);
+  var cleanedTrail = cleaned.match(trail);
+  if (spanTrail) {
+    if (!cleanedTrail) cleaned = cleaned + spanTrail[0];
+  } else if (after && cleanedTrail) {
+    var stripped = cleaned.replace(trail, "");
+    if (stripped) cleaned = stripped;
+  }
+  var sp1 = before && !/\s$/.test(before) ? " " : "";
+  var sp2 = after && !/^\s/.test(after) ? " " : "";
+  return { text: before + sp1 + cleaned + sp2 + after, caret: before.length + sp1.length + cleaned.length };
+};
 window.__bramAppendVoiceToBox = function (component, transcript) {
   try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "windowAppend-enter", tLen: (transcript || "").length, hasComponent: !!component }); } catch (e) {}
   if (!component || !transcript) {
@@ -11133,6 +11255,14 @@ window.__bramAppendVoiceToBox = function (component, transcript) {
   }
   var spacer = current && !/\s$/.test(current) ? " " : "";
   var next = current + spacer + cleaned;
+  var caretAt = next.length;
+  var selCap = window.__bramVoicePendingSel[window.__bramVoicePendingTarget];
+  delete window.__bramVoicePendingSel[window.__bramVoicePendingTarget];
+  if (selCap && selCap.el && document.contains(selCap.el) && String(selCap.el.value || "") === selCap.base) {
+    var rep = window.__bramVoiceReplaceSpan(selCap, cleaned);
+    next = rep.text;
+    caretAt = rep.caret;
+  }
   try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "windowAppend-calling-setValue", currentLen: current.length, nextLen: next.length }); } catch (e) {}
   try {
     component.setValue(next);
@@ -11143,7 +11273,7 @@ window.__bramAppendVoiceToBox = function (component, transcript) {
   }
   try {
     if (typeof component.focus === "function") component.focus();
-    if (typeof component.setSelectionRange === "function") component.setSelectionRange(next.length, next.length);
+    if (typeof component.setSelectionRange === "function") component.setSelectionRange(caretAt, caretAt);
   } catch (e) {}
   return next;
 };
@@ -11314,9 +11444,50 @@ window.bramSubscribeVoicePartial = (function () {
 window.__bramVoiceLiveBase = {};
 function __bramVoiceNewRec(requestId, target) {
   var rec = { requestId: requestId, box: null };
+  // With a selection captured at dictation start, the field still works in
+  // "base + text" terms; set() maps that onto before + text + after, and
+  // get() maps the box's value back, so the field doesn't read its own
+  // write as an edit. A real edit drops the selection (your edits win).
+  rec.sel = window.__bramVoicePendingSel[target] || null;
+  delete window.__bramVoicePendingSel[target];
+  rec.map = [];
+  // With a selection, the field's text is read from the DOM textarea, so
+  // its base is the full text the selection sits in.
+  rec.get = function () {
+    var v = rec.box ? String(rec.box.value || "") : "";
+    if (!rec.sel) return v;
+    if (!document.contains(rec.sel.el)) { rec.sel = null; return v; }
+    v = String(rec.sel.el.value || "");
+    for (var i = 0; i < rec.map.length; i++) {
+      if (rec.map[i].out === v) return rec.map[i].inn;
+    }
+    if (rec.fieldBase === undefined) {
+      rec.fieldBase = v;
+      rec.map.push({ inn: v, out: v }); // the box can lag its first write
+      if (v !== rec.sel.base) rec.sel = null; // edited since the mic click
+    } else {
+      rec.sel = null; // a real edit: your edits win
+    }
+    return v;
+  };
+  rec.set = function (text) {
+    var out = text;
+    if (rec.sel && rec.fieldBase !== undefined && String(text).indexOf(rec.fieldBase) === 0) {
+      var cleaned = String(text).slice(rec.fieldBase.length).replace(/^\s+/, "");
+      var rep = window.__bramVoiceReplaceSpan(rec.sel, cleaned);
+      out = rep.text;
+      rec.caret = rep.caret;
+      rec.map.unshift({ inn: text, out: out });
+      rec.map.length = Math.min(rec.map.length, 3);
+    } else if (rec.sel) {
+      rec.sel = null;
+    }
+    rec.lastOut = out;
+    rec.box.setValue(out);
+  };
   rec.field = window.BramDictation.createField({
-    get: function () { return rec.box ? rec.box.value : ""; },
-    set: function (text) { rec.box.setValue(text); },
+    get: function () { return rec.get(); },
+    set: function (text) { rec.set(text); },
     trace: function (stage, info) {
       try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", Object.assign({ stage: stage, target: target }, info)); } catch (e) {}
     },
@@ -11489,11 +11660,13 @@ window.__bramVoiceFinalizeInto = function (box, target, transcript) {
   var parts = last && last.requestId === rec.requestId ? last.parts : [];
   var done = rec.field.finalize(transcript, parts);
   if (!done) return false;
+  var finalText = rec.sel && rec.lastOut != null ? rec.lastOut : done.next;
+  var finalCaret = rec.sel && typeof rec.caret === "number" ? rec.caret : finalText.length;
   try {
     if (typeof box.focus === "function") box.focus();
-    if (typeof box.setSelectionRange === "function") box.setSelectionRange(done.next.length, done.next.length);
+    if (typeof box.setSelectionRange === "function") box.setSelectionRange(finalCaret, finalCaret);
   } catch (e) {}
-  return done.added ? done.next : false;
+  return done.added ? finalText : false;
 };
 
 // Parent → agent-pane bridge for whisper-server failure notices.

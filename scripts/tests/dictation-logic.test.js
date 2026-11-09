@@ -256,6 +256,15 @@ test("a stopped field is left alone", async () => {
   assert.strictEqual(h.box.value, "");
 });
 
+test("joinWindows lowercases a capital after a mid-sentence pause and trims", () => {
+  const j = BramDictation.joinWindows;
+  assert.strictEqual(j(["So I'm now going to", " Run a test."]), "So I'm now going to run a test.");
+  assert.strictEqual(j(["It ended.", "Then we go"]), "It ended. Then we go");
+  assert.strictEqual(j(['He said "stop."', "Then"]), 'He said "stop." Then');
+  assert.strictEqual(j(["and then", "I'm here", "OK now", "NASA says"]), "and then I'm here OK now NASA says");
+  assert.strictEqual(j(["", "  First", "Second"]), "First second");
+});
+
 (async () => {
   let failed = 0;
   for (const { name, fn } of tests) {

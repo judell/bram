@@ -201,6 +201,17 @@ test("no live record (the reserve full pass): plain append", () => {
   assert.strictEqual(f.text, "Note: Appended.");
 });
 
+test("a replaced span keeps its case and punctuation", () => {
+  const r = (base, a, b, t) => real.__bramVoiceReplaceSpan({ base, start: a, end: b }, t);
+  const b1 = "This is one sentence, but I think slowly.";
+  assert.strictEqual(r(b1, 22, 25, "However...").text, "This is one sentence, however I think slowly.");
+  assert.strictEqual(r("Go slowly.", 3, 10, "fast").text, "Go fast.");
+  assert.strictEqual(r("go now please", 3, 3, "Run.").text, "go run now please");
+  assert.strictEqual(r("This is it. This works.", 12, 16, "however").text, "This is it. However works.");
+  const c = r(b1, 22, 25, "However...");
+  assert.strictEqual(c.text.slice(0, c.caret), "This is one sentence, however");
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {

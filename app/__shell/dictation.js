@@ -238,7 +238,7 @@
       if (L.dead || typeof o.onPartial !== "function") return;
       try {
         o.onPartial({
-          committed: L.committed.join(" "),
+          committed: joinWindows(L.committed),
           provisional: L.provisional,
           parts: L.parts,
           openSeq: L.seq,
@@ -607,7 +607,7 @@
         L.provisional = "";
         livePublish();
       }
-      const text = L.committed.join(" ").trim();
+      const text = joinWindows(L.committed).trim();
       const lat = L.latencies;
       trace("voice-final", {
         requestId: L.requestId,
@@ -715,7 +715,7 @@
         if (p && p.seq >= F.fromSeq && p.text) words.push(p.text);
       });
       if (provisional && openSeq >= F.fromSeq) words.push(provisional);
-      return words.join(" ");
+      return joinWindows(words);
     };
     const join = (base, text) => {
       const spacer = base && text && !/\s$/.test(base) ? " " : "";
@@ -961,7 +961,30 @@
     };
   };
 
-  const api = { engines, createLoop, createField, attach, LIVE_PAUSE_MS };
+  // Windows are decoded independently, so whisper capitalizes each one's
+  // first word as if it began a sentence. Where the text before ends
+  // mid-sentence (no ., ? or ! , allowing closing quotes or brackets after
+  // it) and the next window opens with a capital followed by a lowercase
+  // letter, lowercase it. I, I'm, OK and acronyms stay; a proper noun at a
+  // pause boundary is lowercased too (the accepted cost). Parts are trimmed,
+  // so a leading space from the engine can't double up.
+  const lowerAfterPause = (prev, next) => {
+    const n = String(next || "").trim();
+    const p = String(prev || "").trim();
+    if (!p || !n || /[.?!]["'\u201d\u2019)\]]*$/.test(p)) return n;
+    return /^[A-Z][a-z]/.test(n) ? n.charAt(0).toLowerCase() + n.slice(1) : n;
+  };
+  const joinWindows = (list) => {
+    let out = "";
+    for (const part of list || []) {
+      const t = String(part || "").trim();
+      if (!t) continue;
+      out = out ? out + " " + lowerAfterPause(out, t) : t;
+    }
+    return out;
+  };
+
+  const api = { engines, joinWindows, lowerAfterPause, createLoop, createField, attach, LIVE_PAUSE_MS };
   root.BramDictation = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

@@ -49083,6 +49083,52 @@ fn st_parent_agent_task_finished(session_text: &str, agent_id: &str) -> bool {
     false
 }
 
+// roster-resumed-subagent-reads-finished: a resumed subagent (message-to-agent
+// continues the same transcript) leaves its round-one completion notice in
+// the parent session forever, so the one-way scan above reads it finished for
+// life. The notice only counts when it is not older than the agent's latest
+// start (SubagentStart, recorded by the host). The notice appears twice per
+// completion (queue-operation + delivered turn) with the same record
+// timestamp; the latest one wins. A record that merely repeats the notice
+// text and has no timestamp of its own (an api-request-blob) never counts as
+// a delivery. With no recorded start (host restarted mid-run), or when no
+// notice record carries a timestamp, the old rule stands.
+fn st_parent_task_finished_after(
+    session_text: &str,
+    agent_id: &str,
+    last_start_ms: Option<i64>,
+) -> bool {
+    if !st_parent_agent_task_finished(session_text, agent_id) {
+        return false;
+    }
+    let Some(start) = last_start_ms else {
+        return true;
+    };
+    let marker = format!("<task-id>{}</task-id>", agent_id);
+    let mut latest: Option<i64> = None;
+    for line in session_text.lines() {
+        if !line.contains(marker.as_str()) || !line.contains("<task-notification>") {
+            continue;
+        }
+        // A real delivery has a record timestamp. Echoes of the notice text
+        // (api-request-blob, five per agent in the 2026-11-09 session) lack
+        // one, and counting those made every resumed agent read finished.
+        let ts = line.rfind("\"timestamp\":\"").and_then(|i| {
+            let rest = &line[i + 13..];
+            rest.find('"')
+                .and_then(|e| parse_iso_to_epoch_ms(&rest[..e]))
+        });
+        let Some(t) = ts else {
+            continue;
+        };
+        latest = Some(latest.map_or(t, |l| l.max(t)));
+    }
+    match latest {
+        Some(newest) => newest >= start,
+        None => true,
+    }
+}
+
 // Recency window for the roster's `running` verdict. A subagent's JSONL
 // mtime advancing within this window means it is actively appending; past
 // it (and with no parent-side completion evidence — see
@@ -49115,8 +49161,82 @@ fn st_subagent_state_str(parent_finished: bool, updated_at_ms: i64, now_ms: i64)
 #[cfg(test)]
 mod subagent_state_tests {
     use super::{
-        st_parent_agent_task_finished, st_subagent_state_str, SUBAGENT_RECENT_ACTIVITY_MS,
+        parse_iso_to_epoch_ms, st_parent_agent_task_finished, st_parent_task_finished_after,
+        st_subagent_state_str, SUBAGENT_RECENT_ACTIVITY_MS,
     };
+
+    // Notice record in the real two-shape form, with the record timestamp.
+    fn stamped(agent_id: &str, iso: &str) -> String {
+        format!(
+            "{{\"type\":\"queue-operation\",\"content\":\"<task-notification>\\n<task-id>{}</task-id>\\n<status>completed</status>\\n</task-notification>\",\"timestamp\":\"{}\"}}\n",
+            agent_id, iso
+        )
+    }
+    fn ms(iso: &str) -> i64 {
+        parse_iso_to_epoch_ms(iso).unwrap()
+    }
+
+    #[test]
+    fn resumed_agent_notice_before_later_start_is_not_finished() {
+        let t = stamped("a1", "2026-11-09T18:30:12.141Z");
+        assert!(!st_parent_task_finished_after(
+            &t,
+            "a1",
+            Some(ms("2026-11-09T18:36:28Z"))
+        ));
+    }
+
+    #[test]
+    fn notice_after_latest_start_is_finished() {
+        let t = stamped("a1", "2026-11-09T18:37:22.672Z");
+        assert!(st_parent_task_finished_after(
+            &t,
+            "a1",
+            Some(ms("2026-11-09T18:36:28Z"))
+        ));
+    }
+
+    #[test]
+    fn no_recorded_start_keeps_the_old_rule() {
+        let t = stamped("a1", "2026-11-09T18:30:12.141Z");
+        assert!(st_parent_task_finished_after(&t, "a1", None));
+        assert!(!st_parent_task_finished_after("nothing", "a1", None));
+    }
+
+    #[test]
+    fn untimestamped_echo_of_the_notice_does_not_count() {
+        // Field shape (2026-11-09): a real delivery from an earlier round,
+        // plus an api-request-blob repeating the notice with no timestamp.
+        let echo = format!(
+            "{{\"type\":\"api-request-blob\",\"body\":\"<task-notification>\\n<task-id>a1</task-id>\\n<status>completed</status>\\n</task-notification>\"}}\n"
+        );
+        let t = format!("{}{}", stamped("a1", "2026-11-09T18:54:26.487Z"), echo);
+        assert!(!st_parent_task_finished_after(
+            &t,
+            "a1",
+            Some(ms("2026-11-09T19:07:02Z"))
+        ));
+    }
+
+    #[test]
+    fn two_notices_latest_after_start_is_finished() {
+        let t = format!(
+            "{}{}",
+            stamped("a1", "2026-11-09T18:30:12.141Z"),
+            stamped("a1", "2026-11-09T18:37:22.672Z")
+        );
+        assert!(st_parent_task_finished_after(
+            &t,
+            "a1",
+            Some(ms("2026-11-09T18:36:28Z"))
+        ));
+        // and the same text before a still-later resume reads running
+        assert!(!st_parent_task_finished_after(
+            &t,
+            "a1",
+            Some(ms("2026-11-09T18:38:27Z"))
+        ));
+    }
 
     // Shape observed in a real transcript (issue-244 investigation): the
     // delivered `user` turn's message.content is a bare string (not a
@@ -49561,6 +49681,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     // instead of `finished` — conservative, never a false completion.
     let session_text = std::fs::read_to_string(&session_path).unwrap_or_default();
     let now_ms = to_ms(std::time::SystemTime::now());
+    let starts = read_subagent_starts(app);
     let mut agents: Vec<serde_json::Value> = Vec::new();
     for sf in files {
         let Ok(md) = std::fs::metadata(&sf.jsonl_path) else {
@@ -49569,7 +49690,12 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
         let started_at_ms = md.created().map(to_ms).unwrap_or(updated_at_ms);
         let meta = st_read_subagent_meta(&sf.dir, &sf.agent_id).unwrap_or(serde_json::Value::Null);
-        let parent_finished = st_parent_agent_task_finished(&session_text, &sf.agent_id);
+        let start_rec = starts.get(&sf.agent_id);
+        let parent_finished = st_parent_task_finished_after(
+            &session_text,
+            &sf.agent_id,
+            start_rec.map(|r| r.last_start_ms),
+        );
         let state = st_subagent_state_str(parent_finished, updated_at_ms, now_ms);
         agents.push(serde_json::json!({
             "agentId": sf.agent_id,
@@ -49587,6 +49713,8 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
             "finished": state == "finished",
             "startedAtMs": started_at_ms,
             "updatedAtMs": updated_at_ms,
+            // Resumes the host saw (SubagentStarts beyond the first).
+            "resumedCount": start_rec.map(|r| r.starts.saturating_sub(1)).unwrap_or(0),
         }));
     }
     agents.sort_by_key(|a| a.get("startedAtMs").and_then(|v| v.as_i64()).unwrap_or(0));
@@ -63849,6 +63977,7 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         owned(".bram-message-draft.json", File),
         owned(".inflight-claim.json", File),
         owned(".delegated-bindings.json", File),
+        owned(".subagent-starts.json", File),
         owned(".claim-intervals.json", File),
         owned(".pty-intent.jsonl", File),
         owned(".worklist-authorization.json", File),
@@ -73567,6 +73696,74 @@ fn background_status_finished(status: &str) -> bool {
     )
 }
 
+// roster-resumed-subagent-reads-finished: every SubagentStart, bound or not,
+// counted per agent id so the roster can tell a resumed round from a finished
+// one. A sibling of .delegated-bindings.json; entries older than 7 days are
+// pruned on write.
+const SUBAGENT_STARTS_REL: &str = ".subagent-starts.json";
+const SUBAGENT_STARTS_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct SubagentStartRecord {
+    #[serde(default)]
+    starts: u64,
+    #[serde(rename = "lastStartMs", default)]
+    last_start_ms: i64,
+}
+
+fn read_subagent_starts_at(path: &Path) -> std::collections::BTreeMap<String, SubagentStartRecord> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("agents").cloned())
+        .and_then(|a| serde_json::from_value(a).ok())
+        .unwrap_or_default()
+}
+
+fn read_subagent_starts<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::BTreeMap<String, SubagentStartRecord> {
+    project_resource_path(app, SUBAGENT_STARTS_REL)
+        .map(|p| read_subagent_starts_at(&p))
+        .unwrap_or_default()
+}
+
+fn record_subagent_start_at(path: &Path, agent: &str, now_ms: i64) -> Option<u64> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _g = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut map = read_subagent_starts_at(path);
+    let rec = map.entry(agent.to_string()).or_default();
+    rec.starts += 1;
+    rec.last_start_ms = now_ms;
+    let count = rec.starts;
+    map.retain(|_, r| now_ms.saturating_sub(r.last_start_ms) < SUBAGENT_STARTS_KEEP_MS);
+    let body =
+        serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "agents": map })).ok()?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, format!("{}\n", body)).ok()?;
+    std::fs::rename(&tmp, path).ok()?;
+    Some(count)
+}
+
+fn record_subagent_start<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str) {
+    let Some(path) = project_resource_path(app, SUBAGENT_STARTS_REL) else {
+        return;
+    };
+    match record_subagent_start_at(&path, agent, unix_now_ms()) {
+        Some(n) => app.trace(
+            "delegated",
+            &format!("op=subagent-start agent={} starts={}", agent, n),
+        ),
+        None => app.trace(
+            "delegated",
+            &format!("op=subagent-start-write-failed agent={}", agent),
+        ),
+    }
+}
+
 fn handle_agent_subagent<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -73591,6 +73788,7 @@ fn handle_agent_subagent<R: tauri::Runtime>(
     let session = field("session_id");
     match event.as_str() {
         "SubagentStart" => {
+            record_subagent_start(app, &agent);
             let turn_start_bound = turn_start_bound_cell()
                 .lock()
                 .map(|g| g.clone())

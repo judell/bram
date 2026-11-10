@@ -411,6 +411,28 @@ response saying the commit "ALREADY RAN" is success.
 - **One click approved several items that share files** → read `.claude/bram-reference/worklist-mechanics.md` (§Serializing entangled items approved together).
 - **About to delegate worklist work to subagents** → read `.claude/bram-reference/worklist-mechanics.md` (§Delegating worklist items to subagents).
 
+### Delegate well-specified edits by default
+
+When your provider supports subagents (Claude today), hand an approved
+item's edits to a subagent on a cheaper model by default. Reading large
+files to make an edit stays in the main session's context for every
+later call; a subagent pays it in its own context and returns only a
+report.
+
+- **Well-specified** means the draft names the files, the change at
+  each site, and how to verify. Pick the cheaper model that fits: the
+  smallest for mechanical edits, the middle tier for ordinary code.
+  Say in one line that you're delegating; the user can say not to.
+- **Keep in the main thread:** design, debugging from evidence, draft
+  and plan authorship, review of the subagent's diff, and every
+  lifecycle call (advance, commit, prune).
+- **Don't delegate when the brief costs more than the edit:** a single
+  small change in a file already in context.
+- **The brief carries the house rules.** The subagent sees only what
+  you send: name the files it may touch, the verification commands, and
+  the forbidden actions (lifecycle calls, git writes, killing
+  processes).
+
 ### Transports
 
 **Claude, OpenCode and Antigravity: loopback curl.** Bram writes its port to

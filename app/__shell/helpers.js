@@ -18810,7 +18810,7 @@ window.__bramStateDirPlanMoved = function (p, part) {
   }
   var when = String(m.at || "").replace("T", " ").replace(/:\d\d(\.\d+)?Z$/, " UTC");
   var how = m.selective ? " (selective)" : (m.how === "demo-hydrate" ? " (demo hydrate)" : "");
-  var from = String(m.from || "").replace(/^.*\//, "") || "resources";
+  var from = String(m.from || "").replace(/^.*[\\/]/, "") || "resources";
   return "Moved from " + from + "/ on " + when + how + ".";
 };
 

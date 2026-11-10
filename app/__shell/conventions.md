@@ -617,10 +617,12 @@ Rules:
   with `--body-file` in the next, never both in one command — the guard
   runs before the command, so a body written by the same command can't
   be checked.
-- **PRs and issue posts may take the details-summary form:** the user's
-  own opener, evidence under `<details>` → read
-  `.claude/bram-reference/environment.md` (§Forge posts in
-  details-summary form) first. Never write the opener yourself.
+- **Before posting an issue body, comment or PR description longer than
+  a screen**, read `.claude/bram-reference/environment.md` (§Forge
+  posts in details-summary form) and use its outline: a bold sentence
+  saying what the post is, bullets with bold claims, then numbered
+  folds. The guard denies a long post with no fold. A PR opener above
+  the fold is the user's own words, verbatim; never write it yourself.
 - Commit messages don't take the forge signature (they carry an author
   field), but a commit message another session will read should still
   say who wrote it and from which build.

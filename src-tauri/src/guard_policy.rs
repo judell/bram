@@ -2176,6 +2176,14 @@ fn signature_line_locator(line: &str) -> Option<&str> {
 /// from sitting unsigned above it.
 const DETAILS_SUMMARY_OPENER_MAX: usize = 600;
 
+/// forge-body-fold-enforced: a forge body longer than either limit, measured
+/// after its signature line, must carry at least one `<details>` fold with a
+/// `<summary>`. The rule (environment.md §Forge posts in details-summary
+/// form) was missed on 2026-11-09 when it lived only in prose: the Windows
+/// reply on #488 went up as ~70 expanded lines and was refolded by hand.
+const FORGE_BODY_UNFOLDED_MAX_LINES: usize = 30;
+const FORGE_BODY_UNFOLDED_MAX_CHARS: usize = 2_500;
+
 /// The line that signs `body`: its first non-empty line when that parses as
 /// a signature, else, for the details-summary form (issue-484), the
 /// `<summary>` of its first `<details>` block when the opener above that
@@ -2325,6 +2333,94 @@ Re-read `GET /__app-info` on the loopback port for the live version, fix the \
 signature, and retry.",
         signed,
         env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// True iff `body` contains a `<details>` block with a `<summary>` inside it.
+fn body_has_fold(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let Some(at) = lower.find("<details") else {
+        return false;
+    };
+    lower[at..].contains("<summary")
+}
+
+/// `(non-blank lines, chars)` of `body` after its signature line. A body whose
+/// first non-empty line is not a signature (the details-summary form, or an
+/// unsigned body the signature check has already denied) is measured whole.
+fn forge_body_extent(body: &str) -> (usize, usize) {
+    let mut rest = body;
+    if let Some(first) = body.split('\n').find(|l| !l.trim().is_empty()) {
+        if parse_agent_signature(first).is_some() {
+            // `first` is a subslice of `body`, so its end offset is exact.
+            let end = first.as_ptr() as usize - body.as_ptr() as usize + first.len();
+            rest = &body[end..];
+        }
+    }
+    let lines = rest.lines().filter(|l| !l.trim().is_empty()).count();
+    (lines, rest.trim().chars().count())
+}
+
+/// forge-body-fold-enforced: `("unfolded", lines, chars)` when an inspectable
+/// forge body is over `FORGE_BODY_UNFOLDED_MAX_LINES` non-blank lines or
+/// `FORGE_BODY_UNFOLDED_MAX_CHARS` characters after its signature and has no
+/// `<details>`/`<summary>` fold; `("ok", ..)` or `("skip", ..)` otherwise.
+///
+/// Reads the same body the signature check reads, so it covers exactly the
+/// writes that check inspects, except gists and snippets: those carry file
+/// content (code, logs), where a fold means nothing.
+fn forge_body_fold_verdict(command: &str, cwd: &Path) -> (&'static str, usize, usize) {
+    let skip = ("skip", 0, 0);
+    if command.is_empty() {
+        return skip;
+    }
+    let masked = mask_heredoc_bodies(command); // #363, as the sibling checks do
+    let command = masked.as_str();
+    if !is_forge_write(command) {
+        return skip;
+    }
+    let c = chars(command);
+    if cmd_verb(&c, &["gh"], Some(&["gist"]), &["create", "edit"])
+        || cmd_verb(&c, &["glab"], Some(&["snippet"]), &["create", "update"])
+    {
+        return skip;
+    }
+    let lower = command.to_ascii_lowercase();
+    if lower.contains("gh api") && lower.contains("gists/") {
+        return skip;
+    }
+    let (body, reason) = crossboundary_body(command, cwd);
+    let Some(body) = body else {
+        return skip;
+    };
+    if reason == "positional-body-file" {
+        return skip;
+    }
+    let (lines, chars) = forge_body_extent(&body);
+    let long = lines > FORGE_BODY_UNFOLDED_MAX_LINES || chars > FORGE_BODY_UNFOLDED_MAX_CHARS;
+    if long && !body_has_fold(&body) {
+        ("unfolded", lines, chars)
+    } else {
+        ("ok", lines, chars)
+    }
+}
+
+/// The `long-forge-body-unfolded` deny text, shared by the Claude and Codex
+/// deny sites so they cannot drift.
+fn long_forge_body_unfolded_message(lines: usize, chars: usize) -> String {
+    format!(
+        "This forge post is long and has no fold: {lines} non-blank lines and {chars} \
+characters after the signature (limits: {FORGE_BODY_UNFOLDED_MAX_LINES} lines, \
+{FORGE_BODY_UNFOLDED_MAX_CHARS} characters).\n\
+A long agent-written post keeps what a person reads visible and folds the evidence. \
+Use the outline:\n\
+  - the signature line\n\
+  - one bold sentence: **What this post is:** …, with its key numbers\n\
+  - bullets, each leading with a bold claim\n\
+  - a `Data:` line naming the route or command, with the Bram version\n\
+  - one numbered fold per topic: <details><summary><b>1. …</b></summary> … </details>\n\
+See `.claude/bram-reference/environment.md`, §Forge posts in details-summary form. \
+Refold the body file and retry."
     )
 }
 
@@ -3748,6 +3844,18 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             &preview,
             &cwd_s,
             &stale_signature_version_message(&ver_signed),
+        );
+    }
+    // forge-body-fold-enforced: a signed, current body that is long must fold.
+    let (fold_verdict, fold_lines, fold_chars) = forge_body_fold_verdict(&command, &cwd);
+    if fold_verdict == "unfolded" {
+        return deny_msg(
+            "long-forge-body-unfolded",
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &long_forge_body_unfolded_message(fold_lines, fold_chars),
         );
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, &cwd);
@@ -5453,6 +5561,15 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
     if ver_verdict == "mismatch" {
         return codex_deny(&stale_signature_version_message(&ver_signed), "-");
     }
+    // forge-body-fold-enforced: same placement and message as the Claude site.
+    // The traced reason is the stable code, not the message's first line, so
+    // `reason=long-forge-body-unfolded` greps the same on both providers.
+    let (fold_verdict, fold_lines, fold_chars) = forge_body_fold_verdict(&command, cwd);
+    if fold_verdict == "unfolded" {
+        let mut v = deny("long-forge-body-unfolded", "-");
+        v.message = long_forge_body_unfolded_message(fold_lines, fold_chars);
+        return v;
+    }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, cwd);
     if sha_verdict == "bad" {
         return codex_deny(
@@ -6749,6 +6866,104 @@ mod guard_policy_tests {
         assert!(body_is_signed(&format!("{sig}\n\nBody."), &td));
         let both = format!("{wrong}\n\n<details><summary>{sig}</summary>\n</details>");
         assert!(!body_is_signed(&both, &td));
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    // forge-body-fold-enforced: a long forge body with no <details> fold is
+    // refused; a fold, a short body, or the details-summary form passes.
+    #[test]
+    fn long_forge_body_must_fold() {
+        let td = scratch("forge-body-fold");
+        let sig = "Jon's Claude (main thread, Opus 5.5) speaking from the Bram project (github.com/judell/bram):";
+        let lines: String = (1..=40).map(|n| format!("- finding {n}\n")).collect();
+        let write = |name: &str, body: &str| {
+            let p = td.join(name);
+            std::fs::write(&p, body).unwrap();
+            format!("gh issue comment 5 --body-file {}", p.display())
+        };
+        let verdict = |cmd: &str| forge_body_fold_verdict(cmd, &td);
+
+        // Long, unfolded: 40 non-blank lines after the signature.
+        let long = format!("{sig}\n\n{lines}");
+        assert_eq!(
+            verdict(&write("long.md", &long)),
+            ("unfolded", 40, long[sig.len()..].trim().chars().count())
+        );
+
+        // The same body with one fold passes.
+        let folded = format!(
+            "{sig}\n\n**What this post is:** x.\n\n<details>\n<summary><b>1. Evidence</b></summary>\n\n{lines}</details>\n"
+        );
+        assert_eq!(verdict(&write("folded.md", &folded)).0, "ok");
+
+        // Short, unfolded passes; the signature line itself is not counted.
+        let short_lines: String = (1..=FORGE_BODY_UNFOLDED_MAX_LINES)
+            .map(|n| format!("line {n}\n"))
+            .collect();
+        let short = format!("{sig}\n\n{short_lines}");
+        assert_eq!(
+            verdict(&write("short.md", &short)),
+            (
+                "ok",
+                FORGE_BODY_UNFOLDED_MAX_LINES,
+                short[sig.len()..].trim().chars().count()
+            )
+        );
+
+        // Few lines but over the character limit is long too.
+        let wide = format!(
+            "{sig}\n\n{}",
+            "word ".repeat(FORGE_BODY_UNFOLDED_MAX_CHARS / 4)
+        );
+        assert_eq!(verdict(&write("wide.md", &wide)).0, "unfolded");
+
+        // The details-summary PR form: a short opener, the signature as the
+        // <summary>, everything else folded.
+        let pr = format!(
+            "Lets Bram file PRs with a human opener.\n\n<details>\n<summary>{sig}</summary>\n\n{lines}</details>\n"
+        );
+        std::fs::write(td.join("pr.md"), &pr).unwrap();
+        let pr_cmd = format!(
+            "gh pr create --title t --body-file {}",
+            td.join("pr.md").display()
+        );
+        assert_eq!(verdict(&pr_cmd).0, "ok");
+
+        // Not a body-bearing forge write: no check.
+        assert_eq!(verdict("gh issue view 5").0, "skip");
+        assert_eq!(verdict("gh issue close 5").0, "skip");
+        assert_eq!(verdict("gh issue edit 5 --title t").0, "skip");
+        assert_eq!(
+            verdict(&format!("cat {}", td.join("long.md").display())).0,
+            "skip"
+        );
+        // Gists and snippets carry file content, not a post.
+        assert_eq!(
+            verdict(&format!("gh gist create {}", td.join("long.md").display())).0,
+            "skip"
+        );
+
+        // The deny site: the traced reason and the agent-facing body.
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": write("long.md", &long)},
+            "cwd": "/",
+        }));
+        assert_eq!(v.reason, "long-forge-body-unfolded");
+        let body = body_of(&v);
+        assert!(body.contains("40 non-blank lines"), "{body}");
+        assert!(body.contains("limits: 30 lines, 2500 characters"), "{body}");
+        assert!(body.contains("**What this post is:**"), "{body}");
+        assert!(
+            body.contains("§Forge posts in details-summary form"),
+            "{body}"
+        );
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": write("folded.md", &folded)},
+            "cwd": "/",
+        }));
+        assert_ne!(v.reason, "long-forge-body-unfolded");
         let _ = std::fs::remove_dir_all(&td);
     }
 
@@ -8707,6 +8922,25 @@ mod codex_guard_policy_tests {
     //
     // Byte-identical to the Claude guard's, and reused from the shared core;
     // pinned here so a change to either Python copy shows up on both sides.
+
+    // forge-body-fold-enforced: the Codex deny site traces the stable reason
+    // code, not the message's first line, and shares the Claude message.
+    #[test]
+    fn codex_long_forge_body_unfolded_is_denied() {
+        let td = scratch("codex-forge-body-fold");
+        let sig = "Jon's Codex (main thread, GPT-5.6-sol) speaking from the Bram project (github.com/judell/bram):";
+        let lines: String = (1..=40).map(|n| format!("- finding {n}\n")).collect();
+        let body = format!("{sig}\n\n{lines}");
+        let p = td.join("long.md");
+        std::fs::write(&p, &body).unwrap();
+        let cmd = format!("gh issue comment 5 --body-file {}", p.display());
+        let v = codex_bash_branch(&td, &serde_json::json!({ "command": cmd }), &HashSet::new());
+        assert_eq!(v.decision, "deny");
+        assert_eq!(v.reason, "long-forge-body-unfolded");
+        let chars = body[sig.len()..].trim().chars().count();
+        assert_eq!(v.message, long_forge_body_unfolded_message(40, chars));
+        let _ = std::fs::remove_dir_all(&td);
+    }
 
     #[test]
     fn codex_crossboundary_signature_gates() {

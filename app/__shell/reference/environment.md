@@ -151,6 +151,13 @@ evidence is folded below it. A plain body that opens with the signature
 stays valid. The guards accept a signed `<summary>` under a short opener
 on any forge body.
 
+**Write issue and PR references as `[#N](url)`**, for example
+`[#469](https://github.com/judell/bram/issues/469)`, not a bare `#N` or
+a full URL. GitHub's issue page expands a bare `#N` or a full issue URL
+into the issue's whole title, which swamps a sentence; an explicit label
+stays `#469`, and hovering it still shows the issue card. This applies to
+PRs, issue bodies and comments alike.
+
 ### Pull requests
 
 A PR description can keep a short opener a person wrote visible, with the
@@ -205,7 +212,13 @@ not only marking human words. So an opener is welcome but not required.
   and ends with a **Suggestion:** line when you have one. A reference
   fold such as "Totals" goes last, with a plain summary. Never put one
   fold around the whole post.
-- **A post short enough to read whole takes no folds.**
+- **A post short enough to read whole takes no folds.** Past that, the
+  guards enforce the fold: a forge body over 30 non-blank lines or
+  2,500 characters after the signature line, with no `<details>` block
+  carrying a `<summary>`, is denied with reason
+  `long-forge-body-unfolded`. That covers issue bodies, issue and PR
+  comments, PR descriptions and reviews; gists and snippets are exempt.
+  A details-summary body is already folded and passes.
 - Leave a blank line after each `<summary>`, or GitHub won't render the
   Markdown inside.
 - Build the body file in its own step and post it with `--body-file`.
@@ -215,7 +228,7 @@ Jon's Claude (Bram 0.8.5, main thread, Opus 5.5, macOS, Tuck) speaking from the 
 
 **What this post is:** 33 candidates from 3,141 commands in 18 sessions. Three findings:
 
-- **First finding, as a claim.** One sentence of why.
+- **First finding, as a claim.** One sentence of why, as in [#469](https://github.com/judell/bram/issues/469).
 - **Second finding.** …
 - **Third finding.** …
 

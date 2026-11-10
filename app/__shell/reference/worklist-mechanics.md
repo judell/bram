@@ -267,7 +267,7 @@ stale-port / restarting-server diagnostic — don't continue without the
 lifecycle call. Check the Status tab's **Port file** row, which
 cross-checks the running process, `.bram-port`, and the
 `.bram-port.json` sidecar (port + pid + project root + startup
-timestamp). If `.bram-port` is missing entirely (agent launched outside
+timestamp + version). If `.bram-port` is missing entirely (agent launched outside
 Bram's PTY shell), fall back to `lsof -nP -iTCP -sTCP:LISTEN | grep bram`.
 
 **OpenCode** uses the same curl shapes; the flag rationale above holds
@@ -936,8 +936,9 @@ disqualifies the issue-only worklist exemption. Deny reasons:
   Windows, MSYS `/c/...` spellings are accepted.
 - `crossboundary-unsigned` — the body was read and lacks the signature.
 - `crossboundary-stale-version:<signed>` — the body IS signed, but its
-  version slot names a build other than the one running. The deny names
-  both versions. The usual cause is a long-running session signing from
+  version slot names a build other than the running instance's (the
+  `version` recorded in `.bram-port.json`, falling back to the guard's
+  own build when none is recorded). The deny names both versions. The usual cause is a long-running session signing from
   the `@`-imported conventions copy that was true when it booted; read
   `GET /__app-info` for the live version. A signature with **no**
   version slot is still allowed.

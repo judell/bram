@@ -2302,16 +2302,38 @@ fn crossboundary_signature_verdict(command: &str, cwd: &Path) -> (&'static str, 
 /// was caught by a person reading the line, which is the only mechanism there
 /// was.
 ///
-/// Compared against `env!("CARGO_PKG_VERSION")` rather than a loopback call to
-/// `/__app-info`: `~/.bram/bram-guard` points at the binary built beside the app
-/// and is re-ensured on a ticker, so the guard's own compiled version IS the
-/// running build's. No port lookup, nothing to fail while the route is busy.
+/// Compared against the version the RUNNING instance recorded in its
+/// `.bram-port.json` sidecar (a plain file read), falling back to
+/// `env!("CARGO_PKG_VERSION")`, this guard's own build, when no instance has
+/// recorded one. Not a loopback call to `/__app-info`: no port lookup, nothing
+/// to fail while the route is busy.
+///
+/// The earlier premise was that `~/.bram/bram-guard` points at the binary built
+/// beside the app, so the guard's own compiled version IS the running build's.
+/// That breaks whenever the binary is rebuilt under a running instance: the
+/// guard link picks up the new build at once while the app, and its
+/// `/__app-info`, keeps the version it launched with. On 2026-11-10 the running
+/// instance reported 0.8.5, the guard was rebuilt to 0.8.6, and the deny for
+/// `Bram 0.8.5` told the agent to read `/__app-info`, which said 0.8.5. The
+/// signature describes the instance, so the instance's version is the one to
+/// compare against.
 ///
 /// The slot stays OPTIONAL — `version: None` is allowed exactly as before. This
 /// catches present-and-wrong, which is strictly narrower than requiring one, and
 /// leaves the soft rollout and older threads alone.
-fn signature_version_verdict(command: &str, cwd: &Path) -> (&'static str, String) {
-    let skip = || ("skip", String::new());
+fn signature_version_verdict(command: &str, cwd: &Path) -> (&'static str, String, ExpectedVersion) {
+    // A skip never reaches a message, so it does no sidecar read: this runs on
+    // every Bash call the guard sees.
+    let skip = || {
+        (
+            "skip",
+            String::new(),
+            ExpectedVersion {
+                version: String::new(),
+                source: "guard build",
+            },
+        )
+    };
     if command.is_empty() {
         return skip();
     }
@@ -2330,18 +2352,66 @@ fn signature_version_verdict(command: &str, cwd: &Path) -> (&'static str, String
     let Some(sig) = body_signature_line(&body).and_then(parse_agent_signature) else {
         return skip();
     };
+    let expected = expected_signature_version(cwd);
     match sig.version {
-        Some(v) if v != env!("CARGO_PKG_VERSION") => ("mismatch", v.to_string()),
-        _ => ("ok", String::new()),
+        Some(v) if v != expected.version => ("mismatch", v.to_string(), expected),
+        _ => ("ok", String::new(), expected),
+    }
+}
+
+/// The version a signature is compared against, and where it came from.
+struct ExpectedVersion {
+    version: String,
+    /// `"running instance"` (from `.bram-port.json`) or `"guard build"`.
+    source: &'static str,
+}
+
+/// The running instance's recorded version, found by walking up from `cwd`
+/// through each level's state-folder candidates for `.bram-port.json`; the
+/// guard's compiled version when none is readable (older host, no instance).
+fn expected_signature_version(cwd: &Path) -> ExpectedVersion {
+    let mut cur = abspath_of(cwd);
+    loop {
+        for dir in state_dir_candidates(&cur) {
+            let Ok(text) = std::fs::read_to_string(dir.join(".bram-port.json")) else {
+                continue;
+            };
+            let version = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("version")?.as_str().map(str::to_string))
+                .filter(|v| !v.is_empty());
+            if let Some(version) = version {
+                return ExpectedVersion {
+                    version,
+                    source: "running instance",
+                };
+            }
+        }
+        match cur.parent() {
+            Some(parent) if parent != cur => cur = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    ExpectedVersion {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        source: "guard build",
     }
 }
 
 /// The stale-version deny text, shared by the Claude and Codex deny sites so
 /// they cannot drift — the same discipline issue-365 imposed on the unsigned
 /// message.
-fn stale_signature_version_message(signed: &str) -> String {
+fn stale_signature_version_message(signed: &str, expected: &ExpectedVersion) -> String {
+    let basis = if expected.source == "running instance" {
+        format!("the running instance is {}", expected.version)
+    } else {
+        format!(
+            "this guard's build is {} (no running-instance version recorded)",
+            expected.version
+        )
+    };
     format!(
-        "This forge write is signed \"Bram {}\" but the running build is {}.\n\
+        "This forge write is signed \"Bram {}\" but {}.\n\
 A wrong version is worse than an absent one: it looks like provenance and \
 sends triage at the wrong build (judell/bram#343, #362).\n\
 The stale value is almost certainly the `<!-- bram vX.Y.Z -->` marker in the \
@@ -2349,8 +2419,7 @@ copy of `.claude/bram-conventions.md` that was `@`-imported when this session \
 started, which is older than the build you are running.\n\
 Re-read `GET /__app-info` on the loopback port for the live version, fix the \
 signature, and retry.",
-        signed,
-        env!("CARGO_PKG_VERSION")
+        signed, basis
     )
 }
 
@@ -3853,7 +3922,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     // guard-checks-the-signature-version: only reachable once the body parsed
     // AND the signature is well-formed, so "signed but stale" is a distinct
     // verdict from unsigned rather than a subset of it.
-    let (ver_verdict, ver_signed) = signature_version_verdict(&command, &cwd);
+    let (ver_verdict, ver_signed, ver_expected) = signature_version_verdict(&command, &cwd);
     if ver_verdict == "mismatch" {
         return deny_msg(
             format!("crossboundary-stale-version:{}", ver_signed),
@@ -3861,7 +3930,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             "Bash",
             &preview,
             &cwd_s,
-            &stale_signature_version_message(&ver_signed),
+            &stale_signature_version_message(&ver_signed, &ver_expected),
         );
     }
     // forge-body-fold-enforced: a signed, current body that is long must fold.
@@ -5575,9 +5644,12 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
     }
     // Same placement as the Claude site, shared message builder so the two
     // cannot drift.
-    let (ver_verdict, ver_signed) = signature_version_verdict(&command, cwd);
+    let (ver_verdict, ver_signed, ver_expected) = signature_version_verdict(&command, cwd);
     if ver_verdict == "mismatch" {
-        return codex_deny(&stale_signature_version_message(&ver_signed), "-");
+        return codex_deny(
+            &stale_signature_version_message(&ver_signed, &ver_expected),
+            "-",
+        );
     }
     // forge-body-fold-enforced: same placement and message as the Claude site.
     // The traced reason is the stable code, not the message's first line, so
@@ -6736,10 +6808,59 @@ mod guard_policy_tests {
 
         // The deny text names both versions, so the agent does not have to
         // guess which one the guard thinks is right.
-        let msg = stale_signature_version_message("0.6.7");
+        let msg = stale_signature_version_message("0.6.7", &stale.2);
         assert!(msg.contains("0.6.7"), "{msg}");
         assert!(msg.contains(current), "{msg}");
+        assert!(msg.contains("guard's build"), "{msg}");
         assert!(msg.contains("/__app-info"), "{msg}");
+
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    // The running instance's version, recorded in `.bram-port.json`, decides
+    // the verdict; the guard's compiled version is only the fallback (the
+    // 2026-11-10 incident: instance 0.8.5, guard rebuilt to 0.8.6).
+    #[test]
+    fn signature_version_prefers_the_running_instance_sidecar() {
+        let td = scratch("sigver-sidecar");
+        let current = env!("CARGO_PKG_VERSION");
+        let recorded = "9.9.9-running";
+        let sig = |v: &str| {
+            format!(
+                "gh issue comment 5 --repo judell/bram --body \"Jon's Claude (Bram {}, main thread, Opus 5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):\n\nBody.\"",
+                v
+            )
+        };
+
+        // No sidecar: today's behavior, compared against the guard build.
+        let none = signature_version_verdict(&sig(recorded), &td);
+        assert_eq!(none.0, "mismatch");
+        assert_eq!(none.2.source, "guard build");
+        assert_eq!(signature_version_verdict(&sig(current), &td).0, "ok");
+
+        // Sidecar without a usable version: still the guard build.
+        std::fs::create_dir_all(td.join("resources")).unwrap();
+        let sidecar = td.join("resources").join(".bram-port.json");
+        std::fs::write(&sidecar, "{\"schema\":1,\"version\":\"\"}").unwrap();
+        assert_eq!(signature_version_verdict(&sig(current), &td).0, "ok");
+
+        // Sidecar with a version that differs from the compiled one.
+        std::fs::write(
+            &sidecar,
+            format!("{{\"schema\":1,\"version\":\"{recorded}\"}}"),
+        )
+        .unwrap();
+        let ok = signature_version_verdict(&sig(recorded), &td);
+        assert_eq!(ok.0, "ok");
+        assert_eq!(ok.2.source, "running instance");
+        let bad = signature_version_verdict(&sig(current), &td);
+        assert_eq!(bad.0, "mismatch");
+        assert_eq!(bad.1, current);
+        let msg = stale_signature_version_message(&bad.1, &bad.2);
+        assert!(
+            msg.contains("the running instance is 9.9.9-running"),
+            "{msg}"
+        );
 
         let _ = std::fs::remove_dir_all(&td);
     }

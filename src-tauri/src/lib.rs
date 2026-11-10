@@ -30963,6 +30963,7 @@ fn write_bram_port_files(proj: &Path, port: u16, started_at_ms: i64) -> Result<(
         "projectRoot": proj.to_string_lossy().to_string(),
         "startedAtMs": started_at_ms,
         "startedAt": format_iso_utc_ms(started_at_ms),
+        "version": env!("CARGO_PKG_VERSION"),
     });
     let metadata_text = serde_json::to_string_pretty(&metadata)
         .map_err(|e| format!("serialize port metadata: {}", e))?;
@@ -31175,6 +31176,7 @@ mod bram_port_publication_tests {
         assert_eq!(meta["port"], new.port);
         assert_eq!(meta["pid"], std::process::id());
         assert_eq!(meta["startedAtMs"], 123);
+        assert_eq!(meta["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(project.publish(new.port).unwrap(), None);
     }
 

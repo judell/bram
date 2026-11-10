@@ -313,7 +313,8 @@ Respond to any per-item feedback, whatever the kind.
 - **Recommending Drop / Commit / Start on named items** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
 - **"What's my next move? (a, b, …)"** (a gate-bar button, sent as chat)
   → post the order as a plan whose `why` says what another order would
-  break, or that order doesn't matter; same section.
+  break, or that order doesn't matter; also offer delegation where items
+  can run at once; same section.
 
 **`/__worklist/resolve`** returns `{"kind":"approved"|"drop", "items":
 [<recorded content>]}` — execute those items; don't re-read

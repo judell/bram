@@ -423,6 +423,25 @@ Parallelize the *work*; serialize the *gates*.
   lines, and you can advance and commit once the subagent has returned.
   Other providers don't bind yet, so for them the old advice stands:
   commit delegated items together.
+- **The pane's view.** Running subagents appear as buttons; the user
+  activates one to follow its transcript. The roster reads running /
+  waiting / finished, and a resumed subagent reads running again
+  (`853176e9`). Only Claude's subagents are shown and bound today, so
+  suggest delegating only when you are Claude.
+- **Resume with context.** A subagent can be sent a follow-up and keeps
+  its context. Send review feedback back to the subagent that did the
+  work, not to a fresh one.
+- **When a subagent asks for direction.** It can't talk to the user. Its
+  brief tells it to proceed on its recommended choice when it reaches a
+  decision that changes what the user would see or do, and to put the
+  question with its recommendation at the top of its report. You relay
+  that to the user in one line with its recommendation (and yours, if
+  different), then relay the answer by resuming the same subagent. Say
+  this when you offer delegation, so the user knows questions still reach
+  them.
+- **Transport.** A `--body-file` path given as a shell variable is refused
+  by the guard as unreadable
+  (`crossboundary-unparsed:body-file-unreadable`). Write the literal path.
 
 ## Serializing entangled items approved together
 
@@ -704,6 +723,35 @@ as a plan with a `why`. Order by what the board shows:
   (it would entangle);
 - finish begun work before starting proposed work;
 - recommend Drop for an item that turned out to need nothing.
+
+**Look for delegation.** When two or more ticked items can be worked at once,
+say so in the answer and in the plan's `why`. Both lead with the batches as
+a numbered list, one line each, and say plainly that you'll hand each batch
+to its own subagent. The `why` is what **Why?** shows after the chat has
+scrolled away, so it carries the list too, not only the reasons:
+
+```
+I'll hand each batch to its own subagent:
+1. price-shows-two-decimals, then date-uses-iso-format (both app/format.js)
+2. header-adds-cart-link
+```
+
+Then:
+
+- when there is more than one batch, why they're grouped this way: items
+  that share a file go in the same batch, done one after another by that
+  batch's subagent, and different batches share no file, so they run at once;
+- that all the batches start with one **Start**;
+- that the user can follow each subagent's transcript by activating its button
+  in the pane;
+- that delegating leaves the main thread free for continued work and
+  conversation;
+- that when a subagent asks for direction, you relay the question to the user
+  with a recommendation (§Delegating worklist items to subagents).
+
+Make this offer only when the agent answering is one whose subagents Bram
+can show and bind: Claude today. A Codex, OpenCode or Antigravity session
+answers the next move without it.
 
 A step a plan can't hold (Resume, Start & commit, Push) goes in the chat
 answer as a click to make.

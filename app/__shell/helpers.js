@@ -2544,6 +2544,28 @@ function __bramDraftTrace(subkind, fields) {
   try { window.__bramIframeTrace && window.__bramIframeTrace(subkind, fields); } catch (e) {}
 }
 
+// next-move-offers-delegation: a person emptying the box (select-all, then
+// Delete or Cut) produced one empty input with no typing before it, so the
+// "untyped-empty" guard skipped saving it and the old draft came back on
+// reload (Jon, 2026-11-10: "emptying the box should persist the
+// emptiness"). A key, cut or drop inside the message box is evidence a
+// person edited it, which is what the guard needs; a program emptying the
+// box sends none of these. The box is the footer's textarea, matched as in
+// __bramComposerDirectEnterKeydown.
+function __bramDraftMarkUserEdit(e) {
+  try {
+    var t = e && e.target;
+    if (t && t.tagName === "TEXTAREA" && t.closest && t.closest('[data-testid="app-footer"]')) {
+      __bramDraftTyped = true;
+    }
+  } catch (x) {}
+}
+try {
+  document.addEventListener("keydown", __bramDraftMarkUserEdit, true);
+  document.addEventListener("cut", __bramDraftMarkUserEdit, true);
+  document.addEventListener("drop", __bramDraftMarkUserEdit, true);
+} catch (e) {}
+
 function __bramDraftSaveToHost(text) {
   __bramDraftHostText = text;
   try {
@@ -3405,8 +3427,30 @@ window.__bramPlanTooltip = function (board) {
 // recommendation when there is only one or zero items selected ... That's
 // when the sequence matters"): the plan line shows only while two or more
 // items are ticked.
+// next-move-offers-delegation (Jon, 2026-11-10: "i deselect the first three
+// and selected the rest. the do recommended and why did not catch up"): the
+// plan answers the selection it was asked about, so it shows only while
+// every item it names is still ticked. Change the selection away from it and
+// it steps aside; What's my next move? takes its slot for the new set.
+// next-move-offers-delegation (Jon, 2026-11-10: the shared-files line "is
+// now redundant, and visual clutter, we cover this in the Recommended line
+// and in detail in the Why"): the start-consequence line shows only while no
+// plan answers the selection. Before a plan it is still the warning at the
+// decision point (the 2026-09-03 case in WorklistGateBar.xmlui).
+window.__bramShowStartConsequence = function (board, sel, claim) {
+  if (window.__bramPlanVisible(board, sel)) return false;
+  return !!window.__bramStartConsequence(board && board.items, sel, claim);
+};
 window.__bramPlanVisible = function (board, sel) {
-  return (sel || []).length > 1 && !!window.__bramPlanLine(board);
+  if ((sel || []).length < 2 || !window.__bramPlanLine(board)) return false;
+  var ticked = {};
+  (sel || []).forEach(function (id) { ticked[id] = true; });
+  var steps = (board && board.plan && board.plan.steps) || [];
+  for (var i = 0; i < steps.length; i++) {
+    var ids = (steps[i] && steps[i].ids) || [];
+    for (var j = 0; j < ids.length; j++) if (!ticked[ids[j]]) return false;
+  }
+  return true;
 };
 // whats-my-sequence-button: what the plan line's Why? button opens: why this
 // order, nothing else. The agent's `why` (Markdown, posted with the plan),
@@ -17766,6 +17810,15 @@ window.__bramApplySendRestore = function (snapshot, box, toastApi) {
   var p = snapshot && snapshot.payload;
   var text = p && p.text;
   if (!text) return;
+  // next-move-offers-delegation: the gate bar's What's my next move? sends
+  // its own question straight to the agent. Refused (no agent yet), it is
+  // not the user's words, so it doesn't go back into the message box (Jon,
+  // 2026-11-10: "do not echo the message to the box"); say to click again.
+  if (window.__bramSequenceQuestion && text.indexOf(window.__bramSequenceQuestion) === 0) {
+    try { window.__bramIframeTrace("send-restore", { chars: text.length, skipped: true, reason: "sequence-question" }); } catch (e) {}
+    if (typeof toastApi === "function") toastApi("The agent wasn't ready, so What's my next move? wasn't sent. Click it again in a moment.");
+    return;
+  }
   var existing = "";
   try {
     if (box && typeof box.value === "string") {

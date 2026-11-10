@@ -101,16 +101,21 @@
        when the selection makes it consequential (shared files, or a mixed
        begun/unbegun selection), so un-gating shows text only when there is a
        consequence to state. -->
-  <HStack
-    when="{!!window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+  <!-- next-move-offers-delegation (Jon, 2026-11-10: "top line needs wrap",
+       then "always center what's my next move"): a column, the consequence
+       centered and wrapping, What's my next move? centered on its own line
+       beneath it. Supersedes next-move-button-inline-and-quiet's end-of-line
+       placement, which left-aligned the button once the line wrapped.
+       https://www.xmlui.org/docs/howto/center-content-on-the-page -->
+  <VStack
+    when="{window.__bramShowStartConsequence(gateWorklist.value, gateSel.value, gateClaim.value)}"
     horizontalAlignment="center"
-    verticalAlignment="center"
-    gap="$space-2"
-    paddingHorizontal="$space-8"
+    gap="$space-1"
+    paddingHorizontal="$space-2"
     paddingTop="$space-1">
-    <!-- next-move-button-inline-and-quiet: the text hugs its words (it was
-         width="100%") so the next-move button can sit right after it. -->
     <Text
+      width="fit-content"
+      textAlign="left"
       value="{window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}" />
     <Theme borderColor-Button-primary-outlined="$textColor-secondary"
       textColor-Button-primary-outlined="$textColor-secondary"
@@ -126,7 +131,7 @@
         enabled="{!window.__bramAgentWorking(gateAgent.value)}"
         onClick="window.__bramAskSequence(gateSel.value)" />
     </Theme>
-  </HStack>
+  </VStack>
   <!-- item-last-session-switch-there: a ticked item last worked on in
        another session offers to switch there. lastSession is computed by the
        host from the state-mirror ledger; the switch is the Sessions tab's,
@@ -193,14 +198,17 @@
     when="{!!window.__bramSelectionPredictionKey(gateWorklist.value, gateSel.value)}"
     url="/__worklist/will-commit"
     queryParams="{{ ids: window.__bramSelectionIdsParam(gateSel.value), k: window.__bramSelectionPredictionKey(gateWorklist.value, gateSel.value) }}" />
-  <HStack
+  <!-- next-move-offers-delegation: same column as the consequence line below,
+       so What's my next move? is always centered under its line. -->
+  <VStack
     when="{!!window.__bramSelectionTakeLine(gateTake.value, gateSel.value, gateWorklist.value)}"
     horizontalAlignment="center"
-    verticalAlignment="center"
-    gap="$space-2"
-    paddingHorizontal="$space-8"
+    gap="$space-1"
+    paddingHorizontal="$space-2"
     paddingTop="$space-1">
     <Text
+      width="fit-content"
+      textAlign="left"
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
       value="{window.__bramSelectionTakeLine(gateTake.value, gateSel.value, gateWorklist.value)}" />
@@ -218,7 +226,7 @@
         enabled="{!window.__bramAgentWorking(gateAgent.value)}"
         onClick="window.__bramAskSequence(gateSel.value)" />
     </Theme>
-  </HStack>
+  </VStack>
   <!-- issue-328: close consent AT THE GATE. When the selection carries
        closesIssues, one real checkbox per issue renders here — where the
        decision happens — instead of only inside a row expansion nobody is
@@ -396,14 +404,21 @@
        below, for exactly the ids the line names; it grants nothing the
        buttons don't. Dimmed while the agent is working, like Commit's
        caution. × dismisses. -->
-  <HStack
+  <!-- next-move-offers-delegation: a long plan (nine ids) ran off both
+       edges. Now a column (Jon, 2026-11-10: "center the recommended line
+       and ensure it'll wrap in a left-justified way. Do recommended and why
+       centered on own line"): the line is a block that hugs its words up to
+       the pane's width, centered, its wrapped lines left-aligned; the
+       buttons sit centered on their own line beneath it.
+       https://www.xmlui.org/docs/howto/know-when-to-use-fit-content -->
+  <VStack
     when="{window.__bramPlanVisible(gateWorklist.value, gateSel.value)}"
     horizontalAlignment="center"
-    verticalAlignment="center"
-    gap="$space-2"
+    gap="$space-1"
     paddingHorizontal="$space-2"
     paddingTop="$space-1">
-    <Text fontSize="$fontSize-sm" value="{window.__bramPlanLine(gateWorklist.value)}" />
+    <Text width="fit-content" textAlign="left" fontSize="$fontSize-base" value="{window.__bramPlanLine(gateWorklist.value)}" />
+    <HStack horizontalAlignment="center" verticalAlignment="center" gap="$space-2">
     <!-- A hover only for a feedback step's text, the one thing the line
          can't show; the reasoning is Why?'s (Jon, 2026-11-08: the old
          summary + feedback + decide-lines hover was "total overkill"). -->
@@ -413,14 +428,14 @@
       </property>
       <Button
         label="Do recommended"
-        size="sm"
+        size="xs"
         enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramAgentWorking(gateAgent.value)}"
         onClick="window.__bramDoRecommended(gateWorklist.value, gateClaim.value)" />
     </Tooltip>
     <Button
       when="{!window.__bramPlanTooltip(gateWorklist.value)}"
       label="Do recommended"
-      size="sm"
+      size="xs"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramAgentWorking(gateAgent.value)}"
       onClick="window.__bramDoRecommended(gateWorklist.value, gateClaim.value)" />
     <!-- whats-my-sequence-button: Why? opens the agent's reasoning for the
@@ -429,16 +444,17 @@
     <Button
       label="Why?"
       variant="outlined"
-      size="sm"
+      size="xs"
       tooltip="Why this order"
       onClick="planWhyDialog.open()" />
     <Button
       label="×"
       variant="ghost"
-      size="sm"
+      size="xs"
       tooltip="Dismiss the recommendation"
       onClick="window.__bramDismissPlan()" />
-  </HStack>
+    </HStack>
+  </VStack>
   <ModalDialog id="planWhyDialog" title="Why this order">
     <Markdown content="{window.__bramPlanWhy(gateWorklist.value)}" />
   </ModalDialog>

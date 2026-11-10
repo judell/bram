@@ -2857,6 +2857,40 @@ fn story_changed_soon<R: tauri::Runtime>(app: &AppHandle<R>) {
 mod story_index_tests {
     use super::*;
 
+    // A skip-worklist turn's text is found by time for the Log's preview:
+    // the nearest `<ms>-turn.json` within 3 s of the direct-edit line.
+    #[test]
+    fn outbound_turns_match_direct_edit_lines_by_time() {
+        let d = std::env::temp_dir().join(format!(
+            "bram-story-outbound-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // 2026-11-10T20:47:04.408Z
+        std::fs::write(
+            d.join("1794343624408-turn.json"),
+            r#"{"text":"link to the search i did"}"#,
+        )
+        .unwrap();
+        std::fs::write(d.join("1794343000000-turn.json"), r#"{"text":"too early"}"#).unwrap();
+        let lines = vec![
+            serde_json::json!({ "ts": "2026-11-10T20:47:04.409Z", "cat": "auth-record",
+                "text": "op=write kind=direct-edit ids=[] source=host-skip-worklist-prefix" }),
+            serde_json::json!({ "ts": "2026-11-10T20:47:04.500Z", "cat": "auth-record",
+                "text": "op=write kind=approved ids=[\"x\"]" }),
+            serde_json::json!({ "ts": "2026-11-10T21:00:00.000Z", "cat": "auth-record",
+                "text": "op=write kind=direct-edit ids=[]" }),
+        ];
+        let got = story_outbound_turns(&d, &lines);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["createdAtMs"], 1794343624408i64);
+        assert_eq!(got[0]["ts"], "2026-11-10T20:47:04.409Z");
+        assert_eq!(got[0]["text"], "link to the search i did");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     // log-reads-across-trace-rotation: the window spans a rotation, an
     // archive older than the window is skipped, a refetch with nothing new
     // reads nothing, and an append is read alone.
@@ -3087,6 +3121,9 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str, kinds: &[Stri
     let drafts = project_resource_path(app, ".bram-queue.json")
         .and_then(|p| p.parent().map(|s| story_queue_drafts(s, &lines)))
         .unwrap_or_default();
+    let outbound_turns = outbound_turns_dir(app)
+        .map(|d| story_outbound_turns(&d, &lines))
+        .unwrap_or_default();
     // log-shows-start-commit-push-search: what an entry's expanded detail
     // needs beside the lines. The session in force before the window's
     // first live-session-set line is unknown to the tail; when the tail has
@@ -3141,6 +3178,7 @@ fn story_lines<R: tauri::Runtime>(app: &AppHandle<R>, since: &str, kinds: &[Stri
     let body = serde_json::to_vec(&serde_json::json!({
         "lines": lines,
         "queueDrafts": drafts,
+        "outboundTurns": outbound_turns,
         "currentSession": current_session,
         "sessionTitles": session_titles,
         "commitUrlBase": commit_url_base,
@@ -3292,6 +3330,61 @@ fn queue_draft_lookup(state: &Path, id: &str) -> serde_json::Value {
         Some(entry) => serde_json::json!({ "active": false, "entry": entry }),
         None => serde_json::json!({ "missing": true }),
     }
+}
+
+/// The text of each skip-worklist turn in the window, for the Log's expanded
+/// preview. The trace never carries message text, and the send line truncates
+/// the turn file's name, so the turn is found by time: its file is
+/// `outbound-turns/<created ms>-turn.json`, written just before the host's
+/// `[auth-record] op=write kind=direct-edit` line. The nearest file within
+/// 3 s wins. Text is capped at 4,000 characters.
+fn story_outbound_turns(dir: &Path, lines: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let wanted: Vec<(String, i64)> = lines
+        .iter()
+        .filter(|l| l["cat"] == "auth-record")
+        .filter(|l| {
+            let t = l["text"].as_str().unwrap_or("");
+            t.contains("op=write") && t.contains("kind=direct-edit")
+        })
+        .filter_map(|l| {
+            let ts = l["ts"].as_str()?;
+            Some((ts.to_string(), parse_iso_to_epoch_ms(ts)?))
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let files: Vec<i64> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.strip_suffix("-turn.json")?.parse::<i64>().ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (ts, ms) in wanted {
+        let Some(best) = files
+            .iter()
+            .filter(|f| (**f - ms).abs() <= 3000)
+            .min_by_key(|f| (**f - ms).abs())
+        else {
+            continue;
+        };
+        let text = std::fs::read_to_string(dir.join(format!("{}-turn.json", best)))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["text"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        let text: String = text.chars().take(4000).collect();
+        out.push(serde_json::json!({ "ts": ts, "createdAtMs": best, "text": text }));
+    }
+    out
 }
 
 fn story_queue_drafts(

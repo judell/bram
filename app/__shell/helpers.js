@@ -21993,11 +21993,23 @@ window.__bramStoryTell = (function () {
         // Transcript, when it's in the session the Transcript shows.
         var curSid = payload.currentSession && payload.currentSession.sessionId;
         if (o._ep && o._ep.d && o._ep.d.turnLink && curSid && o.sessionId === curSid) text += " [↗](/transcript?at=" + o.t + ")";
+        // Its text, for the expanded preview: the host's outboundTurns,
+        // matched by time (the turn file is written just before the line).
+        var turnPreview = null;
+        if (o._ep && o._ep.d && o._ep.d.turnLink) {
+          var best = null;
+          (payload.outboundTurns || []).forEach(function (ot) {
+            var dt = Math.abs((ot.createdAtMs || 0) - o.t);
+            if (dt <= 3000 && (!best || dt < best.dt)) best = { dt: dt, text: ot.text };
+          });
+          if (best && best.text) turnPreview = best.text.length > 600 ? best.text.slice(0, 597) + "…" : best.text;
+        }
         var sentDraft = qid && payload.queueDrafts && payload.queueDrafts[qid];
         return {
           id: o.kind + ":" + (o.queueId || o.t),
           at: o.at, text: text, kind: o.kind, surprising: o.surprising, queueId: o.queueId || null,
           sentContext: sentDraft ? window.__bramQueueDraftContext(sentDraft) : null,
+          turnPreview: turnPreview,
           // Open in Queue only while the message is still queued.
           inQueue: !!draft && !draft.sentAtMs && !draft.deletedAtMs,
           // For the expanded detail: when it happened (the board-then fetch

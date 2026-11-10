@@ -192,6 +192,11 @@
             </Theme>
           </HStack>
           <VStack when="{$item.isExpanded}" paddingLeft="$space-5" gap="$space-0_5">
+            <!-- A skip-worklist turn's own words (the host's outboundTurns),
+                 so two such lines can be told apart without opening the
+                 Transcript. -->
+            <Text when="{!!$item.turnPreview}" whiteSpace="pre-wrap" paddingBottom="$space-1"
+              value="{$item.turnPreview}" />
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryEntryContext($item)}" />
             <Text when="{!!$item.sentContext}" fontSize="$fontSize-xs" color="$textColor-secondary"

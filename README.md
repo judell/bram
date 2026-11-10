@@ -43,6 +43,7 @@ UI section.
 - History: Lists and searches your Worklist items.
 
 - Log: Under **More**, tells what Bram did around your work (Start, Commit and Push, your searches, queued messages, session switches, a kept selection after a pane reload, demo instances) over the last five hours and across relaunches. Entries expand and link to History, Commits and the Transcript.
+- Tasks: Under **More**, lists the commands your agents keep re-typing across sessions, ranked, each with a suggested name. A measurement for now; it doesn't save or run anything yet.
 
 - Settings: Shows and changes global (repo-independent) settings.
 
@@ -316,7 +317,7 @@ dialog shows it with a **Copy** button.
 
 Bram supports two ways to dictate instead of type:
 
-- **🎤 Whisper buttons (recommended).** Local, low-latency dictation via [`whisper-server`](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server). Click a 🎤 button in the agent pane (next to the message box, a feedback box, an issue comment) to start recording, and click again when you're done. Your words appear in the box as you speak, so when you stop there's no wait: the text is already there to edit or send. Live text uses the same `whisper-server` and model, so there's nothing extra to install. This is the better experience — lower latency, your choice of model, good transcription quality — but it needs local setup.
+- **🎤 Whisper buttons (recommended).** Local, low-latency dictation via [`whisper-server`](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server). Click a 🎤 button in the agent pane (next to the message box, a feedback box, an issue comment) to start recording, and click again when you're done. Your words appear in the box as you speak, so when you stop there's no wait: the text is already there to edit or send. Speak over a selection and the words replace it; with no selection they go in at the caret. A pause doesn't start a new capital, and a question you continue across a pause stays one question. Live text uses the same `whisper-server` and model, so there's nothing extra to install. This is the better experience — lower latency, your choice of model, good transcription quality — but it needs local setup.
 - **The agent's native `/voice` command.** No local setup, but support varies by agent and platform. It's the zero-install fallback, and the working path where the Whisper button isn't proven yet.
 
 Bram spawns the local `whisper-server` on the first record click and kills it on app exit — you don't manage the process; you just need the binary, `ffmpeg`, and a model file installed.

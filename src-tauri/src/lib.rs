@@ -38031,6 +38031,30 @@ fn handle_agent_session<R: tauri::Runtime>(
         set_named_session(provider, Some(session))
     };
     if previous.as_deref() == Some(session) {
+        // last-active-follows-unchanged-session-report: switching back to a
+        // provider resumes the session Bram still has named for it, so the
+        // report is "unchanged" here, yet the last-active record may name the
+        // other provider's session. It's the same token-checked evidence the
+        // changed branch trusts, so the record follows it. Before this, a
+        // switch Codex -> Claude left last active on Codex and every launch
+        // under startupPolicy lastActive resumed Codex (2026-11-10, 369
+        // remember-last-active-skipped lines between 05:20 and 07:00).
+        let label = session_provider_label(provider);
+        let stale = read_last_active_session(app)
+            .map_or(true, |r| r.session_id != session || r.provider != label);
+        if stale {
+            remember_last_active_session(app, provider, session);
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "agent-switch",
+                    &format!(
+                        "op=remember-last-active-from-report provider={} session={} source=unchanged-report",
+                        label, session
+                    ),
+                );
+            }
+        }
         return (200, JSON, b"{\"ok\":true,\"changed\":false}".to_vec());
     }
     remember_last_active_session(app, provider, session);

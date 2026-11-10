@@ -628,7 +628,7 @@ window.__bramPaneFlushDecision = function (state) {
           });
         } catch (e) {}
       }
-      batch = { fires: 0, sumDrift: 0, maxDrift: 0, spikes: 0, sinceMs: 0 };
+      batch = { fires: 0, sumDrift: 0, maxDrift: 0, spikes: 0, sinceMs: 0, bgFires: 0 };
     }
   }
   setInterval(function () {

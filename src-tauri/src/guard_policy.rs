@@ -2077,9 +2077,27 @@ fn normalize_repo_locator(remote: &str) -> Option<String> {
     Some(format!("{}/{}", host.to_ascii_lowercase(), path))
 }
 
+/// guard-git-no-window: a `git` command that opens no console window on
+/// Windows. The guard is GUI-subsystem (`bin/bram-guard.rs`), so it has no
+/// console for a console-subsystem child to inherit; without
+/// CREATE_NO_WINDOW every `git` it runs gets a new, visible console. On
+/// 2026-11-09 that popped 3–4 windows per `guard_selftest` case at every
+/// Windows launch (judell/bram#469, Windows recovery acceptance).
+fn guard_git_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 pub(crate) fn expected_repo_locator(cwd: &Path) -> Option<String> {
     let safe_directory = format!("safe.directory={}", cwd.display());
-    let output = std::process::Command::new("git")
+    let output = guard_git_command("git")
         .args(["-c", &safe_directory, "remote", "get-url", "origin"])
         .current_dir(cwd)
         .output()
@@ -2476,7 +2494,7 @@ fn forge_sha_verdict_with_git(command: &str, cwd: &Path, git: &Path) -> (&'stati
         return ("ok", "no-full-shas".into());
     }
     for sha in &shas {
-        let probe = std::process::Command::new(git)
+        let probe = guard_git_command(git)
             .arg("cat-file")
             .arg("-e")
             .arg(format!("{}^{{commit}}", sha))
@@ -2493,7 +2511,7 @@ fn forge_sha_verdict_with_git(command: &str, cwd: &Path, git: &Path) -> (&'stati
             }
         }
     }
-    let refs = std::process::Command::new(git)
+    let refs = guard_git_command(git)
         .args([
             "for-each-ref",
             "--format=%(refname)",
@@ -2512,7 +2530,7 @@ fn forge_sha_verdict_with_git(command: &str, cwd: &Path, git: &Path) -> (&'stati
     };
     if has_remote_refs {
         for sha in &shas {
-            let contains = std::process::Command::new(git)
+            let contains = guard_git_command(git)
                 .args([
                     "for-each-ref",
                     "--format=%(refname)",

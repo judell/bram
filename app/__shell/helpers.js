@@ -21510,7 +21510,7 @@ window.__bramStoryTell = (function () {
       }
       var surprising = false;
       if (ep.d.released) s += " I released the claim.";
-      else if (ids.length) { s += " I did not see the claim released, so the item may still read as running."; surprising = true; }
+      else if (ids.length) { s += " I did not see the claim released, so the item may still read as running."; }
       rec.shown = true; rec.queued = queued; rec.quote = snd && snd.quote;
       rec.text = s; rec.surprising = surprising;
       say(ep, "turn", s, surprising);
@@ -21537,7 +21537,7 @@ window.__bramStoryTell = (function () {
         if (!g || g.d.ids) { g = Ep("gate", t); g.d.target = null; g.d.count = 0; g.deadline = t + 8000; open.push(g); }
         g.d.ids = idsOf(rest); g.d.recorded = true; g.deadline = Math.max(g.deadline, t + 8000);
       } else if (op === "write" && kind === "direct-edit") {
-        simple(t, "gate", "You sent a turn that skips the Worklist (skip-worklist: prefix), so I allowed direct edits with no item.");
+        simple(t, "gate", "You sent a turn that skips the Worklist (skip-worklist: prefix), so I allowed direct edits with no item.").d.turnLink = true;
       } else if (op === "refuse") {
         var m = /expired \((\d+) ms old, TTL (\d+) ms\)/.exec(rest);
         var what = kv(rest, "mutate_op") || "request", ids = idsOf(rest);
@@ -21547,7 +21547,7 @@ window.__bramStoryTell = (function () {
         } else {
           var dm = /detail=(.*?) ids=/.exec(rest);
           simple(t, "refusal", "I refused to " + what + " " + names(ids) + " and gave this reason: " +
-            (dm ? dm[1] : "none given") + ". I have no standard sentence for that, so it may be new.", true);
+            (dm ? dm[1] : "none given") + ". I have no standard sentence for that, so it may be new.");
         }
       }
     }
@@ -21591,17 +21591,12 @@ window.__bramStoryTell = (function () {
         if (tg === "commit" || tg === "start-commit") {
           if (d.sha) {
             s += d.files ? " I staged " + plural(+d.files, "file") + " and committed " + shaLink(d.sha) + "." : " I committed " + shaLink(d.sha) + ".";
-            (d.unowned || []).forEach(function (u) {
-              s += " That commit also took lines no item owned in " + u[0] + " (+" + u[1] + "/-" + u[2] +
-                "); that's disclosed, not hidden, but worth a look.";
-              surprising = true;
-            });
           } else if (flushNow < ep.deadline) {
             // Told before its deadline, by the flush at the end of the
             // window: the commit may still be on its way.
             s += " The commit hasn't landed yet.";
           } else if (tg === "commit") {
-            s += " I did not see a commit land within a minute."; surprising = true;
+            s += " I did not see a commit land within a minute.";
           } else {
             s += " No commit had landed " + dur(START_COMMIT_MS / 1000) + " later.";
           }
@@ -21634,7 +21629,8 @@ window.__bramStoryTell = (function () {
       } else {
         var lines = err.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
         var why = lines.filter(function (l) { return /^(error|fatal):/.test(l); })[0] || lines[lines.length - 1] || "git gave no error text";
-        simple(t, "push", "Your push of " + branch + " failed at the " + stage + " stage: " + why, true);
+        simple(t, "push", "Your push of " + branch + " failed at the " + stage + " stage: " + why.replace(/\.$/, "") +
+          ". Push again from the Commits tab, or pull first if it says the branch moved.", true);
       }
     }
 
@@ -21663,12 +21659,12 @@ window.__bramStoryTell = (function () {
       // Search.xmlui reads $queryParams.q and .mode).
       var href = "/search?q=" + encodeURIComponent(d.q) +
         (d.mode && d.mode !== "and" ? "&mode=" + encodeURIComponent(d.mode) : "");
-      var label = window.__bramStoryLeadingSentence(d.q).replace(/([\[\]\\])/g, "\\$1");
-      var s = "You searched for [“" + label + "”](" + href + ")" +
+      var s = "You searched for “" + window.__bramStoryLeadingSentence(d.q) + "”" +
         (d.mode && d.mode !== "and" ? " (" + d.mode + " mode)" : "");
       s += total
         ? " and got " + plural(total, "hit") + (parts.length > 1 ? " (" + parts.join(", ") + ")" : "") + "."
         : " and found nothing.";
+      s += " [↗](" + href + ")";
       say(ep, "search", s);
     }
 
@@ -21713,7 +21709,7 @@ window.__bramStoryTell = (function () {
         s = "The pane had trouble over " + (span >= 1 ? dur(span) : "a moment") + ": " + parts.join(" and ");
       }
       s += top ? ", while I was " + top + "." : ". I can't say what I was busy with; the trace doesn't name the work.";
-      say(ep, "stall", s, true);
+      say(ep, "stall", s, false);
     }
 
     // -- refusal (guard)
@@ -21735,7 +21731,7 @@ window.__bramStoryTell = (function () {
       else if (base === "crossboundary-stale-version") s = "I refused a forge post: its signature named Bram " + arg + ", which isn't the running version." + works;
       else if (base === "crossboundary-unparsed") s = "I refused a forge post because I couldn't check it (" + (arg || "unparsed") + ")." + works;
       else if (base === "subagent-lifecycle-call") s = "I refused a worklist lifecycle call that came from a subagent." + works;
-      else { s = "I refused Claude's " + d.tool + at + " with reason '" + d.reason + "'. I have no standard sentence for that one, so it may be new."; surprising = true; }
+      else { s = "I refused Claude's " + d.tool + at + " with reason '" + d.reason + "'. I have no standard sentence for that one, so it may be new."; }
       if (d.n > 1) s += " (It happened " + d.n + " times in a row.)";
       say(ep, "refusal", s, surprising);
     }
@@ -21805,7 +21801,7 @@ window.__bramStoryTell = (function () {
         if (pendingSwitch && pendingSwitch.provider === prov && pendingSwitch.why !== "launch") {
           var how = op === "launch-timeout" ? "the launch timed out" : "it exited as it launched";
           var away = lastSet && lastSet.provider !== prov ? " from " + agentName(lastSet.provider) : "";
-          pushSwitch(t, "You switched" + away + " to " + agentName(prov) + ", but it didn't start (" + how + ").", true);
+          pushSwitch(t, "You switched" + away + " to " + agentName(prov) + ", but it didn't start (" + how + "). Try the switch again from Sessions.", true);
           pendingSwitch = null;
         }
       } else if (op === "live-session-set") {
@@ -21993,6 +21989,10 @@ window.__bramStoryTell = (function () {
         // and its target (Claude, a Worklist item) from the saved draft.
         var qid = o.kind === "queue" && o._ep && o._ep.d && o._ep.d.qid;
         if (qid && shownAdds[qid]) text += " [↗](/log?focus=" + encodeURIComponent("queue-add:" + qid) + ")";
+        // A turn told in the Log (skip-worklist) links to that turn in the
+        // Transcript, when it's in the session the Transcript shows.
+        var curSid = payload.currentSession && payload.currentSession.sessionId;
+        if (o._ep && o._ep.d && o._ep.d.turnLink && curSid && o.sessionId === curSid) text += " [↗](/transcript?at=" + o.t + ")";
         var sentDraft = qid && payload.queueDrafts && payload.queueDrafts[qid];
         return {
           id: o.kind + ":" + (o.queueId || o.t),

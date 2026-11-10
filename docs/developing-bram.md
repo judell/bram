@@ -230,6 +230,22 @@ hand-rolls something different, the outlier is almost certainly
 where the bug lives — refit to the canonical pattern before adding
 instrumentation.
 
+## Warning color is earned
+
+Use the warning color only when a nontechnical user can clearly
+understand the problem and can easily act on it (Jon, 2026-11-10). A
+warning also says the action in plain words ("Push again from the
+Commits tab", "Try the switch again from Sessions"); a line that can't
+name one isn't a warning. Detail only an agent or a developer can use
+stays in the trace, not on the surface.
+
+The receipt: the Log once colored a commit line orange for "lines no
+item owned … that's disclosed, not hidden, but worth a look". Nobody
+could tell what it meant or do anything about it. The clause is gone,
+and the Log's eight warning sites were checked against this rule: two
+kept the color (a failed push, a switch that didn't start), and the
+rest went plain.
+
 ## Client storage: decision vs. focus
 
 The pane's browser storage splits into two classes, and picking the wrong

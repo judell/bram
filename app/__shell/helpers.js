@@ -18085,7 +18085,7 @@ window.__bramBlockquote = function (text) {
 // while the message is still queued.
 window.__bramLogQuotedMessage = function (item) {
   var q = window.__bramBlockquote(item && item.message);
-  if (q && item.context && item.inQueue) q += " [↗](/queue?focus=" + encodeURIComponent(item.queueId) + ")";
+  if (q && item.context && item.inQueue) q += " [↗](/queue?focus=" + encodeURIComponent(item.queueId) + ' "Open in Queue")';
   return q;
 };
 window.__bramLogFocusParam = function (focus) {
@@ -21549,8 +21549,12 @@ window.__bramStoryTell = (function () {
         var g = gateNow(t);
         if (!g || g.d.ids) { g = Ep("gate", t); g.d.target = null; g.d.count = 0; g.deadline = t + 8000; open.push(g); }
         g.d.ids = idsOf(rest); g.d.recorded = true; g.deadline = Math.max(g.deadline, t + 8000);
+      } else if (op === "write" && kind === "drop") {
+        // The Drop click's line names no items; this one does.
+        var gd = gateNow(t);
+        if (gd && gd.d.target === "drop" && !(gd.d.ids && gd.d.ids.length)) gd.d.ids = idsOf(rest);
       } else if (op === "write" && kind === "direct-edit") {
-        simple(t, "gate", "You sent a turn that skips the Worklist (skip-worklist: prefix), so I allowed direct edits with no item.").d.turnLink = true;
+        simple(t, "gate", "You sent a turn that skips the Worklist, so I allowed direct edits.").d.turnLink = true;
       } else if (op === "refuse") {
         var m = /expired \((\d+) ms old, TTL (\d+) ms\)/.exec(rest);
         var what = kv(rest, "mutate_op") || "request", ids = idsOf(rest);
@@ -21677,7 +21681,7 @@ window.__bramStoryTell = (function () {
       s += total
         ? " and got " + plural(total, "hit") + (parts.length > 1 ? " (" + parts.join(", ") + ")" : "") + "."
         : " and found nothing.";
-      s += " [↗](" + href + ")";
+      s += " [↗](" + href + ' "Run this search again in Search")';
       say(ep, "search", s);
     }
 
@@ -22001,11 +22005,11 @@ window.__bramStoryTell = (function () {
         // A sent message: an inline ↗ to the row that added it (when shown),
         // and its target (Claude, a Worklist item) from the saved draft.
         var qid = o.kind === "queue" && o._ep && o._ep.d && o._ep.d.qid;
-        if (qid && shownAdds[qid]) text += " [↗](/log?focus=" + encodeURIComponent("queue-add:" + qid) + ")";
+        if (qid && shownAdds[qid]) text += " [↗](/log?focus=" + encodeURIComponent("queue-add:" + qid) + ' "Show the message this sent")';
         // A turn told in the Log (skip-worklist) links to that turn in the
         // Transcript, when it's in the session the Transcript shows.
         var curSid = payload.currentSession && payload.currentSession.sessionId;
-        if (o._ep && o._ep.d && o._ep.d.turnLink && curSid && o.sessionId === curSid) text += " [↗](/transcript?at=" + o.t + ")";
+        if (o._ep && o._ep.d && o._ep.d.turnLink && curSid && o.sessionId === curSid) text += " [↗](/transcript?at=" + o.t + ' "Open this turn in the Transcript")';
         // Its text, for the expanded preview: the host's outboundTurns,
         // matched by time (the turn file is written just before the line).
         var turnPreview = null;

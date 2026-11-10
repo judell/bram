@@ -102,3 +102,13 @@ Every case the plan predicted shows up as predicted; no checkout has a `.bram/` 
 ## Judgment calls recorded for 0.8.4
 
 From the dry run as landed: a consumed but unexpired authorization counts as a live claim (advance and commit still use it); the state-mirror database's claim is not consulted; `wouldMove` reads the folder's top level only. From the inventory: two classes (machine state, seeded content) plus "shown only" may be too few if a managed project commits its `worklist-history/`. From the self-ignore: `.agents/hooks.json` and `.opencode/opencode.json` are merged files, so a user's additions to them are hidden from git until the project tracks the file.
+
+A brand-new project now starts in `.bram/` (new-project-starts-in-dot-bram,
+Windows's #488 fold 3). Without it, a root with neither folder made the first
+state write create `resources/`, and Status offered to migrate it on the first
+launch. When the startup mover skips, `ensure_new_state_dir` creates `.bram/`
+with `.gitignore` = `*` written first, so every reader resolves it under the
+unchanged rule. It does nothing for the home directory, when `.bram/` exists,
+or when `resources/` holds a Bram-owned entry (the mover's case). A
+`resources/` that holds only the project's own files is left untouched. It
+traces `[state-migrate] op=created-new reason=<no-old-folder|resources-not-bram>`.

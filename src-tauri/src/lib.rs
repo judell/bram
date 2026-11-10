@@ -33207,15 +33207,27 @@ fn repo_has_origin<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
 // first non-empty stderr line. Pull and Push keep their own blocking fetches.
 fn status_fetch(root: &std::path::Path, timeout: std::time::Duration) -> Result<(), String> {
     use std::io::Read;
-    let mut child = std::process::Command::new("git")
-        .current_dir(root)
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(root)
         .args(["fetch", "origin"])
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(std::process::Stdio::piped());
+    // issue-399: git's transport child (ssh) must die with git at the timeout.
+    // Unix: lead a process group and signal it. Windows: taskkill /T the tree.
+    // Same pattern as the issue-341 server spawn (kill_server_group).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     // Drain stderr on a thread so a chatty fetch can't block on a full pipe.
     // It is never joined: a killed ssh grandchild may hold the pipe open.
     let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -33247,6 +33259,12 @@ fn status_fetch(root: &std::path::Path, timeout: std::time::Duration) -> Result<
             Err(e) => return Err(e.to_string()),
         }
         if started.elapsed() >= timeout {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            taskkill_tree(child.id(), true);
             let _ = child.kill();
             let _ = child.wait();
             return Err("timed out".to_string());
@@ -65102,6 +65120,55 @@ fn state_migrate_rename(
 const STATE_MIGRATE_ATTEMPTS: u32 = 10;
 const STATE_MIGRATE_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 const STATE_MIGRATED_FROM_REL: &str = ".migrated-from";
+
+// A brand-new project starts in `.bram/`, not `resources/`. With neither
+// folder present the mover skips, and the resolver's "`.bram/` if it exists,
+// else `resources/`" rule would make the first state write create `resources/`
+// (and `/__state-dir/plan` would then offer to migrate it). So when the mover
+// had nothing to move, create `.bram/` here, `.gitignore` = `*` first as the
+// mover does; every reader (host, guard, plugin, scripts) then resolves it
+// under the unchanged rule. Skipped for the home directory (`~/.bram` is the
+// machine folder), when `.bram/` already exists, and when `resources/` holds
+// any Bram-owned entry (state_dir_plan_core's would_move: the mover's case).
+// Returns the trace reason when it created the folder.
+fn ensure_new_state_dir(root: &Path) -> Option<&'static str> {
+    ensure_new_state_dir_with_home(root, home_dir().as_deref())
+}
+
+fn ensure_new_state_dir_with_home(root: &Path, home: Option<&Path>) -> Option<&'static str> {
+    if home.is_some_and(|h| path_is_home_dir(root, h)) {
+        return None;
+    }
+    let new = root.join(BRAM_STATE_DIR_NEW);
+    if new.exists() {
+        return None;
+    }
+    let old = root.join(BRAM_STATE_DIR_LEGACY);
+    let reason = match std::fs::read_dir(&old) {
+        Ok(read) => {
+            let holds_bram_state = read.flatten().any(|e| {
+                matches!(
+                    state_dir_entry_for(&e.file_name().to_string_lossy()),
+                    Some(entry) if entry.class != OwnedClass::SeededContent
+                )
+            });
+            if holds_bram_state {
+                return None;
+            }
+            "resources-not-bram"
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "no-old-folder",
+        // resources/ exists but can't be read: don't guess.
+        Err(_) => return None,
+    };
+    std::fs::create_dir(&new).ok()?;
+    // Without the `*` rule the folder would be stageable: undo and skip.
+    if std::fs::write(new.join(".gitignore"), "*\n").is_err() {
+        let _ = std::fs::remove_dir_all(&new);
+        return None;
+    }
+    Some(reason)
+}
 
 fn migrate_state_dir(root: &Path) -> StateMigrateOutcome {
     migrate_state_dir_with(
@@ -97520,6 +97587,67 @@ mod worklist_authorization_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn ensure_new_state_dir_empty_root_creates_dot_bram() {
+        let root = state_dir_plan_temp_root();
+        assert_eq!(
+            super::ensure_new_state_dir_with_home(&root, None),
+            Some("no-old-folder")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(".bram/.gitignore")).unwrap(),
+            "*\n"
+        );
+        assert!(!root.join(super::BRAM_STATE_DIR_LEGACY).exists());
+        assert_eq!(super::ensure_new_state_dir_with_home(&root, None), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ensure_new_state_dir_leaves_project_resources_alone() {
+        let root = state_dir_plan_temp_root();
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_LEGACY)).unwrap();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_LEGACY).join("logo.svg"),
+            "<svg/>",
+        )
+        .unwrap();
+        assert_eq!(
+            super::ensure_new_state_dir_with_home(&root, None),
+            Some("resources-not-bram")
+        );
+        assert!(root.join(".bram/.gitignore").is_file());
+        let left: Vec<_> = std::fs::read_dir(root.join(super::BRAM_STATE_DIR_LEGACY))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(left.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ensure_new_state_dir_skips_bram_owned_resources_and_home() {
+        let root = state_dir_plan_temp_root();
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_LEGACY)).unwrap();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_LEGACY)
+                .join("worklist.json"),
+            "{}",
+        )
+        .unwrap();
+        assert_eq!(super::ensure_new_state_dir_with_home(&root, None), None);
+        assert!(!root.join(".bram").exists());
+        let _ = std::fs::remove_dir_all(&root);
+
+        let home = state_dir_plan_temp_root();
+        assert_eq!(
+            super::ensure_new_state_dir_with_home(&home, Some(&home)),
+            None
+        );
+        assert!(!home.join(".bram").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn state_dir_plan_temp_root() -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("bram-469-plan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -105043,7 +105171,14 @@ pub fn run() {
                 // Kept for GET /__state-dir/plan, so Status can say why a
                 // folder is still in resources/ without parsing the trace.
                 let _ = STATE_MIGRATE_STARTUP.set(state_migrate_outcome_json(&outcome, unix_now_ms()));
-                let lines = state_migrate_trace_lines(&outcome);
+                let mut lines = state_migrate_trace_lines(&outcome);
+                // A new project starts in `.bram/`: only when the mover had
+                // nothing to move (never after a move, block or abandon).
+                if project_folder().is_ok() && matches!(outcome, StateMigrateOutcome::Skipped(_)) {
+                    if let Some(reason) = ensure_new_state_dir(root) {
+                        lines.push(format!("op=created-new reason={}", reason));
+                    }
+                }
                 // Only an outcome the trace can't record goes to stderr: outside
                 // a project folder nothing is traced at all.
                 if matches!(outcome, StateMigrateOutcome::Skipped("not-repo")) {
@@ -110870,12 +111005,42 @@ mod status_fetch_tests {
     fn fetch_timeout_kills_and_reports() {
         let dir = scratch_repo("hang");
         git(&dir, &["config", "protocol.ext.allow", "always"]);
-        git(&dir, &["remote", "add", "origin", "ext::sleep 8"]);
+        // The marker rides in the transport's command line, so a leaked
+        // grandchild (issue-399: git's ssh) is findable after the call.
+        let marker = format!(
+            "bram-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        // ext:: honours no quoting, so the command is a script whose path
+        // (and so the shell's command line) carries the marker.
+        let script = dir.join(format!("hang-{}.sh", marker));
+        std::fs::write(&script, "sleep 8\ntrue\n").unwrap();
+        git(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("ext::sh {}", script.display()),
+            ],
+        );
         let started = Instant::now();
         let err = status_fetch(&dir, Duration::from_secs(1)).unwrap_err();
         let took = started.elapsed();
         assert_eq!(err, "timed out");
         assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(300));
+        let ps = std::process::Command::new("ps")
+            .args(["-axo", "command"])
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&ps.stdout);
+        let survivors: Vec<&str> = listing.lines().filter(|l| l.contains(&marker)).collect();
+        assert!(survivors.is_empty(), "leaked: {:?}", survivors);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

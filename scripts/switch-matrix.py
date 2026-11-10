@@ -62,6 +62,14 @@ NEVER = re.compile(
 )
 
 
+def strip_bram_notes(content: str) -> str:
+    """Drop a leading block of host-written `[bram: ...]` lines (and blanks)."""
+    lines = content.strip().splitlines()
+    while lines and (not lines[0].strip() or re.match(r"^\[bram: .*\]$", lines[0].strip())):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 class Run:
     def __init__(self, repo: Path, timeout: float):
         self.repo = repo
@@ -125,7 +133,7 @@ class Run:
                     if isinstance(content, list):
                         content = "".join(p.get("text", "") for p in content
                                           if isinstance(p, dict) and p.get("type") == "text")
-                    if isinstance(content, str) and content.strip() == text:
+                    if isinstance(content, str) and strip_bram_notes(content) == text:
                         return True
             time.sleep(0.5)
         return False

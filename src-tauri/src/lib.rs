@@ -22520,6 +22520,7 @@ fn run_startup_autostart(
             // marker and keeps typing ahead, as before.
             gate: !cfg!(windows),
             first_command: true,
+            fresh: !launch.resume || resume_without_session,
             hook: Box::new(move |app, phase| {
                 // issue-429-digest-publish-watermark: autostart no longer
                 // marks the session it enters; digests advance their own
@@ -24352,32 +24353,116 @@ fn host_notes_without(notes: Vec<HostNote>, delivered: &[String]) -> Vec<HostNot
         .collect()
 }
 
+// Kinds that state a FACT about the world as of now: a newer one says
+// everything an older pending one did, so queuing replaces. Events (a
+// withdrawn close, one per issue and sha) each carry news and must each be
+// delivered, so they append.
+//   state-folder-moved    fact: where Bram's state lives now
+//   tracked-settings-dirty fact: the settings file's current state
+//   issue-close-withdrawn  event: one per withdrawn close; never merged
+fn host_note_kind_replaces(kind: &str) -> bool {
+    matches!(kind, STATE_MOVED_NOTE_KIND | SETTINGS_NOTE_KIND)
+}
+
+// Pure: the note list after queuing `note`. For a fact kind, pending notes of
+// that kind are removed first; their ids come back so the caller can trace
+// the replacement.
+fn host_notes_with_queued(notes: Vec<HostNote>, note: HostNote) -> (Vec<HostNote>, Vec<String>) {
+    let mut replaced = Vec::new();
+    let mut out: Vec<HostNote> = Vec::with_capacity(notes.len() + 1);
+    for n in notes {
+        if n.kind == note.kind && host_note_kind_replaces(&note.kind) {
+            replaced.push(n.id);
+        } else {
+            out.push(n);
+        }
+    }
+    out.push(note);
+    (out, replaced)
+}
+
+// Pure: the notes left after dropping every one of `kind`, and the ids dropped.
+fn host_notes_dropping_kind(notes: Vec<HostNote>, kind: &str) -> (Vec<HostNote>, Vec<String>) {
+    let mut dropped = Vec::new();
+    let mut kept = Vec::with_capacity(notes.len());
+    for n in notes {
+        if n.kind == kind {
+            dropped.push(n.id);
+        } else {
+            kept.push(n);
+        }
+    }
+    (kept, dropped)
+}
+
+// A brand-new session has no earlier turns to correct and reads the current
+// conventions, so a pending state-folder-moved note is dropped, not delivered.
+fn drop_state_moved_notes_for_new_session<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(path) = host_notes_file(app) else {
+        return;
+    };
+    let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let (kept, dropped) = host_notes_dropping_kind(read_host_notes(&path), STATE_MOVED_NOTE_KIND);
+    if dropped.is_empty() {
+        return;
+    }
+    if write_host_notes(&path, &kept).is_ok() {
+        append_bram_trace_line(
+            app,
+            "host-note",
+            &format!(
+                "op=dropped kind={} reason=new-session ids={}",
+                STATE_MOVED_NOTE_KIND,
+                dropped.join(",")
+            ),
+        );
+    }
+}
+
 fn queue_host_note<R: tauri::Runtime>(app: &AppHandle<R>, kind: &str, text: String) {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let Some(path) = host_notes_file(app) else {
         return;
     };
     let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let mut notes = read_host_notes(&path);
     let now = unix_now_ms();
     let id = format!(
         "{}-{}",
         now,
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    notes.push(HostNote {
-        id: id.clone(),
-        kind: kind.to_string(),
-        text,
-        created_at_ms: now,
-    });
+    let (notes, replaced) = host_notes_with_queued(
+        read_host_notes(&path),
+        HostNote {
+            id: id.clone(),
+            kind: kind.to_string(),
+            text,
+            created_at_ms: now,
+        },
+    );
     let pending = notes.len();
     match write_host_notes(&path, &notes) {
-        Ok(()) => append_bram_trace_line(
-            app,
-            "host-note",
-            &format!("op=queued id={} kind={} pending={}", id, kind, pending),
-        ),
+        // op=queued still means "a note was added"; a replacement adds op=replaced
+        // naming what it superseded, so the trace never loses the queue event.
+        Ok(()) => {
+            append_bram_trace_line(
+                app,
+                "host-note",
+                &format!("op=queued id={} kind={} pending={}", id, kind, pending),
+            );
+            if !replaced.is_empty() {
+                append_bram_trace_line(
+                    app,
+                    "host-note",
+                    &format!(
+                        "op=replaced id={} kind={} old={}",
+                        id,
+                        kind,
+                        replaced.join(",")
+                    ),
+                );
+            }
+        }
         Err(e) => append_bram_trace_line(
             app,
             "host-note",
@@ -25004,6 +25089,8 @@ struct AgentLaunch<R: tauri::Runtime> {
     caller_hint: &'static str,
     gate: bool,
     first_command: bool,
+    // True when the launch starts a brand-new session (nothing resumed).
+    fresh: bool,
     // The site's own work around the write (pins, refreshes, the boot hold).
     hook: Box<dyn Fn(&AppHandle<R>, LaunchPhase) + Send>,
 }
@@ -25093,6 +25180,11 @@ fn opencode_instance_launch_command(command: &str, supported: bool) -> String {
 }
 
 fn launch_agent_command<R: tauri::Runtime>(mut launch: AgentLaunch<R>) {
+    // The one funnel every launch passes: a brand-new session never gets the
+    // state-folder-moved correction (it has no earlier turns to correct).
+    if launch.fresh {
+        drop_state_moved_notes_for_new_session(&launch.app);
+    }
     std::thread::spawn(move || {
         // A shared Codex server inherits another launch's environment. Hooks
         // then lack this Bram instance's menu token (Windows 0.165.0, #455).
@@ -25970,6 +26062,10 @@ fn switch_agent(
         caller_hint: "agent-switch-launch",
         gate: true,
         first_command: true,
+        fresh: matches!(
+            resume_reason,
+            "fresh" | "fresh-for-new-session" | "restart-pending"
+        ),
         hook: Box::new(move |app, phase| {
             if phase == LaunchPhase::Confirmed {
                 // Pairs are explicit only (the draft's decided answer): a
@@ -28439,6 +28535,7 @@ fn reload_agent_session(
         caller_hint: "agent-reload-launch",
         gate: true,
         first_command: false,
+        fresh: !session_exists,
         hook: Box::new(move |app, phase| {
             if phase == LaunchPhase::Confirmed {
                 // session-groups: a resume across agents no longer joins
@@ -28537,6 +28634,7 @@ fn start_agent_fresh(
         caller_hint: "agent-fresh-launch",
         gate: true,
         first_command: true,
+        fresh: true,
         hook: Box::new(move |app, phase| {
             if phase != LaunchPhase::Written {
                 return;
@@ -29582,6 +29680,7 @@ fn create_new_session(
         caller_hint: "agent-new-launch",
         gate: true,
         first_command: false,
+        fresh: true,
         hook: Box::new(move |app, phase| match phase {
             // A manual launch is now the only way on; let its boot bytes
             // release the hold.
@@ -108034,9 +108133,59 @@ mod attribution_pathspec_tests {
 #[cfg(test)]
 mod host_note_tests {
     use super::{
-        close_withdrawn_note_text, host_notes_without, prepend_host_notes, read_host_notes,
-        turn_accepts_host_notes, write_host_notes, HostNote,
+        close_withdrawn_note_text, host_notes_dropping_kind, host_notes_with_queued,
+        host_notes_without, prepend_host_notes, read_host_notes, turn_accepts_host_notes,
+        write_host_notes, HostNote,
     };
+
+    fn kind_note(id: &str, kind: &str) -> HostNote {
+        HostNote {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            text: id.to_string(),
+            created_at_ms: 1,
+        }
+    }
+
+    // A fact kind keeps only its newest note. Fails if state-folder-moved
+    // appends (the demo's doubled prefix).
+    #[test]
+    fn a_fact_kind_queues_one_note_the_newest() {
+        let start = vec![
+            kind_note("a", "state-folder-moved"),
+            kind_note("x", "issue-close-withdrawn"),
+        ];
+        let (out, replaced) = host_notes_with_queued(start, kind_note("b", "state-folder-moved"));
+        assert_eq!(replaced, vec!["a".to_string()]);
+        let ids: Vec<&str> = out.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["x", "b"]);
+    }
+
+    // An event kind still appends: each withdrawn close must be told.
+    #[test]
+    fn an_event_kind_still_appends() {
+        let start = vec![kind_note("a", "issue-close-withdrawn")];
+        let (out, replaced) =
+            host_notes_with_queued(start, kind_note("b", "issue-close-withdrawn"));
+        assert!(replaced.is_empty());
+        assert_eq!(out.len(), 2);
+    }
+
+    // A new session drops only state-folder-moved notes.
+    #[test]
+    fn dropping_a_kind_keeps_the_others() {
+        let start = vec![
+            kind_note("a", "state-folder-moved"),
+            kind_note("x", "issue-close-withdrawn"),
+            kind_note("b", "state-folder-moved"),
+        ];
+        let (kept, dropped) = host_notes_dropping_kind(start, "state-folder-moved");
+        assert_eq!(dropped, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(kept, vec![kind_note("x", "issue-close-withdrawn")]);
+        let (same, none) = host_notes_dropping_kind(kept.clone(), "state-folder-moved");
+        assert!(none.is_empty());
+        assert_eq!(same, kept);
+    }
 
     fn note(id: &str, text: &str) -> HostNote {
         HostNote {

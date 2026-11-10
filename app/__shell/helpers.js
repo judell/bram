@@ -18075,6 +18075,19 @@ window.__bramLogRows = function (entries, expanded, focusId) {
 // The Log's deep link (/log?focus=<row id>): a queue-send row's sentence
 // links to the queue-add row for the message it sent. The focused row is
 // expanded (__bramLogFocusExpand), scrolled to (List.scrollToId) and tinted.
+// A quoted message (a turn's text, a queued message) as a Markdown
+// blockquote, every line prefixed so blank lines stay inside the quote.
+window.__bramBlockquote = function (text) {
+  var s = String(text == null ? "" : text).replace(/\s+$/, "");
+  return s ? s.split("\n").map(function (l) { return "> " + l; }).join("\n") : "";
+};
+// A queued message's body: the blockquote, ending in ↗ to Open in Queue
+// while the message is still queued.
+window.__bramLogQuotedMessage = function (item) {
+  var q = window.__bramBlockquote(item && item.message);
+  if (q && item.context && item.inQueue) q += " [↗](/queue?focus=" + encodeURIComponent(item.queueId) + ")";
+  return q;
+};
 window.__bramLogFocusParam = function (focus) {
   // The ↗ click also toggles its own row; that expansion lands in the same
   // render and must not clear the focus it set.

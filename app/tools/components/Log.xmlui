@@ -140,11 +140,10 @@
                  however it wraps (Text `inline`:
                  https://www.xmlui.org/docs/reference/components/Text).
                  The link shows only when there is a saved draft to open. -->
-            <Text>
-              <Text inline="true" whiteSpace="pre-wrap" value="{$item.message}" />
-              <Link when="{!!$item.context &amp;&amp; $item.inQueue}" icon="external-link" noIndicator="true" marginLeft="$space-1"
-                tooltip="Open in Queue" to="{'/queue?focus=' + $item.queueId}" />
-            </Text>
+            <!-- The message as a Markdown blockquote; while it's still
+                 queued it ends in ↗ to Open in Queue
+                 (https://www.xmlui.org/docs/reference/components/Markdown). -->
+            <Markdown openLinkInNewTab="{false}" content="{window.__bramLogQuotedMessage($item)}" />
             <!-- Screenshots sent with the message, as Transcript shows a
                  turn's images: a thumbnail that opens full size. -->
             <Items data="{$item.images || []}">
@@ -195,8 +194,8 @@
             <!-- A skip-worklist turn's own words (the host's outboundTurns),
                  so two such lines can be told apart without opening the
                  Transcript. -->
-            <Text when="{!!$item.turnPreview}" whiteSpace="pre-wrap" paddingBottom="$space-1"
-              value="{$item.turnPreview}" />
+            <Markdown when="{!!$item.turnPreview}" openLinkInNewTab="{false}"
+              content="{window.__bramBlockquote($item.turnPreview)}" />
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryEntryContext($item)}" />
             <Text when="{!!$item.sentContext}" fontSize="$fontSize-xs" color="$textColor-secondary"

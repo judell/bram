@@ -3,7 +3,8 @@
   var.storyTick="{0}"
   var.mountKey="{window.__bramStoryMountKey()}"
   var.expanded="{[]}"
-  var.fullscreenImage="{null}">
+  var.fullscreenImage="{null}"
+  var.focusId="{null}">
 
   <!-- issue-473-readable-launch-log: Bram's story of the last five hours
        (one until log-shows-start-commit-push-search, 2026-11-07; the host's
@@ -30,6 +31,15 @@
        https://www.xmlui.org/docs/reference/components/ChangeListener -->
   <ChangeListener listenTo="{expanded.join(',')}"
     onDidChange="window.__bramLogExpandedTrace(expanded)" />
+  <!-- The queue-send row's "Show the message" link sets focusId; one
+       ChangeListener expands that row, another scrolls the List to it
+       (List.scrollToId: https://www.xmlui.org/docs/reference/components/List#scrolltoid).
+       The row is highlighted while focused with the same
+       $color-primary-100 background Queue.xmlui uses for its focused entry. -->
+  <ChangeListener listenTo="{focusId}"
+    onDidChange="expanded = window.__bramLogFocusExpand(expanded, focusId)" />
+  <ChangeListener listenTo="{focusId}"
+    onDidChange="logList.scrollToId(focusId)" />
   <PushSource id="storyChanged" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('story-changed')}" />
   <ChangeListener listenTo="{storyChanged.value &amp;&amp; storyChanged.value.tick}"
@@ -59,7 +69,7 @@
          otherwise retain the old expanded array in both bindings and click
          handlers, even while the parent ChangeListener sees the update.
          https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop -->
-    <List data="{window.__bramLogRows(window.__bramStoryTell(story.value), expanded)}" idKey="id">
+    <List id="logList" data="{window.__bramLogRows(window.__bramStoryTell(story.value), expanded, focusId)}" idKey="id">
       <!-- While the story loads, a spinner; once loaded, an empty Log is
            just empty (Jon, 2026-11-07: remove "Nothing to show yet").
            https://www.xmlui.org/docs/reference/components/Spinner -->
@@ -82,7 +92,8 @@
         paddingVertical-Text-paragraph="0"
         lineHeight-Text-paragraph="1.5rem"
         paddingBottom-Text-code="0">
-      <HStack gap="$space-2" paddingVertical="$space-1" verticalAlignment="start">
+      <HStack gap="$space-2" paddingVertical="$space-1" verticalAlignment="start"
+        backgroundColor="{$item.isFocused ? '$color-primary-100' : 'transparent'}">
         <!-- The time links into the Transcript at that moment
              (/transcript?at=<ms>) when the entry happened in the session
              the Transcript shows; otherwise it's plain. -->
@@ -121,8 +132,22 @@
                  however it wraps (Text `inline`:
                  https://www.xmlui.org/docs/reference/components/Text).
                  The link shows only when there is a saved draft to open. -->
+            <!-- A message that opens with an agent signature: a small toggle
+                 line with the one-line summary, the fields beneath when open,
+                 then the rest of the message. -->
+            <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
+              textColor-Link--active="$textColor-secondary">
+              <Link when="{!!$item.signature}" noIndicator="true" fontSize="$fontSize-xs" breakMode="word"
+                label="{($item.sigOpen ? '▾ ' : '▸ ') + ($item.signature ? $item.signature.summary : '')}"
+                onClick="expanded = window.__bramLogSigToggle(expanded, $item.id)" />
+            </Theme>
+            <VStack when="{!!$item.signature &amp;&amp; $item.sigOpen}" gap="0" paddingLeft="$space-3">
+              <Items data="{$item.signature ? $item.signature.fields : []}">
+                <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.label + ': ' + $item.value}" />
+              </Items>
+            </VStack>
             <Text>
-              <Text inline="true" whiteSpace="pre-wrap" value="{$item.message}" />
+              <Text inline="true" whiteSpace="pre-wrap" value="{$item.signature ? $item.signature.rest : $item.message}" />
               <Link when="{!!$item.context}" icon="external-link" noIndicator="true" marginLeft="$space-1"
                 tooltip="Open in Queue" to="{'/queue?focus=' + $item.queueId}" />
             </Text>
@@ -171,6 +196,9 @@
             <Theme when="{$item.surprising}" textColor-Text="$color-warn-700">
               <Markdown width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             </Theme>
+            <Link when="{!!$item.sentQueueId}" icon="external-link" noIndicator="true"
+              tooltip="Show the message"
+              onClick="focusId = window.__bramLogFocusQueueAdd($item.sentQueueId)" />
           </HStack>
           <VStack when="{$item.isExpanded}" paddingLeft="$space-5" gap="$space-0_5">
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"

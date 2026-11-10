@@ -18063,11 +18063,79 @@ window.__bramStoryTranscriptHref = function (item, story) {
 // and handlers. Parent state alone changed without updating visible rows in
 // the vendored XMLUI bundle; reproduced with both plain and arrow handlers.
 // https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop
-window.__bramLogRows = function (entries, expanded) {
+window.__bramLogRows = function (entries, expanded, focusId) {
   var open = new Set(expanded || []);
   return (entries || []).map(function (entry) {
-    return Object.assign({}, entry, { isExpanded: open.has(entry.id) });
+    return Object.assign({}, entry, {
+      isExpanded: open.has(entry.id),
+      sigOpen: open.has("sig:" + entry.id),
+      isFocused: !!focusId && entry.id === focusId,
+    });
   });
+};
+// The queue-send row's link to the message it sent: the add row's id, to be
+// stored as the Log's focus. A ChangeListener on focus then expands it
+// (__bramLogFocusExpand) and scrolls to it (List.scrollToId).
+window.__bramLogFocusQueueAdd = function (queueId) {
+  return queueId ? "queue-add:" + queueId : null;
+};
+window.__bramLogFocusExpand = function (expanded, focusId) {
+  if (!focusId) return expanded || [];
+  var arr = expanded || [];
+  return arr.indexOf(focusId) >= 0 ? arr : arr.concat([focusId]);
+};
+// Toggles the signature fold of a row ("sig:" + row id) in the same array.
+window.__bramLogSigToggle = function (expanded, id) {
+  return window.__bramToggleInArray(expanded, "sig:" + id);
+};
+// A message that opens with an agent signature, in either form (grammar:
+// guard_policy.rs parse_agent_signature / parse_expander_signature). Returns
+// null, or { summary, fields: [{label, value}], rest }.
+window.__bramSplitSignature = function (text) {
+  var s = String(text == null ? "" : text).replace(/^\s+/, "");
+  var AG = "(Claude|Codex|OpenCode|Antigravity)";
+  function done(summary, fields, tail) {
+    return { summary: summary, fields: fields, rest: tail.replace(/^(?:[ \t]*\r?\n)+/, "").replace(/^\s+$/, "") };
+  }
+  var m = new RegExp("^([^\\n]*?)'s " + AG + " \\(([^)\\n]*)\\) speaking from the ([^\\n]+?) project \\(([^)\\n]+)\\):[ \\t]*(?:\\r?\\n|$)").exec(s);
+  if (m && m[1].trim()) {
+    var slots = m[3].split(", ").map(function (x) { return x.trim(); });
+    var fields = [];
+    var first = slots[0] || "";
+    var ver = /^Bram (\S.*)$/.exec(first);
+    if (ver) { fields.push({ label: "Bram", value: "v" + ver[1].trim().replace(/^[vV](?=\d)/, "") }); slots.shift(); }
+    var thread = slots.shift();
+    if (thread !== "main thread" && thread !== "subagent") return null;
+    var model = slots.shift();
+    if (!model) return null;
+    fields.push({ label: "Model", value: model });
+    fields.push({ label: "Subagent", value: thread === "subagent" ? "yes" : "none" });
+    if (slots[0]) fields.push({ label: "OS", value: slots[0] });
+    if (slots[1]) fields.push({ label: "Machine", value: slots[1] });
+    return done(m[1].trim() + "'s " + m[2] + " speaking from " + m[5].trim(), fields, s.slice(m[0].length));
+  }
+  var d = /^<details>\s*<summary>([^<\n]*)<\/summary>([\s\S]*?)<\/details>/.exec(s);
+  if (d) {
+    var sm = new RegExp("^(.+?)'s " + AG + " speaking from (\\S.*)$").exec(d[1].trim());
+    if (!sm || !sm[1].trim()) return null;
+    var flds = [];
+    d[2].split("\n").forEach(function (raw) {
+      var line = raw.trim().replace(/^[-* ]+/, "");
+      var i = line.indexOf(":");
+      if (i < 0) return;
+      var label = line.slice(0, i).trim(), value = line.slice(i + 1).trim();
+      if (label && value) flds.push({ label: label, value: value });
+    });
+    return done(d[1].trim(), flds, s.slice(d[0].length));
+  }
+  return null;
+};
+// The Log headline's quote: the signature's one-line summary, then the
+// message's leading sentence after it; plain messages quote as before.
+window.__bramStoryQuote = function (message, sig) {
+  if (!sig) return window.__bramStoryLeadingSentence(message);
+  var lead = window.__bramStoryLeadingSentence(sig.rest);
+  return lead ? sig.summary + ": " + lead : sig.summary;
 };
 // A sentence click toggles its entry. The current plain handler passes no
 // event, so embedded links navigate and also toggle. Event-aware callers
@@ -21713,7 +21781,7 @@ window.__bramStoryTell = (function () {
     function onQueueSend(t, rest) {
       var j = jsonTail(rest);
       qsends.push(t);
-      var ep = Ep("queue", t); ep.deadline = t + 2500; ep.d.mode = j.mode;
+      var ep = Ep("queue", t); ep.deadline = t + 2500; ep.d.mode = j.mode; ep.d.qid = j.id || null;
       open.push(ep);
     }
     function endQueue(ep) {
@@ -21944,17 +22012,25 @@ window.__bramStoryTell = (function () {
       }
     });
     out.sort(function (a, b) { return b.t - a.t; });
+    // A queue-send row links to its add row only when that row is shown.
+    var shownAdds = {};
+    out.forEach(function (o) {
+      if (o.kind === "queue-add" && o.queueId && STORY_SHOW.indexOf("queue-add") >= 0) shownAdds[o.queueId] = true;
+    });
     return out
       .filter(function (o) { return STORY_SHOW.indexOf(o.kind) >= 0; })
       .map(function (o) {
         var draft = o.queueId && payload.queueDrafts && payload.queueDrafts[o.queueId];
         var message = draft && typeof draft.text === "string" ? draft.text : null;
-        var quote = window.__bramStoryLeadingSentence(message);
+        var sig = message ? window.__bramSplitSignature(message) : null;
+        var quote = window.__bramStoryQuote(message, sig);
         var text = o.text;
         if (quote) text = (o.kind === "queue-delete" ? "Deleted queue message: “" : "New queue message: “") + quote + "”";
         return {
           id: o.kind + ":" + (o.queueId || o.t),
           at: o.at, text: text, kind: o.kind, surprising: o.surprising, queueId: o.queueId || null,
+          sentQueueId: (o.kind === "queue" && o._ep && o._ep.d && o._ep.d.qid && shownAdds[o._ep.d.qid]) ? o._ep.d.qid : null,
+          signature: sig,
           // For the expanded detail: when it happened (the board-then fetch
           // keys on it) and the agent and session in force at the time.
           t: o.t, agent: o.agent || null, sessionId: o.sessionId || null, sessionTitle: o.sessionTitle || null,

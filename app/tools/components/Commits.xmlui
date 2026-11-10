@@ -126,6 +126,14 @@
         color="$textColor-secondary"
         tooltip="Add a remote (git remote add origin …) to enable Push"
         value="local repository — no remote configured" />
+      <!-- issue-399-status-fetch-non-fatal: the status fetch failed or timed
+           out; counts come from the last good fetch. -->
+      <Text
+        when="{gitStatus.value &amp;&amp; gitStatus.value.fetchError}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        tooltip="{gitStatus.value.fetchError}"
+        value="couldn't reach origin — counts are from the last fetch" />
       <Button
         label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
         size="xs"

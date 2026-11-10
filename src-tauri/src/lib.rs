@@ -33190,13 +33190,63 @@ fn repo_has_origin<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     git_run(app, &["remote", "get-url", "origin"]).is_ok()
 }
 
+// issue-399-status-fetch-non-fatal: the status route's `git fetch origin`,
+// bounded and non-fatal. A hung SSH agent used to hold /__git/status for as
+// long as git waited, and a failed fetch turned the route into a 500, though
+// every status field is a local fact. Kills the child at `timeout`; sets
+// GIT_TERMINAL_PROMPT=0 on this fetch only. Err is "timed out" or git's
+// first non-empty stderr line. Pull and Push keep their own blocking fetches.
+fn status_fetch(root: &std::path::Path, timeout: std::time::Duration) -> Result<(), String> {
+    use std::io::Read;
+    let mut child = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["fetch", "origin"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Drain stderr on a thread so a chatty fetch can't block on a full pipe.
+    // It is never joined: a killed ssh grandchild may hold the pipe open.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if let Some(mut err) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = err.read_to_string(&mut buf);
+            let _ = tx.send(buf);
+        });
+    }
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                }
+                let text = rx
+                    .recv_timeout(std::time::Duration::from_millis(500))
+                    .unwrap_or_default();
+                let line = text
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("git fetch failed");
+                return Err(line.to_string());
+            }
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("timed out".to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
-    // pull-rebase-stash-safety: wait for an in-flight Pull/Push rebase
-    // rather than race it (see git_rebase_exclusive_cell).
-    let _exclusive = match git_rebase_exclusive_cell().lock() {
-        Ok(guard) => guard,
-        Err(error) => error.into_inner(),
-    };
     // local-repo-no-origin-first-class: without an origin the fetch (and
     // the whole route with it, via `?`) used to fatal — the exact error a
     // local-only repo showed for merely opening the Commits tab. ahead /
@@ -33206,10 +33256,38 @@ fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, 
     let has_origin = repo_has_origin(app);
     // Refresh the remote-tracking ref first; otherwise "behind" only
     // reflects the last fetch and the Pull button can be dimmed while
-    // origin has new commits.
+    // origin has new commits. issue-399: bounded, non-fatal, and run BEFORE
+    // taking the rebase lock, so a hung fetch cannot block Pull or Push.
+    // A fetch only updates remote-tracking refs, which a rebase doesn't use.
+    let mut fetch_error: Option<String> = None;
     if has_origin {
-        git_run(app, &["fetch", "origin"])?;
+        if let Some(root) = project_root(Some(app)) {
+            let started = std::time::Instant::now();
+            if let Err(reason) = status_fetch(&root, std::time::Duration::from_secs(10)) {
+                append_bram_trace_line(
+                    app,
+                    "git-status",
+                    &format!(
+                        "op=fetch-failed reason={} ms={}",
+                        if reason == "timed out" {
+                            "timeout"
+                        } else {
+                            "error"
+                        },
+                        started.elapsed().as_millis()
+                    ),
+                );
+                fetch_error = Some(reason);
+            }
+        }
     }
+    // pull-rebase-stash-safety: wait for an in-flight Pull/Push rebase
+    // before reading local refs rather than race it (see
+    // git_rebase_exclusive_cell).
+    let _exclusive = match git_rebase_exclusive_cell().lock() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
     let ahead = git_run(app, &["rev-list", "--count", "@{u}..HEAD"])
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -33236,6 +33314,7 @@ fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, 
         "branch": branch,
         "upstream": upstream,
         "hasOrigin": has_origin,
+        "fetchError": fetch_error,
     }))
     .map_err(|e| e.to_string())
 }
@@ -110714,5 +110793,80 @@ mod task_candidates_tests {
                 "make-deploy-4"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod status_fetch_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-status-fetch-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        dir
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {:?} failed", args);
+    }
+
+    #[test]
+    fn fetch_error_returns_first_stderr_line() {
+        let dir = scratch_repo("err");
+        git(&dir, &["remote", "add", "origin", "/nonexistent/x"]);
+        let started = Instant::now();
+        let err = status_fetch(&dir, Duration::from_secs(10)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!err.is_empty() && !err.contains('\n'), "got {:?}", err);
+        assert_ne!(err, "timed out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fetch_success_is_ok() {
+        let remote = scratch_repo("ok-remote");
+        let dir = scratch_repo("ok-local");
+        git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        assert!(status_fetch(&dir, Duration::from_secs(10)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    // A remote helper that never answers (`ext::` runs a command as the
+    // transport) stands in for a hung SSH agent.
+    #[cfg(unix)]
+    #[test]
+    fn fetch_timeout_kills_and_reports() {
+        let dir = scratch_repo("hang");
+        git(&dir, &["config", "protocol.ext.allow", "always"]);
+        git(&dir, &["remote", "add", "origin", "ext::sleep 8"]);
+        let started = Instant::now();
+        let err = status_fetch(&dir, Duration::from_secs(1)).unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(err, "timed out");
+        assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

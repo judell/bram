@@ -103771,7 +103771,15 @@ const STATE_CHANGING_GET_PATHS: &[&str] = &[
     "__startup-ready",    // emits startup events
 ];
 
+// POST routes that cannot change state because the engine enforces read-only
+// (for `query`: read-only open plus `PRAGMA query_only`, #355), so a project
+// page's own loopback origin may call them. Hand-kept like its sibling above.
+const READ_ONLY_POST_PATHS: &[&str] = &["query"];
+
 fn request_changes_state(method: &str, path: &str) -> bool {
+    if method == "POST" && READ_ONLY_POST_PATHS.contains(&path) {
+        return false;
+    }
     !matches!(method, "GET" | "HEAD" | "OPTIONS") || STATE_CHANGING_GET_PATHS.contains(&path)
 }
 
@@ -103870,6 +103878,39 @@ mod cors_origin_tests {
         );
         assert_eq!(
             loopback_gate_refusal("POST", "__self-update", evil, h, p),
+            Some("foreign-origin")
+        );
+        // read-only POST: a page's own loopback origin may call /query
+        assert_eq!(
+            loopback_gate_refusal("POST", "query", Some("http://127.0.0.1:57373"), h, p),
+            None
+        );
+        assert_eq!(
+            loopback_gate_refusal("POST", "query", Some("bramapp://localhost"), h, p),
+            None
+        );
+        assert_eq!(
+            loopback_gate_refusal(
+                "POST",
+                "query",
+                Some("http://127.0.0.1:57373"),
+                Some("evil.example:5000"),
+                p
+            ),
+            Some("bad-host")
+        );
+        assert_eq!(
+            loopback_gate_refusal(
+                "POST",
+                "__worklist/reorder",
+                Some("http://127.0.0.1:57373"),
+                h,
+                p
+            ),
+            Some("foreign-origin")
+        );
+        assert_eq!(
+            loopback_gate_refusal("GET", "__enhance/run", Some("http://127.0.0.1:57373"), h, p),
             Some("foreign-origin")
         );
         // legitimate

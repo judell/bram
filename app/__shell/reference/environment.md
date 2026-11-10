@@ -70,7 +70,9 @@ agent pane) can bind live views directly instead of consuming derived
 files: set `"db": "<relative path>"` in `.bram.json`, and Bram's
 loopback serves `POST /query` — the receiving end of XMLUI's
 `DataSource dataType="sql"`. Request body is `{ sql, params }`; the
-response is a JSON array of column-keyed row objects:
+response is a JSON array of column-keyed row objects. A page Bram serves may call it from its own origin; Bram
+0.8.3 to 0.8.5 refused that call as `foreign-origin`, fixed in the next
+release.
 
 ```xml
 <DataSource id="txns" url="/query" method="POST" dataType="sql"

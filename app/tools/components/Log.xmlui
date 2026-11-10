@@ -31,11 +31,15 @@
        https://www.xmlui.org/docs/reference/components/ChangeListener -->
   <ChangeListener listenTo="{expanded.join(',')}"
     onDidChange="window.__bramLogExpandedTrace(expanded)" />
-  <!-- The queue-send row's "Show the message" link sets focusId; one
-       ChangeListener expands that row, another scrolls the List to it
+  <!-- /log?focus=<row id>: a sent message's inline ↗ links here to the row
+       that added it. The param sets focusId, as History reads ?entry=
+       ($queryParams, re-read on a same-route link); one ChangeListener
+       expands that row, another scrolls the List to it
        (List.scrollToId: https://www.xmlui.org/docs/reference/components/List#scrolltoid).
        The row is highlighted while focused with the same
        $color-primary-100 background Queue.xmlui uses for its focused entry. -->
+  <ChangeListener listenTo="{$queryParams.focus || ''}"
+    onDidChange="focusId = window.__bramLogFocusParam($queryParams.focus)" />
   <ChangeListener listenTo="{focusId}"
     onDidChange="expanded = window.__bramLogFocusExpand(expanded, focusId)" />
   <ChangeListener listenTo="{focusId}"
@@ -132,22 +136,8 @@
                  however it wraps (Text `inline`:
                  https://www.xmlui.org/docs/reference/components/Text).
                  The link shows only when there is a saved draft to open. -->
-            <!-- A message that opens with an agent signature: a small toggle
-                 line with the one-line summary, the fields beneath when open,
-                 then the rest of the message. -->
-            <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
-              textColor-Link--active="$textColor-secondary">
-              <Link when="{!!$item.signature}" noIndicator="true" fontSize="$fontSize-xs" breakMode="word"
-                label="{($item.sigOpen ? '▾ ' : '▸ ') + ($item.signature ? $item.signature.summary : '')}"
-                onClick="expanded = window.__bramLogSigToggle(expanded, $item.id)" />
-            </Theme>
-            <VStack when="{!!$item.signature &amp;&amp; $item.sigOpen}" gap="0" paddingLeft="$space-3">
-              <Items data="{$item.signature ? $item.signature.fields : []}">
-                <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.label + ': ' + $item.value}" />
-              </Items>
-            </VStack>
             <Text>
-              <Text inline="true" whiteSpace="pre-wrap" value="{$item.signature ? $item.signature.rest : $item.message}" />
+              <Text inline="true" whiteSpace="pre-wrap" value="{$item.message}" />
               <Link when="{!!$item.context}" icon="external-link" noIndicator="true" marginLeft="$space-1"
                 tooltip="Open in Queue" to="{'/queue?focus=' + $item.queueId}" />
             </Text>
@@ -196,13 +186,12 @@
             <Theme when="{$item.surprising}" textColor-Text="$color-warn-700">
               <Markdown width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             </Theme>
-            <Link when="{!!$item.sentQueueId}" icon="external-link" noIndicator="true"
-              tooltip="Show the message"
-              onClick="focusId = window.__bramLogFocusQueueAdd($item.sentQueueId)" />
           </HStack>
           <VStack when="{$item.isExpanded}" paddingLeft="$space-5" gap="$space-0_5">
             <Text fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryEntryContext($item)}" />
+            <Text when="{!!$item.sentContext}" fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{$item.sentContext}" />
             <Text when="{!!$item.scenario}" fontSize="$fontSize-xs" color="$textColor-secondary"
               value="{window.__bramStoryScenarioLine($item)}" />
             <!-- log-push-lists-its-commits: a push lists what it carried,

@@ -50,6 +50,29 @@ Every change here is behavior-preserving when `.bram/` doesn't exist, which is e
 - The `/resources/` alias is removed.
 - The old-name branches in the resolver, guard and plugin are deleted, and the literal-path test tightens to `.bram/` only. `guard::GUARD_TARGET_REL` goes with them.
 
+## Next release: recovery, retirement deferred (2026-11-10)
+
+Reader retirement moves out again (Jon: "fine to move out again, nobody is
+clamoring and better safe than sorry"). What ships instead is recovery for a
+project whose state is still in `resources/` after the startup move didn't
+happen (issue-469-leftover-folder-reported):
+
+- Status, State folder, says Bram is still using `resources/`, and why, from
+  the structured startup outcome in `/__state-dir/plan` (`startupMove`), never
+  from trace text.
+- **Migrate and relaunch** (`POST /__state-dir/migrate-relaunch`) is offered
+  when a relaunch can help; for a mixed folder it records the `move` answer
+  first. Otherwise Status names the obstacle: a live claim, unknown git status,
+  Bram-owned tracked files, a leftover `.bram-moving/` or a failed rollback.
+  Nothing is cleared, deleted or untracked to enable the button.
+- Compatibility stays: the resolver, guards, plugin and scripts still read
+  `resources/`, and nothing new is created in `.bram/`. The old-name branches
+  stay until a migration-only startup path (or a separately specified runtime
+  storage location) is designed. That is broader than reporting leftovers, and
+  the call is Jon's. #469 stays open for parts 2 and 3.
+- A blocked retry on Windows still needs confirming on Windows; a held handle
+  on macOS is not evidence for its rename behaviour.
+
 ## Acceptance cases
 
 Four checkouts, each with its own checks, run before and after each release:

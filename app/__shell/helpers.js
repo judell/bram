@@ -18814,6 +18814,61 @@ window.__bramStateDirPlanMoved = function (p, part) {
   return "Moved from " + from + "/ on " + when + how + ".";
 };
 
+// issue-469-leftover-folder-reported: Status says when Bram's state is still
+// in resources/ (the startup move didn't happen), why, and whether a relaunch
+// can finish it. Reads the host's structured p.startupMove / p.retry only.
+window.__bramStateDirLeftover = function (p, part) {
+  var r = (p && p.retry) || {};
+  if (part === "show") return !!r.leftover;
+  if (!r.leftover) return part === "offer" ? false : "";
+  if (part === "offer") return !!r.offer;
+  if (part === "line") {
+    return "This project's Bram state is still in resources/, an older Bram's folder. Bram keeps using it until it moves to .bram/.";
+  }
+  if (part === "tip") {
+    return "Bram restarts and tries the move again. Another program holding a file open in resources/ can still block it.";
+  }
+  if (part === "obstacle") {
+    var o = {
+      "live-claim": "Finish or release the Worklist item in progress, then try again.",
+      "tracked-unknown": "Fix the git error (try git status here), then try again.",
+      "tracked-bram-files": "Git tracks some of Bram's files in resources/. Remove them from git first (git rm --cached), then try again.",
+      "staging-left": "A previous move left a staging folder behind. It needs a look before Bram moves anything.",
+      "rollback-failed": "A previous move failed and couldn't roll back. Check resources/ and .bram/ by hand before moving."
+    };
+    return r.obstacle ? (o[r.obstacle] || "Not movable yet: " + r.obstacle + ".") : "";
+  }
+  if (part === "why") {
+    var m = p.startupMove;
+    if (!m) return "";
+    if (m.outcome === "blocked") {
+      return "The move at the last launch was blocked: another program had a file open in resources/" +
+        (m.osError ? " (OS error " + m.osError + ")" : "") + ".";
+    }
+    if (m.outcome === "abandoned") {
+      return "The move at the last launch stopped partway (" + m.reason + ") and put everything back.";
+    }
+    if (m.outcome === "selective-failed") {
+      return "The move of Bram's own files stopped at " + m.entry +
+        (m.rolledBack ? " and was rolled back." : "; the rollback failed.");
+    }
+    if (m.outcome === "skipped") {
+      if (m.reason === "declined") return "You chose Not now for the move.";
+      if (m.reason === "live-claim") return "The move at the last launch waited: a Worklist item was mid-work.";
+      if (m.reason === "mixed" || m.reason === "tracked") {
+        return "resources/ also holds files that aren't Bram's, so Bram needs your OK to move only its own.";
+      }
+      if (m.reason === "tracked-unknown") return "Git couldn't say which files it tracks.";
+    }
+    return "";
+  }
+  return "";
+};
+
+window.__bramStateMigrateRelaunch = function () {
+  return window.__bramPaneAction("state-migrate-relaunch", "/__state-dir/migrate-relaunch", { method: "POST", body: {} });
+};
+
 window.__bramStateDirPlanFolderLine = function (p) {
   if (!p) return "";
   return "State folder: " + p.stateDir + (p.stateDirExists ? " (exists)" : " (not created yet)");

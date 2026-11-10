@@ -77,6 +77,20 @@
          (tracked is capped at 200 by the host). -->
     <VStack when="{stateDirPlan.value}" gap="$space-2">
       <Heading level="h3">State folder</Heading>
+      <!-- issue-469-leftover-folder-reported: state still in resources/, why,
+           and the relaunch that retries the move. -->
+      <VStack when="{window.__bramStateDirLeftover(stateDirPlan.value, 'show')}" gap="$space-2">
+        <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'line')}" />
+        <Text when="{window.__bramStateDirLeftover(stateDirPlan.value, 'why')}" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'why')}" />
+        <Text when="{window.__bramStateDirLeftover(stateDirPlan.value, 'obstacle')}" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'obstacle')}" />
+        <Button
+          when="{window.__bramStateDirLeftover(stateDirPlan.value, 'offer')}"
+          label="Migrate and relaunch"
+          variant="outlined"
+          size="xs"
+          tooltip="{window.__bramStateDirLeftover(stateDirPlan.value, 'tip')}"
+          onClick="window.__bramStateMigrateRelaunch()" />
+      </VStack>
       <!-- status-reports-a-completed-move: once moved, say what happened;
            the dry run below describes a move that is done, so it hides. -->
       <Text when="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'show')}" fontWeight="$fontWeight-bold" value="{window.__bramStateDirPlanMoved(stateDirPlan.value, 'line')}" />

@@ -17711,7 +17711,32 @@ fn handle_self_update_relaunch<R: tauri::Runtime>(
             br#"{"ok":false,"error":"no relaunch target"}"#.to_vec(),
         );
     };
-    let mut cmd = std::process::Command::new(&target);
+    match relaunch_self(app, &target) {
+        Ok(detach) => {
+            append_bram_trace_line(
+                app,
+                "self-update",
+                &format!("op=relaunch target={} detach={}", target.display(), detach),
+            );
+        }
+        Err(e) => {
+            return (
+                500,
+                JSON,
+                format!("{{\"ok\":false,\"error\":\"{}\"}}", e).into_bytes(),
+            );
+        }
+    }
+    (200, JSON, br#"{"ok":true,"relaunching":true}"#.to_vec())
+}
+
+// Spawn `target` against the current project root, detached, then exit this
+// process after the HTTP response has flushed. Returns the detach method.
+fn relaunch_self<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    target: &Path,
+) -> Result<&'static str, String> {
+    let mut cmd = std::process::Command::new(target);
     if let Some(root) = project_root(Some(app)) {
         cmd.arg(root);
     }
@@ -17740,24 +17765,13 @@ fn handle_self_update_relaunch<R: tauri::Runtime>(
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         "windows-flags"
     };
-    if let Err(e) = cmd.spawn() {
-        return (
-            500,
-            JSON,
-            format!("{{\"ok\":false,\"error\":\"spawn: {}\"}}", e).into_bytes(),
-        );
-    }
-    append_bram_trace_line(
-        app,
-        "self-update",
-        &format!("op=relaunch target={} detach={}", target.display(), detach),
-    );
+    cmd.spawn().map_err(|e| format!("spawn: {}", e))?;
     // Let the HTTP response flush before this process exits.
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(400));
         std::process::exit(0);
     });
-    (200, JSON, br#"{"ok":true,"relaunching":true}"#.to_vec())
+    Ok(detach)
 }
 
 // Memoizes the `gh api /user` login lookup (git_log_recent) for the life of
@@ -64590,7 +64604,119 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
         // describes the new folder; Status shows what happened instead.
         "migrated": state_dir_migrated(root, p.state_name),
         "leftBehind": state_dir_left_behind(root, p.state_name),
+        // issue-469-leftover-folder-reported: what the startup move did this
+        // launch (null for the CLI), and whether a relaunch could finish it.
+        "startupMove": STATE_MIGRATE_STARTUP.get().cloned(),
+        "retry": state_dir_retry(root, unix_now_ms(), STATE_MIGRATE_STARTUP.get()),
     })
+}
+
+// The startup mover's outcome as data, recorded once at launch (the mover
+// runs before the trace opens, so the pane can't read it from there).
+static STATE_MIGRATE_STARTUP: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+
+fn state_migrate_outcome_json(outcome: &StateMigrateOutcome, at_ms: i64) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "outcome": null, "reason": null, "osError": null, "attempts": null,
+        "restored": null, "rolledBack": null, "entry": null, "moved": null,
+        "entries": null, "atMs": at_ms,
+    });
+    match outcome {
+        StateMigrateOutcome::Skipped(reason) => {
+            v["outcome"] = "skipped".into();
+            v["reason"] = (*reason).into();
+        }
+        StateMigrateOutcome::Moved { entries, .. } => {
+            v["outcome"] = "moved".into();
+            v["entries"] = (*entries).into();
+        }
+        StateMigrateOutcome::Blocked {
+            os_error,
+            attempts,
+            restored,
+        } => {
+            v["outcome"] = "blocked".into();
+            v["osError"] = (*os_error).into();
+            v["attempts"] = (*attempts).into();
+            v["restored"] = (*restored).into();
+        }
+        StateMigrateOutcome::Abandoned {
+            reason,
+            attempts,
+            restored,
+        } => {
+            v["outcome"] = "abandoned".into();
+            v["reason"] = (*reason).into();
+            v["attempts"] = (*attempts).into();
+            v["restored"] = (*restored).into();
+        }
+        StateMigrateOutcome::MovedSelective { entries, .. } => {
+            v["outcome"] = "moved-selective".into();
+            v["entries"] = (*entries).into();
+        }
+        StateMigrateOutcome::SelectiveFailed {
+            reason,
+            os_error,
+            entry,
+            moved,
+            rolled_back,
+        } => {
+            v["outcome"] = "selective-failed".into();
+            v["reason"] = (*reason).into();
+            v["osError"] = (*os_error).into();
+            v["entry"] = entry.clone().into();
+            v["moved"] = (*moved).into();
+            v["rolledBack"] = (*rolled_back).into();
+        }
+    }
+    v
+}
+
+// Is Bram's state still in `resources/`, and could a relaunch move it?
+// Read-only: never clears a claim, removes staging or touches tracked files.
+// `obstacle` names why not when it can't. `needsChoice`: the move needs the
+// user's "move" answer written first (foreign entries stay behind).
+fn state_dir_retry(
+    root: &Path,
+    now_ms: i64,
+    startup: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let none = serde_json::json!({
+        "leftover": false, "offer": false, "needsChoice": false, "obstacle": null,
+    });
+    if bram_state_dir_name(root) != BRAM_STATE_DIR_LEGACY
+        || !root.join(BRAM_STATE_DIR_LEGACY).is_dir()
+    {
+        return none;
+    }
+    let plan = state_dir_plan_core(root, now_ms);
+    if plan.would_move.is_empty() {
+        return none;
+    }
+    let verdict = |offer: bool, needs_choice: bool, obstacle: Option<&str>| {
+        serde_json::json!({
+            "leftover": true, "offer": offer, "needsChoice": needs_choice, "obstacle": obstacle,
+        })
+    };
+    if let Some(s) = startup {
+        if s["outcome"] == "selective-failed" && s["rolledBack"] == false {
+            return verdict(false, false, Some("rollback-failed"));
+        }
+    }
+    if root.join(STATE_MOVE_STAGING).exists() {
+        return verdict(false, false, Some("staging-left"));
+    }
+    match state_migrate_eligibility(root, now_ms) {
+        Ok(_) => verdict(true, false, None),
+        // The selective path (the user's choice) refuses Bram-owned tracked
+        // files, unknown git status and live claims; it takes the rest.
+        Err("mixed" | "tracked") => match state_migrate_selective_check(root, now_ms) {
+            Ok(_) => verdict(true, true, None),
+            Err("tracked-owned") => verdict(false, false, Some("tracked-bram-files")),
+            Err(other) => verdict(false, false, Some(other)),
+        },
+        Err(other) => verdict(false, false, Some(other)),
+    }
 }
 
 // `.bram/.migrated-from` is "<old path> <ISO time>[ <how>]", how being
@@ -64717,13 +64843,92 @@ fn handle_state_move_decision(
             b"{\"error\":\"no old state folder to move\"}".to_vec(),
         );
     }
-    let rec = serde_json::json!({ "choice": choice, "atMs": now_ms }).to_string();
-    match std::fs::write(root.join(BRAM_STATE_DIR_LEGACY).join(STATE_MOVE_REL), &rec) {
-        Ok(()) => (200, JSON, rec.into_bytes()),
+    match write_state_move_decision(root, &choice, now_ms) {
+        Ok(rec) => (200, JSON, rec.into_bytes()),
         Err(e) => (
             500,
             JSON,
-            serde_json::json!({ "error": e.to_string() })
+            serde_json::json!({ "error": e }).to_string().into_bytes(),
+        ),
+    }
+}
+
+// Records the user's answer in the old folder; returns the record written.
+fn write_state_move_decision(root: &Path, choice: &str, now_ms: i64) -> Result<String, String> {
+    let rec = serde_json::json!({ "choice": choice, "atMs": now_ms }).to_string();
+    std::fs::write(root.join(BRAM_STATE_DIR_LEGACY).join(STATE_MOVE_REL), &rec)
+        .map(|()| rec)
+        .map_err(|e| e.to_string())
+}
+
+// POST /__state-dir/migrate-relaunch: Status's "Migrate and relaunch". Only
+// when state_dir_retry offers it; writes the "move" answer first when the
+// folder is mixed, and never relaunches if that write fails. Ends this
+// process (the new one's startup mover does the move).
+fn handle_state_migrate_relaunch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let now = unix_now_ms();
+    let retry = state_dir_retry(root, now, STATE_MIGRATE_STARTUP.get());
+    let obstacle = retry["obstacle"].as_str().unwrap_or("none").to_string();
+    let needs_choice = retry["needsChoice"].as_bool().unwrap_or(false);
+    let trace = |status: u16| {
+        append_bram_trace_line(
+            app,
+            "state-dir",
+            &format!(
+                "op=migrate-relaunch needs_choice={} status={} obstacle={}",
+                needs_choice, status, obstacle
+            ),
+        )
+    };
+    if retry["offer"].as_bool() != Some(true) {
+        trace(409);
+        return (
+            409,
+            JSON,
+            serde_json::json!({ "ok": false, "obstacle": retry["obstacle"] })
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    if needs_choice {
+        if let Err(e) = write_state_move_decision(root, "move", now) {
+            trace(500);
+            return (
+                500,
+                JSON,
+                serde_json::json!({ "ok": false, "error": e })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+    }
+    let target = std::env::current_exe().ok().filter(|p| p.exists());
+    let Some(target) = target else {
+        trace(409);
+        return (
+            409,
+            JSON,
+            br#"{"ok":false,"error":"no relaunch target"}"#.to_vec(),
+        );
+    };
+    // Traced before relaunching: the process exits shortly after the spawn.
+    trace(200);
+    match relaunch_self(app, &target) {
+        Ok(_) => (
+            200,
+            JSON,
+            serde_json::json!({ "ok": true, "relaunching": true, "choiceRecorded": needs_choice })
+                .to_string()
+                .into_bytes(),
+        ),
+        Err(e) => (
+            500,
+            JSON,
+            serde_json::json!({ "ok": false, "error": e })
                 .to_string()
                 .into_bytes(),
         ),
@@ -89209,13 +89414,16 @@ fn route_request<R: tauri::Runtime>(
             app,
             "state-dir",
             &format!(
-                "op=plan state_dir={} would_move={} foreign={} tracked={} live_claim={} nested={}",
+                "op=plan state_dir={} would_move={} foreign={} tracked={} live_claim={} nested={} leftover={} retry_offer={} obstacle={}",
                 plan["stateDir"].as_str().unwrap_or(""),
                 len("wouldMove"),
                 len("foreign"),
                 plan["tracked"]["count"].as_u64().unwrap_or(0),
                 plan["liveClaim"].as_bool().unwrap_or(false),
                 len("nested"),
+                plan["retry"]["leftover"].as_bool().unwrap_or(false),
+                plan["retry"]["offer"].as_bool().unwrap_or(false),
+                plan["retry"]["obstacle"].as_str().unwrap_or("none"),
             ),
         );
         let body = serde_json::to_vec(&plan).unwrap_or_default();
@@ -97413,6 +97621,166 @@ mod worklist_authorization_tests {
     }
 
     #[test]
+    fn state_migrate_outcome_json_records_each_outcome() {
+        let blocked = super::state_migrate_outcome_json(
+            &super::StateMigrateOutcome::Blocked {
+                os_error: Some(32),
+                attempts: 10,
+                restored: true,
+            },
+            7,
+        );
+        assert_eq!(blocked["outcome"], "blocked");
+        assert_eq!(blocked["osError"], 32);
+        assert_eq!(blocked["attempts"], 10);
+        assert_eq!(blocked["restored"], true);
+        assert!(blocked["reason"].is_null());
+        assert_eq!(blocked["atMs"], 7);
+        let failed = super::state_migrate_outcome_json(
+            &super::StateMigrateOutcome::SelectiveFailed {
+                reason: "blocked",
+                os_error: None,
+                entry: "worklist.json".to_string(),
+                moved: 2,
+                rolled_back: false,
+            },
+            8,
+        );
+        assert_eq!(failed["outcome"], "selective-failed");
+        assert_eq!(failed["reason"], "blocked");
+        assert!(failed["osError"].is_null());
+        assert_eq!(failed["entry"], "worklist.json");
+        assert_eq!(failed["moved"], 2);
+        assert_eq!(failed["rolledBack"], false);
+        let skipped =
+            super::state_migrate_outcome_json(&super::StateMigrateOutcome::Skipped("mixed"), 9);
+        assert_eq!(skipped["outcome"], "skipped");
+        assert_eq!(skipped["reason"], "mixed");
+        assert!(skipped["attempts"].is_null());
+    }
+
+    #[test]
+    fn state_dir_retry_is_quiet_when_not_a_leftover() {
+        let root = state_migrate_root();
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_NEW)).unwrap();
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["leftover"], false);
+        assert_eq!(r["offer"], false);
+        assert!(r["obstacle"].is_null());
+        let empty = state_dir_plan_temp_root();
+        assert_eq!(
+            super::state_dir_retry(&empty, super::unix_now_ms(), None)["leftover"],
+            false
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn state_dir_retry_offers_a_clean_leftover() {
+        let root = state_migrate_root();
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["leftover"], true);
+        assert_eq!(r["offer"], true);
+        assert_eq!(r["needsChoice"], false);
+        assert!(r["obstacle"].is_null());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_dir_retry_asks_for_the_choice_on_a_mixed_folder() {
+        let root = state_migrate_root();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_LEGACY).join("logo.png"),
+            "x",
+        )
+        .unwrap();
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["leftover"], true);
+        assert_eq!(r["offer"], true);
+        assert_eq!(r["needsChoice"], true);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_dir_retry_names_a_live_claim() {
+        let root = state_migrate_root();
+        std::fs::write(
+            super::resource_relative_path(&root, super::INFLIGHT_CLAIM_REL),
+            serde_json::json!({ "ids": ["x"] }).to_string(),
+        )
+        .unwrap();
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["offer"], false);
+        assert_eq!(r["obstacle"], "live-claim");
+        // A mixed folder with a live claim is refused by the selective path too.
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_LEGACY).join("logo.png"),
+            "x",
+        )
+        .unwrap();
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["offer"], false);
+        assert_eq!(r["obstacle"], "live-claim");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_dir_retry_names_unknown_tracking_and_leftover_staging() {
+        // Not a repo: git can't say what is tracked.
+        let root = state_dir_plan_temp_root();
+        let old = root.join(super::BRAM_STATE_DIR_LEGACY);
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("worklist.json"), "{}").unwrap();
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["obstacle"], "tracked-unknown");
+        assert_eq!(r["offer"], false);
+        let _ = std::fs::remove_dir_all(&root);
+        // A staging folder left by a crashed selective move.
+        let root = state_migrate_root();
+        std::fs::create_dir_all(root.join(super::STATE_MOVE_STAGING)).unwrap();
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["obstacle"], "staging-left");
+        assert_eq!(r["offer"], false);
+        // A failed rollback at startup outranks everything.
+        let startup = super::state_migrate_outcome_json(
+            &super::StateMigrateOutcome::SelectiveFailed {
+                reason: "blocked",
+                os_error: None,
+                entry: "x".to_string(),
+                moved: 1,
+                rolled_back: false,
+            },
+            1,
+        );
+        let root2 = state_migrate_root();
+        let r = super::state_dir_retry(&root2, super::unix_now_ms(), Some(&startup));
+        assert_eq!(r["obstacle"], "rollback-failed");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    #[test]
+    fn state_dir_retry_refuses_tracked_bram_files() {
+        let root = state_migrate_root();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success())
+        };
+        let tracked = super::bram_state_rel(&root, "worklist.json");
+        git(&["add", "-f", "--", tracked.as_str()]);
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
+        assert_eq!(r["offer"], false);
+        assert_eq!(r["obstacle"], "tracked-bram-files");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn state_migrate_moves_a_fresh_legacy_folder() {
         let root = state_migrate_root();
         let outcome = state_migrate(&root, &mut real_rename);
@@ -103635,6 +104003,23 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
                 b"no project root".to_vec(),
             )
         }
+    } else if path == "__state-dir/migrate-relaunch" {
+        // issue-469-leftover-folder-reported: Status's Migrate and relaunch.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else if let Some(root) = project_root(Some(app)) {
+            let out = handle_state_migrate_relaunch(app, &root);
+            if out.0 == 200 {
+                emit_replayable_signal(app, "state-dir-changed");
+            }
+            out
+        } else {
+            (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            )
+        }
     } else if path == "__menu/permission/clear" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
@@ -104567,6 +104952,9 @@ pub fn run() {
                 } else {
                     StateMigrateOutcome::Skipped("not-repo")
                 };
+                // Kept for GET /__state-dir/plan, so Status can say why a
+                // folder is still in resources/ without parsing the trace.
+                let _ = STATE_MIGRATE_STARTUP.set(state_migrate_outcome_json(&outcome, unix_now_ms()));
                 let lines = state_migrate_trace_lines(&outcome);
                 // Only an outcome the trace can't record goes to stderr: outside
                 // a project folder nothing is traced at all.

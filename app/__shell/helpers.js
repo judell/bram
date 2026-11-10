@@ -18951,7 +18951,10 @@ window.__bramStateDirPlanLiveClaimLine = function (p) {
 // Windows (issue-469-state-move-pane-fixes; APICall lastResult:
 // https://www.xmlui.org/docs/reference/components/APICall#lastresult).
 window.__bramStateMoveBanner = function (p, part, last) {
-  if (part === "pending") return !!(p && p.pending);
+  // status-one-state-move-offer: while the leftover block (__bramStateDirLeftover)
+  // shows, it owns Status's offer; Migrate and relaunch records the same
+  // "move". Only Status reads `pending` / `offer` (Windows found both shown, #488).
+  if (part === "pending") return !!(p && p.pending) && !(p.retry && p.retry.leftover);
   if (!p || !p.pending) return part === "text" || part === "stays" ? "" : false;
   var recorded = p.decision || {};
   var latest = last && last.choice && (last.atMs || 0) >= (recorded.atMs || 0) ? last : recorded;

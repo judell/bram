@@ -7712,6 +7712,47 @@ window.__bramOverlapAny = function (items, claim) {
   return window.__bramOverlapDisplayIndex(items, claim).length > 0;
 };
 
+// review-overlaps-optional-setting: Settings → "Review overlaps in the
+// Worklist". Default OFF; only a stored '1' turns it on, so a missing key
+// reads as off. DECISION, per-user and unscoped (a review-aid preference, not
+// about any one project), localStorage-backed like the tips and
+// terminal-at-startup switches: the host's /__settings view is a typed
+// projection that drops ui keys it doesn't know, so a ui.* key would save but
+// never read back without a Rust change. Pushed so the Worklist pane shown
+// under the Settings tab follows the switch without a reload. Hides a review
+// aid only: the commit gate's entanglement checks and the row strips don't
+// read it.
+var __bramReviewOverlapsSubscribers = new Set();
+window.__bramReviewOverlapsEnabled = function () {
+  return __bramReadLS('bram.worklistReviewOverlaps', '0') === '1';
+};
+window.__bramSetReviewOverlapsEnabled = function (on) {
+  __bramWriteLS('bram.worklistReviewOverlaps', on ? '1' : '0');
+  var v = !!on;
+  __bramReviewOverlapsSubscribers.forEach(function (fn) {
+    try { fn(v); } catch (e) { console.error("[bramSubscribeReviewOverlaps] subscriber threw:", e); }
+  });
+  return v;
+};
+window.bramSubscribeReviewOverlaps = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramReviewOverlapsEnabled()); };
+      __bramReviewOverlapsSubscribers.add(fire);
+      fire();
+      return function () { __bramReviewOverlapsSubscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+// The header's Review-overlaps button and disclosure gate: the pushed
+// preference (reviewOverlapsPref.value) AND an overlap existing.
+window.__bramOverlapReviewShown = function (enabled, items, claim) {
+  return enabled === true && window.__bramOverlapAny(items, claim);
+};
+
 
 // One index row. `all N items` for a universal file.
 window.__bramOverlapRowCount = function (entry, items) {
@@ -14048,7 +14089,7 @@ window.bramSubscribeW2Selection = (function () {
   // "… queued"; the row says when it runs and offers Cancel. To have it run
   // sooner, stop the agent's turn: the turn ending is what delivers it.
   window.__bramGateQueueMessage = function (q) {
-    return q ? "Runs when the agent finishes its current turn." : "";
+    return q ? "Runs when the agent finishes." : "";
   };
   window.__bramGateQueueCancel = function () {
     window.__bramGateQueueClear("cancelled");

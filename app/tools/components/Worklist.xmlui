@@ -130,6 +130,12 @@
     id="overlapFocus"
     initial="{window.__bramOverlapFocus}"
     subscribe="{window.bramSubscribeOverlapFocus()}" />
+  <!-- review-overlaps-optional-setting: Settings → "Review overlaps in the
+       Worklist" (default off). Pushed, so the header follows the switch live. -->
+  <PushSource
+    id="reviewOverlapsPref"
+    initial="{window.__bramReviewOverlapsEnabled()}"
+    subscribe="{window.bramSubscribeReviewOverlaps()}" />
   <!-- issue-278: publish the selection so the Footer's gate bar can read it.
        The gate row is moving to the Footer because that is the one surface
        this App layout pins ("vertical-sticky ... the footer sticks to the
@@ -207,6 +213,7 @@
            one file. -->
       <SpaceFiller />
       <Text
+        when="{reviewOverlapsPref.value === true}"
         fontSize="$fontSize-sm"
         color="$textColor-secondary"
         width="*"
@@ -214,7 +221,7 @@
         overflowMode="flow"
         value="{window.__bramOverlapHeaderLine(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}" />
       <Button
-        when="{window.__bramOverlapAny(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
+        when="{window.__bramOverlapReviewShown(reviewOverlapsPref.value, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
         label="{worklist2OverlapOpen ? 'Hide overlaps' : 'Review overlaps'}"
         variant="ghost"
         size="xs"
@@ -234,7 +241,7 @@
          "No data available" table with no control left to close it
          (observed post-teardown, 2026-08-24). -->
     <VStack
-      when="{worklist2OverlapOpen &amp;&amp; window.__bramOverlapAny(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
+      when="{worklist2OverlapOpen &amp;&amp; window.__bramOverlapReviewShown(reviewOverlapsPref.value, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
       gap="$space-1"
       padding="$space-3"
       border="1px solid $color-surface-200"

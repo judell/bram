@@ -338,18 +338,24 @@
        item a bound subagent is still working on. Mirrors the queued-click row
        above: one line saying why the buttons are off, one control. Release
        frees the binding when the subagent's stop never arrived. -->
-  <!-- wrapContent: in a narrow pane the reason and Release must wrap, or the
-       button runs off the edge unseen (Jon, 2026-11-04 demo).
-       https://www.xmlui.org/docs/reference/components/Stack#wrapcontent -->
-  <HStack
+  <!-- gate-delegated-line-centered (Jon, 2026-11-09: "center it"): was a
+       wrapping HStack, whose long Text took the row's full width once it
+       wrapped, so horizontalAlignment had nothing to centre and the line read
+       start-aligned. Now the same column as the consequence and plan lines
+       above: the Text hugs its words (fit-content) up to the pane's width,
+       centred, wrapped lines left-aligned; Release centred on its own line
+       beneath, so it can't run off the edge in a narrow pane (Jon, 2026-11-04).
+       https://www.xmlui.org/docs/howto/know-when-to-use-fit-content
+       https://www.xmlui.org/docs/howto/center-content-on-the-page -->
+  <VStack
     when="{!!window.__bramDelegatedBlocker(gateClaim.value, gateSel.value)}"
-    wrapContent="true"
     horizontalAlignment="center"
-    verticalAlignment="center"
-    gap="$space-2"
+    gap="$space-1"
     paddingHorizontal="$space-2"
     paddingTop="$space-1">
     <Text
+      width="fit-content"
+      textAlign="left"
       fontSize="$fontSize-sm"
       color="$color-warn-700"
       value="{window.__bramDelegatedWhy(gateClaim.value, gateSel.value)}" />
@@ -359,7 +365,7 @@
       label="Release"
       tooltip="Release the subagent's hold, e.g. if it was cancelled and never reported stopping"
       onClick="window.__bramDelegatedRelease(gateClaim.value, gateSel.value)" />
-  </HStack>
+  </VStack>
   <!-- locked-board-names-its-own-exit: the escape, stated where the dead
        buttons are. Deliberately NOT gated on a selection, unlike the button
        band below - while a claim is live no row can be ticked, so a

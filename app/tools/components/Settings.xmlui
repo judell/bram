@@ -310,6 +310,14 @@
           labelPosition="end"
           initialValue="{settingsToolsPaneHotReload(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { toolsPaneHotReload: v } })" />
+        <!-- review-overlaps-optional-setting: per-user (localStorage), default
+             off. Hides the Worklist header's overlap line, Review overlaps
+             button and disclosure; the commit gate's checks are unaffected. -->
+        <Switch
+          label="Review overlaps in the Worklist"
+          labelPosition="end"
+          initialValue="{window.__bramReviewOverlapsEnabled ? window.__bramReviewOverlapsEnabled() : false}"
+          onDidChange="(v) => window.__bramSetReviewOverlapsEnabled(v)" />
         <!-- pane-idle-flush-when-degraded: opt-in workaround for an unexplained
              pane slowdown (judell/bram#482 for the underlying leak). -->
         <Switch

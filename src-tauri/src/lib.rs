@@ -17757,13 +17757,22 @@ fn relaunch_self<R: tauri::Runtime>(
         cmd.process_group(0);
         "process-group"
     };
+    // issue-469-relaunch-hidden-console: not DETACHED_PROCESS, which left the
+    // relaunched Bram with no console, so every console child it spawns
+    // without CREATE_NO_WINDOW (nearly every `git`) opened its own window:
+    // a stream of them on Windows (judell/bram#488, Windows acceptance of
+    // 7cfbc863). CREATE_NO_WINDOW gives a console-subsystem Bram (every debug
+    // build) its own hidden console, which its children inherit, and still
+    // not the dying parent's. The two can't be combined: CREATE_NO_WINDOW is
+    // ignored with DETACHED_PROCESS. A GUI-subsystem release build gets no
+    // console either way; whether its relaunch pops windows is open on #488.
     #[cfg(windows)]
     let detach = {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        "windows-flags"
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+        "windows-hidden-console"
     };
     cmd.spawn().map_err(|e| format!("spawn: {}", e))?;
     // Let the HTTP response flush before this process exits.

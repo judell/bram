@@ -2141,6 +2141,13 @@ pub(crate) struct AgentSignature<'a> {
     // locator is what identity comparisons use.
     pub(crate) project: &'a str,
     pub(crate) locator: &'a str,
+    // "<owner>'s <Agent>", the speaker label the Awaiting You sweep shows.
+    pub(crate) speaker: &'a str,
+    // Expander-only optional bullets (the one-line form carries none).
+    // `commit` is the HEAD short sha with any `+dirty` suffix stripped.
+    pub(crate) commit: Option<&'a str>,
+    pub(crate) item: Option<&'a str>,
+    pub(crate) agent_cli: Option<&'a str>,
 }
 
 pub(crate) fn parse_agent_signature(line: &str) -> Option<AgentSignature<'_>> {
@@ -2153,6 +2160,7 @@ pub(crate) fn parse_agent_signature(line: &str) -> Option<AgentSignature<'_>> {
         return None;
     }
     let (agent, rest) = rest.split_once(" (")?;
+    let speaker = line[..owner.len() + 3 + agent.len()].trim();
     if !matches!(agent, "Claude" | "Codex" | "OpenCode" | "Antigravity") {
         return None;
     }
@@ -2181,11 +2189,97 @@ pub(crate) fn parse_agent_signature(line: &str) -> Option<AgentSignature<'_>> {
         machine,
         project: project.trim(),
         locator: locator.trim(),
+        speaker,
+        commit: None,
+        item: None,
+        agent_cli: None,
     })
 }
 
-fn signature_line_locator(line: &str) -> Option<&str> {
-    parse_agent_signature(line).map(|s| s.locator)
+/// forge-signature-as-expander: the summary of the expander form,
+/// `<owner>'s <Agent> speaking from <locator>`. The fields come from the
+/// block's bullets (`parse_expander_signature`).
+fn parse_agent_summary(summary: &str) -> Option<AgentSignature<'_>> {
+    let summary = summary.trim();
+    if summary.contains('\n') {
+        return None;
+    }
+    let (owner, rest) = summary.split_once("'s ")?;
+    if owner.trim().is_empty() {
+        return None;
+    }
+    let (agent, locator) = rest.split_once(" speaking from ")?;
+    if !matches!(agent, "Claude" | "Codex" | "OpenCode" | "Antigravity") {
+        return None;
+    }
+    let locator = locator.trim();
+    if locator.is_empty() {
+        return None;
+    }
+    let project = locator
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(locator);
+    Some(AgentSignature {
+        version: None,
+        model: "",
+        os: None,
+        machine: None,
+        project,
+        locator,
+        speaker: &summary[..owner.len() + 3 + agent.len()],
+        commit: None,
+        item: None,
+        agent_cli: None,
+    })
+}
+
+/// The expander form starting at `body[at..]` (which begins with `<details`):
+/// summary grammar plus the labeled bullets. Returns the signature and the
+/// end offset (in `body`) of the closing `</details>`.
+fn parse_expander_signature(body: &str, at: usize) -> Option<(AgentSignature<'_>, usize)> {
+    let after = &body[at..];
+    let sum_open = after.find("<summary>")? + "<summary>".len();
+    let sum_close = sum_open + after[sum_open..].find("</summary>")?;
+    let mut sig = parse_agent_summary(&after[sum_open..sum_close])?;
+    let details_close = sum_close + after[sum_close..].find("</details>")?;
+    for raw in after[sum_close + "</summary>".len()..details_close].lines() {
+        let line = raw
+            .trim()
+            .trim_start_matches(|ch| matches!(ch, '-' | '*' | ' '));
+        let Some((label, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match label.trim().to_ascii_lowercase().as_str() {
+            "bram" => {
+                let v = value
+                    .strip_prefix(['v', 'V'])
+                    .filter(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+                    .unwrap_or(value);
+                sig.version = Some(v);
+            }
+            "model" => sig.model = value,
+            "os" => sig.os = Some(value),
+            "machine" => sig.machine = Some(value),
+            "commit" => {
+                let c = value.strip_suffix("+dirty").unwrap_or(value).trim();
+                sig.commit = Some(c).filter(|c| !c.is_empty());
+            }
+            "item" => sig.item = Some(value),
+            "agent cli" => sig.agent_cli = Some(value),
+            _ => {}
+        }
+    }
+    if sig.model.is_empty() {
+        return None;
+    }
+    Some((sig, at + details_close + "</details>".len()))
 }
 
 /// issue-484-details-summary-prs: the most text a details-summary body may
@@ -2202,40 +2296,67 @@ const DETAILS_SUMMARY_OPENER_MAX: usize = 600;
 const FORGE_BODY_UNFOLDED_MAX_LINES: usize = 30;
 const FORGE_BODY_UNFOLDED_MAX_CHARS: usize = 2_500;
 
-/// The line that signs `body`: its first non-empty line when that parses as
-/// a signature, else, for the details-summary form (issue-484), the
-/// `<summary>` of its first `<details>` block when the opener above that
-/// block is at most `DETAILS_SUMMARY_OPENER_MAX` characters. None when
-/// neither shape holds.
-fn body_signature_line(body: &str) -> Option<&str> {
+/// The signature of `body` and its byte span. Forms, in order:
+///
+/// 1. The one-line form as the first non-empty line (span: that line).
+/// 2. The expander form (forge-signature-as-expander): the first `<details>`
+///    whose `<summary>` is `<owner>'s <Agent> speaking from <locator>`, first
+///    in the body or under an opener of at most `DETAILS_SUMMARY_OPENER_MAX`
+///    characters (span: the whole `<details>...</details>` block).
+/// 3. The details-summary form (issue-484): the one-line form as the
+///    `<summary>` of the first `<details>` block, same opener cap (span: the
+///    summary text, so the block still counts as the post's fold).
+///
+/// None when no shape holds. Every consumer reads the signature here, so
+/// there is one grammar.
+pub(crate) fn parse_body_signature(
+    body: &str,
+) -> Option<(AgentSignature<'_>, std::ops::Range<usize>)> {
     let first = body.split('\n').find(|l| !l.trim().is_empty())?;
-    if parse_agent_signature(first).is_some() {
-        return Some(first);
+    if let Some(sig) = parse_agent_signature(first) {
+        // `first` is a subslice of `body`, so its offset is exact.
+        let start = first.as_ptr() as usize - body.as_ptr() as usize;
+        return Some((sig, start..start + first.len()));
     }
-    let details_at = body.find("<details")?;
-    if body[..details_at].trim().chars().count() > DETAILS_SUMMARY_OPENER_MAX {
-        return None;
+    let mut from = 0usize;
+    let mut nth = 0usize;
+    while let Some(rel) = body[from..].find("<details") {
+        let at = from + rel;
+        if body[..at].trim().chars().count() > DETAILS_SUMMARY_OPENER_MAX {
+            return None;
+        }
+        if let Some((sig, end)) = parse_expander_signature(body, at) {
+            return Some((sig, at..end));
+        }
+        if nth == 0 {
+            let after = &body[at..];
+            let open = after.find("<summary>")? + "<summary>".len();
+            let close = after[open..].find("</summary>")?;
+            let raw = &after[open..open + close];
+            let summary = raw.trim();
+            if !summary.contains('\n') {
+                if let Some(sig) = parse_agent_signature(summary) {
+                    let start = at + open + (raw.len() - raw.trim_start().len());
+                    return Some((sig, start..start + summary.len()));
+                }
+            }
+        }
+        nth += 1;
+        from = at + "<details".len();
     }
-    let after = &body[details_at..];
-    let open = after.find("<summary>")? + "<summary>".len();
-    let close = after[open..].find("</summary>")?;
-    let summary = after[open..open + close].trim();
-    if summary.contains('\n') {
-        return None;
-    }
-    parse_agent_signature(summary).map(|_| summary)
+    None
 }
 
-/// True iff the body is signed (see `body_signature_line`) and the signature
+/// True iff the body is signed (see `parse_body_signature`) and the signature
 /// names this checkout's normalized origin when one is discoverable.
 fn body_is_signed(body: &str, cwd: &Path) -> bool {
     let expected = expected_repo_locator(cwd);
-    let Some(actual) = body_signature_line(body).and_then(signature_line_locator) else {
+    let Some((sig, _)) = parse_body_signature(body) else {
         return false;
     };
     expected
         .as_deref()
-        .map(|want| actual.eq_ignore_ascii_case(want))
+        .map(|want| sig.locator.eq_ignore_ascii_case(want))
         .unwrap_or(true)
 }
 
@@ -2256,7 +2377,7 @@ fn crossboundary_unsigned_message(cwd: &Path) -> String {
         }
     };
     format!(
-        "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\n{expectation}\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
+        "This agent-authored forge artifact lacks the full repository-qualified signature.\nSign it with this expander, first in the body or right after a short opener:\n<details>\n<summary><owner>'s <Agent> speaking from <origin-host>/<path></summary>\n\n- Bram: v<version>\n- Model: <model>\n- Subagent: none (or the task name)\n- OS: <os>\n- Machine: <hostname -s>\n</details>\n{expectation}\nThe older one-line form is still accepted.\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
     )
 }
 
@@ -2348,8 +2469,8 @@ fn signature_version_verdict(command: &str, cwd: &Path) -> (&'static str, String
         return skip();
     };
     // An unsigned body is denied ahead of this. The signature may be the
-    // first line or a details-summary `<summary>` (issue-484).
-    let Some(sig) = body_signature_line(&body).and_then(parse_agent_signature) else {
+    // first line, an expander block, or a details-summary `<summary>`.
+    let Some((sig, _)) = parse_body_signature(&body) else {
         return skip();
     };
     let expected = expected_signature_version(cwd);
@@ -2414,9 +2535,9 @@ fn stale_signature_version_message(signed: &str, expected: &ExpectedVersion) -> 
         "This forge write is signed \"Bram {}\" but {}.\n\
 A wrong version is worse than an absent one: it looks like provenance and \
 sends triage at the wrong build (judell/bram#343, #362).\n\
-The stale value is almost certainly the `<!-- bram vX.Y.Z -->` marker in the \
-copy of `.claude/bram-conventions.md` that was `@`-imported when this session \
-started, which is older than the build you are running.\n\
+Usually the value came from context, the `<!-- bram vX.Y.Z -->` marker in the \
+`@`-imported `.claude/bram-conventions.md` or memory, rather than from the live \
+instance.\n\
 Re-read `GET /__app-info` on the loopback port for the live version, fix the \
 signature, and retry.",
         signed, basis
@@ -2432,20 +2553,23 @@ fn body_has_fold(body: &str) -> bool {
     lower[at..].contains("<summary")
 }
 
-/// `(non-blank lines, chars)` of `body` after its signature line. A body whose
-/// first non-empty line is not a signature (the details-summary form, or an
-/// unsigned body the signature check has already denied) is measured whole.
+/// `(non-blank lines, chars)` of `body` with its signature span removed (see
+/// `parse_body_signature`). An unsigned body, which the signature check has
+/// already denied, is measured whole.
 fn forge_body_extent(body: &str) -> (usize, usize) {
-    let mut rest = body;
-    if let Some(first) = body.split('\n').find(|l| !l.trim().is_empty()) {
-        if parse_agent_signature(first).is_some() {
-            // `first` is a subslice of `body`, so its end offset is exact.
-            let end = first.as_ptr() as usize - body.as_ptr() as usize + first.len();
-            rest = &body[end..];
-        }
-    }
+    let rest = body_without_signature(body);
     let lines = rest.lines().filter(|l| !l.trim().is_empty()).count();
     (lines, rest.trim().chars().count())
+}
+
+/// `body` with the signature span cut out. For the expander form that removes
+/// the signature's own `<details>` block, so it is not mistaken for the
+/// post's fold.
+pub(crate) fn body_without_signature(body: &str) -> String {
+    match parse_body_signature(body) {
+        Some((_, span)) => format!("{}{}", &body[..span.start], &body[span.end..]),
+        None => body.to_string(),
+    }
 }
 
 /// forge-body-fold-enforced: `("unfolded", lines, chars)` when an inspectable
@@ -2485,7 +2609,7 @@ fn forge_body_fold_verdict(command: &str, cwd: &Path) -> (&'static str, usize, u
     }
     let (lines, chars) = forge_body_extent(&body);
     let long = lines > FORGE_BODY_UNFOLDED_MAX_LINES || chars > FORGE_BODY_UNFOLDED_MAX_CHARS;
-    if long && !body_has_fold(&body) {
+    if long && !body_has_fold(&body_without_signature(&body)) {
         ("unfolded", lines, chars)
     } else {
         ("ok", lines, chars)
@@ -2501,7 +2625,7 @@ characters after the signature (limits: {FORGE_BODY_UNFOLDED_MAX_LINES} lines, \
 {FORGE_BODY_UNFOLDED_MAX_CHARS} characters).\n\
 A long agent-written post keeps what a person reads visible and folds the evidence. \
 Use the outline:\n\
-  - the signature line\n\
+  - the signature block (the expander)\n\
   - one bold sentence: **What this post is:** …, with its key numbers\n\
   - bullets, each leading with a bold claim\n\
   - a `Data:` line naming the route or command, with the Bram version\n\
@@ -2559,10 +2683,19 @@ fn forge_sha_verdict_with_git(command: &str, cwd: &Path, git: &Path) -> (&'stati
         return ("unparsed", reason.into());
     };
     let shas = full_shas(&body);
-    if shas.is_empty() {
+    // The expander's optional `Commit:` bullet must resolve locally too.
+    // It is usually a short sha, so it gets the resolve probe only, not the
+    // pushed-to-a-remote check below.
+    let sig_commit = parse_body_signature(&body).and_then(|(s, _)| s.commit.map(str::to_string));
+    if shas.is_empty() && sig_commit.is_none() {
         return ("ok", "no-full-shas".into());
     }
-    for sha in &shas {
+    if let Some(c) = &sig_commit {
+        if c.len() < 4 || c.len() > 40 || !c.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return ("bad", c.clone());
+        }
+    }
+    for sha in shas.iter().chain(sig_commit.iter()) {
         let probe = guard_git_command(git)
             .arg("cat-file")
             .arg("-e")
@@ -6941,6 +7074,117 @@ mod guard_policy_tests {
         }
     }
 
+    // forge-signature-as-expander: the expander form and the one-line form
+    // parse to the same fields; every consumer reads through one parser.
+    const EXPANDER: &str = "<details>\n<summary>Jon's Claude speaking from github.com/judell/bram</summary>\n\n- Bram: v0.8.6\n- Model: Opus 5.5\n- Subagent: none\n- OS: macOS\n- Machine: Tuck\n</details>\n";
+
+    fn git_scratch(name: &str) -> std::path::PathBuf {
+        let td = scratch(name);
+        std::fs::create_dir_all(td.join(".git").join("refs")).unwrap();
+        std::fs::create_dir_all(td.join(".git").join("objects")).unwrap();
+        std::fs::write(td.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            td.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/judell/bram.git\n",
+        )
+        .unwrap();
+        td
+    }
+
+    #[test]
+    fn expander_and_one_line_forms_parse_equal() {
+        let one = "Jon's Claude (Bram 0.8.6, main thread, Opus 5.5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+        let (a, span_a) = parse_body_signature(one).expect("one-line");
+        let (b, span_b) = parse_body_signature(EXPANDER).expect("expander");
+        assert_eq!(span_a, 0..one.len());
+        assert_eq!(&EXPANDER[span_b.clone()], EXPANDER.trim_end());
+        assert_eq!(a.version, Some("0.8.6"));
+        assert_eq!(b.version, Some("0.8.6"));
+        assert_eq!(a.model, b.model);
+        assert_eq!(a.os, b.os);
+        assert_eq!(a.machine, b.machine);
+        assert_eq!(a.project, "Bram");
+        assert_eq!(b.project, "bram");
+        assert_eq!(a.locator, b.locator);
+        assert_eq!(a.speaker, "Jon's Claude");
+        assert_eq!(b.speaker, "Jon's Claude");
+
+        // No bullet marker, extra whitespace, no v prefix, optional fields.
+        let loose = "<details>\n<summary>  Asish's Codex speaking from gitlab.com/g/s/p </summary>\n\n Bram:   0.8.6 \nModel:gpt-5.2\n</details>";
+        let (c, _) = parse_body_signature(loose).expect("loose");
+        assert_eq!(c.version, Some("0.8.6"));
+        assert_eq!(c.model, "gpt-5.2");
+        assert_eq!(c.machine, None);
+        assert_eq!(c.project, "p");
+        assert_eq!(c.locator, "gitlab.com/g/s/p");
+
+        // Model is required; the agent name is checked.
+        let no_model = EXPANDER.replace("- Model: Opus 5.5\n", "");
+        assert!(parse_body_signature(&no_model).is_none());
+        let bad_agent = EXPANDER.replace("Claude", "Bot");
+        assert!(parse_body_signature(&bad_agent).is_none());
+    }
+
+    #[test]
+    fn expander_signature_locator_and_version_are_checked() {
+        let td = git_scratch("signature-expander");
+        assert!(body_is_signed(&format!("{EXPANDER}\nBody."), &td));
+        let wrong = EXPANDER.replace("github.com/judell/bram", "github.com/xmlui-org/xmlui");
+        assert!(!body_is_signed(&format!("{wrong}\nBody."), &td));
+
+        // Opener + expander (the PR form) is signed; an over-cap opener is not.
+        let opener = "Lets Bram file PRs.\n\n";
+        assert!(body_is_signed(&format!("{opener}{EXPANDER}"), &td));
+        let long = format!(
+            "{}\n\n{EXPANDER}",
+            "word ".repeat(DETAILS_SUMMARY_OPENER_MAX / 4)
+        );
+        assert!(!body_is_signed(&long, &td));
+
+        // Version mismatch against the recorded running instance.
+        let state = td.join(".bram");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(".bram-port.json"), r#"{"version":"0.9.0"}"#).unwrap();
+        let p = td.join("c.md");
+        std::fs::write(&p, EXPANDER).unwrap();
+        let cmd = format!("gh issue comment 5 --body-file {}", p.display());
+        let (verdict, signed, _) = signature_version_verdict(&cmd, &td);
+        assert_eq!(verdict, "mismatch");
+        assert_eq!(signed, "0.8.6");
+        std::fs::write(state.join(".bram-port.json"), r#"{"version":"0.8.6"}"#).unwrap();
+        assert_eq!(signature_version_verdict(&cmd, &td).0, "ok");
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    #[test]
+    fn expander_block_is_not_the_posts_fold() {
+        let td = git_scratch("signature-expander-fold");
+        let lines: String = (1..=40).map(|n| format!("- finding {n}\n")).collect();
+        let verdict = |name: &str, body: &str| {
+            let p = td.join(name);
+            std::fs::write(&p, body).unwrap();
+            forge_body_fold_verdict(
+                &format!("gh issue comment 5 --body-file {}", p.display()),
+                &td,
+            )
+        };
+        // Only fold is the signature block: still unfolded.
+        let only_sig = format!("{EXPANDER}\n{lines}");
+        assert_eq!(verdict("a.md", &only_sig).0, "unfolded");
+        assert_eq!(verdict("a.md", &only_sig).1, 40);
+        // A second, content fold passes.
+        let folded = format!(
+            "{EXPANDER}\n**What this post is:** x.\n\n<details>\n<summary><b>1. Evidence</b></summary>\n\n{lines}</details>\n"
+        );
+        assert_eq!(verdict("b.md", &folded).0, "ok");
+        // PR form: opener, signature block, then content fold.
+        let pr = format!(
+            "Short opener.\n\n{EXPANDER}\n<details>\n<summary>Details</summary>\n\n{lines}</details>\n"
+        );
+        assert_eq!(verdict("c.md", &pr).0, "ok");
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
     #[test]
     fn body_is_signed_tolerates_markdown_emphasis() {
         let td = scratch("signature-markdown");
@@ -6983,7 +7227,10 @@ mod guard_policy_tests {
             format!("{opener}<details>\n  <summary>{sig}</summary>\n\nThe hook.\n</details>\n");
         assert!(body_is_signed(&one, &td));
         assert!(body_is_signed(&split, &td));
-        assert_eq!(body_signature_line(&split), Some(sig));
+        assert_eq!(
+            parse_body_signature(&split).map(|(s, _)| s.locator),
+            Some("github.com/judell/bram")
+        );
 
         // A wrong locator in the summary is refused, as on a top line.
         let wrong_repo = format!("{opener}<details><summary>{wrong}</summary>\n\nx\n</details>");
@@ -8371,7 +8618,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "crossboundary-unsigned");
         assert_eq!(
             body_of(&v),
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nNo origin remote found here; any host/path-shaped locator is accepted.\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nSign it with this expander, first in the body or right after a short opener:\n<details>\n<summary><owner>'s <Agent> speaking from <origin-host>/<path></summary>\n\n- Bram: v<version>\n- Model: <model>\n- Subagent: none (or the task name)\n- OS: <os>\n- Machine: <hostname -s>\n</details>\nNo origin remote found here; any host/path-shaped locator is accepted.\nThe older one-line form is still accepted.\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
         );
 
         let at = '@';
@@ -8656,6 +8903,45 @@ mod guard_policy_tests {
         forge_sha_test_git(&root, &["push", "fork", "refs/heads/main:refs/heads/main"]);
         write_body(&format!("Base {pushed}; now pushed {local}"));
         assert_allowed();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expander_optional_fields_parse_and_commit_is_checked() {
+        let with = "<details>\n<summary>Jon's Claude speaking from github.com/judell/bram</summary>\n\n- Bram: v0.8.6\n- Model: Opus 5.5\n- Subagent: none\n- OS: macOS\n- Machine: Tuck\n- Commit: COMMIT+dirty\n- Item: forge-signature-as-expander\n- Agent CLI: Claude Code 2.1.322\n</details>\n";
+        let first = with.replace("COMMIT", "0b2ce8f3");
+        let (sig, _) = parse_body_signature(&first).unwrap();
+        assert_eq!(sig.commit, Some("0b2ce8f3"));
+        assert_eq!(sig.item, Some("forge-signature-as-expander"));
+        assert_eq!(sig.agent_cli, Some("Claude Code 2.1.322"));
+        let (plain, _) = parse_body_signature(EXPANDER).unwrap();
+        assert_eq!(
+            (plain.commit, plain.item, plain.agent_cli),
+            (None, None, None)
+        );
+        let (one, _) = parse_body_signature(
+            "Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):",
+        )
+        .unwrap();
+        assert_eq!((one.commit, one.item, one.agent_cli), (None, None, None));
+
+        let root = scratch("expander-commit");
+        forge_sha_test_git(&root, &["init", "--initial-branch=main"]);
+        let tree = forge_sha_test_git(&root, &["hash-object", "-w", "-t", "tree", "--stdin"]);
+        let head = forge_sha_test_git(&root, &["commit-tree", &tree, "-m", "base"]);
+        forge_sha_test_git(&root, &["update-ref", "refs/heads/main", &head]);
+        let command = "gh issue comment 5 --body-file comment.md";
+        let verdict = |body: &str| {
+            std::fs::write(root.join("comment.md"), body).unwrap();
+            forge_sha_verdict(command, &root)
+        };
+        // Resolvable (short, with +dirty) is allowed; none is allowed.
+        let good = with.replace("COMMIT", &head[..8]);
+        assert_eq!(verdict(&good).0, "ok");
+        assert_eq!(verdict(EXPANDER).0, "ok");
+        // Unresolvable is denied with the unresolved-sha reason.
+        let bad = with.replace("COMMIT", "deadbeef");
+        assert_eq!(verdict(&bad), ("bad", "deadbeef".to_string()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

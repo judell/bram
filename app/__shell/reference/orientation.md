@@ -54,12 +54,12 @@ Then stop and wait for **Start**.
    `<base href="../">`, so they share every file in the folder. A new page is
    a new folder with the same copy.
 2. Edit only the `SITE` block at the top of `orientation/arch.js`: the
-   project name, the pinned commit and its date, your signature line in the
-   forge form (`<owner>'s <Agent> (Bram <version>, <thread>, <model>, <os>,
-   <machine>) speaking from the <Project> project (<locator>):`, shown above
-   the diagrams; on a published site the `<thread>` and `<machine>` segments
-   may be left out, while the forge convention for issues and comments stays
-   as it is),
+   project name, the pinned commit and its date, your signature line (the older
+   one-line forge form, `<owner>'s <Agent> (Bram <version>, <thread>, <model>,
+   <os>, <machine>) speaking from the <Project> project (<locator>):`, shown
+   above the diagrams; on a published site the `<thread>` and `<machine>`
+   segments may be left out). Forge issues and comments now sign with the
+   expander form in `conventions.md`; a site's credit line may stay one line),
    and the diagram list. Leave `orientation/START.md` alone:
    the Start page is the owner's, in their own words, and you never write or
    edit it.

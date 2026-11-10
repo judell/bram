@@ -402,6 +402,21 @@ Parallelize the *work*; serialize the *gates*.
   never route around it through another tool or scripted write. A
   blocked worktree with zero changes is eligible for harness cleanup,
   so report promptly rather than waiting in place.
+- **Delegate well-specified edits by default (Claude).** Well-specified
+  means the draft names the files, the change at each site, and how to
+  verify. Pick the cheaper model that fits: the smallest for mechanical
+  edits, the middle tier for ordinary code. Say in one line that you're
+  delegating; the user can say not to. Reading large files to make an
+  edit stays in the main session's context for every later call; a
+  subagent pays it in its own context and returns only a report.
+- **Keep in the main thread:** design, debugging from evidence, draft
+  and plan authorship, review of the subagent's diff, and every
+  lifecycle call (advance, commit, prune). Don't delegate when the brief
+  costs more than the edit (a single small change in a file already in
+  context).
+- **The brief carries the house rules.** The subagent sees only what you
+  send: name the files it may touch, the verification commands, and the
+  forbidden actions (lifecycle calls, git writes, killing processes).
 - Attribution: `worklist.json` has no agent field, so a committable
   item's diff produced by several subagents carries no record of which
   one made which edit. If that matters, commit the items separately.
@@ -921,9 +936,13 @@ prose body exists (`--body-file -` or a metadata-only command with no
 body flag). Coverage includes issue/PR/MR prose writes, GitHub gists,
 GitLab snippets, and inspectable `gh api` comment/gist writes.
 Recognized file-backed writes whose named file can't be read are
-denied. The guards require the full current form on every new
-inspectable artifact; the version slot is parsed when present and
-otherwise optional for now.
+denied. The guards require a signature on every new inspectable
+artifact, in the expander form (a `<details>` block whose `<summary>` is
+`<owner>'s <Agent> speaking from <locator>`, with `Bram`, `Model`,
+`Subagent`, `OS` and `Machine` bullets, plus optional `Commit`, `Item`
+and `Agent CLI`) or the older one-line form. It
+sits first in the body or under an opener of at most 600 characters.
+The version is parsed when present and otherwise optional for now.
 
 Writing the body file in the same command as the post defeats the
 check (the file doesn't exist yet when the guard looks), and a heredoc
@@ -934,14 +953,24 @@ disqualifies the issue-only worklist exemption. Deny reasons:
   couldn't be read; the write is denied (never silently bypassed) and
   the message names the path that failed to open. Quoted paths and, on
   Windows, MSYS `/c/...` spellings are accepted.
-- `crossboundary-unsigned` — the body was read and lacks the signature.
+- `crossboundary-unsigned` — the body was read and lacks a signature, or
+  its locator isn't this checkout's origin. The deny shows the expander
+  template.
 - `crossboundary-stale-version:<signed>` — the body IS signed, but its
-  version slot names a build other than the running instance's (the
+  version (the `Bram:` bullet, `v` prefix optional) names a build other than the running instance's (the
   `version` recorded in `.bram-port.json`, falling back to the guard's
-  own build when none is recorded). The deny names both versions. The usual cause is a long-running session signing from
-  the `@`-imported conventions copy that was true when it booted; read
-  `GET /__app-info` for the live version. A signature with **no**
-  version slot is still allowed.
+  own build when none is recorded). The deny names both versions. The value
+  usually came from context (the `@`-imported conventions marker or
+  memory) rather than the live instance, so it can be older or newer
+  than the instance; read `GET /__app-info` for the live version. A
+  signature with **no** version is still allowed.
+- `long-forge-body-unfolded` — a long body (over 30 non-blank lines or
+  2,500 characters, measured with the signature block removed) with no
+  other `<details>` fold. The signature's own expander doesn't count as
+  the fold.
+- `forge-sha-unresolved:<sha>` — a full 40-hex SHA in the body, or the
+  signature's optional `Commit:` bullet (`+dirty` stripped), doesn't
+  resolve in this repository. Fails open if git can't run.
 - `no-session-url` — a direct `git commit` or forge write whose command
   text or readable message/body file carries a session URL or
   `Claude-Session:` trailer. Greps and trace reads that mention the URL
@@ -950,10 +979,10 @@ disqualifies the issue-only worklist exemption. Deny reasons:
   resolve locally is denied (catches fabricated hashes and
   rebase-orphaned citations alike).
 
-Signature slot meanings, for readers: the version answers "which
-build?"; thread and model give evidential standing (an orchestrator
+Signature field meanings, for readers: the version answers "which
+build?"; subagent and model give evidential standing (an orchestrator
 held the design discussion, a subagent saw only its brief) and
-attribution; os and machine distinguish sessions of the same owner's
+attribution; `OS` and `Machine` distinguish sessions of the same owner's
 same agent across machines. The hostname also makes the signature
 machine-readable provenance: Alerts classifies a same-account
 comment by it — unsigned means the human typed it, this host's name
@@ -968,8 +997,8 @@ never sign your own writes that way.
 
 Old and missing signatures:
 
-- **Old-form signatures are valid historical text, not valid new
-  writes.** Don't retrofit old threads; new writes use the full form.
+- **The one-line form is valid historical text and still accepted by
+  the guards.** Don't retrofit old threads; new writes use the expander.
 - **The retrofit rule.** A missing signature noticed after posting is
   added in a *new* comment, not only by editing the body.
 

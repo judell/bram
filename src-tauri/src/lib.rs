@@ -79826,19 +79826,22 @@ fn local_machine_identity() -> (&'static str, &'static str) {
 // the parenthetical, since AgentSignature deliberately keeps no owner slot.
 // Never guesses past that split: an empty author (a bare state change with
 // no comment) yields None and the caller keeps its reason-only detail.
-fn needs_you_replier_phrase(author: &str, first_line: &str) -> Option<String> {
+fn needs_you_replier_phrase(author: &str, body: &str) -> Option<String> {
     let author = author.trim();
     if author.is_empty() {
         return None;
     }
-    let line = first_line
+    // forge-signature-as-expander: the signature may be the one-line form or
+    // an expander block, so the whole body is read, not its first line.
+    if let Some((sig, _)) = guard_policy::parse_body_signature(body) {
+        return Some(format!("{} replied", sig.speaker));
+    }
+    let line = body
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
         .trim()
         .trim_start_matches(|ch: char| matches!(ch, '_' | '*' | '>' | '#' | '-' | ' '));
-    if guard_policy::parse_agent_signature(line).is_some() {
-        if let Some((speaker, _)) = line.split_once(" (") {
-            return Some(format!("{} replied", speaker.trim()));
-        }
-    }
     if let Some(speaker) = worklist_mirror_signature_speaker(line) {
         return Some(format!("{} posted", speaker));
     }
@@ -79855,6 +79858,9 @@ fn needs_you_replier_phrase(author: &str, first_line: &str) -> Option<String> {
 const NEEDS_YOU_EXCERPT_MAX_CHARS: usize = 160;
 
 fn needs_you_excerpt(body: &str) -> String {
+    // forge-signature-as-expander: cut the whole signature block first, so
+    // neither its summary nor its "Bram: v0.8.6" bullets read as content.
+    let body = guard_policy::body_without_signature(body);
     for raw in body.lines() {
         let line = raw.trim();
         if line.is_empty() {
@@ -79937,6 +79943,16 @@ mod needs_you_excerpt_tests {
     }
 
     #[test]
+    fn expander_signature_is_skipped_whole() {
+        let sig = "<details>\n<summary>Jon's Claude speaking from github.com/judell/bram</summary>\n\n- Bram: v0.8.6\n- Model: Opus 5.5\n</details>";
+        assert_eq!(needs_you_excerpt(sig), "");
+        assert_eq!(
+            needs_you_excerpt(&format!("{sig}\n\n## Findings\nmore")),
+            "Findings"
+        );
+    }
+
+    #[test]
     fn emphasized_signature_is_still_skipped() {
         let body = format!("_{}_\nReal content", SIG);
         assert_eq!(needs_you_excerpt(&body), "Real content");
@@ -80001,6 +80017,15 @@ mod needs_you_replier_tests {
     }
 
     #[test]
+    fn expander_signature_names_the_agent() {
+        let body = "<details>\n<summary>Jon's Claude speaking from github.com/judell/bram</summary>\n\n- Bram: v0.8.6\n- Model: Opus 5.5\n</details>\n\nReal content";
+        assert_eq!(
+            needs_you_replier_phrase("judell", body).as_deref(),
+            Some("Jon's Claude replied")
+        );
+    }
+
+    #[test]
     fn unsigned_body_names_the_human() {
         assert_eq!(
             needs_you_replier_phrase(
@@ -80033,8 +80058,7 @@ fn cross_machine_agent_move(
     body: &str,
     local_locator: Option<&str>,
 ) -> Option<(String, String, &'static str)> {
-    let first = body.lines().find(|l| !l.trim().is_empty())?;
-    let sig = guard_policy::parse_agent_signature(first)?;
+    let (sig, _) = guard_policy::parse_body_signature(body)?;
     let (local_os, local_host) = local_machine_identity();
     let foreign_machine = match sig.machine {
         Some(m) => !local_host.is_empty() && !m.eq_ignore_ascii_case(local_host),
@@ -80147,6 +80171,41 @@ mod cross_machine_agent_tests {
             cross_machine_agent_move("Real Jon speaking. Ship it.", LOCAL),
             None
         );
+    }
+
+    #[test]
+    fn expander_form_classifies_like_the_one_line_form() {
+        let body = |machine: &str, locator: &str| {
+            format!(
+                "<details>\n<summary>Jon's Claude speaking from {locator}</summary>\n\n- Bram: v0.8.6\n- Model: Opus 5\n- Subagent: none\n- OS: macOS\n- Machine: {machine}\n</details>\n\nBody."
+            )
+        };
+        assert_eq!(
+            cross_machine_agent_move(
+                &body("definitely-not-this-host", "github.com/judell/bram"),
+                LOCAL
+            ),
+            Some((
+                "definitely-not-this-host".to_string(),
+                "Opus 5".to_string(),
+                "same account, different machine.",
+            ))
+        );
+        let (_, local_host) = local_machine_identity();
+        if !local_host.is_empty() {
+            assert_eq!(
+                cross_machine_agent_move(&body(local_host, "github.com/judell/bram"), LOCAL),
+                None
+            );
+            assert_eq!(
+                cross_machine_agent_move(&body(local_host, "github.com/judell/budget"), LOCAL),
+                Some((
+                    "budget-project".to_string(),
+                    "Opus 5".to_string(),
+                    "same account and machine, different project.",
+                ))
+            );
+        }
     }
 
     #[test]
@@ -80693,13 +80752,12 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                     Some((a, b)) => (a.trim().to_string(), b.to_string()),
                     None => (raw.trim().to_string(), String::new()),
                 };
-                let first_line = comment_body.lines().next().unwrap_or("").trim().to_string();
                 if !author.is_empty() {
                     if author.eq_ignore_ascii_case(login.as_str()) {
                         continue;
                     }
                     verified = true;
-                    replier = needs_you_replier_phrase(&author, &first_line);
+                    replier = needs_you_replier_phrase(&author, &comment_body);
                     excerpt = needs_you_excerpt(&comment_body);
                 }
             }

@@ -414,24 +414,10 @@ response saying the commit "ALREADY RAN" is success.
 ### Delegate well-specified edits by default
 
 When your provider supports subagents (Claude today), hand an approved
-item's edits to a subagent on a cheaper model by default. Reading large
-files to make an edit stays in the main session's context for every
-later call; a subagent pays it in its own context and returns only a
-report.
-
-- **Well-specified** means the draft names the files, the change at
-  each site, and how to verify. Pick the cheaper model that fits: the
-  smallest for mechanical edits, the middle tier for ordinary code.
-  Say in one line that you're delegating; the user can say not to.
-- **Keep in the main thread:** design, debugging from evidence, draft
-  and plan authorship, review of the subagent's diff, and every
-  lifecycle call (advance, commit, prune).
-- **Don't delegate when the brief costs more than the edit:** a single
-  small change in a file already in context.
-- **The brief carries the house rules.** The subagent sees only what
-  you send: name the files it may touch, the verification commands, and
-  the forbidden actions (lifecycle calls, git writes, killing
-  processes).
+item's edits to a subagent on a cheaper model by default, if the draft
+names the files, the change at each site, and how to verify. Say in one
+line that you're delegating. Details → read
+`.claude/bram-reference/worklist-mechanics.md` (§Delegating worklist items to subagents).
 
 ### Transports
 
@@ -598,58 +584,56 @@ check whether to offer the user a fresh session for it → read
 
 ## Signing agent-authored forge artifacts
 
-**Every agent-authored forge artifact opens with a signature** — issue
+**Every agent-authored forge artifact carries a signature** — issue
 bodies, issue comments, PR descriptions, PR comments, reviews,
 gists/snippets — in every repo. Agents post through the human's
 account, so an unsigned agent comment is indistinguishable from the
-human's. The form:
+human's. The signature is an expander (speaker visible, provenance
+inside). Put it first in the body, or right
+after a short opener a person wrote:
 
-    <owner>'s <Agent> (Bram <version>, <thread>, <model>, <os>, <machine>) speaking from the <Project> project (<forge-host>/<owner-or-group>/<repo>):
+```markdown
+<details>
+<summary>Jon's Claude speaking from github.com/judell/bram</summary>
 
-For example:
+- Bram: v0.8.6
+- Model: Opus 5.5
+- Subagent: none
+- OS: macOS
+- Machine: Jons-MacBook-Air
+- Commit: 0b2ce8f3+dirty
+- Item: forge-signature-as-expander
+- Agent CLI: Claude Code 2.1.322
+</details>
+```
 
-    Jon's Claude (Bram 0.6.5, main thread, Fable 5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):
-    Jon's Codex (Bram 0.6.5, main thread, gpt-5.2-codex, macOS, Tuck) speaking from the XMLUI project (github.com/xmlui-org/xmlui):
-
-- `<version>` — Bram's version, from `GET /__app-info` (`current`);
-  without a reachable instance, the `<!-- bram vX.Y.Z -->` marker on the
-  first line of `.claude/bram-conventions.md`; if neither, write
-  `Bram unknown`, never a guess. Prefer the live `/__app-info` value: a
-  long-running session's imported copy can be stale, and a present but
-  wrong version is denied.
-- `<Agent>` — `Claude`, `Codex`, `OpenCode` or `Antigravity`.
-  `<thread>` — `main thread` or `subagent`. `<model>` — the model
-  producing the words.
-- `<os>` — `macOS`, `Windows` or `Linux`. `<machine>` — short hostname
-  (`hostname -s`; `COMPUTERNAME` on Windows).
-- The locator is the checkout's `origin` normalized to `host/path`: no
-  scheme, credentials, trailing slash or `.git`; don't assume a public
-  forge or a two-segment path (`gitlab.com/group/subgroup/project`
-  and `forge.example.org/team/project` are valid). With no network-shaped `origin`, still write a full locator
-  and say it can't be verified against a remote.
+`Commit`, `Item` and `Agent CLI` are optional; `Commit` must resolve
+locally. Field meanings, sources and locator rules → read
+`.claude/bram-reference/environment.md` (§Signature fields). The older
+one-line form (`… (Bram <version>, <thread>, …) speaking from the
+<Project> project (<locator>):`) is still accepted; write expanders.
 
 Rules:
 
 - **Every artifact, not just the first in a thread** — later readers
   have no memory of comment #1.
 - **The executor signs.** Whoever makes the forge write signs with their
-  own thread and model; a subagent's findings posted by the orchestrator
-  carry the orchestrator's signature, with the subagent credited inline.
+  own `Subagent` and `Model`; a subagent's findings posted by the
+  orchestrator carry the orchestrator's signature, with the subagent credited inline.
 - **Write the body file in its own step.** Build it in one call, post
   with `--body-file` in the next, never both in one command — the guard
   runs before the command, so a body written by the same command can't
   be checked.
 - **Before a forge post longer than a screen**, read
   `.claude/bram-reference/environment.md` (§Forge posts in
-  details-summary form) and use its outline: a bold sentence, bullets
-  with bold claims, numbered folds. The guard denies a long post with
+  details-summary form) and use its outline: the signature block, a bold
+  sentence, bullets with bold claims, numbered folds. The guard denies a long post with
   no fold. Never write a PR's opener yourself.
 - Commit messages don't take the forge signature (they carry an author
   field), but a commit message another session will read should still
   say who wrote it and from which build.
 
-Every agent's guard **denies** unsigned forge writes; sign by default and
-you never meet them.
+Every agent's guard **denies** unsigned forge writes; sign by default.
 
 - **A signature denial you don't understand** → read `.claude/bram-reference/worklist-mechanics.md` (§Signature deny reasons).
 

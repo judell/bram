@@ -168,12 +168,14 @@ to file a PR.
   already said about this PR. Never draft or polish it. Above the fold
   it reads as human judgement, and nothing can tell who wrote it. Keep
   it a sentence or two: the guards refuse an opener over 600 characters.
-- **The `<summary>` is your full signature line.** It stays visible when
-  the fold is closed, and it already names the agent and model. The
-  guards accept the body when the first `<details>` block's `<summary>`
-  is a valid signature for this checkout.
-- **Everything you wrote goes inside the fold**, in Markdown, after a
-  blank line, or GitHub won't render it.
+- **Then your signature block**, the expander from
+  `.claude/bram-conventions.md` (§Signing agent-authored forge
+  artifacts). The guards accept the body when it is the first
+  `<details>` block under the opener and its `<summary>` is a valid
+  signature for this checkout.
+- **Everything you wrote goes in its own folds below the signature**,
+  in Markdown, after a blank line, or GitHub won't render it. The
+  signature's own block doesn't count as the post's fold.
 - Build the body file in its own step and post it with `--body-file`, as
   for any forge write.
 
@@ -181,9 +183,20 @@ to file a PR.
 <the user's opener, verbatim>
 
 <details>
-<summary>Jon's Claude (Bram 0.8.5, main thread, Opus 5.5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):</summary>
+<summary>Jon's Claude speaking from github.com/judell/bram</summary>
 
-## What changed
+- Bram: v0.8.6
+- Model: Opus 5.5
+- Subagent: none
+- OS: macOS
+- Machine: Jons-MacBook-Air
+- Commit: 0b2ce8f3
+- Item: forge-signature-as-expander
+- Agent CLI: Claude Code 2.1.322
+</details>
+
+<details>
+<summary>What changed</summary>
 
 …
 </details>
@@ -195,11 +208,10 @@ For an issue post the point is readability of a long agent-written post,
 not only marking human words. So an opener is welcome but not required.
 
 - **Offer an opener when the post is long.** Ask once. If the user gives
-  one, use it verbatim and never draft it. If not, open with the
-  signature on the first line, as for any forge write. With an opener,
-  the PR rules apply to the signature: it is the `<summary>` of a
-  `<details>` block under the opener.
-- **Keep the part a person reads visible.** Under the signature, one
+  one, use it verbatim and never draft it. If not, put the signature
+  block first, as for any forge write. With an opener, the signature
+  block goes right under it, as in the PR form.
+- **Keep the part a person reads visible.** Under the signature block, one
   bold sentence saying what the post is, with its key numbers. Then
   "Three findings:" (or however many) as bullets that each lead with a
   bold claim.
@@ -214,17 +226,28 @@ not only marking human words. So an opener is welcome but not required.
   fold around the whole post.
 - **A post short enough to read whole takes no folds.** Past that, the
   guards enforce the fold: a forge body over 30 non-blank lines or
-  2,500 characters after the signature line, with no `<details>` block
-  carrying a `<summary>`, is denied with reason
+  2,500 characters after the signature block, with no other `<details>`
+  block carrying a `<summary>` (the signature's own doesn't count), is denied with reason
   `long-forge-body-unfolded`. That covers issue bodies, issue and PR
   comments, PR descriptions and reviews; gists and snippets are exempt.
-  A details-summary body is already folded and passes.
+  A body whose content is already in its own folds passes.
 - Leave a blank line after each `<summary>`, or GitHub won't render the
   Markdown inside.
 - Build the body file in its own step and post it with `--body-file`.
 
 ```markdown
-Jon's Claude (Bram 0.8.5, main thread, Opus 5.5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):
+<details>
+<summary>Jon's Claude speaking from github.com/judell/bram</summary>
+
+- Bram: v0.8.6
+- Model: Opus 5.5
+- Subagent: none
+- OS: macOS
+- Machine: Jons-MacBook-Air
+- Commit: 0b2ce8f3
+- Item: forge-signature-as-expander
+- Agent CLI: Claude Code 2.1.322
+</details>
 
 **What this post is:** 33 candidates from 3,141 commands in 18 sessions. Three findings:
 
@@ -232,7 +255,7 @@ Jon's Claude (Bram 0.8.5, main thread, Opus 5.5, macOS, Tuck) speaking from the 
 - **Second finding.** …
 - **Third finding.** …
 
-Data: `GET /__tasks/candidates` on Bram 0.8.5.
+Data: `GET /__tasks/candidates` on Bram 0.8.6.
 
 <details>
 <summary><b>1. The first finding, in a line</b></summary>
@@ -248,6 +271,55 @@ Evidence: a table, a code block, a count.
 - The report's own fields.
 </details>
 ```
+
+## Signature fields
+
+The expander signature (`.claude/bram-conventions.md`, §Signing
+agent-authored forge artifacts) is a `<details>` block. Shape:
+
+```markdown
+<details>
+<summary><owner>'s <Agent> speaking from <forge-host>/<owner-or-group>/<repo></summary>
+
+- Bram: v<version>
+- Model: <model>
+- Subagent: none
+- OS: <os>
+- Machine: <machine>
+- Commit: <short sha>[+dirty]
+- Item: <worklist item id>
+- Agent CLI: <name and version>
+</details>
+```
+
+- `<Agent>` is `Claude`, `Codex`, `OpenCode` or `Antigravity`.
+- `Bram` is Bram's version, from `GET /__app-info` (`current`); a
+  leading `v` is fine. Without a reachable instance, use the
+  `<!-- bram vX.Y.Z -->` marker on the first line of
+  `.claude/bram-conventions.md`; if neither, write `unknown`, never a
+  guess. Prefer the live value: a long-running session's imported copy
+  can be stale, and a present but wrong version is denied.
+- `Model` is the model producing the words (required).
+- `Subagent` is `none` for the main thread, else the subagent's task name.
+- `OS` is `macOS`, `Windows` or `Linux`. `Machine` is the short hostname
+  (`hostname -s`; `COMPUTERNAME` on Windows), not a display name: Alerts
+  compares it with the reader's own host.
+- `Commit` (optional) is the checkout's HEAD short sha when you post,
+  with `+dirty` appended when the tree has uncommitted changes. The
+  guard strips `+dirty` and requires the sha to resolve in this repo
+  (denied as `forge-sha-unresolved:<sha>`); it fails open if git can't run.
+- `Item` (optional) is the Worklist item id, when you post while working
+  one. Parsed, not checked.
+- `Agent CLI` (optional) is the CLI's name and version from
+  `claude --version`, `codex --version` and so on, e.g.
+  `Claude Code 2.1.322`. Parsed, not checked.
+- The locator in the summary is the checkout's `origin` normalized to
+  `host/path`: no scheme, credentials, trailing slash or `.git`; don't
+  assume a public forge or a two-segment path
+  (`gitlab.com/group/subgroup/project` and
+  `forge.example.org/team/project` are valid). With no network-shaped
+  `origin`, still write a full locator and say it can't be verified
+  against a remote.
 
 ## Resource-heavy test suites
 

@@ -21554,7 +21554,7 @@ window.__bramStoryTell = (function () {
         var gd = gateNow(t);
         if (gd && gd.d.target === "drop" && !(gd.d.ids && gd.d.ids.length)) gd.d.ids = idsOf(rest);
       } else if (op === "write" && kind === "direct-edit") {
-        simple(t, "gate", "You sent a turn that skips the Worklist, so I allowed direct edits.").d.turnLink = true;
+        simple(t, "gate", "You sent a message that skips the Worklist, so I allowed direct edits.").d.turnLink = true;
       } else if (op === "refuse") {
         var m = /expired \((\d+) ms old, TTL (\d+) ms\)/.exec(rest);
         var what = kv(rest, "mutate_op") || "request", ids = idsOf(rest);
@@ -21601,7 +21601,7 @@ window.__bramStoryTell = (function () {
         s = "An approval for " + who + " was recorded, but I saw no click on the gate bar for it" +
           (d.handed ? "; the turn was handed to Claude" : "") + ".";
       } else if (tg === "drop") {
-        s = "You clicked Drop on " + who + ". Feedback-less drops finish in the host, so there's no turn to tell about.";
+        s = "You clicked Drop on " + who + ".";
       } else {
         var label = { start: "Start", commit: "Commit", "start-commit": "Start & commit" }[tg] || tg;
         s = "You clicked " + label + " on " + who + ".";

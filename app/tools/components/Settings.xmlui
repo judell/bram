@@ -318,12 +318,12 @@
           labelPosition="end"
           initialValue="{window.__bramReviewOverlapsEnabled ? window.__bramReviewOverlapsEnabled() : false}"
           onDidChange="(v) => window.__bramSetReviewOverlapsEnabled(v)" />
-        <!-- pane-idle-flush-when-degraded: opt-in workaround for an unexplained
+        <!-- pane-idle-flush-when-degraded: default-on workaround for an unexplained
              pane slowdown (judell/bram#482 for the underlying leak). -->
         <Switch
           label="Reload a slowed pane when idle"
           labelPosition="end"
-          initialValue="{settingsValue &amp;&amp; settingsValue.ui &amp;&amp; settingsValue.ui.paneIdleFlush === true}"
+          initialValue="{!(settingsValue &amp;&amp; settingsValue.ui &amp;&amp; settingsValue.ui.paneIdleFlush === false)}"
           onDidChange="(v) => saveSettings.execute({ ui: { paneIdleFlush: v } })" />
         <!-- issue-231: per-user preferences, localStorage-backed (not project
              settings) — tips dismissal state is per-user too. The interval

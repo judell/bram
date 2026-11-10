@@ -30370,7 +30370,7 @@ mod agent_startup_policy_tests {
                 "continueLast": true
             },
             "worklist": { "batchCommitActions": false, "enforcement": "on" },
-            "ui": { "showTargetApp": false, "toolsPaneHotReload": false, "paneIdleFlush": false },
+            "ui": { "showTargetApp": false, "toolsPaneHotReload": false, "paneIdleFlush": true },
             "sessions": {
                 "suggestOnNewItem": true,
                 "suggestOnNewIssue": true,
@@ -30612,8 +30612,9 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                 ui.as_ref()
                     .and_then(|u| u.tools_pane_hot_reload)
                     .unwrap_or(false),
-                // pane-idle-flush-when-degraded: default OFF, opt-in workaround.
-                ui.and_then(|u| u.pane_idle_flush).unwrap_or(false),
+                // pane-idle-flush-when-degraded: default ON — only an
+                // explicit `false` turns the workaround off.
+                ui.and_then(|u| u.pane_idle_flush).unwrap_or(true),
                 // Default ON — tracing is the observability backbone; an
                 // explicit `false` (or BRAM_TRACE=0) turns it off.
                 traces.as_ref().and_then(|t| t.enabled).unwrap_or(true),
@@ -30639,7 +30640,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             false,
             false,
             false,
-            false,
+            true, // pane_idle_flush: default ON
             true,
             false,
             DEFAULT_TRACE_ARCHIVE_AFTER_DAYS,
@@ -91819,7 +91820,8 @@ fn handle_queue_save<R: tauri::Runtime>(
 // pane-idle-flush-when-degraded: POST /__pane/flush. The degraded, idle pane
 // asks for a forced reload; it goes through the same deferral as every other
 // forced reload (emit_or_defer_tools_pane_reload), so a turn in flight holds
-// it until the claim clears. Refused unless ui.paneIdleFlush is on. Workaround
+// it until the claim clears. Refused when ui.paneIdleFlush is explicitly
+// false (a missing key reads as on). Workaround
 // route; judell/bram#482 for the underlying leak.
 fn handle_pane_flush<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
     const JSON: &str = "application/json; charset=utf-8";
@@ -91827,7 +91829,7 @@ fn handle_pane_flush<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static st
         .and_then(|root| load_project_config(&root))
         .and_then(|c| c.ui)
         .and_then(|u| u.pane_idle_flush)
-        .unwrap_or(false);
+        .unwrap_or(true);
     if !enabled {
         return (
             409,

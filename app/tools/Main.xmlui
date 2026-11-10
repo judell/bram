@@ -1417,7 +1417,13 @@
           <HStack
             when="{window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) > 0}"
             gap="$space-1"
+            wrapContent="true"
             verticalAlignment="center">
+            <!-- footer-transcript-chips-wrap-centered: wrapContent lets chips flow
+                 onto another row instead of squeezing; the two DropdownMenus use a
+                 triggerTemplate Button size="xs" so they match the chips.
+                 https://www.xmlui.org/docs/howto/wrap-items-across-multiple-rows
+                 https://www.xmlui.org/docs/reference/components/DropdownMenu#triggertemplate -->
             <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="· Transcripts:" />
             <!-- subagent-chips-show-selection: one signal per axis. Selection
                  is the fill: the chip whose stream the Transcript is showing
@@ -1458,8 +1464,15 @@
             <DropdownMenu
               when="{window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length > 3}"
               label="{'+' + (window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length - 3) + ' more'}"
-              alignment="end"
-              triggerButtonVariant="outlined">
+              alignment="end">
+              <property name="triggerTemplate">
+                <Button
+                  size="xs"
+                  variant="outlined"
+                  icon="chevrondown"
+                  iconPosition="end"
+                  label="{'+' + (window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length - 3) + ' more'}" />
+              </property>
               <Items data="{window.__bramFooterOverflowAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds, transcriptAgentId)}">
                 <MenuItem
                   label="{window.__bramAgentChipLabel($item)}"
@@ -1475,8 +1488,15 @@
             <DropdownMenu
               when="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) > 0}"
               label="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) + ' hidden'}"
-              alignment="end"
-              triggerButtonVariant="ghost">
+              alignment="end">
+              <property name="triggerTemplate">
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  icon="chevrondown"
+                  iconPosition="end"
+                  label="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) + ' hidden'}" />
+              </property>
               <Items data="{window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).slice().reverse() : []}">
                 <MenuItem
                   label="{'↩ ' + window.__bramAgentChipLabel($item)}"

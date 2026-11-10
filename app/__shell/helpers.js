@@ -12214,12 +12214,35 @@ window.__bramLocalLinkPreviewOverflow = function (preview) {
 // With allowHtml="false" an HTML comment (Bram's <!-- bram:start --> markers)
 // renders as literal text. Drop comments outside fenced code; a comment shown
 // inside a code sample stays.
+// files-preview-details-summary: the same goes for <details> / <summary>
+// (README's collapsible sections, Jon 2026-11-10: "Stray /details?"). Outside
+// fenced code, a line that is only <details …> or </details> is dropped, and
+// <summary>X</summary> (with or without <b>…</b> inside) becomes a bold line,
+// so the section reads as an open section under a heading. The preview keeps
+// allowHtml="false": file contents are data
+// (https://www.xmlui.org/docs/reference/components/Markdown#allowhtml).
+function __bramPreviewDetailsLine(line) {
+  if (/^\s*<\/?details(\s[^>]*)?>\s*$/i.test(line)) return null;
+  var m = line.match(/^\s*<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary>\s*$/i);
+  if (m) {
+    var title = m[1].replace(/<\/?b>/gi, "").replace(/<\/?strong>/gi, "").trim();
+    return title ? "**" + title + "**" : null;
+  }
+  return line;
+}
 function __bramStripMarkdownComments(text) {
   var out = [], inFence = false, fence = "";
   var lines = String(text).split("\n");
   var buf = [];
   var flush = function () {
-    if (buf.length) out.push(buf.join("\n").replace(/<!--[\s\S]*?-->/g, ""));
+    if (buf.length) {
+      var kept = [];
+      for (var j = 0; j < buf.length; j++) {
+        var l = __bramPreviewDetailsLine(buf[j]);
+        if (l !== null) kept.push(l);
+      }
+      out.push(kept.join("\n").replace(/<!--[\s\S]*?-->/g, ""));
+    }
     buf = [];
   };
   for (var i = 0; i < lines.length; i++) {

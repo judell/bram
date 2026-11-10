@@ -13336,6 +13336,17 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
                     notifications_skipped = notifications_skipped.saturating_add(1);
                     continue;
                 }
+                // A local slash command (`/model`, `/config`, `/clear`) writes
+                // a caveat, the command frame and its stdout as user records.
+                // The user ran a local command; nobody asked the model
+                // anything, so no turn starts here. Same rule as the
+                // transcript parse (issue-377).
+                if claude_jsonl_user_text(&rec)
+                    .map(|t| st_is_local_command_text(&t))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
                 let ts = rec
                     .get("timestamp")
                     .and_then(|v| v.as_str())
@@ -47738,6 +47749,17 @@ fn st_command_frame_value(text: &str, tag: &str) -> Option<String> {
     Some(text[start..end].trim().to_string())
 }
 
+// Local slash-command records: the caveat, the command frame, and its
+// stdout/stderr. Start-anchored so prose that merely mentions a tag is
+// untouched. Shared by the transcript parse and `compute_claude_turn_stats`.
+fn st_is_local_command_text(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("<command-name>")
+        || t.starts_with("<local-command-stdout>")
+        || t.starts_with("<local-command-stderr>")
+        || t.starts_with("<local-command-caveat>")
+}
+
 fn st_slash_command_turn(text: &str) -> Option<serde_json::Value> {
     let trimmed = text.trim_start();
     if !trimmed.starts_with("<command-name>") {
@@ -71903,6 +71925,47 @@ mod notification_turn_boundary_tests {
         let content = ended_turn_then_notification();
         let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
         assert!(claude_turn_is_done(&content, Some(stats.user_ts_ms)));
+    }
+
+    fn ended_turn_then_model_command() -> String {
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-11-10T03:09:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-10T03:10:38.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"user","isMeta":true,"timestamp":"2026-11-10T03:10:50.797Z","message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code, not by the model.</local-command-caveat>"}}"#,
+            r#"{"type":"user","timestamp":"2026-11-10T03:10:50.797Z","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>"}}"#,
+            r#"{"type":"user","timestamp":"2026-11-10T03:10:50.797Z","message":{"role":"user","content":"<local-command-stdout>Set model to `Opus 5.5` and saved as your default for new sessions</local-command-stdout>"}}"#,
+        )
+    }
+
+    #[test]
+    fn a_slash_command_after_an_ended_turn_is_not_working() {
+        let content = ended_turn_then_model_command();
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(!stats.is_working, "/model opens no turn");
+        assert_eq!(stats.user_ts_ms, 1_794_280_140_000);
+    }
+
+    #[test]
+    fn a_real_prompt_after_a_slash_command_is_working() {
+        let content = format!(
+            "{}{}\n",
+            ended_turn_then_model_command(),
+            r#"{"type":"user","timestamp":"2026-11-10T03:11:30.000Z","message":{"role":"user","content":[{"type":"text","text":"next please"}]}}"#
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(stats.is_working);
+    }
+
+    #[test]
+    fn prose_mentioning_a_command_tag_is_still_a_boundary() {
+        let content = format!(
+            "{}{}\n",
+            ended_turn_then_model_command(),
+            r#"{"type":"user","timestamp":"2026-11-10T03:11:30.000Z","message":{"role":"user","content":"why does <command-name> show up in the log?"}}"#
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(stats.is_working);
     }
 
     #[test]

@@ -42,6 +42,10 @@
     onDidChange="focusId = window.__bramLogFocusParam($queryParams.focus)" />
   <ChangeListener listenTo="{focusId}"
     onDidChange="expanded = window.__bramLogFocusExpand(expanded, focusId)" />
+  <!-- Any expand or collapse clears the highlight (Jon, 2026-11-10), but not
+       the expansion the focus itself just made. -->
+  <ChangeListener listenTo="{expanded.join(',')}"
+    onDidChange="focusId = window.__bramLogFocusAfterExpand(focusId)" />
   <ChangeListener listenTo="{focusId}"
     onDidChange="logList.scrollToId(focusId)" />
   <PushSource id="storyChanged" initial="{null}"
@@ -138,7 +142,7 @@
                  The link shows only when there is a saved draft to open. -->
             <Text>
               <Text inline="true" whiteSpace="pre-wrap" value="{$item.message}" />
-              <Link when="{!!$item.context}" icon="external-link" noIndicator="true" marginLeft="$space-1"
+              <Link when="{!!$item.context &amp;&amp; $item.inQueue}" icon="external-link" noIndicator="true" marginLeft="$space-1"
                 tooltip="Open in Queue" to="{'/queue?focus=' + $item.queueId}" />
             </Text>
             <!-- Screenshots sent with the message, as Transcript shows a

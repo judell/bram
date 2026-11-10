@@ -18076,12 +18076,24 @@ window.__bramLogRows = function (entries, expanded, focusId) {
 // links to the queue-add row for the message it sent. The focused row is
 // expanded (__bramLogFocusExpand), scrolled to (List.scrollToId) and tinted.
 window.__bramLogFocusParam = function (focus) {
+  // The ↗ click also toggles its own row; that expansion lands in the same
+  // render and must not clear the focus it set.
+  if (focus) window.__bramLogFocusGraceUntil = Date.now() + 600;
   return focus ? String(focus) : null;
 };
 window.__bramLogFocusExpand = function (expanded, focusId) {
   if (!focusId) return expanded || [];
   var arr = expanded || [];
-  return arr.indexOf(focusId) >= 0 ? arr : arr.concat([focusId]);
+  if (arr.indexOf(focusId) >= 0) return arr;
+  window.__bramLogFocusArmed = true; // this expansion is the focus's own
+  return arr.concat([focusId]);
+};
+// Any expand or collapse clears the highlight, except the one the focus
+// itself made: that change arrives once, armed, and keeps the focus.
+window.__bramLogFocusAfterExpand = function (focusId) {
+  if (window.__bramLogFocusArmed) { window.__bramLogFocusArmed = false; return focusId; }
+  if (Date.now() < (window.__bramLogFocusGraceUntil || 0)) return focusId;
+  return null;
 };
 // A sentence click toggles its entry. The current plain handler passes no
 // event, so embedded links navigate and also toggle. Event-aware callers
@@ -21647,7 +21659,12 @@ window.__bramStoryTell = (function () {
         total += d.hits[b];
         if (d.hits[b]) parts.push(d.hits[b] + " " + (LABEL[b] || b));
       });
-      var s = "You searched for “" + window.__bramStoryLeadingSentence(d.q) + "”" +
+      // The query links to the Search tab with it run again (/search?q=,
+      // Search.xmlui reads $queryParams.q and .mode).
+      var href = "/search?q=" + encodeURIComponent(d.q) +
+        (d.mode && d.mode !== "and" ? "&mode=" + encodeURIComponent(d.mode) : "");
+      var label = window.__bramStoryLeadingSentence(d.q).replace(/([\[\]\\])/g, "\\$1");
+      var s = "You searched for [“" + label + "”](" + href + ")" +
         (d.mode && d.mode !== "and" ? " (" + d.mode + " mode)" : "");
       s += total
         ? " and got " + plural(total, "hit") + (parts.length > 1 ? " (" + parts.join(", ") + ")" : "") + "."
@@ -21981,6 +21998,8 @@ window.__bramStoryTell = (function () {
           id: o.kind + ":" + (o.queueId || o.t),
           at: o.at, text: text, kind: o.kind, surprising: o.surprising, queueId: o.queueId || null,
           sentContext: sentDraft ? window.__bramQueueDraftContext(sentDraft) : null,
+          // Open in Queue only while the message is still queued.
+          inQueue: !!draft && !draft.sentAtMs && !draft.deletedAtMs,
           // For the expanded detail: when it happened (the board-then fetch
           // keys on it) and the agent and session in force at the time.
           t: o.t, agent: o.agent || null, sessionId: o.sessionId || null, sessionTitle: o.sessionTitle || null,

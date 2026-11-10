@@ -12230,6 +12230,37 @@ function __bramPreviewDetailsLine(line) {
   }
   return line;
 }
+// files-preview-links-and-images: the README's demo poster
+// (<a href><img alt src></a>) printed as raw tags too (Jon, 2026-11-10:
+// "different prob now"). Outside inline code, <a href="X">inner</a> becomes
+// [label](X), its label the inner text with any <img> reduced to its alt;
+// a remaining <img alt="A"> becomes *[image: A]* (dropped with no alt). The
+// image isn't rendered: its src is repo-relative and the pane can't load it.
+// Other tags stay literal, as allowHtml="false" intends.
+function __bramPreviewImgAlt(tag) {
+  var m = String(tag).match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+  return m ? (m[1] != null ? m[1] : m[2]).trim() : "";
+}
+function __bramPreviewInlineHtml(text) {
+  return String(text).split(/(`+[^`]*`+)/).map(function (seg, i) {
+    if (i % 2 === 1) return seg;
+    seg = seg.replace(
+      /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)<\/a>/gi,
+      function (_, h1, h2, inner) {
+        var href = h1 != null ? h1 : h2;
+        var label = inner
+          .replace(/<img\b[^>]*>/gi, function (img) { return __bramPreviewImgAlt(img); })
+          .replace(/<[^>]+>/g, "")
+          .trim();
+        return "[" + (label || href) + "](" + href + ")";
+      }
+    );
+    return seg.replace(/<img\b[^>]*>/gi, function (img) {
+      var alt = __bramPreviewImgAlt(img);
+      return alt ? "*[image: " + alt + "]*" : "";
+    });
+  }).join("");
+}
 function __bramStripMarkdownComments(text) {
   var out = [], inFence = false, fence = "";
   var lines = String(text).split("\n");
@@ -12241,7 +12272,7 @@ function __bramStripMarkdownComments(text) {
         var l = __bramPreviewDetailsLine(buf[j]);
         if (l !== null) kept.push(l);
       }
-      out.push(kept.join("\n").replace(/<!--[\s\S]*?-->/g, ""));
+      out.push(__bramPreviewInlineHtml(kept.join("\n").replace(/<!--[\s\S]*?-->/g, "")));
     }
     buf = [];
   };

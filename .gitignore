@@ -62,6 +62,7 @@ resources/.bram-port.json
 resources/.bram-guard-target
 resources/.inflight-claim.json
 resources/.delegated-bindings.json
+resources/.subagent-starts.json
 resources/.claim-intervals.json
 resources/.pty-intent.jsonl
 resources/.worklist-authorization.json

@@ -40,9 +40,12 @@ if ($Duration -match '^(\d+)m$') {
 }
 
 # The state folder, by the host's rule (bram_state_dir in src-tauri/src/lib.rs):
-# .bram if it exists and this isn't the home directory, else resources.
+# .bram if it is Bram's (it carries .migrated-from, or a .gitignore that is
+# exactly `*`; judell/bram#469) and this isn't the home directory, else resources.
 $state = 'resources'
-if ((Test-Path '.bram' -PathType Container) -and ((Get-Location).Path -ne $HOME)) { $state = '.bram' }
+$bramOwned = (Test-Path '.bram/.migrated-from') -or
+    ((Test-Path '.bram/.gitignore' -PathType Leaf) -and ((Get-Content -Raw '.bram/.gitignore').Trim() -eq '*'))
+if ((Test-Path '.bram' -PathType Container) -and $bramOwned -and ((Get-Location).Path -ne $HOME)) { $state = '.bram' }
 if (-not (Test-Path $state -PathType Container)) {
     Write-Error "No .bram\ or resources\ in $PWD - run from a Bram project directory"
     exit 1

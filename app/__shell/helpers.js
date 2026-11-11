@@ -19075,6 +19075,17 @@ window.__bramStateDirPlanMoved = function (p, part) {
 // can finish it. Reads the host's structured p.startupMove / p.retry only.
 window.__bramStateDirLeftover = function (p, part) {
   var r = (p && p.retry) || {};
+  // judell/bram#469: a .bram/ that isn't Bram's is in the way. Bram keeps
+  // resources/ and never writes into that folder, so there is nothing to offer.
+  if (p && p.foreignDotBram) {
+    // Warning color is earned here: plain words and a clear action.
+    if (part === "show" || part === "warn") return true;
+    if (part === "line") {
+      return "A folder named .bram/ that isn't Bram's is in the way. Bram keeps using resources/. To let Bram move its files, rename that folder and relaunch.";
+    }
+    return part === "offer" ? false : "";
+  }
+  if (part === "warn") return false;
   if (part === "show") return !!r.leftover;
   if (!r.leftover) return part === "offer" ? false : "";
   if (part === "offer") return !!r.offer;

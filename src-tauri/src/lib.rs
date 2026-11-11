@@ -30438,6 +30438,7 @@ mod agent_startup_policy_tests {
     fn project_config_merges_settings_json_over_root_file() {
         let root = split_settings_root("merge");
         std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
         std::fs::write(
             root.join(".bram.json"),
             r#"{"server":{"command":"npm start","port":4000},"shell":{"agent":"claude","args":"--x"}}"#,
@@ -30463,6 +30464,7 @@ mod agent_startup_policy_tests {
     fn settings_write_after_move_leaves_root_file_bytes_alone() {
         let root = split_settings_root("after");
         std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
         let original = "{\n  \"shell\": {\"agent\": \"claude\"},\n  \"server\": {\"port\": 1},\n  \"forge\": \"github\"\n}\n";
         std::fs::write(root.join(".bram.json"), original).unwrap();
         let update = serde_json::json!({ "shell": { "agent": "codex" } });
@@ -64196,14 +64198,33 @@ const GUARD_TARGET_STATE_REL: &str = ".bram-guard-target";
 // `~/.bram` is the machine folder (it holds the bram-guard link), never a
 // project's state folder, so a root at the home directory resolves the
 // legacy name (the guard's guard_policy::state_dir rule, the same answer).
+//
+// A `.bram/` that isn't Bram's (no marker, see is_bram_state_dir) is not
+// adopted: the legacy folder stays the answer (judell/bram#469).
 fn bram_state_dir_name(root: &Path) -> &'static str {
     if root.join(BRAM_STATE_DIR_NEW).is_dir()
         && !home_dir().is_some_and(|home| path_is_home_dir(root, &home))
+        && is_bram_state_dir(root)
     {
         BRAM_STATE_DIR_NEW
     } else {
         BRAM_STATE_DIR_LEGACY
     }
+}
+
+// Is `<root>/.bram` Bram's? Every folder Bram makes carries `.migrated-from`
+// (the mover) or a `.gitignore` of exactly `*` (ensure_new_state_dir, the
+// demo hydrator). One rule shared with the guard (guard_policy).
+fn is_bram_state_dir(root: &Path) -> bool {
+    guard_policy::is_bram_state_dir(root)
+}
+
+// A `.bram/` exists at the root, is not the home machine folder, and is not
+// Bram's: something else's folder that Bram must neither adopt nor write into.
+fn foreign_dot_bram(root: &Path) -> bool {
+    root.join(BRAM_STATE_DIR_NEW).is_dir()
+        && !home_dir().is_some_and(|home| path_is_home_dir(root, &home))
+        && !is_bram_state_dir(root)
 }
 
 fn bram_state_dir(root: &Path) -> PathBuf {
@@ -64905,6 +64926,9 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
     serde_json::json!({
         "stateDir": p.state_name,
         "stateDirExists": p.state_dir_exists,
+        // judell/bram#469: a `.bram/` that isn't Bram's is in the way; Status
+        // says so and Bram keeps using resources/.
+        "foreignDotBram": foreign_dot_bram(root),
         "wouldMove": would_move,
         "foreign": foreign,
         "tracked": {
@@ -65359,6 +65383,7 @@ fn ensure_new_state_dir_with_home(root: &Path, home: Option<&Path>) -> Option<&'
         return None;
     }
     let new = root.join(BRAM_STATE_DIR_NEW);
+    // Bram's own, or a foreign one it must not touch (the mover traces why).
     if new.exists() {
         return None;
     }
@@ -65405,7 +65430,12 @@ fn migrate_state_dir(root: &Path) -> StateMigrateOutcome {
 // blocked rename waits (Codex review, 2026-11-04).
 fn state_migrate_eligibility(root: &Path, now_ms: i64) -> Result<StateDirPlan, &'static str> {
     if root.join(BRAM_STATE_DIR_NEW).exists() {
-        return Err("already-moved");
+        // judell/bram#469: only Bram's own `.bram/` means the move is done.
+        return Err(if is_bram_state_dir(root) {
+            "already-moved"
+        } else {
+            "foreign-dot-bram"
+        });
     }
     if !root.join(BRAM_STATE_DIR_LEGACY).is_dir() {
         return Err("no-old-folder");
@@ -90251,6 +90281,7 @@ mod state_url_tests {
     fn fold_repo() -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("bram-fold-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
         fold_git(&root, &["init", "-q"]);
         root
     }
@@ -97852,6 +97883,9 @@ mod worklist_authorization_tests {
         assert_eq!(super::bram_state_dir(&root), root.join(legacy));
         std::fs::remove_file(root.join(".bram")).unwrap();
         std::fs::create_dir_all(root.join(".bram")).unwrap();
+        // An unmarked `.bram/` is not Bram's (judell/bram#469).
+        assert_eq!(super::bram_state_dir(&root), root.join(legacy));
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
         assert_eq!(super::bram_state_dir(&root), root.join(".bram"));
         assert_eq!(
             resource_relative_path(&root, ".bram-port"),
@@ -97879,6 +97913,37 @@ mod worklist_authorization_tests {
         assert!(!root.join(super::BRAM_STATE_DIR_LEGACY).exists());
         assert_eq!(super::ensure_new_state_dir_with_home(&root, None), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn foreign_dot_bram_is_left_alone_and_resources_stays_the_state_folder() {
+        // judell/bram#469: Andrew's CodeExam index, no marker.
+        for with_resources in [true, false] {
+            let root = state_dir_plan_temp_root();
+            let dot = root.join(super::BRAM_STATE_DIR_NEW);
+            std::fs::create_dir_all(&dot).unwrap();
+            std::fs::write(dot.join("index.json"), "{}").unwrap();
+            if with_resources {
+                let res = root.join(super::BRAM_STATE_DIR_LEGACY);
+                std::fs::create_dir_all(&res).unwrap();
+                std::fs::write(res.join("worklist.json"), r#"{"items":[]}"#).unwrap();
+            }
+            assert!(super::foreign_dot_bram(&root));
+            assert_eq!(
+                super::bram_state_dir_name(&root),
+                super::BRAM_STATE_DIR_LEGACY
+            );
+            assert_eq!(super::ensure_new_state_dir_with_home(&root, None), None);
+            assert_eq!(
+                super::state_migrate_eligibility(&root, 0).err(),
+                Some("foreign-dot-bram")
+            );
+            assert_eq!(super::state_dir_plan(&root)["foreignDotBram"], true);
+            // Nothing written into the foreign folder.
+            let names: Vec<_> = std::fs::read_dir(&dot).unwrap().flatten().collect();
+            assert_eq!(names.len(), 1);
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
@@ -98060,6 +98125,11 @@ mod worklist_authorization_tests {
     fn state_dir_plan_resolves_dot_bram() {
         let root = state_dir_plan_temp_root();
         std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_NEW)).unwrap();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_NEW).join(".gitignore"),
+            "*\n",
+        )
+        .unwrap();
         // An unknown dotfile falls under the dotfiles rule.
         std::fs::write(resource_relative_path(&root, ".bram-port"), "1").unwrap();
         let unknown_dotfile = ".something-new.json";
@@ -98073,8 +98143,10 @@ mod worklist_authorization_tests {
             .iter()
             .map(|e| e["kind"].as_str().unwrap())
             .collect();
-        assert_eq!(kinds, vec!["file", "dotfile"]);
+        // `.bram-port`, the marker `.gitignore`, the unknown dotfile.
+        assert_eq!(kinds, vec!["file", "dotfile", "dotfile"]);
         assert_eq!(plan["foreign"].as_array().unwrap().len(), 0);
+        assert_eq!(plan["foreignDotBram"], false);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -98157,6 +98229,11 @@ mod worklist_authorization_tests {
     fn state_dir_retry_is_quiet_when_not_a_leftover() {
         let root = state_migrate_root();
         std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_NEW)).unwrap();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_NEW).join(".gitignore"),
+            "*\n",
+        )
+        .unwrap();
         let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
         assert_eq!(r["leftover"], false);
         assert_eq!(r["offer"], false);
@@ -98330,7 +98407,22 @@ mod worklist_authorization_tests {
         // Both folders present.
         let root = state_migrate_root();
         std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_NEW)).unwrap();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_NEW).join(".gitignore"),
+            "*\n",
+        )
+        .unwrap();
         skipped(&root, "already-moved");
+        // A `.bram/` with no Bram marker is someone else's (judell/bram#469):
+        // never "already moved", and nothing is renamed or written into it.
+        let root = state_migrate_root();
+        std::fs::create_dir_all(root.join(super::BRAM_STATE_DIR_NEW)).unwrap();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_NEW).join("index.json"),
+            "{}",
+        )
+        .unwrap();
+        skipped(&root, "foreign-dot-bram");
         // A foreign entry: the mixed-folder dialog's case.
         let root = state_migrate_root();
         std::fs::write(

@@ -2599,6 +2599,7 @@ mod guard_mode_tests {
         let nested = root.join("app").join("tools");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
         let project_guard = root.join("project-guard");
         std::fs::write(&project_guard, "").unwrap();
         let running_guard = root.join("running-guard");
@@ -2641,6 +2642,7 @@ mod guard_mode_tests {
     fn breadcrumb_lands_under_dot_bram_when_it_exists() {
         let root = scratch("crumb-dot-bram");
         std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
         // A legacy folder beside it is not the state folder any more.
         std::fs::create_dir_all(root.join("resources")).unwrap();
         let payload = serde_json::json!({
@@ -2670,6 +2672,7 @@ mod guard_mode_tests {
 
         let dot = scratch("port-dot-bram");
         std::fs::create_dir_all(dot.join(".bram")).unwrap();
+        std::fs::write(dot.join(".bram/.gitignore"), "*\n").unwrap();
         std::fs::write(dot.join(".bram/.bram-port"), "4102\n").unwrap();
         assert_eq!(read_port(&dot), Some(4102));
         let deep = dot.join("a").join("b");
@@ -2689,6 +2692,7 @@ mod guard_mode_tests {
         std::fs::write(root.join("resources/.bram-port"), "5001").unwrap();
         let sub = root.join("sub");
         std::fs::create_dir_all(sub.join(".bram")).unwrap();
+        std::fs::write(sub.join(".bram/.gitignore"), "*\n").unwrap();
         std::fs::write(sub.join(".bram/.bram-port"), "5002").unwrap();
         let x = sub.join("x");
         std::fs::create_dir_all(&x).unwrap();

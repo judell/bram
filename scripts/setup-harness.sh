@@ -61,14 +61,19 @@ require_bin() {
 
 launch() {
   local dir="$1"
+  # The optional second argument names the state folder to watch for the port
+  # file, for a launch whose answer isn't bram_state_dir's (a foreign .bram/,
+  # #469: the sourced bram-state.sh still adopts any .bram/).
+  local sd="${2:-}"
   # BRAM_TRACE=1 matters: traces are opt-in per project and a scratch project
   # has no settings yet, so only the env var turns them on.
   BRAM_TRACE=1 "$BRAM_BIN" "$dir" > "$WORK_ROOT/$SCENARIO.log" 2>&1 &
   BRAM_PID=$!
   local i
   for i in $(seq 1 80); do
-    if [ -f "$(bram_state_dir "$dir")/.bram-port" ]; then
-      BRAM_PORT="$(cat "$(bram_state_dir "$dir")/.bram-port" 2>/dev/null)"
+    local sdir="${sd:+$dir/$sd}"; [ -n "$sdir" ] || sdir="$(bram_state_dir "$dir")"
+    if [ -f "$sdir/.bram-port" ]; then
+      BRAM_PORT="$(cat "$sdir/.bram-port" 2>/dev/null)"
       [ -n "$BRAM_PORT" ] && sleep 1 && return 0
     fi
     kill -0 "$BRAM_PID" 2>/dev/null || { bad "launch" "process exited; see $WORK_ROOT/$SCENARIO.log"; return 1; }
@@ -424,6 +429,72 @@ scenario_already_setup() {
   shutdown_bram
 }
 
+# judell/bram#469 (Andrew's CodeExam): a `.bram/` of another tool's index files,
+# no Bram marker, beside a live board in resources/. Bram must keep resources/,
+# write nothing into `.bram/`, and trace reason=foreign-dot-bram. The variant
+# "damaged" is the state 0.8.5 and 0.8.6 left behind: Bram's own files already
+# written into the unmarked folder; they are left alone, not adopted.
+foreign_dot_bram_project() {
+  local dir="$1" i
+  mkdir -p "$dir/resources/worklist-drafts" "$dir/.bram"
+  git -C "$dir" init -q
+  printf '# scratch\n' > "$dir/README.md"
+  printf 'resources/\n.bram/\n' > "$dir/.gitignore"
+  printf '{"description":"live","items":[{"id":"live-item","status":"proposed","files":["README.md"]}],"version":3}\n' > "$dir/resources/worklist.json"
+  printf '# Before\n\nx\n\n# After\n\ny\n' > "$dir/resources/worklist-drafts/live-item.md"
+  for i in 1 2 3; do printf '{"index":%s}\n' "$i" > "$dir/.bram/index-$i.json"; done
+  git -C "$dir" add -A
+  git -C "$dir" -c user.email=h@h -c user.name=harness commit -qm init
+}
+
+assert_foreign_dot_bram() {
+  local dir="$1" before="$2" after
+  assert_trace_in "$dir/resources" "\[state-migrate\] op=skipped reason=foreign-dot-bram" "traces reason=foreign-dot-bram"
+  check "Bram keeps resources/ as the state folder" test -f "$dir/resources/.bram-port"
+  check "live board untouched in resources/" grep -q live-item "$dir/resources/worklist.json"
+  check "no .gitignore or .migrated-from written into .bram/" bash -c "test ! -e '$dir/.bram/.gitignore' && test ! -e '$dir/.bram/.migrated-from'"
+  after="$(cd "$dir/.bram" && find . -type f -exec shasum {} + | sort | shasum)"
+  if [ "$before" = "$after" ]; then ok ".bram/ contents unchanged"; else bad ".bram/ contents unchanged" "before/after differ"; fi
+  local f; f="$(api __state-dir/plan | jq -r '.foreignDotBram')"
+  if [ "$f" = "true" ]; then ok "state-dir plan reports foreignDotBram"; else bad "state-dir plan reports foreignDotBram" "got: $f"; fi
+}
+
+# assert_trace for an explicit state folder (bram_state_dir adopts a foreign .bram/).
+assert_trace_in() {
+  local sdir="$1" pattern="$2" name="$3" i
+  for i in $(seq 1 20); do
+    if grep -q "$pattern" "$sdir/bram-traces/bram-trace.log" 2>/dev/null; then ok "$name"; return 0; fi
+    sleep 0.5
+  done
+  bad "$name" "no line matching: $pattern"
+  return 1
+}
+
+scenario_foreign_dot_bram() {
+  local dir="$WORK_ROOT/foreign_dot_bram"; mkdir -p "$dir"
+  foreign_dot_bram_project "$dir"
+  local before; before="$(cd "$dir/.bram" && find . -type f -exec shasum {} + | sort | shasum)"
+  launch "$dir" resources || return
+  assert_foreign_dot_bram "$dir" "$before"
+  shutdown_bram
+}
+
+scenario_foreign_dot_bram_damaged() {
+  local dir="$WORK_ROOT/foreign_dot_bram_damaged"; mkdir -p "$dir"
+  foreign_dot_bram_project "$dir"
+  # What 0.8.5/0.8.6 wrote into the unmarked folder.
+  printf '{"description":"","items":[],"version":1}\n' > "$dir/.bram/worklist.json"
+  printf '{}\n' > "$dir/.bram/.worklist-authorization.json"
+  printf '{}\n' > "$dir/.bram/settings.json"
+  printf '1\n' > "$dir/.bram/.bram-port"
+  local before; before="$(cd "$dir/.bram" && find . -type f -exec shasum {} + | sort | shasum)"
+  # The stray .bram-port is stale; the real one is resources/.bram-port.
+  launch "$dir" resources || return
+  # The damaged folder must not have gained, lost or changed a file.
+  assert_foreign_dot_bram "$dir" "$before"
+  shutdown_bram
+}
+
 scenario_stale_instructions() {
   # #465: a set-up project whose conventions copy no longer matches. The
   # status used to say only claudeNeedsSetup=true; setupReasons must name the
@@ -544,7 +615,7 @@ require_bin
 command -v jq >/dev/null || { echo "jq required"; exit 127; }
 printf 'workdir: %s\n' "$WORK_ROOT"
 
-SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested)
+SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested foreign_dot_bram foreign_dot_bram_damaged)
 [ $# -gt 0 ] && SCENARIOS=("$@")
 
 for s in "${SCENARIOS[@]}"; do

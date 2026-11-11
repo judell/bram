@@ -1,7 +1,8 @@
 """Where a Bram project's state folder is: `.bram/` or `resources/`.
 
 The same rule as the host's `bram_state_dir` (src-tauri/src/lib.rs):
-`<root>/.bram` when that directory exists, else `<root>/resources`. The
+`<root>/.bram` when that directory exists and is Bram's (carries a marker, see
+is_bram_state_dir), else `<root>/resources`. The
 host also ignores a `.bram/` in the home directory, so this does too.
 0.8.3 accepts both names; 0.8.4 moves the folder to `.bram/` (#469).
 
@@ -28,9 +29,22 @@ def _is_home(root: Path) -> bool:
         return False
 
 
+def is_bram_state_dir(root: Path | str) -> bool:
+    """Is `<root>/.bram` Bram's (#469)? Every folder Bram makes carries
+    `.migrated-from` or a `.gitignore` of exactly `*`; a `.bram/` with
+    neither belongs to something else and is never the state folder."""
+    dot = Path(root) / STATE_DIR_NEW
+    if (dot / ".migrated-from").exists():
+        return True
+    try:
+        return (dot / ".gitignore").read_text(encoding="utf-8").strip() == "*"
+    except OSError:
+        return False
+
+
 def state_dir_name(root: Path | str) -> str:
     root = Path(root)
-    if (root / STATE_DIR_NEW).is_dir() and not _is_home(root):
+    if (root / STATE_DIR_NEW).is_dir() and not _is_home(root) and is_bram_state_dir(root):
         return STATE_DIR_NEW
     return STATE_DIR_LEGACY
 

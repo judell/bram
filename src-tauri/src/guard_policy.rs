@@ -294,9 +294,37 @@ fn is_home(dir: &Path, home: Option<&Path>) -> bool {
     }
 }
 
-/// Whether `dir/.bram` is a project state folder (exists, and isn't `~/.bram`).
+/// Whether `dir/.bram` is Bram's (judell/bram#469): it carries one of the two
+/// markers every Bram-made state folder has, `.migrated-from` (the mover) or a
+/// `.gitignore` whose content is exactly `*` (`ensure_new_state_dir`, the
+/// demo hydrator). A `.bram/` without either belongs to something else (a
+/// CodeExam index, say) and is never adopted. This is the one rule: the
+/// host's `is_bram_state_dir` calls it.
+pub fn is_bram_state_dir(root: &Path) -> bool {
+    let dir = root.join(STATE_DIR_NEW);
+    dir.join(".migrated-from").exists()
+        || std::fs::read_to_string(dir.join(".gitignore")).is_ok_and(|s| s.trim() == "*")
+}
+
+/// Whether `dir/.bram` is a project state folder (it is Bram's, and isn't
+/// `~/.bram`).
 fn has_project_bram_dir(dir: &Path, home: Option<&Path>) -> bool {
-    dir.join(STATE_DIR_NEW).is_dir() && !is_home(dir, home)
+    dir.join(STATE_DIR_NEW).is_dir() && !is_home(dir, home) && is_bram_state_dir(dir)
+}
+
+/// One line for the `bash-write-no-coverage` denial when a `.bram/` that isn't
+/// Bram's hides a live board in `resources/` from the resolver. Deny path only.
+fn foreign_dot_bram_hint(root: &Path) -> Option<String> {
+    let dot = root.join(STATE_DIR_NEW);
+    if !dot.is_dir() || is_bram_state_dir(root) || is_home(root, home_dir().as_deref()) {
+        return None;
+    }
+    let text = std::fs::read_to_string(root.join(STATE_DIR_LEGACY).join(WORKLIST_LEAF)).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    if v["items"].as_array().is_none_or(|a| a.is_empty()) {
+        return None;
+    }
+    Some("\n  - A folder named .bram/ that isn't Bram's is in the way, so Bram reads its worklist from resources/, which this check cannot see. The user can rename .bram/ and relaunch Bram (judell/bram#469).".to_string())
 }
 
 fn state_dir_name_with_home(root: &Path, home: Option<&Path>) -> &'static str {
@@ -307,13 +335,13 @@ fn state_dir_name_with_home(root: &Path, home: Option<&Path>) -> &'static str {
     }
 }
 
-/// The resolved state folder's name for `root`: `.bram` if it exists, else
-/// `resources`.
+/// The resolved state folder's name for `root`: `.bram` if it is Bram's
+/// (`is_bram_state_dir`), else `resources`.
 pub fn state_dir_name(root: &Path) -> &'static str {
     state_dir_name_with_home(root, home_dir().as_deref())
 }
 
-/// `<root>/.bram` if it exists, else `<root>/resources`.
+/// `<root>/.bram` if it is Bram's, else `<root>/resources`.
 pub fn state_dir(root: &Path) -> PathBuf {
     root.join(state_dir_name(root))
 }
@@ -4207,6 +4235,9 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     // here because this call site always passes a project_root.
     let mut body = sd_text(&project_root, "Bash blocked: this command writes to the filesystem or performs a sensitive side effect, and resources/worklist.json has no proposed or applied items covering active work.\n  - Propose the work in the worklist first, wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.");
     body.push_str(&claude_coverage_root_line(&project_root));
+    if let Some(hint) = foreign_dot_bram_hint(&project_root) {
+        body.push_str(&hint);
+    }
     if push_cmd(&command) {
         body.push_str("\n  - This looks like a push. The user can click Push in the Commits tab; an agent push is allowed only in the 10-minute window after a gate commit (see judell/bram#283).");
     }
@@ -7144,6 +7175,7 @@ mod guard_policy_tests {
         // Version mismatch against the recorded running instance.
         let state = td.join(".bram");
         std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(".gitignore"), "*\n").unwrap();
         std::fs::write(state.join(".bram-port.json"), r#"{"version":"0.9.0"}"#).unwrap();
         let p = td.join("c.md");
         std::fs::write(&p, EXPANDER).unwrap();
@@ -10166,9 +10198,58 @@ mod state_dir_tests {
         dir
     }
 
+    /// A `.bram/` as Bram makes it: `.gitignore` of `*` (judell/bram#469).
+    fn mark_dot_bram(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(".gitignore"), "*\n").unwrap();
+    }
+
+    #[test]
+    fn foreign_dot_bram_is_not_adopted() {
+        let root = scratch("foreign");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        // Index-style files, no marker: not Bram's.
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::write(root.join(".bram/index.json"), "{}").unwrap();
+        assert!(!is_bram_state_dir(&root));
+        assert_eq!(state_dir_name(&root), "resources");
+        assert_eq!(state_dir_candidates(&root), vec![root.join("resources")]);
+        // A `.gitignore` that is not exactly `*` is not the marker.
+        std::fs::write(root.join(".bram/.gitignore"), "node_modules\n").unwrap();
+        assert_eq!(state_dir_name(&root), "resources");
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
+        assert_eq!(state_dir_name(&root), ".bram");
+        std::fs::remove_file(root.join(".bram/.gitignore")).unwrap();
+        std::fs::write(root.join(".bram/.migrated-from"), "x 2026-11-11T00:00:00Z").unwrap();
+        assert_eq!(state_dir_name(&root), ".bram");
+    }
+
+    #[test]
+    fn foreign_dot_bram_hint_needs_a_live_board_in_resources() {
+        let root = scratch("foreign-hint");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        assert!(foreign_dot_bram_hint(&root).is_none());
+        std::fs::write(root.join("resources/worklist.json"), r#"{"items":[]}"#).unwrap();
+        assert!(foreign_dot_bram_hint(&root).is_none());
+        std::fs::write(
+            root.join("resources/worklist.json"),
+            r#"{"items":[{"id":"a"}]}"#,
+        )
+        .unwrap();
+        assert!(foreign_dot_bram_hint(&root)
+            .unwrap()
+            .contains("isn't Bram's"));
+        mark_dot_bram(&root.join(".bram"));
+        assert!(foreign_dot_bram_hint(&root).is_none());
+    }
+
     fn managed(name: &str, folder: &str) -> PathBuf {
         let root = scratch(name);
         std::fs::create_dir_all(root.join(folder)).unwrap();
+        if folder == ".bram" {
+            mark_dot_bram(&root.join(folder));
+        }
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::write(root.join(folder).join(AUTH_LEAF), "{}").unwrap();
         root
@@ -10192,7 +10273,7 @@ mod state_dir_tests {
         assert_eq!(state_dir_name(&root), "resources");
         assert_eq!(state_rel(&root, WORKLIST_LEAF), "resources/worklist.json");
         assert_eq!(state_dir_candidates(&root), vec![root.join("resources")]);
-        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        mark_dot_bram(&root.join(".bram"));
         assert_eq!(state_dir_name(&root), ".bram");
         assert_eq!(state_dir(&root), root.join(".bram"));
         assert_eq!(state_rel(&root, WORKLIST_LEAF), ".bram/worklist.json");
@@ -10216,7 +10297,7 @@ mod state_dir_tests {
     #[test]
     fn predicates_follow_the_resolved_folder() {
         let root = scratch("predicates");
-        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        mark_dot_bram(&root.join(".bram"));
         assert!(is_lifecycle_path(&root, ".bram/.bram-port"));
         assert!(is_lifecycle_path(&root, ".bram/worklist-drafts/x.md"));
         assert!(is_lifecycle_path(
@@ -10258,7 +10339,7 @@ mod state_dir_tests {
         // Only the parent is managed: the child has neither name.
         assert_eq!(find_project_root(&x.to_string_lossy()), Some(root.clone()));
         // A nested `.bram/` instance is found before its `resources/` parent.
-        std::fs::create_dir_all(sub.join(".bram")).unwrap();
+        mark_dot_bram(&sub.join(".bram"));
         std::fs::write(sub.join(".bram").join(AUTH_LEAF), "{}").unwrap();
         assert_eq!(find_project_root(&x.to_string_lossy()), Some(sub.clone()));
         let _ = std::fs::remove_dir_all(&root);
@@ -10396,7 +10477,7 @@ mod state_dir_tests {
     #[test]
     fn codex_unmanaged_without_either_marker() {
         let root = scratch("codex-unmanaged");
-        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        mark_dot_bram(&root.join(".bram"));
         // The legacy marker does not manage a root whose state folder is `.bram/`.
         std::fs::create_dir_all(root.join("resources")).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();

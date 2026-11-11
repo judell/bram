@@ -67,12 +67,28 @@ class StateDirTests(unittest.TestCase):
 
     def test_only_bram(self) -> None:
         (self.root / ".bram").mkdir()
+        (self.root / ".bram" / ".gitignore").write_text("*\n")
         self.assert_resolves(".bram")
 
     def test_both_prefers_bram(self) -> None:
         (self.root / "resources").mkdir()
         (self.root / ".bram").mkdir()
+        (self.root / ".bram" / ".gitignore").write_text("*\n")
         self.assert_resolves(".bram")
+
+    def test_migrated_from_marker_counts(self) -> None:
+        (self.root / ".bram").mkdir()
+        (self.root / ".bram" / ".migrated-from").write_text("x 2026-11-11T00:00:00Z\n")
+        self.assert_resolves(".bram")
+
+    def test_foreign_bram_is_not_adopted(self) -> None:
+        # #469: another tool's .bram/ (no marker) is not the state folder.
+        (self.root / "resources").mkdir()
+        (self.root / ".bram").mkdir()
+        (self.root / ".bram" / "index.json").write_text("{}\n")
+        self.assert_resolves("resources")
+        (self.root / ".bram" / ".gitignore").write_text("node_modules\n")
+        self.assert_resolves("resources")
 
     def test_neither_falls_back_to_resources(self) -> None:
         self.assert_resolves("resources")
@@ -83,6 +99,7 @@ class StateDirTests(unittest.TestCase):
 
     def test_home_bram_is_ignored(self) -> None:
         (self.root / ".bram").mkdir()
+        (self.root / ".bram" / ".gitignore").write_text("*\n")
         saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
         os.environ["HOME"] = os.environ["USERPROFILE"] = str(self.root)
         try:

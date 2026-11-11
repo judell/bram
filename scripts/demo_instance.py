@@ -82,6 +82,7 @@ STARTERS = (
     "joint-owner-committed",
     "entangled-with-unowned",
     "membership-unanswerable",
+    "foreign-dot-bram",
 )
 
 # What membership should answer for each starter, checked by
@@ -188,6 +189,12 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
             },
         },
         "will_commit": {"{p}-top": (1, 1), "{p}-bottom": (1, 1)},
+    },
+    # #469: a `.bram/` that isn't Bram's (index files, no marker) sits beside
+    # the live board in resources/. Membership must read resources/.
+    "foreign-dot-bram": {
+        "paths": {"demo/{p}.txt": {"owners": ["{p}-board"], "single": (1, 1)}},
+        "will_commit": {"{p}-board": (1, 1)},
     },
     # #437: a declared file not yet created and an ignored declared file must
     # not stop the compute; the planner owns its edit.
@@ -354,6 +361,7 @@ def starter_seed(starter: str, prefix: str) -> tuple[str, str]:
             "reedit: the created sibling arrives under two claim windows\n",
         ),
         "entangled-with-unowned": (f"demo/{prefix}.txt", _entangled_unowned(False, False, False)),
+        "foreign-dot-bram": (f"demo/{prefix}.txt", "board: base\n"),
     }
     try:
         return seeds[starter]
@@ -872,6 +880,27 @@ class StarterBuilder:
         self.file(path, _chat_edit_file(3))
         self.boundary([])
 
+    def starter_foreign_dot_bram(self, prefix: str) -> None:
+        # judell/bram#469 (Andrew's CodeExam): a `.bram/` that holds another
+        # tool's index files and none of Bram's markers (no `.gitignore` of
+        # `*`, no `.migrated-from`), beside a live board in resources/. Bram
+        # must keep resources/, write nothing into `.bram/`, and trace
+        # `[state-migrate] op=skipped reason=foreign-dot-bram`. The hydrate
+        # leaves the board in resources/ while a foreign `.bram/` is there
+        # (_settle_state_folder), whichever layout was asked for.
+        # Written before the first boundary so every claim tree holds them.
+        for n in range(1, 4):
+            self.file(
+                f".bram/index-{n}.json",
+                json.dumps({"index": n, "tool": "codeexam"}, indent=2) + "\n",
+            )
+        path = f"demo/{prefix}.txt"
+        item_id = f"{prefix}-board"
+        self.item(item_id, path, "The board line is at baseline.", "Change the board line.")
+        self.boundary([item_id])
+        self.file(path, "board: changed\n")
+        self.boundary([])
+
     def starter_membership_unanswerable(self, prefix: str) -> None:
         # judell/bram#437: two ordinary board shapes that made the membership
         # engine's scratch-index `add -A -- <declared entries>` fail, so every
@@ -1183,6 +1212,17 @@ def _settle_state_folder(repo: Path, layout: str) -> None:
     the mover on a demo."""
     legacy = repo / bram_state.STATE_DIR_LEGACY
     new = repo / bram_state.STATE_DIR_NEW
+    # judell/bram#469: a `.bram/` that isn't Bram's (the foreign-dot-bram
+    # starter) is never merged into or out of; the board stays in resources/.
+    # The hydrate's `clean` removes the markers but keeps the live port and
+    # traces, so a `.bram/` holding only those is still the demo's own.
+    live_only = {".bram-port", ".bram-port.json", "bram-traces", ".gitignore", ".migrated-from"}
+    if (
+        new.is_dir()
+        and not bram_state.is_bram_state_dir(repo)
+        and any(entry.name not in live_only for entry in new.iterdir())
+    ):
+        return
     if run_git(repo, "ls-files", "--", f"{bram_state.STATE_DIR_LEGACY}/", f"{bram_state.STATE_DIR_NEW}/"):
         raise DemoError("refusing to move a state folder with tracked files")
     if layout == LAYOUT_LEGACY:
@@ -1340,11 +1380,12 @@ def new_scenario(
     _clear_claim_refs(repo)
     expanded = list(starters)
     if not expanded:
-        expanded = list(STARTERS)
+        expanded = [s for s in STARTERS if s != "foreign-dot-bram"]
     elif "all" in expanded:
         if expanded != ["all"]:
             raise DemoError("use --from all by itself, or list individual starters")
-        expanded = list(STARTERS)
+        # foreign-dot-bram pins the board to resources/, so it is asked for by name.
+        expanded = [s for s in STARTERS if s != "foreign-dot-bram"]
     occurrences: dict[str, int] = {}
     for starter in expanded:
         if starter not in STARTERS:

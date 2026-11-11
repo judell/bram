@@ -1172,7 +1172,10 @@ takes the whole file; Codex's acceptance case for issue-425-retire-replay),
 and `membership-unanswerable` (judell/bram#437: one begun item declaring a
 file it hasn't created yet, another declaring a new file an ignore rule
 hides; both once failed every membership compute, so the gate refused all
-commits as "no membership answer").
+commits as "no membership answer"), and `foreign-dot-bram` (judell/bram#469:
+a `.bram/` holding another tool's files, with no Bram marker, beside a live
+board in `resources/`; Bram must keep `resources/` and write nothing into
+`.bram/`. It's left out of `--from all`, since it forces the old layout).
 For example, a focused board is:
 
 ```sh

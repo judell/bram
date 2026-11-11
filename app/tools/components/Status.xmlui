@@ -80,7 +80,8 @@
       <!-- issue-469-leftover-folder-reported: state still in resources/, why,
            and the relaunch that retries the move. -->
       <VStack when="{window.__bramStateDirLeftover(stateDirPlan.value, 'show')}" gap="$space-2">
-        <Text fontWeight="$fontWeight-bold" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'line')}" />
+        <Text when="{!window.__bramStateDirLeftover(stateDirPlan.value, 'warn')}" fontWeight="$fontWeight-bold" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'line')}" />
+        <Text when="{window.__bramStateDirLeftover(stateDirPlan.value, 'warn')}" fontWeight="$fontWeight-bold" color="$color-warn-700" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'line')}" />
         <Text when="{window.__bramStateDirLeftover(stateDirPlan.value, 'why')}" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'why')}" />
         <Text when="{window.__bramStateDirLeftover(stateDirPlan.value, 'obstacle')}" value="{window.__bramStateDirLeftover(stateDirPlan.value, 'obstacle')}" />
         <Button

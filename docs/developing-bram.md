@@ -246,6 +246,33 @@ and the Log's eight warning sites were checked against this rule: two
 kept the color (a failed push, a switch that didn't start), and the
 rest went plain.
 
+## Rust: typed data, not hand-read JSON
+
+Data inside the host is typed (Jon, 2026-11-11, a standing rule):
+
+- **Structs for shapes.** `#[derive(Serialize, Deserialize)]`, with
+  `#[serde(rename_all = "camelCase")]` to keep the wire shape and
+  `#[serde(default)]` for optional fields. Not a `serde_json::Value` read
+  one field at a time (`v.get("kind").and_then(|v| v.as_str())…`,
+  `v["offer"].as_bool()`).
+- **Enums for closed sets of codes** (outcomes, obstacles, kinds), so the
+  compiler rejects an unknown value and every `match` is checked.
+- **`Value` only where the shape isn't ours,** such as a provider's
+  transcript record or a CLI's output. Build JSON only where a route
+  answers.
+- **A Tauri command takes the typed struct as its parameter.**
+- **When a struct replaces a `Value`, keep the wire shape byte-identical,**
+  and pin it with a test, because the pane and other tests read it. Serde's
+  error text differs from hand-written errors, so check whether anything
+  matches the old text.
+
+New code follows the rule. Old code converts when an item touches it, not
+in sweeps. The receipt: `queue_pty_intent_inner` spends about 40 lines
+extracting five fields that one derived struct and an enum replace. On
+2026-11-11, `lib.rs` had about 960 such field reads and 101 files parsed to
+an untyped `Value`, against 16 parsed to a struct. The audit is on
+[#487](https://github.com/judell/bram/issues/487).
+
 ## Client storage: decision vs. focus
 
 The pane's browser storage splits into two classes, and picking the wrong

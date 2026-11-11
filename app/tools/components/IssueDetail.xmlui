@@ -15,6 +15,10 @@
        the rows binding re-evaluate when one is added, posted or dropped. -->
   <PushSource id="pendingComments" initial="{0}"
     subscribe="{window.bramSubscribeIssueComments()}" />
+  <!-- issue-view-details-summary-folds: content is window.__bramIssueBodyFor,
+       which turns <details> into `> [!DETAILS]` blockquote folds (HTML stays
+       off) and the flattened open form while a find matches the row. Doc:
+       https://www.xmlui.org/docs/howto/align-values-in-collapsible-summaries#collapsible-sections-in-markdown -->
   <VStack gap="$space-2" padding="$space-2">
 
     <!-- Loading indicator is a component-scope sibling: the List row is a
@@ -44,7 +48,7 @@
             value="{($item.state === 'OPEN' ? 'open' : 'closed') + ' · #' + $item.number + ' ' + $item.title}" />
           <Text when="{$item.author}" fontSize="$fontSize-sm" color="$textColor-secondary"
             value="{(($item.author.login || $item.author.name) || 'unknown') + ' opened ' + getDateUntilNow($item.createdAt) + ' ago'}" />
-          <Markdown when="{$item.body}" interpolateBindings="false" allowHtml="false" content="{$item.body}"
+          <Markdown when="{$item.body}" interpolateBindings="false" allowHtml="false" content="{window.__bramIssueBodyFor($item)}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
@@ -54,7 +58,7 @@
           <Text fontSize="$fontSize-xs" color="$textColor-secondary"
             value="{window.__bramIssueCommentHeader($item)}"
             tooltip="{window.__bramIssueCommentWhen($item)}" />
-          <Markdown interpolateBindings="false" allowHtml="false" content="{$item.body}"
+          <Markdown interpolateBindings="false" allowHtml="false" content="{window.__bramIssueBodyFor($item)}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>

@@ -16349,7 +16349,128 @@ window.__bramIssueBlockRows = function (issue, _pendingTick) {
   // issue-comment-optimistic-and-reindexed: pending comments after the real
   // ones. `_pendingTick` is unused here; IssueDetail passes it so the binding
   // re-evaluates when a pending comment is added, posted or dropped.
-  return rows.concat(__bramPendingCommentRows(issue));
+  return rows.concat(__bramPendingCommentRows(issue)).map(__bramIssueRowForms);
+};
+// issue-view-details-summary-folds: each row carries two renderings of its
+// body. bodyFolded turns <details> into XMLUI's native `> [!DETAILS]` fold
+// (allowHtml stays false); bodyOpen is the Files preview's flattening, shown
+// while a find query is active so matches inside a fold are visible.
+// GitHub's pasted screenshots arrive as <img … src="…" />, which prints as
+// text with HTML off: turn each into a Markdown image, outside fenced code.
+function __bramImgTagsToMarkdown(text) {
+  var inFence = false, fch = "";
+  return String(text || "").split("\n").map(function (l) {
+    var fm = l.match(/^\s*(`{3,}|~{3,})/);
+    if (fm) {
+      if (!inFence) { inFence = true; fch = fm[1].charAt(0); }
+      else if (fm[1].charAt(0) === fch) inFence = false;
+      return l;
+    }
+    if (inFence) return l;
+    return l.replace(/<img\b[^>]*>/gi, function (tag) {
+      var src = /\bsrc\s*=\s*"([^"]*)"/i.exec(tag) || /\bsrc\s*=\s*'([^']*)'/i.exec(tag);
+      if (!src) return "";
+      var alt = /\balt\s*=\s*"([^"]*)"/i.exec(tag);
+      return "![" + (alt ? alt[1].replace(/[\[\]]/g, "") : "image") + "](" + src[1] + ")";
+    });
+  }).join("\n");
+}
+function __bramIssueRowForms(row) {
+  var body = __bramImgTagsToMarkdown(String((row && row.body) || ""));
+  return Object.assign({}, row, {
+    bodyFolded: window.__bramDetailsToMarkdown(body),
+    bodyOpen: __bramStripMarkdownComments(body),
+  });
+}
+// Row template binding: open form on rows the find matched, folded otherwise.
+window.__bramIssueBodyFor = function (row) {
+  if (!row) return "";
+  var open = !!row.__needle;
+  var t = open ? row.bodyOpen : row.bodyFolded;
+  return t == null ? (row.body || "") : t;
+};
+// <details>/<summary> -> `> [!DETAILS] summary` blockquote folds
+// (https://www.xmlui.org/docs/howto/align-values-in-collapsible-summaries#collapsible-sections-in-markdown).
+// Outside fenced code only; nesting adds one "> " per level; missing summary
+// reads "Details"; an unclosed block closes at the end of the text.
+function __bramDetailsSummaryInline(html) {
+  var s = String(html || "")
+    .replace(/<\/?(?:b|strong)\b[^>]*>/gi, "**")
+    .replace(/<\/?(?:i|em)\b[^>]*>/gi, "*")
+    .replace(/<\/?code\b[^>]*>/gi, "`")
+    .replace(/<[^>]*>/g, "");
+  s = s.replace(/\s+/g, " ").trim();
+  return s || "Details";
+}
+window.__bramDetailsToMarkdown = function (text) {
+  var src = String(text == null ? "" : text);
+  if (!/<details\b/i.test(src)) return src;
+  // Pass 1: outside fences, put each details/summary tag on its own line.
+  var lines = src.split("\n"), segs = [], buf = [], fenced = [], inFence = false, fch = "";
+  var flushText = function () {
+    if (!buf.length) return;
+    var t = buf.join("\n")
+      .replace(/<summary\b[^>]*>([\s\S]*?)<\/summary\s*>/gi, function (m, inner) {
+        return "\n<summary>" + inner.replace(/\s*\n\s*/g, " ") + "</summary>\n";
+      })
+      .replace(/<details\b[^>]*>/gi, "\n<details>\n")
+      .replace(/<\/details\s*>/gi, "\n</details>\n");
+    t.split("\n").forEach(function (l) { segs.push({ line: l, code: false }); });
+    buf = [];
+  };
+  for (var i = 0; i < lines.length; i++) {
+    var fm = lines[i].match(/^\s*(`{3,}|~{3,})/);
+    if (!inFence && fm) { flushText(); inFence = true; fch = fm[1].charAt(0); segs.push({ line: lines[i], code: true }); continue; }
+    if (inFence) {
+      segs.push({ line: lines[i], code: true });
+      if (fm && fm[1].charAt(0) === fch) inFence = false;
+      continue;
+    }
+    buf.push(lines[i]);
+  }
+  flushText();
+  // Pass 2: walk, tracking depth.
+  var out = [], depth = 0, atBodyStart = false;
+  var pre = function (d) { var p = ""; for (var k = 0; k < d; k++) p += "> "; return p; };
+  var emit = function (line) {
+    out.push(line === "" ? pre(depth).replace(/\s+$/, "") : pre(depth) + line);
+  };
+  var lastBlank = function () { return !out.length || /^[>\s]*$/.test(out[out.length - 1]); };
+  for (var j = 0; j < segs.length; j++) {
+    var sg = segs[j], ln = sg.line;
+    if (!sg.code) {
+      var t = ln.trim();
+      if (t === "<details>") {
+        if (!lastBlank()) emit("");
+        var summary = "Details";
+        var nx = j + 1;
+        while (nx < segs.length && !segs[nx].code && segs[nx].line.trim() === "") nx++;
+        if (nx < segs.length && !segs[nx].code) {
+          var sm = segs[nx].line.trim().match(/^<summary>([\s\S]*)<\/summary>$/i);
+          if (sm) { summary = __bramDetailsSummaryInline(sm[1]); j = nx; }
+        }
+        depth++;
+        emit("[!DETAILS] " + summary);
+        emit("");
+        atBodyStart = true;
+        continue;
+      }
+      if (t === "</details>") {
+        if (depth === 0) continue; // stray close
+        if (!lastBlank()) emit("");
+        depth--;
+        emit("");
+        atBodyStart = false;
+        continue;
+      }
+      if (depth > 0) {
+        if (t === "" && (atBodyStart || lastBlank())) continue;
+        atBodyStart = false;
+      }
+    } else if (depth > 0) atBodyStart = false;
+    emit(ln);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
 };
 // issue-detail-comment-timestamps: a comment's header line, "author · about 4
 // hours ago". The age is worded like XMLUI's getDateUntilNow (date-fns
@@ -16384,7 +16505,7 @@ function __bramDistanceAgo(iso) {
 }
 // Marked surface (counted == highlighted): the body text for both kinds.
 window.__bramIssueMarkedText = function (row) {
-  return (row && row.body) || "";
+  return (row && (row.bodyOpen != null ? row.bodyOpen : row.body)) || "";
 };
 // findable-list-udc HistoryDetail: flat typed rows for FindableList, preserving
 // the current section order. Computed metadata is baked in (frozen row-scope

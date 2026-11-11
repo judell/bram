@@ -71645,9 +71645,19 @@ fn retire_claim_locked(
         return ClaimShrink::Uncovered;
     };
     if !retained.is_empty() {
+        let pending = if via == "turn-end" {
+            format!(" pendingAgents={}", pending_agents_token())
+        } else {
+            String::new()
+        };
         fx.trace(
             "delegated",
-            &format!("op=retain ids={} via={}", ids_json_str(&retained), via),
+            &format!(
+                "op=retain ids={} via={}{}",
+                ids_json_str(&retained),
+                via,
+                pending
+            ),
         );
     }
     let mirror_source = match mode {
@@ -73125,6 +73135,49 @@ mod codex_subagent_tests {
     }
 }
 
+// Observe-only: the newest `turn_duration` system record's
+// `pendingBackgroundAgentCount` (Claude's own count of background subagents
+// still running when the turn ended). None when there is no such record or it
+// lacks the field. Only the newest record counts, and only the last few
+// hundred lines are looked at.
+fn claude_pending_background_agents(content: &str) -> Option<u64> {
+    for line in content.lines().rev().take(400) {
+        if !line.contains("\"turn_duration\"") {
+            continue;
+        }
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if rec.get("type").and_then(|v| v.as_str()) != Some("system")
+            || rec.get("subtype").and_then(|v| v.as_str()) != Some("turn_duration")
+        {
+            continue;
+        }
+        return rec
+            .get("pendingBackgroundAgentCount")
+            .and_then(|v| v.as_u64());
+    }
+    None
+}
+
+// The count for the turn-end clear in flight, -1 when unavailable. Set by the
+// Claude JSONL path just before it clears and reset right after.
+static PENDING_AGENTS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+fn set_pending_agents(n: Option<u64>) {
+    PENDING_AGENTS.store(
+        n.map_or(-1, |v| v.min(i64::MAX as u64) as i64),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn pending_agents_token() -> String {
+    match PENDING_AGENTS.load(std::sync::atomic::Ordering::Relaxed) {
+        n if n >= 0 => n.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
 // JSONL-driven turn-end detection (#91 follow-up, broadened by #153).
 // Durable session output is the primary independent completion signal:
 // Claude writes assistant `stop_reason:"end_turn"`; Codex writes
@@ -73648,18 +73701,29 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     //
     // delegated-work-action-gates: ids a subagent is still bound to survive
     // the clear (retire_claim_locked retains them).
+    //
+    // Observe-only (delegated-continuation-keeps-claim): note the turn's
+    // pendingBackgroundAgentCount for the clear and retain lines below. Only
+    // Claude's JSONL carries it; other providers' clear sites write `-`.
+    set_pending_agents(if provider == JsonlCompletionProvider::Claude {
+        claude_pending_background_agents(&content)
+    } else {
+        None
+    });
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
             "inflight-sentinel",
             &format!(
-                "op=clear-at-turn-end kind={} ids={}",
+                "op=clear-at-turn-end kind={} ids={} pendingAgents={}",
                 inflight_claim_kind(app).as_deref().unwrap_or(""),
-                serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string())
+                serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string()),
+                pending_agents_token()
             ),
         );
     }
     clear_inflight_claim_sentinel(app, &claimed_ids, "turn-end");
+    set_pending_agents(None);
 }
 
 // Startup cleanup. Removes any stale inflight sentinel from a prior
@@ -73858,14 +73922,26 @@ fn rearm_blocked(claim: Option<&InflightClaim>, bound: &[String]) -> bool {
     claim.map_or(false, |c| c.ids.is_empty() || !ids_subset(&c.ids, bound))
 }
 
-// The bound ids at the start of the current main turn (taken when the turn
-// opens). They belong to subagents of an EARLIER turn, so a subagent this
-// turn spawns doesn't inherit them: a chat turn's research subagent must not
-// bind to an item another subagent holds. Ids this turn's own subagents bind
-// are not in it, so parallel subagents of one turn all bind.
-fn turn_start_bound_cell() -> &'static Mutex<Vec<String>> {
-    static CELL: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+// Who held what at the start of the current main turn: (agent, its ids)
+// pairs, taken when the turn opens. They belong to subagents of an EARLIER
+// turn, so a DIFFERENT subagent this turn spawns doesn't inherit them: a chat
+// turn's research subagent must not bind to an item another subagent holds.
+// The SAME agent resumed this turn (SendMessage to a background subagent)
+// does rebind to its own ids: a continuation is the same work. Ids this
+// turn's own subagents bind are not in it, so parallel subagents of one turn
+// all bind.
+type TurnStartBound = Vec<(String, Vec<String>)>;
+
+fn turn_start_bound_cell() -> &'static Mutex<TurnStartBound> {
+    static CELL: OnceLock<Mutex<TurnStartBound>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn turn_start_bound_of(b: &DelegatedBindings) -> TurnStartBound {
+    b.bindings
+        .iter()
+        .map(|(agent, bind)| (agent.clone(), bind.ids.clone()))
+        .collect()
 }
 
 // The main turn opened or closed. Snapshot the bound ids at the open, and
@@ -73874,7 +73950,7 @@ fn delegated_note_turn_edge<R: tauri::Runtime>(app: &AppHandle<R>, opened: bool)
     let bound = delegated_bound_ids_union(app);
     if opened {
         if let Ok(mut g) = turn_start_bound_cell().lock() {
-            *g = bound.clone();
+            *g = turn_start_bound_of(&read_delegated_bindings(app));
         }
     }
     if !bound.is_empty() {
@@ -73882,12 +73958,21 @@ fn delegated_note_turn_edge<R: tauri::Runtime>(app: &AppHandle<R>, opened: bool)
     }
 }
 
-// The claim ids a subagent spawned now inherits: the claim minus ids bound
-// before this turn began.
-fn delegated_inheritable_ids(claim: &[String], turn_start_bound: &[String]) -> Vec<String> {
+// The claim ids `agent` inherits when it starts now: the claim minus ids a
+// DIFFERENT agent held when this turn began. Ids the same agent held then are
+// its own (a resumed subagent), so it rebinds to them.
+fn delegated_inheritable_ids(
+    claim: &[String],
+    turn_start_bound: &[(String, Vec<String>)],
+    agent: &str,
+) -> Vec<String> {
     claim
         .iter()
-        .filter(|id| !turn_start_bound.contains(id))
+        .filter(|id| {
+            !turn_start_bound
+                .iter()
+                .any(|(a, ids)| a != agent && ids.contains(id))
+        })
         .cloned()
         .collect()
 }
@@ -74036,8 +74121,9 @@ fn trace_token(s: &str) -> String {
 
 // SubagentStart: bind to the ids of the live claim this turn may hand on
 // (delegated_inheritable_ids). A subagent spawned with no claim, or under a
-// claim whose ids were all bound before this turn began (a chat turn while
-// another subagent works), binds to nothing.
+// claim whose ids were all held by another subagent when this turn began (a
+// chat turn while another subagent works), binds to nothing. The same agent
+// resumed under its own ids rebinds to them.
 fn bind_locked(
     _g: &ClaimGuard,
     files: &ClaimFiles,
@@ -74045,7 +74131,7 @@ fn bind_locked(
     agent: &str,
     agent_type: &str,
     session_id: &str,
-    turn_start_bound: &[String],
+    turn_start_bound: &[(String, Vec<String>)],
 ) -> Option<Vec<String>> {
     let skipped = |reason: &str| {
         fx.trace(
@@ -74058,7 +74144,7 @@ fn bind_locked(
     if claim.ids.is_empty() {
         return skipped("no-claim");
     }
-    let ids = delegated_inheritable_ids(&claim.ids, turn_start_bound);
+    let ids = delegated_inheritable_ids(&claim.ids, turn_start_bound, agent);
     if ids.is_empty() {
         return skipped("held-claim-only");
     }
@@ -74913,7 +74999,7 @@ mod delegated_binding_tests {
         let claim = read_inflight_claim_at(&files.claim);
         assert!(!rearm_blocked(claim.as_ref(), &bound));
         // The turn opened with `a` already bound.
-        let turn_start_bound = bound.clone();
+        let turn_start_bound = turn_start_bound_of(&read_delegated_bindings_at(&files.bindings));
         let g = claim_lock();
         write_claim_locked(&g, &files, &Fx::default(), &s(&["a"]), "approved", true);
         assert_eq!(claim_ids(&files), Some(s(&["a"])));
@@ -74939,6 +75025,89 @@ mod delegated_binding_tests {
     }
 
     // The turn that starts `a` may spawn several subagents; each binds.
+    // delegated-continuation-keeps-claim: the 2026-11-09 15:48-15:51 order.
+    // Agent `s1` is bound, a main turn opens with it bound, it stops (released),
+    // then the main thread resumes the SAME agent: it rebinds, and the turn-end
+    // clear retains the ids.
+    #[test]
+    fn a_resumed_subagent_rebinds_to_the_ids_it_held_at_turn_start() {
+        let files = temp_files("continuation");
+        seed(&files, &["a"], &[("s1", &["a"])]);
+        let turn_start_bound = turn_start_bound_of(&read_delegated_bindings_at(&files.bindings));
+        let open = Fx {
+            open: true,
+            ..Fx::default()
+        };
+        assert_eq!(release(&files, &["s1"], &open), 1);
+        let g = claim_lock();
+        write_claim_locked(&g, &files, &Fx::default(), &s(&["a"]), "approved", true);
+        assert_eq!(
+            bind_locked(&g, &files, &open, "s1", "t", "sess", &turn_start_bound),
+            Some(s(&["a"]))
+        );
+        drop(g);
+        retire(&files, &["a"], Retire::Clear);
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+    }
+
+    // Same order, but a different agent starts under the claim `s1` held at
+    // turn start: still held-claim-only.
+    #[test]
+    fn a_different_subagent_under_a_held_claim_still_binds_nothing() {
+        let files = temp_files("continuation-other");
+        seed(&files, &["a"], &[("s1", &["a"])]);
+        let turn_start_bound = turn_start_bound_of(&read_delegated_bindings_at(&files.bindings));
+        let open = Fx {
+            open: true,
+            ..Fx::default()
+        };
+        assert_eq!(release(&files, &["s1"], &open), 1);
+        let g = claim_lock();
+        write_claim_locked(&g, &files, &Fx::default(), &s(&["a"]), "approved", true);
+        assert_eq!(
+            bind_locked(&g, &files, &open, "s2", "t", "sess", &turn_start_bound),
+            None
+        );
+        drop(g);
+        assert!(!read_delegated_bindings_at(&files.bindings)
+            .bindings
+            .contains_key("s2"));
+    }
+
+    #[test]
+    fn pending_background_agent_count_is_read_from_the_newest_turn_duration() {
+        let td = |n: &str| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","durationMs":5{n}}}"#,
+                n = n
+            )
+        };
+        let with = |n: u64| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","durationMs":5,"pendingBackgroundAgentCount":{n}}}"#
+            )
+        };
+        let user = r#"{"type":"user","message":{"content":"hi"}}"#;
+        assert_eq!(
+            claude_pending_background_agents(&format!("{}\n{user}\n", with(1))),
+            Some(1)
+        );
+        assert_eq!(
+            claude_pending_background_agents(&format!("{}\n{user}\n", td(""))),
+            None
+        );
+        assert_eq!(claude_pending_background_agents(&format!("{user}\n")), None);
+        assert_eq!(
+            claude_pending_background_agents(&format!("{}\n{user}\n{}\n", with(3), with(0))),
+            Some(0)
+        );
+        // The newest record decides, even when it lacks the field.
+        assert_eq!(
+            claude_pending_background_agents(&format!("{}\n{user}\n{}\n", with(3), td(""))),
+            None
+        );
+    }
+
     #[test]
     fn parallel_subagents_of_one_turn_all_bind() {
         let files = temp_files("parallel");
@@ -74958,7 +75127,7 @@ mod delegated_binding_tests {
         );
         // A turn starting `b` while `a` is held hands on only `b`.
         assert_eq!(
-            delegated_inheritable_ids(&s(&["a", "b"]), &s(&["a"])),
+            delegated_inheritable_ids(&s(&["a", "b"]), &[("s1".to_string(), s(&["a"]))], "s2"),
             s(&["b"])
         );
     }

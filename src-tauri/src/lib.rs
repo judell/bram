@@ -49465,6 +49465,31 @@ fn st_subagent_finished(jsonl_path: &Path) -> bool {
 // shapes (the `queue-operation` enqueue record and the delivered `user`
 // turn), and it's proven directly against real transcripts under
 // ~/.claude/projects/-Users-jonudell-bram/ (issue-244 investigation).
+//
+// subagent-waiting-on-background-reads-finished: a subagent that ends its
+// turn to wait on its own background work is announced with
+// `<status>completed</status>` too, but its text says it may resume (Claude
+// Code 2.1.322 specimen):
+//   <summary>Agent "…" is waiting on its own background work</summary>
+//   <note>This agent stopped with background work of its own still running.
+//   It may resume on its own … the result below may be interim.</note>
+// Such a notice is not a finish; the same task-id notifies again later.
+const ST_INTERIM_NOTICE_MARKERS: [&str; 2] = [
+    "is waiting on its own background work",
+    "stopped with background work of its own still running",
+];
+
+fn st_task_notification_is_interim(block: &str) -> bool {
+    ST_INTERIM_NOTICE_MARKERS.iter().any(|m| block.contains(m))
+}
+
+// The roster's finished verdict: an agent Bram holds a live delegated
+// binding for (its stop deferred on pending background work) is not
+// finished, whatever the notification says.
+fn st_roster_parent_finished(bound: bool, notice_finished: bool) -> bool {
+    !bound && notice_finished
+}
+
 fn st_parent_agent_task_finished(session_text: &str, agent_id: &str) -> bool {
     if agent_id.is_empty() {
         return false;
@@ -49487,7 +49512,9 @@ fn st_parent_agent_task_finished(session_text: &str, agent_id: &str) -> bool {
             let open_abs = back_start + open_rel;
             if let Some(close_rel) = session_text[open_abs..].find("</task-notification>") {
                 let close_abs = open_abs + close_rel + "</task-notification>".len();
-                if close_abs > abs {
+                if close_abs > abs
+                    && !st_task_notification_is_interim(&session_text[open_abs..close_abs])
+                {
                     return true;
                 }
             }
@@ -49522,6 +49549,12 @@ fn st_parent_task_finished_after(
     let mut latest: Option<i64> = None;
     for line in session_text.lines() {
         if !line.contains(marker.as_str()) || !line.contains("<task-notification>") {
+            continue;
+        }
+        // An interim notice (waiting on its own background work) is not a
+        // finish, so a resumed agent that stops to wait keeps reading
+        // not-finished even though an earlier round's final notice exists.
+        if st_task_notification_is_interim(line) {
             continue;
         }
         // A real delivery has a record timestamp. Echoes of the notice text
@@ -49576,7 +49609,7 @@ fn st_subagent_state_str(parent_finished: bool, updated_at_ms: i64, now_ms: i64)
 mod subagent_state_tests {
     use super::{
         parse_iso_to_epoch_ms, st_parent_agent_task_finished, st_parent_task_finished_after,
-        st_subagent_state_str, SUBAGENT_RECENT_ACTIVITY_MS,
+        st_roster_parent_finished, st_subagent_state_str, SUBAGENT_RECENT_ACTIVITY_MS,
     };
 
     // Notice record in the real two-shape form, with the record timestamp.
@@ -49652,6 +49685,21 @@ mod subagent_state_tests {
         ));
     }
 
+    #[test]
+    fn resumed_agent_interim_notice_after_start_is_not_finished() {
+        // An earlier round's final notice, then a resume, then an interim
+        // notice (stopped to wait on its own background work).
+        let interim = format!(
+            "{{\"type\":\"queue-operation\",\"content\":\"<task-notification>\\n<task-id>a1</task-id>\\n<status>completed</status>\\n<summary>Agent \\\"x\\\" is waiting on its own background work</summary>\\n</task-notification>\",\"timestamp\":\"2026-11-09T18:40:00Z\"}}\n"
+        );
+        let t = format!("{}{}", stamped("a1", "2026-11-09T18:30:12.141Z"), interim);
+        assert!(!st_parent_task_finished_after(
+            &t,
+            "a1",
+            Some(ms("2026-11-09T18:36:28Z"))
+        ));
+    }
+
     // Shape observed in a real transcript (issue-244 investigation): the
     // delivered `user` turn's message.content is a bare string (not a
     // tool_result content-block array) carrying the escaped notification.
@@ -49681,6 +49729,40 @@ mod subagent_state_tests {
             &notification_record("agent2", "stopped"),
             "agent2"
         ));
+    }
+
+    // Claude Code 2.1.322 specimen: a subagent stopped to wait on its own
+    // background work, announced as `completed`.
+    fn interim_notification_record(agent_id: &str) -> String {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"<task-notification>\\n<task-id>{}</task-id>\\n<tool-use-id>toolu_x</tool-use-id>\\n<status>completed</status>\\n<summary>Agent \\\"Sleep then write subagent.txt\\\" is waiting on its own background work</summary>\\n<note>This agent stopped with background work of its own still running. It may resume on its own when that work completes or reports, and the same task-id notifies again if it does; the result below may be interim.</note>\\n</task-notification>\"}}}}",
+            agent_id
+        )
+    }
+
+    #[test]
+    fn interim_notification_is_not_finished() {
+        let text = interim_notification_record("a1");
+        assert!(!st_parent_agent_task_finished(&text, "a1"));
+    }
+
+    #[test]
+    fn later_final_notification_after_interim_is_finished() {
+        let text = format!(
+            "{}\n{}",
+            interim_notification_record("a1"),
+            notification_record("a1", "completed")
+        );
+        assert!(st_parent_agent_task_finished(&text, "a1"));
+    }
+
+    #[test]
+    fn bound_agent_with_plain_completed_notice_is_not_finished() {
+        let text = notification_record("a1", "completed");
+        let notice = st_parent_agent_task_finished(&text, "a1");
+        assert!(notice);
+        assert!(!st_roster_parent_finished(true, notice));
+        assert!(st_roster_parent_finished(false, notice));
     }
 
     #[test]
@@ -50096,6 +50178,7 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     let session_text = std::fs::read_to_string(&session_path).unwrap_or_default();
     let now_ms = to_ms(std::time::SystemTime::now());
     let starts = read_subagent_starts(app);
+    let bindings = read_delegated_bindings(app);
     let mut agents: Vec<serde_json::Value> = Vec::new();
     for sf in files {
         let Ok(md) = std::fs::metadata(&sf.jsonl_path) else {
@@ -50105,10 +50188,13 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         let started_at_ms = md.created().map(to_ms).unwrap_or(updated_at_ms);
         let meta = st_read_subagent_meta(&sf.dir, &sf.agent_id).unwrap_or(serde_json::Value::Null);
         let start_rec = starts.get(&sf.agent_id);
-        let parent_finished = st_parent_task_finished_after(
-            &session_text,
-            &sf.agent_id,
-            start_rec.map(|r| r.last_start_ms),
+        let parent_finished = st_roster_parent_finished(
+            bindings.bindings.contains_key(&sf.agent_id),
+            st_parent_task_finished_after(
+                &session_text,
+                &sf.agent_id,
+                start_rec.map(|r| r.last_start_ms),
+            ),
         );
         let state = st_subagent_state_str(parent_finished, updated_at_ms, now_ms);
         agents.push(serde_json::json!({

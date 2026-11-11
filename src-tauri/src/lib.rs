@@ -24591,6 +24591,37 @@ fn clear_delivered_host_notes<R: tauri::Runtime>(app: &AppHandle<R>, delivered: 
     );
 }
 
+// footer-selection-label-follows-selection: an `iterate:` turn for X sent
+// while a subagent is bound to Y (Y not among the turn's items) carries a
+// `hostNote` key INSIDE the payload JSON. Structured turns are
+// start-anchored, so nothing may precede or follow; `item_turn_ids` and the
+// transcript projection parse the JSON and ignore unknown keys. None when
+// the text isn't an `iterate:` turn, doesn't parse, or nothing else is bound.
+fn iterate_turn_with_delegation_note(turn_text: &str, bound: &[String]) -> Option<String> {
+    let rest = turn_text.trim_start().strip_prefix("iterate:")?;
+    let mut value = serde_json::from_str::<serde_json::Value>(rest.trim_start()).ok()?;
+    let items = item_turn_ids(turn_text);
+    let others: Vec<&String> = bound.iter().filter(|b| !items.contains(b)).collect();
+    if others.is_empty() {
+        return None;
+    }
+    let obj = value.as_object_mut()?;
+    let other_list = others
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let item_list = items.join(", ");
+    let note = format!(
+        "[bram: a subagent is working on {other}. If this feedback is about that work, flag it with flag-item (.claude/bram-reference/worklist-mechanics.md, Feedback about another item's running work). If this turn edits no tracked file, release {item} with POST /__worklist/end {{\"ids\":{ids}}} so the subagent's lines stay {other}'s.]",
+        other = other_list,
+        item = item_list,
+        ids = ids_json_str(&items),
+    );
+    obj.insert("hostNote".to_string(), serde_json::Value::String(note));
+    Some(format!("iterate: {}", serde_json::to_string(&value).ok()?))
+}
+
 fn write_pty_turn_intent<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &State<'_, AppState>,
@@ -24619,6 +24650,26 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     } else {
         with_notes = prepend_host_notes(data, &pending_notes);
         &with_notes
+    };
+    // footer-selection-label-follows-selection: tell the agent, inside the
+    // `iterate:` JSON, that a subagent is working on a different item.
+    let bound_now = delegated_bound_ids_union(app);
+    let with_delegation;
+    let data: &str = match iterate_turn_with_delegation_note(data, &bound_now) {
+        Some(t) => {
+            append_bram_trace_line(
+                app,
+                "delegated",
+                &format!(
+                    "op=iterate-note items={} bound={}",
+                    ids_json_str(&item_turn_ids(data)),
+                    ids_json_str(&bound_now)
+                ),
+            );
+            with_delegation = t;
+            &with_delegation
+        }
+        None => data,
     };
     // Envelope switch (docs/turn-transport-redesign.md step 6): substantial,
     // image-bearing or multi-line typed sends are persisted as an
@@ -92426,8 +92477,18 @@ fn handle_audit_direct_edit<R: tauri::Runtime>(
 // POST {"op":"resend-as-feedback","turnRef"}   the pane's button; must be the
 //                                     pending ref; returns the turn's text,
 //                                     images and a note to send as feedback
-// The pending flag carries its kind ("feedback" or "chat"); GET names a chat
-// flag's ref as turnRef.
+// The pending flag carries its kind ("feedback", "chat" or "item"); GET names
+// a chat flag's ref as turnRef.
+//
+// footer-selection-label-follows-selection: a third kind. Feedback ticked on
+// item X that is plainly about item Y (typically the work Y's subagent is
+// doing):
+// POST {"op":"flag-item","feedbackRef","id"}  the agent; feedbackRef as for
+//                                     flag; id is an item on the board other
+//                                     than the ref's own
+// POST {"op":"resend-to-item","feedbackRef"}  the pane's button; must be the
+//                                     pending ref; returns Y, the text and a
+//                                     note naming X, to send to Y as feedback
 #[derive(Clone)]
 struct MisaddressedFeedback {
     fref: String,
@@ -92482,6 +92543,43 @@ fn misaddressed_note(item_id: &str, at_iso: &str) -> String {
     )
 }
 
+// The note sent with feedback resent to another item, so that item's
+// record says where the message first went.
+fn misaddressed_item_note(from_id: &str, at_iso: &str) -> String {
+    format!(
+        "\n\n---\n*Resent to this item {}: first sent to `{}`.*\n",
+        at_iso, from_id
+    )
+}
+
+// The checks behind op=flag-item, pure so they can be tested: a live draft,
+// a running iterate turn addressed to the ref's item X, and a target on the
+// board that is not X. Returns X, or the refusal (status, reason).
+fn misaddressed_flag_item_verdict(
+    fref: &str,
+    target: &str,
+    draft_live: bool,
+    iterate_addressed: &[String],
+    board_ids: &[String],
+) -> Result<String, (u16, &'static str)> {
+    let Some(from_id) = misaddressed_ref_item(fref) else {
+        return Err((400, "bad-ref"));
+    };
+    if !draft_live {
+        return Err((409, "no-live-draft"));
+    }
+    if !iterate_addressed.iter().any(|a| a == &from_id) {
+        return Err((409, "not-this-turn"));
+    }
+    if target.is_empty() || !board_ids.iter().any(|b| b == target) {
+        return Err((409, "not-on-board"));
+    }
+    if target == from_id {
+        return Err((409, "same-item"));
+    }
+    Ok(from_id)
+}
+
 fn misaddressed_json(status: u16, v: serde_json::Value) -> (u16, &'static str, Vec<u8>) {
     (
         status,
@@ -92507,6 +92605,12 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
             serde_json::json!({ "pending": pending.map(|p| if p.kind == "chat" {
                 serde_json::json!({
                     "kind": "chat", "turnRef": p.fref, "itemId": p.item_id, "atMs": p.at_ms,
+                })
+            } else if p.kind == "item" {
+                serde_json::json!({
+                    "kind": "item", "feedbackRef": p.fref, "itemId": p.item_id,
+                    "fromId": misaddressed_ref_item(&p.fref).unwrap_or_default(),
+                    "atMs": p.at_ms,
                 })
             } else {
                 serde_json::json!({
@@ -92812,6 +92916,126 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
                 }),
             )
         }
+        "flag-item" => {
+            let target = req
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let draft_live = feedback_drafts_dir(app)
+                .map(|d| d.join(format!("{}.md", fref)).is_file())
+                .unwrap_or(false);
+            let ctx = project_root(Some(app))
+                .and_then(|root| {
+                    std::fs::read_to_string(resource_relative_path(&root, TURN_CONTEXT_REL)).ok()
+                })
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or_default();
+            let iterate_addressed: Vec<String> =
+                if ctx.get("kind").and_then(|k| k.as_str()) == Some("iterate") {
+                    ctx.get("addressedIds")
+                        .and_then(|a| a.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+            let board_ids: Vec<String> = worklist_file(app)
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|w| {
+                    w.get("items").and_then(|a| a.as_array()).map(|a| {
+                        a.iter()
+                            .filter_map(|it| {
+                                it.get("id").and_then(|v| v.as_str()).map(String::from)
+                            })
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+            let from_id = match misaddressed_flag_item_verdict(
+                &fref,
+                &target,
+                draft_live,
+                &iterate_addressed,
+                &board_ids,
+            ) {
+                Ok(x) => x,
+                Err((status, reason)) => {
+                    trace(format!(
+                        "op=flag-item-refused reason={} ref={} item={}",
+                        reason, fref, target
+                    ));
+                    return misaddressed_json(
+                        status,
+                        serde_json::json!({ "error": format!("flag-item refused: {}", reason) }),
+                    );
+                }
+            };
+            if let Ok(mut g) = misaddressed_cell().lock() {
+                *g = Some(MisaddressedFeedback {
+                    fref: fref.clone(),
+                    item_id: target.clone(),
+                    at_ms: unix_now_ms(),
+                    kind: "item",
+                });
+            }
+            trace(format!(
+                "op=flag-item ref={} from={} item={}",
+                fref, from_id, target
+            ));
+            emit_replayable_signal(app, "feedback-misaddressed-changed");
+            misaddressed_json(
+                200,
+                serde_json::json!({ "ok": true, "itemId": target, "fromId": from_id }),
+            )
+        }
+        "resend-to-item" => {
+            let pending = misaddressed_cell().lock().ok().and_then(|g| g.clone());
+            let Some(p) = pending.filter(|p| p.kind == "item" && p.fref == fref) else {
+                trace(format!(
+                    "op=resend-to-item-refused reason=not-pending ref={}",
+                    fref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "that ref is not the pending flag" }),
+                );
+            };
+            let from_id = misaddressed_ref_item(&p.fref).unwrap_or_default();
+            let text = feedback_drafts_dir(app)
+                .and_then(|d| std::fs::read_to_string(d.join(format!("{}.md", p.fref))).ok());
+            let Some(text) = text else {
+                trace(format!(
+                    "op=resend-to-item-refused reason=draft-gone ref={}",
+                    p.fref
+                ));
+                return misaddressed_json(
+                    409,
+                    serde_json::json!({ "error": "the feedback draft is gone" }),
+                );
+            };
+            if let Ok(mut g) = misaddressed_cell().lock() {
+                *g = None;
+            }
+            let note = misaddressed_item_note(&from_id, &format_iso_utc(unix_now_ms()));
+            trace(format!(
+                "op=resend-to-item ref={} from={} item={}",
+                p.fref, from_id, p.item_id
+            ));
+            emit_replayable_signal(app, "feedback-misaddressed-changed");
+            misaddressed_json(
+                200,
+                serde_json::json!({
+                    "ok": true, "itemId": p.item_id, "fromId": from_id,
+                    "text": text.trim(), "note": note,
+                }),
+            )
+        }
         "dismiss" => {
             let cleared = misaddressed_cell().lock().ok().and_then(|mut g| g.take());
             if let Some(p) = cleared {
@@ -92823,7 +93047,7 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
         _ => misaddressed_json(
             400,
             serde_json::json!({
-                "error": "op must be flag, resend, flag-chat, resend-as-feedback or dismiss"
+                "error": "op must be flag, resend, flag-chat, resend-as-feedback, flag-item, resend-to-item or dismiss"
             }),
         ),
     }
@@ -92832,8 +93056,99 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
 #[cfg(test)]
 mod misaddressed_feedback_tests {
     use super::{
-        misaddressed_chat_note, misaddressed_note, misaddressed_ref_item, misaddressed_turn_ref_ok,
+        misaddressed_chat_note, misaddressed_flag_item_verdict, misaddressed_item_note,
+        misaddressed_note, misaddressed_ref_item, misaddressed_turn_ref_ok,
     };
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn flag_item_accepts_a_live_ref_addressed_to_this_turn() {
+        let r = misaddressed_flag_item_verdict(
+            "1794093936375-item-x",
+            "item-y",
+            true,
+            &ids(&["item-x"]),
+            &ids(&["item-x", "item-y"]),
+        );
+        assert_eq!(r, Ok("item-x".to_string()));
+    }
+
+    #[test]
+    fn flag_item_refuses_the_same_item() {
+        let r = misaddressed_flag_item_verdict(
+            "1794093936375-item-x",
+            "item-x",
+            true,
+            &ids(&["item-x"]),
+            &ids(&["item-x", "item-y"]),
+        );
+        assert_eq!(r, Err((409, "same-item")));
+    }
+
+    #[test]
+    fn flag_item_refuses_an_unknown_id() {
+        let r = misaddressed_flag_item_verdict(
+            "1794093936375-item-x",
+            "item-z",
+            true,
+            &ids(&["item-x"]),
+            &ids(&["item-x", "item-y"]),
+        );
+        assert_eq!(r, Err((409, "not-on-board")));
+        let r = misaddressed_flag_item_verdict(
+            "1794093936375-item-x",
+            "",
+            true,
+            &ids(&["item-x"]),
+            &ids(&["item-x"]),
+        );
+        assert_eq!(r, Err((409, "not-on-board")));
+    }
+
+    #[test]
+    fn flag_item_refuses_a_ref_not_addressed_to_this_turn() {
+        let board = ids(&["item-x", "item-y"]);
+        // The running turn is addressed to someone else, or is not feedback.
+        assert_eq!(
+            misaddressed_flag_item_verdict(
+                "1794093936375-item-x",
+                "item-y",
+                true,
+                &ids(&["item-y"]),
+                &board
+            ),
+            Err((409, "not-this-turn"))
+        );
+        assert_eq!(
+            misaddressed_flag_item_verdict("1794093936375-item-x", "item-y", true, &[], &board),
+            Err((409, "not-this-turn"))
+        );
+        // No live draft, and a malformed ref.
+        assert_eq!(
+            misaddressed_flag_item_verdict(
+                "1794093936375-item-x",
+                "item-y",
+                false,
+                &ids(&["item-x"]),
+                &board
+            ),
+            Err((409, "no-live-draft"))
+        );
+        assert_eq!(
+            misaddressed_flag_item_verdict("../x", "item-y", true, &ids(&["item-x"]), &board),
+            Err((400, "bad-ref"))
+        );
+    }
+
+    #[test]
+    fn item_note_names_the_first_recipient() {
+        let note = misaddressed_item_note("item-x", "2026-11-11T20:00:00Z");
+        assert!(note.contains("first sent to `item-x`"));
+        assert!(note.contains("2026-11-11T20:00:00Z"));
+    }
 
     #[test]
     fn turn_ref_accepts_only_outbound_turn_ids() {
@@ -111631,5 +111946,64 @@ mod status_fetch_tests {
         let survivors: Vec<&str> = listing.lines().filter(|l| l.contains(&marker)).collect();
         assert!(survivors.is_empty(), "leaked: {:?}", survivors);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod iterate_delegation_note_tests {
+    use super::*;
+
+    const TURN: &str =
+        r#"iterate: {"items":[{"id":"dependency-prepare","feedbackRef":"1-dependency-prepare"}]}"#;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn none_when_nothing_bound() {
+        assert_eq!(iterate_turn_with_delegation_note(TURN, &[]), None);
+    }
+
+    #[test]
+    fn none_when_bound_only_to_own_item() {
+        assert_eq!(
+            iterate_turn_with_delegation_note(TURN, &ids(&["dependency-prepare"])),
+            None
+        );
+    }
+
+    #[test]
+    fn adds_note_naming_both_and_keeps_items() {
+        let out = iterate_turn_with_delegation_note(
+            TURN,
+            &ids(&["dependency-prepare", "subagent-holds-claim"]),
+        )
+        .expect("note");
+        assert!(out.starts_with("iterate: "));
+        let v: serde_json::Value =
+            serde_json::from_str(out.strip_prefix("iterate: ").unwrap()).expect("valid json");
+        let orig: serde_json::Value =
+            serde_json::from_str(TURN.strip_prefix("iterate: ").unwrap()).unwrap();
+        assert_eq!(v["items"], orig["items"]);
+        let note = v["hostNote"].as_str().expect("hostNote");
+        assert!(note.contains("subagent-holds-claim"));
+        assert!(note.contains("dependency-prepare"));
+        assert!(!note.contains('\n'));
+        assert_eq!(item_turn_ids(&out), item_turn_ids(TURN));
+    }
+
+    #[test]
+    fn none_for_non_iterate_and_malformed() {
+        let b = ids(&["other"]);
+        assert_eq!(
+            iterate_turn_with_delegation_note(r#"approved: {"items":[{"id":"a"}]}"#, &b),
+            None
+        );
+        assert_eq!(iterate_turn_with_delegation_note("hello", &b), None);
+        assert_eq!(
+            iterate_turn_with_delegation_note("iterate: {oops", &b),
+            None
+        );
     }
 }

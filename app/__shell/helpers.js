@@ -3147,14 +3147,18 @@ window.__bramMisaddressedAccept = function (d) {
 window.__bramMisaddressedLabel = function (v) {
   var p = v && v.pending;
   if (!p || !p.itemId) return "";
-  return p.kind === "chat" ? "About " + p.itemId + "?" : "Not about " + p.itemId + "?";
+  return p.kind === "chat" || p.kind === "item" ? "About " + p.itemId + "?" : "Not about " + p.itemId + "?";
 };
 window.__bramMisaddressedButton = function (v) {
   var p = v && v.pending;
+  if (p && p.kind === "item") return "Resend to " + p.itemId;
   return p && p.kind === "chat" ? "Resend as feedback" : "Resend as chat";
 };
 window.__bramMisaddressedTooltip = function (v) {
   var p = v && v.pending;
+  if (p && p.kind === "item") {
+    return "Untick " + String(p.fromId || "the first item") + ", tick " + p.itemId + " alone, and send the same message to it as feedback, noting it was first sent to " + String(p.fromId || "the other item");
+  }
   return p && p.kind === "chat"
     ? "Tick the item, send the same message and its images to it as feedback, and note that it was first sent as chat"
     : "Untick the item, send the same message as chat, and note on the item's feedback record that it was resent";
@@ -3173,6 +3177,7 @@ function __bramMisaddressedPost(body) {
 window.__bramMisaddressedResend = function (ds) {
   var pending = ds && ds.value && ds.value.pending;
   if (pending && pending.kind === "chat") return window.__bramMisaddressedResendAsFeedback(ds, pending);
+  if (pending && pending.kind === "item") return window.__bramMisaddressedResendToItem(ds, pending);
   if (!pending || !pending.feedbackRef) return;
   window.__bramIframeTrace("click", { target: "resend-as-chat", op: "act", item: String(pending.itemId || "") });
   __bramMisaddressedPost({ op: "resend", feedbackRef: pending.feedbackRef }).then(function (res) {
@@ -3204,6 +3209,26 @@ window.__bramMisaddressedResendAsFeedback = function (ds, pending) {
     }
     var markers = (res.images || []).map(function (p) { return "Read this screenshot: @" + p + "\n[Image: source: " + p + "]"; }).join("\n");
     var body = (markers ? markers + "\n\n" : "") + (res.text || "") + (res.note || "");
+    if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection([res.itemId]);
+    window.__bramWorklist2BatchIterate([res.itemId], body);
+    if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript();
+  });
+};
+// footer-selection-label-follows-selection: the item direction. Feedback
+// that went to X but is about Y: the host returns the draft's text and a note
+// naming X; the pane ticks Y alone (which unticks X) and sends the text to Y
+// as feedback through the same path as the chat direction.
+window.__bramMisaddressedResendToItem = function (ds, pending) {
+  if (!pending || !pending.feedbackRef) return;
+  window.__bramIframeTrace("click", { target: "resend-to-item", op: "act", item: String(pending.itemId || ""), from: String(pending.fromId || "") });
+  __bramMisaddressedPost({ op: "resend-to-item", feedbackRef: pending.feedbackRef }).then(function (res) {
+    window.__bramMisaddressedPending = null;
+    if (ds && typeof ds.refetch === "function") ds.refetch();
+    if (!res || !res.ok || !res.itemId || !res.text) {
+      window.__bramIframeTrace("click", { target: "resend-to-item", op: "refused", reason: String((res && res.error) || "no-response") });
+      return;
+    }
+    var body = res.text + (res.note || "");
     if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection([res.itemId]);
     window.__bramWorklist2BatchIterate([res.itemId], body);
     if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript();
@@ -4466,11 +4491,29 @@ window.__bramAlertsShouldPulse = function (needsYou, pathname) {
 
 // Round 2 (Jon, from the field): COMPOSE the facts, don't choose one —
 // "Selected in Worklist: a, b · Proposing a new item…" when both hold.
+// footer-selection-label-follows-selection: "Selected in Worklist:" names only
+// what's ticked. A subagent holds its item's claim after the turn ends while
+// the user ticks other rows (622252f1), so the claim is no longer the
+// selection. Its items get their own note instead (__bramFooterDelegationNote).
+// The claim's ids stand in only when nothing is ticked and a main turn holds
+// them (the gate clears the selection at submit).
 window.__bramFooterContextLine = function (claim, proposing, sel, agentStatus) {
   var parts = [];
   var ids = (claim && claim.ids) || [];
   var selection = sel || [];
-  if (ids.length) {
+  var note = window.__bramFooterDelegationNote(claim, selection);
+  if (selection.length) {
+    var claimed = ids.length && selection.every(function (id) { return ids.indexOf(id) >= 0; });
+    parts.push(
+      "Selected in Worklist: " + selection.join(", ") +
+        (claimed && window.__bramAgentWorking(agentStatus)
+          ? " (" + window.__bramClaimVerb(claim.kind, claim.statusLabel) + "…)"
+          : "")
+    );
+  } else if (ids.length && !(claim && claim.heldByDelegation)) {
+    var bound = window.__bramFooterBoundIds(claim);
+    var own = ids.filter(function (id) { return bound.indexOf(id) < 0; });
+    if (own.length) ids = own;
     // The parenthesised verb asserts work in flight, so it needs the same
     // evidence the row surfaces now require: a claim names WHO is claimed,
     // agent status says whether anything is happening. Without it this line
@@ -4484,11 +4527,33 @@ window.__bramFooterContextLine = function (claim, proposing, sel, agentStatus) {
           ? " (" + window.__bramClaimVerb(claim.kind, claim.statusLabel) + "…)"
           : "")
     );
-  } else if (selection.length) {
-    parts.push("Selected in Worklist: " + selection.join(", "));
   }
+  if (note) parts.push(note);
   if (proposing) parts.push("Proposing a new item…");
   return parts.join(" · ");
+};
+
+// "Subagent working on a, b": items a subagent holds that aren't ticked.
+// "" when there are none. /__inflight's `delegated` lists each binding.
+window.__bramFooterDelegationNote = function (claim, sel) {
+  var selection = sel || [];
+  var away = window.__bramFooterBoundIds(claim).filter(function (id) {
+    return selection.indexOf(id) < 0;
+  });
+  return away.length ? "Subagent working on " + away.join(", ") : "";
+};
+
+// Every item id a subagent is bound to, from /__inflight's `delegated`.
+window.__bramFooterBoundIds = function (claim) {
+  var bound = [];
+  var list = (claim && claim.delegated) || [];
+  for (var i = 0; i < list.length; i++) {
+    var bids = (list[i] && list[i].ids) || [];
+    for (var j = 0; j < bids.length; j++) {
+      if (bound.indexOf(bids[j]) < 0) bound.push(bids[j]);
+    }
+  }
+  return bound;
 };
 
 // footer-selection-uncheck-in-place: the footer offers each selected id as a
@@ -4496,9 +4561,10 @@ window.__bramFooterContextLine = function (claim, proposing, sel, agentStatus) {
 // While a claim is live the line names the claimed ids instead, and a claimed
 // row can't be unticked in the Worklist either (__bramWorklist2RowSelectable),
 // so the footer doesn't offer it.
+// footer-selection-label-follows-selection: also while only a subagent holds
+// a claim, since rows stay tickable then (__bramWorklist2RowSelectable).
 window.__bramFooterSelectionEditable = function (claim, sel) {
-  var ids = (claim && claim.ids) || [];
-  return !ids.length && !!(sel && sel.length);
+  return !!(sel && sel.length) && window.__bramWorklist2RowSelectable(claim);
 };
 
 // Untick one id from the footer. Writes the shared store the gate bar already

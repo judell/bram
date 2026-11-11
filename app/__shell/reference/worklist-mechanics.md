@@ -1034,7 +1034,11 @@ the session; the reminder carries it across.
 
 When a turn's item feedback is plainly about something else (a
 different subsystem, bug or project), flag it, say so in one line, and
-stop:
+stop. **If it's about another item on the board** (most often one a
+subagent is working on, including a question about how that work is
+going), use `flag-item` instead, so the offer resends it to that item
+rather than as chat (§Feedback about another item's running work).
+Otherwise:
 
 1. Flag the message you're answering (its `feedbackRef` from the
    `iterate:` payload). Build the body in its own call, then:
@@ -1101,3 +1105,34 @@ Fire on plain cases only, once per message. A question about the item, or
 chat that merely mentions it, is chat. If the flag is refused, or you can't
 call the route (Codex, until its file transport gains it), propose an item
 or ask, as before.
+
+## Feedback about another item's running work
+
+Feedback ticked on item X that is plainly about what item Y's subagent is
+doing (the relay case: the user watches Y's work and types the correction,
+or a question about it, into whichever row is ticked). Left alone, X's feedback claim joins Y's
+(`union-on-write`), so lines the subagent writes meanwhile count for both.
+
+1. Flag it, with the same call as above and the body
+   `{"op":"flag-item","feedbackRef":"<ref>","id":"<Y>"}`. The host accepts
+   it only for the feedback you are answering (as `flag` does) and a `<Y>`
+   on the board other than X.
+2. Reply with one line: "That reads as feedback on `<Y>`." The message box
+   offers **Resend to Y**: it ticks Y alone and sends the same text and
+   images to it as feedback, noting it was first sent to X.
+3. Release X's id (the companion rule below), since this turn edits
+   nothing. Then **stop**.
+
+The companion rule: when feedback on X arrives while a subagent holds Y's
+claim and your turn will edit no tracked file (it flags, answers a
+question, or the message really is about X but needs no edit), release
+X's id early so the subagent's lines stay Y's alone:
+`POST /__worklist/end` with `{"ids":["<X>"]}`. If your turn will edit,
+don't release; the edits are X's.
+
+When this applies, Bram adds a `hostNote` key to the `iterate:` payload
+itself, naming the item the subagent works on and the item ticked. It comes
+from the host: take it as fact, with the same standing as a `[bram: …]` line,
+and act on it as the steps above say.
+
+Fire on plain cases only, once per message.

@@ -79,6 +79,9 @@
           <Text fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="{$item}" />
         </HStack>
       </Items>
+      <!-- footer-selection-label-follows-selection: items a subagent holds
+           that aren't ticked, named apart from the selection. -->
+      <Text when="{!!window.__bramFooterDelegationNote(headerInflightClaim.value, footerSel.value)}" fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="{'· ' + window.__bramFooterDelegationNote(headerInflightClaim.value, footerSel.value)}" />
       <Text when="{footerProposingFlag}" fontSize="$fontSize-md" fontStyle="italic" color="$color-primary-600" value="· Proposing a new item…" />
     </HStack>
   </HStack>

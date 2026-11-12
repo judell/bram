@@ -29,8 +29,13 @@ rust-tests-module:
 .PHONY: build-debug
 
 # The debug build, logged to build-log.jsonl (never --release).
+ifeq ($(OS),Windows_NT)
+build-debug:
+	powershell -NoProfile -File scripts\build.ps1
+else
 build-debug:
 	scripts/build.sh
+endif
 
 # Saved by Bram from the agents' `scripts/demo-instance.sh` runs. Replaces:
 #   scripts/demo-instance.sh stop 2>&1 | tail -1  ->  make demo-stop
@@ -44,16 +49,31 @@ build-debug:
 .PHONY: demo-launch demo-stop demo-reset
 
 # Launch the default demo instance.
+ifeq ($(OS),Windows_NT)
+demo-launch:
+	powershell -NoProfile -File scripts\demo-instance.ps1 launch
+else
 demo-launch:
 	scripts/demo-instance.sh launch
+endif
 
 # Stop only the default demo's recorded process.
+ifeq ($(OS),Windows_NT)
+demo-stop:
+	powershell -NoProfile -File scripts\demo-instance.ps1 stop
+else
 demo-stop:
 	scripts/demo-instance.sh stop
+endif
 
 # Restore the active saved scenario, replacing live demo changes.
+ifeq ($(OS),Windows_NT)
+demo-reset:
+	powershell -NoProfile -File scripts\demo-instance.ps1 reset
+else
 demo-reset:
 	scripts/demo-instance.sh reset
+endif
 
 # Saved by Bram from the agents' `cargo fmt` runs. Replaces:
 #   cargo fmt  ->  make rust-fmt

@@ -724,6 +724,21 @@ first call, which is Bram's own fixed cost before any work), the uncached
 tokens a cache-less server would process per call, and the pace. It does not
 say whether a smaller model could do the work, and it does not run one.
 
+**The ledger** (`issue-486`, `token-accounting-ledger-in-sqlite`) keeps every
+call and read once seen, so a call stays counted after its session file is
+gone. It lives at `<app_local_data_dir>/token-ledger/<project key>.db` (on
+macOS `~/Library/Application Support/org.xmlui.bram/token-ledger/`). Deleting
+it is safe: the next request backfills from whatever session files still
+exist, and calls whose files are gone are lost. A call's item is stamped once
+it is 10 minutes old (`ATTRIBUTION_SETTLE_MS`), with one exception: a call at
+or after the start of the oldest claim still open is left unstamped until that
+claim clears, because an open claim reads as 1 ms wide and the call would be
+stamped `chat` for good. A Codex call is keyed `<ordinal>:<time>`, so a rollout
+rewritten in place can't overwrite an old row. If the ledger can't be opened
+or was written by a newer Bram, the report is built from the files and the
+trace says `[token-accounting] op=ledger-fallback reason=open-failed|newer-schema`.
+`op=ledger` is traced only when a pass stored something.
+
 **First baseline (2026-11-12, this repo: 247 Claude sessions with 27,545
 calls, 286 Codex rollouts with 24,530):**
 

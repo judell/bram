@@ -1082,7 +1082,10 @@ impl CodexParser {
         let cache_read = u.cached_input_tokens.unwrap_or(0);
         let cache_creation = u.cache_write_input_tokens.unwrap_or(0);
         self.calls.push(RawCall {
-            key: ordinal.to_string(),
+            // The ordinal alone restarts when a rollout is rewritten in
+            // place; with the record's own time, a new record never lands on
+            // an old row and a replay of the same record still does.
+            key: format!("{ordinal}:{at_ms}"),
             at_ms,
             model: self.model.clone(),
             context,
@@ -3004,12 +3007,14 @@ pub fn conventions_bytes(root: &Path) -> BTreeMap<String, u64> {
 //   parser state a later pass resumes from. A file that shrank or changed
 //   identity is re-read from the start.
 // - Item attribution is stamped at insert from the claim ledger, but only once
-//   a call is `ATTRIBUTION_SETTLE_MS` old: a claim window still open has not
-//   been closed, and a call stamped `chat` against it would stay wrong. Younger
-//   calls stay NULL and attribute from the windows at report time until a later
-//   pass stamps them.
+//   a call is `ATTRIBUTION_SETTLE_MS` old, and never for a call at or after the
+//   start of the oldest claim still open: an open claim reads as 1 ms wide, so
+//   a call stamped against it would be `chat` for good. Those calls stay NULL
+//   and attribute from the windows at report time until a later pass stamps
+//   them (see `stamp_cutoff`).
 
-pub const LEDGER_VERSION: i64 = 1;
+/// 2: Codex call keys became `<ordinal>:<at_ms>`; `open` rewrites v1 rows.
+pub const LEDGER_VERSION: i64 = 2;
 const ATTRIBUTION_SETTLE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3132,6 +3137,10 @@ impl IngestStats {
         self.unchanged += o.unchanged;
         self.ms += o.ms;
     }
+    /// The `op=ledger` line, or None for a pass that stored nothing new.
+    pub fn trace_line(&self) -> Option<String> {
+        (self.inserted() > 0).then(|| self.trace_fields())
+    }
     pub fn trace_fields(&self) -> String {
         format!(
             "op=ledger inserted={} skipped={} sources={} ms={} calls={} unchanged={}",
@@ -3194,20 +3203,44 @@ fn file_inode(path: &Path) -> i64 {
     }
 }
 
+/// Why a report was built without the ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LedgerFallback {
+    OpenFailed,
+    NewerSchema,
+}
+
+impl LedgerFallback {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LedgerFallback::OpenFailed => "open-failed",
+            LedgerFallback::NewerSchema => "newer-schema",
+        }
+    }
+    pub fn trace_fields(self) -> String {
+        format!("op=ledger-fallback reason={}", self.as_str())
+    }
+}
+
 impl Ledger {
     pub fn open(path: &Path) -> Option<Ledger> {
+        Self::open_checked(path).ok()
+    }
+
+    pub fn open_checked(path: &Path) -> Result<Ledger, LedgerFallback> {
+        use LedgerFallback::OpenFailed;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok()?;
+            std::fs::create_dir_all(dir).map_err(|_| OpenFailed)?;
         }
-        let conn = rusqlite::Connection::open(path).ok()?;
+        let conn = rusqlite::Connection::open(path).map_err(|_| OpenFailed)?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .ok()?;
+            .map_err(|_| OpenFailed)?;
         if version > LEDGER_VERSION {
             // Written by a newer Bram: leave it alone.
-            return None;
+            return Err(LedgerFallback::NewerSchema);
         }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sources (
@@ -3241,11 +3274,21 @@ impl Ledger {
                 UNIQUE (source_key, read_key)
              );",
         )
-        .ok()?;
+        .map_err(|_| OpenFailed)?;
         if version < LEDGER_VERSION {
+            if version == 1 {
+                // v1 keyed a Codex call by its ordinal alone. The new key adds
+                // the call's own time, which the row already holds, so the
+                // rewrite is exact and loses nothing (the rollout may be gone).
+                let _ = conn.execute(
+                    "UPDATE calls SET call_key = call_key || ':' || at_ms \
+                     WHERE provider = 'codex' AND instr(call_key, ':') = 0",
+                    [],
+                );
+            }
             let _ = conn.pragma_update(None, "user_version", LEDGER_VERSION);
         }
-        Some(Ledger { conn })
+        Ok(Ledger { conn })
     }
 
     fn stored_source(&self, key: &str) -> Option<StoredSource> {
@@ -3299,9 +3342,21 @@ impl Ledger {
             let resume = stored
                 .as_ref()
                 .filter(|s| s.inode == inode && s.read_to as u64 <= size);
-            let (offset, state) = match resume {
-                Some(s) => (s.read_to as u64, s.state.clone()),
-                None => (0, SourceState::default()),
+            // A re-read from the start keeps the counters: the calls and reads
+            // of the old pass stay stored, so their unreadable lines,
+            // compactions and quota stay counted too.
+            let (offset, state) = match (resume, &stored) {
+                (Some(s), _) => (s.read_to as u64, s.state.clone()),
+                (None, Some(old)) => (
+                    0,
+                    SourceState {
+                        unreadable: old.state.unreadable,
+                        compactions: old.state.compactions,
+                        quota: old.state.quota.clone(),
+                        ..Default::default()
+                    },
+                ),
+                (None, None) => (0, SourceState::default()),
             };
             let Some((chunk, read_to, _)) = read_tail(path, offset) else {
                 continue;
@@ -3343,6 +3398,9 @@ impl Ledger {
             fetched.mtime_ms = mtime_ms;
             fetched.inode = inode;
             fetched.read_to = read_to as i64;
+            if fetched.quota.is_none() {
+                fetched.quota = fetched.state.quota.clone();
+            }
             stamp_attribution(&mut fetched.calls, windows_conn, now_ms);
             stats.sources += 1;
             self.store(fetched, now_ms, &mut stats);
@@ -3374,7 +3432,7 @@ impl Ledger {
             let mut state = stored.map(|s| s.state).unwrap_or_default();
             let Ok(mut stmt) = conn.prepare(
                 "SELECT id, data, time_created, time_updated FROM session_message \
-                 WHERE session_id = ?1 AND type = 'assistant' AND time_updated > ?2 ORDER BY seq",
+                 WHERE session_id = ?1 AND type = 'assistant' AND time_updated >= ?2 ORDER BY seq",
             ) else {
                 continue;
             };
@@ -3388,6 +3446,11 @@ impl Ledger {
             }) else {
                 continue;
             };
+            // `>=`: a second row or revision in the saved millisecond would be
+            // skipped by `>`. The upsert makes the re-read harmless, and rows
+            // in that millisecond that are already stored as they are now are
+            // dropped here, so a quiet pass writes nothing.
+            let prev_unreadable = state.unreadable;
             let mut calls = Vec::new();
             let mut last = after;
             for (id, data, created, updated) in rows.flatten() {
@@ -3395,13 +3458,18 @@ impl Ledger {
                 match opencode_call(&data, created) {
                     Ok(Some(mut c)) => {
                         c.key = id;
+                        if updated == after && self.call_is_stored(&key, &c) {
+                            continue;
+                        }
                         calls.push(c);
                     }
                     Ok(None) => {}
-                    Err(()) => state.unreadable += 1,
+                    // Seen last pass already when it sits on the boundary.
+                    Err(()) if updated > after => state.unreadable += 1,
+                    Err(()) => {}
                 }
             }
-            if calls.is_empty() && state.unreadable == 0 {
+            if calls.is_empty() && state.unreadable == prev_unreadable {
                 stats.unchanged += 1;
                 continue;
             }
@@ -3438,6 +3506,29 @@ impl Ledger {
         }
         stats.ms = started.elapsed().as_millis();
         stats
+    }
+
+    /// Whether `c` is stored under `source_key` exactly as it is now.
+    fn call_is_stored(&self, source_key: &str, c: &RawCall) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM calls WHERE source_key = ?1 AND call_key = ?2 AND model = ?3 \
+                   AND context = ?4 AND input = ?5 AND cache_read = ?6 AND cache_creation = ?7 \
+                   AND output = ?8 AND reasoning IS ?9",
+                rusqlite::params![
+                    source_key,
+                    c.key,
+                    c.model,
+                    c.context as i64,
+                    c.input as i64,
+                    c.cache_read as i64,
+                    c.cache_creation as i64,
+                    c.output as i64,
+                    c.reasoning.map(|r| r as i64),
+                ],
+                |_| Ok(()),
+            )
+            .is_ok()
     }
 
     fn store(&mut self, f: Fetched, now_ms: i64, stats: &mut IngestStats) {
@@ -3553,7 +3644,9 @@ impl Ledger {
     pub fn stamp_pending(&mut self, windows_conn: Option<&rusqlite::Connection>) {
         let Some(wc) = windows_conn else { return };
         let _guard = INGEST_LOCK.lock();
-        let cutoff = now_epoch_ms() - ATTRIBUTION_SETTLE_MS;
+        let Some(cutoff) = stamp_cutoff(wc, now_epoch_ms()) else {
+            return;
+        };
         let rows: Vec<(i64, i64)> = {
             let Ok(mut stmt) = self
                 .conn
@@ -3714,6 +3807,26 @@ fn now_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The latest call time that may be stamped now: `ATTRIBUTION_SETTLE_MS` ago,
+/// and before the start of the oldest claim still open. An open claim reads as
+/// 1 ms wide (`claims_overlapping`), so a call inside it would be stamped
+/// `chat` and never revisited. None when the claims can't be read: stamp
+/// nothing rather than guess.
+fn stamp_cutoff(windows_conn: &rusqlite::Connection, now_ms: i64) -> Option<i64> {
+    let open_from: Option<i64> = windows_conn
+        .query_row(
+            "SELECT MIN(written_at_ms) FROM claims WHERE cleared_at_ms IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let settled = now_ms - ATTRIBUTION_SETTLE_MS;
+    Some(match open_from {
+        Some(from) => settled.min(from - 1),
+        None => settled,
+    })
+}
+
 /// Stamp the settled calls from the claim ledger; the rest stay unstamped.
 fn stamp_attribution(
     calls: &mut [RawCall],
@@ -3721,7 +3834,9 @@ fn stamp_attribution(
     now_ms: i64,
 ) {
     let Some(wc) = windows_conn else { return };
-    let cutoff = now_ms - ATTRIBUTION_SETTLE_MS;
+    let Some(cutoff) = stamp_cutoff(wc, now_ms) else {
+        return;
+    };
     let (from, to) = calls
         .iter()
         .filter(|c| c.at_ms <= cutoff)
@@ -3851,12 +3966,20 @@ pub fn run(
     include_calls: bool,
     windows_conn: Option<&rusqlite::Connection>,
     ledger_path: Option<&Path>,
-) -> (Report, usize, Option<IngestStats>) {
+) -> (Report, usize, Option<IngestStats>, Option<LedgerFallback>) {
     let started = std::time::Instant::now();
     let sources = discover(root);
     let opencode = crate::opencode_open_db();
     let mut stats = None;
-    let mut ledger = ledger_path.and_then(Ledger::open);
+    let mut fallback = None;
+    let mut ledger = match ledger_path.map(Ledger::open_checked) {
+        Some(Ok(l)) => Some(l),
+        Some(Err(why)) => {
+            fallback = Some(why);
+            None
+        }
+        None => None,
+    };
     let files: Vec<Arc<ParsedFile>> = match ledger.as_mut() {
         Some(l) => {
             let mut st = l.ingest_sources(&sources, windows_conn);
@@ -3908,7 +4031,7 @@ pub fn run(
         lib_rs_now(root),
     );
     report.ms = started.elapsed().as_millis();
-    (report, n_files, stats)
+    (report, n_files, stats, fallback)
 }
 
 fn report_json(report: &Report) -> serde_json::Value {
@@ -3920,7 +4043,7 @@ pub fn run_cli(root: &Path, since: Option<&str>, include_calls: bool) -> serde_j
     let since_ms = since.and_then(crate::parse_iso_to_epoch_ms);
     let conn = open_state_db_read_only(root);
     let ledger = local_data_dir().map(|d| ledger_db_path_in(&d, root));
-    let (report, _, _) = run(
+    let (report, _, _, _) = run(
         root,
         since_ms,
         None,
@@ -3960,7 +4083,7 @@ pub fn route<R: tauri::Runtime>(app: &tauri::AppHandle<R>, query: &str) -> Vec<u
     let include_calls = query.split('&').any(|p| p == "calls=1");
     let conn = crate::worklist_state_open(app);
     let ledger = ledger_path_for_app(app, &root);
-    let (report, n_files, stats) = run(
+    let (report, n_files, stats, fallback) = run(
         &root,
         since_ms,
         session_filter,
@@ -3969,8 +4092,11 @@ pub fn route<R: tauri::Runtime>(app: &tauri::AppHandle<R>, query: &str) -> Vec<u
         ledger.as_deref(),
     );
     if crate::bram_trace_enabled() {
-        if let Some(st) = &stats {
-            crate::append_bram_trace_line(app, "token-accounting", &st.trace_fields());
+        if let Some(line) = stats.as_ref().and_then(|st| st.trace_line()) {
+            crate::append_bram_trace_line(app, "token-accounting", &line);
+        }
+        if let Some(fb) = fallback {
+            crate::append_bram_trace_line(app, "token-accounting", &fb.trace_fields());
         }
         let calls: usize = report.sessions.iter().map(|s| s.calls).sum();
         crate::append_bram_trace_line(
@@ -4255,8 +4381,8 @@ fn ledger_session_turn_end<R: tauri::Runtime>(
     };
     let conn = crate::worklist_state_open(app);
     let stats = ledger.ingest_sources(&session_sources(provider, path), conn.as_ref());
-    if crate::bram_trace_enabled() {
-        crate::append_bram_trace_line(app, "token-accounting", &stats.trace_fields());
+    if let (true, Some(line)) = (crate::bram_trace_enabled(), stats.trace_line()) {
+        crate::append_bram_trace_line(app, "token-accounting", &line);
     }
 }
 
@@ -4314,8 +4440,8 @@ pub fn sample_opencode_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>, si
         {
             let wc = crate::worklist_state_open(app);
             let stats = ledger.ingest_opencode(&conn, &root, Some(sid), wc.as_ref());
-            if crate::bram_trace_enabled() {
-                crate::append_bram_trace_line(app, "token-accounting", &stats.trace_fields());
+            if let (true, Some(line)) = (crate::bram_trace_enabled(), stats.trace_line()) {
+                crate::append_bram_trace_line(app, "token-accounting", &line);
             }
         }
     }
@@ -4382,8 +4508,8 @@ pub fn sample_antigravity_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
     {
         let wc = crate::worklist_state_open(app);
         let stats = ledger.ingest_sources(&sources, wc.as_ref());
-        if crate::bram_trace_enabled() {
-            crate::append_bram_trace_line(app, "token-accounting", &stats.trace_fields());
+        if let (true, Some(line)) = (crate::bram_trace_enabled(), stats.trace_line()) {
+            crate::append_bram_trace_line(app, "token-accounting", &line);
         }
     }
     if !crate::bram_trace_enabled() {

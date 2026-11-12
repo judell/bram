@@ -1174,6 +1174,370 @@ fn old_calls_are_stamped_from_the_claims_and_young_ones_are_left_to_report_time(
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn claims_db() -> rusqlite::Connection {
+    let claims = rusqlite::Connection::open_in_memory().unwrap();
+    claims
+        .execute_batch(
+            "CREATE TABLE claims (written_at_ms INTEGER, cleared_at_ms INTEGER, kind TEXT, ids TEXT);",
+        )
+        .unwrap();
+    claims
+}
+
+fn attribution_of(ledger: &Ledger, key: &str) -> Option<Attribution> {
+    ledger
+        .load(None)
+        .iter()
+        .flat_map(|f| f.calls.iter())
+        .find(|c| c.key == key)
+        .unwrap()
+        .attribution
+        .clone()
+}
+
+#[test]
+fn a_call_inside_an_open_claim_stays_unstamped_until_the_claim_clears() {
+    let dir = ledger_dir("openclaim");
+    let src = claude_source(&dir);
+    let now = now_epoch_ms();
+    let before = chrono_like(now - 5_000_000);
+    let inside = chrono_like(now - 3_600_000);
+    append(
+        src.path(),
+        &[
+            assistant("msg_before", &before, 1, 1, 0, 1),
+            assistant("msg_inside", &inside, 1, 1, 0, 1),
+        ],
+    );
+    let claims = claims_db();
+    claims
+        .execute(
+            "INSERT INTO claims VALUES (?1, NULL, 'approved', '[\"item-a\"]')",
+            [now - 4_000_000],
+        )
+        .unwrap();
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src], Some(&claims));
+    assert_eq!(
+        attribution_of(&ledger, "msg_before"),
+        Some(Attribution::Chat)
+    );
+    assert_eq!(attribution_of(&ledger, "msg_inside"), None);
+    // the second route, a report mid-turn, must not stamp it either
+    ledger.stamp_pending(Some(&claims));
+    assert_eq!(attribution_of(&ledger, "msg_inside"), None);
+    claims
+        .execute("UPDATE claims SET cleared_at_ms = ?1", [now - 3_000_000])
+        .unwrap();
+    ledger.stamp_pending(Some(&claims));
+    assert_eq!(
+        attribution_of(&ledger, "msg_inside"),
+        Some(Attribution::Items(vec!["item-a".into()]))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stamp_pending_stamps_old_unstamped_calls_and_skips_young_ones() {
+    let dir = ledger_dir("pending");
+    let src = claude_source(&dir);
+    let now = now_epoch_ms();
+    append(
+        src.path(),
+        &[
+            assistant("msg_old", &chrono_like(now - 3_600_000), 1, 1, 0, 1),
+            assistant("msg_new", &chrono_like(now - 1_000), 1, 1, 0, 1),
+        ],
+    );
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src], None);
+    assert_eq!(attribution_of(&ledger, "msg_old"), None);
+    ledger.stamp_pending(None);
+    assert_eq!(attribution_of(&ledger, "msg_old"), None, "no claims, no-op");
+    let claims = claims_db();
+    claims
+        .execute(
+            "INSERT INTO claims VALUES (?1, ?2, 'approved', '[\"item-a\"]')",
+            [now - 4_000_000, now - 3_000_000],
+        )
+        .unwrap();
+    ledger.stamp_pending(Some(&claims));
+    assert_eq!(
+        attribution_of(&ledger, "msg_old"),
+        Some(Attribution::Items(vec!["item-a".into()]))
+    );
+    assert_eq!(attribution_of(&ledger, "msg_new"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn session_sources_names_a_claude_transcript_with_its_subagents_and_a_codex_rollout() {
+    let dir = ledger_dir("sessrc");
+    let main = dir.join("abc.jsonl");
+    append(
+        &main,
+        &[assistant("m", "2026-11-01T10:00:00.000Z", 1, 1, 0, 1)],
+    );
+    let subs = dir.join("abc").join("subagents");
+    std::fs::create_dir_all(&subs).unwrap();
+    append(&subs.join("agent-7.jsonl"), &[]);
+    append(&subs.join("notes.jsonl"), &[]);
+    let got = session_sources("claude", &main);
+    assert_eq!(got.len(), 2, "one subagent file and the main file");
+    assert!(matches!(
+        &got[0],
+        Source::ClaudeSubagent { id, agent, .. } if id == "abc" && agent == "7"
+    ));
+    assert!(matches!(&got[1], Source::ClaudeMain { id, .. } if id == "abc"));
+
+    let rollout = dir.join("rollout-z.jsonl");
+    append(
+        &rollout,
+        &[r#"{"type":"session_meta","timestamp":"2026-11-09T14:59:00.000Z","payload":{"id":"cx9","cwd":"/r"}}"#.to_string()],
+    );
+    let got = session_sources("codex", &rollout);
+    assert_eq!(got.len(), 1);
+    assert!(matches!(&got[0], Source::Codex { id, .. } if id == "cx9"));
+    let bare = dir.join("rollout-q.jsonl");
+    append(&bare, &["{}".to_string()]);
+    let got = session_sources("codex", &bare);
+    assert!(matches!(&got[0], Source::Codex { id, .. } if id == "rollout-q"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn codex_rollout(dir: &Path, name: &str) -> (PathBuf, Source) {
+    let path = dir.join(name);
+    (
+        path.clone(),
+        Source::Codex {
+            id: "fallback".into(),
+            path,
+        },
+    )
+}
+
+const CX_META: &str =
+    r#"{"type":"session_meta","timestamp":"2026-11-09T14:59:00.000Z","payload":{"id":"cx1"}}"#;
+const CX_CTX: &str = r#"{"type":"turn_context","timestamp":"2026-11-09T14:59:01.000Z","payload":{"model":"gpt-5.5"}}"#;
+const CX_COMPACT: &str =
+    r#"{"type":"compacted","timestamp":"2026-11-09T15:00:06.000Z","payload":{}}"#;
+
+#[test]
+fn a_codex_rollout_rewritten_in_place_keeps_old_calls_and_counters() {
+    let dir = ledger_dir("cxshrink");
+    let (path, src) = codex_rollout(&dir, "rollout-x.jsonl");
+    append(
+        &path,
+        &[
+            CX_META.to_string(),
+            CX_CTX.to_string(),
+            codex_count("2026-11-09T15:00:05.000Z", 2, 1000, 900, 800, 100),
+            codex_count("2026-11-09T15:00:09.000Z", 3, 2400, 1300, 1200, 100),
+            CX_COMPACT.to_string(),
+            "not json".to_string(),
+        ],
+    );
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src.clone()], None);
+    assert_eq!(count(&ledger, "calls"), 2);
+    // Replaced by a shorter rollout that reuses ordinals 2 and 3.
+    std::fs::remove_file(&path).unwrap();
+    append(
+        &path,
+        &[
+            CX_META.to_string(),
+            CX_CTX.to_string(),
+            codex_count("2026-11-10T09:00:05.000Z", 2, 500, 400, 0, 20),
+            CX_COMPACT.to_string(),
+        ],
+    );
+    let st = ledger.ingest_sources(&[src], None);
+    assert_eq!(st.calls_inserted, 1);
+    assert_eq!(
+        count(&ledger, "calls"),
+        3,
+        "the old two are not overwritten"
+    );
+    let pf = ledger.load(None);
+    assert_eq!(pf[0].calls[0].context, 900, "old call keeps its own usage");
+    assert_eq!(pf[0].calls[0].at_ms, t("2026-11-09T15:00:05.000Z"));
+    assert_eq!(pf[0].calls[2].context, 400);
+    assert_eq!(pf[0].compactions, 2, "counters add up across the rewrite");
+    assert_eq!(pf[0].unreadable, 1);
+    assert!(pf[0].quota.is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_codex_rollout_replaced_by_identical_bytes_is_not_counted_twice() {
+    let dir = ledger_dir("cxreplay");
+    let (path, src) = codex_rollout(&dir, "rollout-x.jsonl");
+    let lines = [
+        CX_META.to_string(),
+        CX_CTX.to_string(),
+        codex_count("2026-11-09T15:00:05.000Z", 2, 1000, 900, 800, 100),
+    ];
+    append(&path, &lines);
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src.clone()], None);
+    std::fs::remove_file(&path).unwrap();
+    append(&path, &lines);
+    let st = ledger.ingest_sources(&[src], None);
+    assert_eq!(st.calls_inserted, 0);
+    assert_eq!(count(&ledger, "calls"), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_v1_ledger_has_its_codex_keys_rewritten_so_a_reread_does_not_double_count() {
+    let dir = ledger_dir("cxv1");
+    let (path, src) = codex_rollout(&dir, "rollout-x.jsonl");
+    let lines = [
+        CX_META.to_string(),
+        CX_CTX.to_string(),
+        codex_count("2026-11-09T15:00:05.000Z", 2, 1000, 900, 800, 100),
+    ];
+    append(&path, &lines);
+    let db = dir.join("l.db");
+    {
+        let mut ledger = Ledger::open(&db).unwrap();
+        ledger.ingest_sources(&[src.clone()], None);
+        // back to what v1 wrote
+        ledger
+            .conn
+            .execute("UPDATE calls SET call_key = '2'", [])
+            .unwrap();
+        ledger.conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let mut ledger = Ledger::open(&db).unwrap();
+    let key: String = ledger
+        .conn
+        .query_row("SELECT call_key FROM calls", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(key, format!("2:{}", t("2026-11-09T15:00:05.000Z")));
+    std::fs::remove_file(&path).unwrap();
+    append(&path, &lines);
+    let st = ledger.ingest_sources(&[src], None);
+    assert_eq!(st.calls_inserted, 0);
+    assert_eq!(count(&ledger, "calls"), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn opencode_db() -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session_v2 (id TEXT, parent_id TEXT, directory TEXT);
+         CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER,
+            data TEXT, time_created INTEGER, time_updated INTEGER);
+         INSERT INTO session_v2 VALUES ('ses_1', NULL, '/r');",
+    )
+    .unwrap();
+    conn
+}
+
+fn oc_message(conn: &rusqlite::Connection, id: &str, seq: i64, data: &str, updated: i64) {
+    conn.execute(
+        "INSERT INTO session_message VALUES (?1, 'ses_1', 'assistant', ?2, ?3, ?4, ?4)",
+        rusqlite::params![id, seq, data, updated],
+    )
+    .unwrap();
+}
+
+fn oc_data(output: u64) -> String {
+    format!(
+        r#"{{"time":{{"created":1794441583052}},"model":{{"id":"m"}},"tokens":{{"input":4,"output":{output},"cache":{{"read":10,"write":0}}}},"content":[]}}"#
+    )
+}
+
+#[test]
+fn opencode_rows_in_the_saved_millisecond_are_read_on_the_next_pass() {
+    let dir = ledger_dir("ocms");
+    let oc = opencode_db();
+    let root = Path::new("/r");
+    oc_message(&oc, "m1", 1, &oc_data(5), 100);
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    let first = ledger.ingest_opencode(&oc, root, None, None);
+    assert_eq!(first.calls_inserted, 1);
+    // a second row in the same millisecond
+    oc_message(&oc, "m2", 2, &oc_data(6), 100);
+    let second = ledger.ingest_opencode(&oc, root, None, None);
+    assert_eq!(second.calls_inserted, 1, "same-ms row is not skipped");
+    assert_eq!(count(&ledger, "calls"), 2);
+    // nothing new: no write, counted unchanged
+    let third = ledger.ingest_opencode(&oc, root, None, None);
+    assert_eq!(
+        (third.sources, third.unchanged, third.inserted()),
+        (0, 1, 0)
+    );
+    assert!(third.trace_line().is_none());
+    // a revision of m2 in the same millisecond is picked up
+    oc.execute(
+        "UPDATE session_message SET data = ?1 WHERE id = 'm2'",
+        [oc_data(60)],
+    )
+    .unwrap();
+    let fourth = ledger.ingest_opencode(&oc, root, None, None);
+    assert_eq!(fourth.calls_inserted, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unreadable_opencode_row_does_not_force_a_rewrite_every_pass() {
+    let dir = ledger_dir("ocunread");
+    let oc = opencode_db();
+    let root = Path::new("/r");
+    oc_message(&oc, "m1", 1, &oc_data(5), 100);
+    oc_message(&oc, "bad", 2, "{not json", 200);
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    let first = ledger.ingest_opencode(&oc, root, None, None);
+    assert_eq!(first.sources, 1);
+    for _ in 0..2 {
+        let again = ledger.ingest_opencode(&oc, root, None, None);
+        assert_eq!((again.sources, again.unchanged), (0, 1));
+    }
+    let unreadable: i64 = ledger
+        .conn
+        .query_row("SELECT unreadable FROM sources", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(unreadable, 1, "counted once, not once per pass");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_ledger_fallback_names_why_it_was_needed() {
+    let dir = ledger_dir("fallback");
+    // newer schema
+    let newer = dir.join("newer.db");
+    {
+        let conn = rusqlite::Connection::open(&newer).unwrap();
+        conn.pragma_update(None, "user_version", LEDGER_VERSION + 1)
+            .unwrap();
+    }
+    assert_eq!(
+        Ledger::open_checked(&newer).err(),
+        Some(LedgerFallback::NewerSchema)
+    );
+    // a path that cannot be a database: its parent is a file
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, "x").unwrap();
+    assert_eq!(
+        Ledger::open_checked(&blocker.join("l.db")).err(),
+        Some(LedgerFallback::OpenFailed)
+    );
+    assert_eq!(
+        LedgerFallback::NewerSchema.trace_fields(),
+        "op=ledger-fallback reason=newer-schema"
+    );
+    assert_eq!(
+        LedgerFallback::OpenFailed.trace_fields(),
+        "op=ledger-fallback reason=open-failed"
+    );
+    let (_, _, stats, fb) = run(&dir, None, None, false, None, Some(&newer));
+    assert!(stats.is_none());
+    assert_eq!(fb, Some(LedgerFallback::NewerSchema));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn chrono_like(ms: i64) -> String {
     // "YYYY-MM-DDTHH:MM:SS.mmmZ" for an epoch ms, via the days-from-civil inverse.
     let secs = ms.div_euclid(1000);

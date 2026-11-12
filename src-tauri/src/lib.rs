@@ -33678,7 +33678,20 @@ fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, 
 // the ref graph the same way. Pure so the rule is testable without a repo:
 // `containing` is, per unpushed commit, every branch (local short names and
 // remote-tracking `origin/...`) that contains it.
-fn push_withheld_branches(current: &str, default: &str, containing: &[Vec<String>]) -> Vec<String> {
+//
+// push-withheld-ignores-local-only-branches: only a branch that has been
+// pushed can carry commits to the default branch through review. `locals`
+// maps each local branch to whether it has an upstream. A local branch counts
+// when it has one, or when `origin/<name>` contains the same commit; a branch
+// that has never left this machine doesn't withhold Push (2026-11-12: a
+// local `issue-483-save-as-task` that `main` had fast-forwarded to dimmed
+// Push). Names not in `locals` are remote-tracking and count as before.
+fn push_withheld_branches(
+    current: &str,
+    default: &str,
+    containing: &[Vec<String>],
+    locals: &std::collections::HashMap<String, bool>,
+) -> Vec<String> {
     if current != default {
         return Vec::new();
     }
@@ -33690,10 +33703,20 @@ fn push_withheld_branches(current: &str, default: &str, containing: &[Vec<String
         "origin/HEAD".to_string(),
         "origin".to_string(),
     ];
+    let excluded = &excluded;
     let mut out: Vec<String> = containing
         .iter()
-        .flatten()
-        .filter(|b| !b.is_empty() && !b.contains("->") && !excluded.contains(b))
+        .flat_map(|list| {
+            list.iter().filter(move |b| {
+                if b.is_empty() || b.contains("->") || excluded.contains(b) {
+                    return false;
+                }
+                match locals.get(b.as_str()) {
+                    Some(has_upstream) => *has_upstream || list.contains(&format!("origin/{}", b)),
+                    None => true,
+                }
+            })
+        })
         .cloned()
         .collect();
     out.sort();
@@ -33738,7 +33761,28 @@ fn push_withheld_for_status<R: tauri::Runtime>(
             .unwrap_or_default()
         })
         .collect();
-    let branches = push_withheld_branches(branch, &default, &containing);
+    // Each local branch and whether it has an upstream (an empty
+    // %(upstream) means it has never been pushed with tracking).
+    let locals: std::collections::HashMap<String, bool> = git_run(
+        app,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(upstream)",
+            "refs/heads",
+        ],
+    )
+    .map(|out| {
+        out.lines()
+            .filter_map(|l| {
+                let mut parts = l.splitn(2, '\t');
+                let name = parts.next()?.trim();
+                let upstream = parts.next().unwrap_or("").trim();
+                (!name.is_empty()).then(|| (name.to_string(), !upstream.is_empty()))
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    let branches = push_withheld_branches(branch, &default, &containing, &locals);
     if branches.is_empty() {
         return None;
     }
@@ -110928,9 +110972,15 @@ mod preview_shim_tests {
 #[cfg(test)]
 mod push_withheld_tests {
     use super::push_withheld_branches;
+    use std::collections::HashMap;
 
     fn v(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    // Local branches and whether each has an upstream.
+    fn locals(xs: &[(&str, bool)]) -> HashMap<String, bool> {
+        xs.iter().map(|(n, u)| (n.to_string(), *u)).collect()
     }
 
     #[test]
@@ -110939,8 +110989,9 @@ mod push_withheld_tests {
             v(&["main", "pr-fix"]),
             v(&["main", "pr-fix", "origin/pr-fix"]),
         ];
+        let l = locals(&[("main", true), ("pr-fix", true)]);
         assert_eq!(
-            push_withheld_branches("main", "main", &c),
+            push_withheld_branches("main", "main", &c, &l),
             v(&["origin/pr-fix", "pr-fix"])
         );
     }
@@ -110948,26 +110999,63 @@ mod push_withheld_tests {
     #[test]
     fn withheld_when_only_some_ride_a_branch() {
         let c = vec![v(&["main"]), v(&["main", "pr-fix"])];
-        assert_eq!(push_withheld_branches("main", "main", &c), v(&["pr-fix"]));
+        let l = locals(&[("main", true), ("pr-fix", true)]);
+        assert_eq!(
+            push_withheld_branches("main", "main", &c, &l),
+            v(&["pr-fix"])
+        );
     }
 
     #[test]
     fn not_withheld_off_the_default_branch() {
         let c = vec![v(&["pr-fix", "other"])];
-        assert!(push_withheld_branches("pr-fix", "main", &c).is_empty());
+        let l = locals(&[("pr-fix", true), ("other", true)]);
+        assert!(push_withheld_branches("pr-fix", "main", &c, &l).is_empty());
     }
 
     // #329's shape: plain work on main, no other branch. Push stays live.
     #[test]
     fn not_withheld_for_plain_work_on_main() {
         let c = vec![v(&["main"]), v(&["main"])];
-        assert!(push_withheld_branches("main", "main", &c).is_empty());
+        let l = locals(&[("main", true)]);
+        assert!(push_withheld_branches("main", "main", &c, &l).is_empty());
     }
 
     #[test]
     fn default_and_origin_head_are_not_another_branch() {
         let c = vec![v(&["main", "origin/main", "origin/HEAD", "origin"])];
-        assert!(push_withheld_branches("main", "main", &c).is_empty());
+        let l = locals(&[("main", true)]);
+        assert!(push_withheld_branches("main", "main", &c, &l).is_empty());
+    }
+
+    // push-withheld-ignores-local-only-branches, the 2026-11-12 case: main
+    // fast-forwarded to a local branch that was never pushed. No review can
+    // happen through it, so Push stays live.
+    #[test]
+    fn local_only_branch_does_not_withhold() {
+        let c = vec![v(&["main", "issue-483-save-as-task"])];
+        let l = locals(&[("main", true), ("issue-483-save-as-task", false)]);
+        assert!(push_withheld_branches("main", "main", &c, &l).is_empty());
+    }
+
+    // A local branch pushed without tracking still counts, because
+    // origin/<name> holds the commit.
+    #[test]
+    fn untracked_local_branch_counts_when_origin_has_it() {
+        let c = vec![v(&["main", "pr-fix", "origin/pr-fix"])];
+        let l = locals(&[("main", true), ("pr-fix", false)]);
+        assert_eq!(
+            push_withheld_branches("main", "main", &c, &l),
+            v(&["origin/pr-fix", "pr-fix"])
+        );
+    }
+
+    // A local branch name with a slash is still local, not remote-tracking.
+    #[test]
+    fn local_branch_with_a_slash_is_still_local() {
+        let c = vec![v(&["main", "feature/x"])];
+        let l = locals(&[("main", true), ("feature/x", false)]);
+        assert!(push_withheld_branches("main", "main", &c, &l).is_empty());
     }
 }
 

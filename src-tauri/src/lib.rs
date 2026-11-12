@@ -112503,6 +112503,98 @@ fn task_step_is_data(toks: &[&str]) -> bool {
     toks.get(1) == Some(&"=") || toks.first().is_some_and(|t| t.ends_with('='))
 }
 
+// The argument at the start of `s`: a quoted string's contents (`"…"` with
+// `\"` and `""` unescaped, `'…'` with `''` unescaped), anything after the
+// closing quote dropped (output piped onward is not the task); unquoted, the
+// rest of `s`.
+fn task_take_wrapped_arg(s: &str) -> String {
+    let s = s.trim_start();
+    let Some(q) = s.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+        return s.to_string();
+    };
+    let mut out = String::new();
+    let mut chars = s[1..].chars().peekable();
+    while let Some(ch) = chars.next() {
+        if q == '"' && ch == '\\' && chars.peek() == Some(&'"') {
+            out.push('"');
+            chars.next();
+        } else if ch == q {
+            if chars.peek() == Some(&q) {
+                out.push(q);
+                chars.next();
+            } else {
+                break;
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+// issue-483-tasks-unwrap-shell-wrappers: a step that only wraps another
+// command (`powershell -Command "…"`, `cmd /c '…'`, `call x`, `timeout N x`)
+// is replaced by the steps of the command inside, so the report judges what
+// ran, not the wrapper. Each result may carry a bucket it must go to (a
+// Windows `timeout /t` wait, a `call` of the VS environment script). A step
+// that wraps nothing comes back as itself.
+fn task_expand_wrappers(text: &str, depth: u8) -> Vec<(String, Option<usize>)> {
+    let itself = || vec![(text.to_string(), None)];
+    if depth >= 3 {
+        return itself();
+    }
+    let toks = task_tokens(text);
+    let Some(first) = toks.first().copied() else {
+        return itself();
+    };
+    // Where a token starts in `text` (task_tokens returns slices of it).
+    let offset = |t: &str| t.as_ptr() as usize - text.as_ptr() as usize;
+    let base_raw = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    let base_owned = base_raw.to_ascii_lowercase();
+    let base = base_owned.strip_suffix(".exe").unwrap_or(&base_owned);
+    let inner = match base {
+        "powershell" | "pwsh" => toks
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case("-command") || t.eq_ignore_ascii_case("-c"))
+            .and_then(|i| toks.get(i + 1))
+            .map(|t| task_take_wrapped_arg(&text[offset(t)..])),
+        "cmd" => toks
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case("/c") || t.eq_ignore_ascii_case("//c"))
+            .and_then(|i| toks.get(i + 1))
+            .map(|t| task_take_wrapped_arg(&text[offset(t)..])),
+        "call" => {
+            let lower = text.to_ascii_lowercase();
+            if lower.contains("vsdevcmd") || lower.contains("vcvars") {
+                return vec![(text.to_string(), Some(3))];
+            }
+            toks.get(1).map(|t| text[offset(t)..].to_string())
+        }
+        "timeout" => {
+            let Some(arg) = toks.get(1) else {
+                return itself();
+            };
+            if arg.starts_with('/') {
+                // Windows' `timeout /t N` is a wait.
+                return vec![(text.to_string(), Some(3))];
+            }
+            let secs = arg.trim_end_matches(['s', 'm', 'h']);
+            if secs.is_empty() || !secs.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return itself();
+            }
+            toks.get(2).map(|t| text[offset(t)..].to_string())
+        }
+        _ => None,
+    };
+    let Some(inner) = inner.filter(|s| !s.trim().is_empty()) else {
+        return itself();
+    };
+    task_split_steps(&inner)
+        .iter()
+        .flat_map(|s| task_expand_wrappers(s, depth + 1))
+        .collect()
+}
+
 // `runnable(first_word)`: whether the step's first word is something you
 // can run (task_first_word_runnable in production). A step that isn't is
 // counted as notACommand, not clustered (issue-483-tasks-runnable-first-word).
@@ -112520,9 +112612,12 @@ fn task_candidates_core_with(
     for rec in steps {
         report.commands += 1;
         sessions.insert(rec.session.as_str());
-        for raw in task_split_steps(&rec.command) {
+        let expanded: Vec<(String, Option<usize>)> = task_split_steps(&rec.command)
+            .iter()
+            .flat_map(|raw| task_expand_wrappers(&task_normalize_step(raw, root), 0))
+            .collect();
+        for (text, forced) in expanded {
             report.steps += 1;
-            let text = task_normalize_step(&raw, root);
             // A dry run (`make -n`) prints a recipe without running it: not a
             // run of the task, and not a command worth listing.
             if task_make_dry_run(&text) {
@@ -112540,7 +112635,7 @@ fn task_candidates_core_with(
                     e.1.insert(rec.session.clone());
                 }
             }
-            let bucket = task_bucket(&text).or_else(|| {
+            let bucket = forced.or_else(|| task_bucket(&text)).or_else(|| {
                 let toks = task_tokens(&text);
                 let first = toks.first().copied().unwrap_or("");
                 (task_step_is_data(&toks) || !runnable(first)).then_some(TASK_BUCKET_NOT_A_COMMAND)
@@ -113710,6 +113805,87 @@ mod task_candidates_tests {
         assert!(r.excluded[TASK_BUCKET_NOT_A_COMMAND] > 0);
         assert!(task_step_is_data(&["route", "=", "'x'"]));
         assert!(!task_step_is_data(&["cargo", "test"]));
+    }
+
+    // issue-483-tasks-unwrap-shell-wrappers: this repo's Windows wrapper rows.
+    #[test]
+    fn wrappers_are_judged_by_the_command_inside() {
+        let texts = |s: &str| -> Vec<(String, Option<usize>)> { task_expand_wrappers(s, 0) };
+        // cmd /c around the VS environment and a test run: the env setup is a
+        // chore, the test run is cargo test.
+        let got = texts(
+            r#"cmd /c 'call "C:\Program Files (x86)\VS\VsDevCmd.bat" -arch=x64 >nul && cargo test --lib --target x86_64-pc-windows-msvc'"#,
+        );
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].1, Some(3));
+        assert_eq!(
+            got[1],
+            (
+                "cargo test --lib --target x86_64-pc-windows-msvc".to_string(),
+                None
+            )
+        );
+        // powershell -Command: the quoted script, output piped after it dropped.
+        assert_eq!(
+            texts(
+                r#"powershell -NoProfile -Command "Get-Process bram -ErrorAction SilentlyContinue | Select-Object Id" | tr -s ' '"#
+            ),
+            vec![(
+                "Get-Process bram -ErrorAction SilentlyContinue | Select-Object Id".to_string(),
+                None
+            )]
+        );
+        // Escaped quotes inside the script come back as plain quotes.
+        assert_eq!(
+            texts(
+                r#"powershell -NoProfile -c "Get-CimInstance Win32_Process -Filter \"Name='bram.exe'\"""#
+            ),
+            vec![(
+                "Get-CimInstance Win32_Process -Filter \"Name='bram.exe'\"".to_string(),
+                None
+            )]
+        );
+        // GNU timeout runs the command after it; Windows' timeout /t waits.
+        assert_eq!(
+            texts("timeout 420 node run5.mjs"),
+            vec![("node run5.mjs".to_string(), None)]
+        );
+        assert_eq!(
+            texts("timeout /t 5"),
+            vec![("timeout /t 5".to_string(), Some(3))]
+        );
+        // -File already keys by its script; not a wrapper.
+        assert_eq!(
+            texts("powershell -NoProfile -File scripts/build.ps1"),
+            vec![(
+                "powershell -NoProfile -File scripts/build.ps1".to_string(),
+                None
+            )]
+        );
+        // End to end: the cmd-wrapped runs count toward cargo test, and the
+        // wrappers aren't rows.
+        let mut steps = Vec::new();
+        for s in ["a", "b", "c"] {
+            steps.push(step(
+                r#"cmd /c 'call "C:\VS\VsDevCmd.bat" >nul && cargo test --lib'"#,
+                s,
+            ));
+            steps.push(step(
+                r#"powershell -NoProfile -Command "Get-Process bram | Format-Table""#,
+                s,
+            ));
+            steps.push(step(
+                "timeout 120 python -I -m unittest discover -s scripts/tests",
+                s,
+            ));
+        }
+        let r = task_candidates_core("/r", &steps);
+        let keys: Vec<&str> = r.candidates.iter().map(|c| c.key.as_str()).collect();
+        assert!(keys.contains(&"cargo test"), "{keys:?}");
+        assert!(keys.contains(&"python -m unittest"), "{keys:?}");
+        for w in ["cmd", "powershell -Command", "timeout", "call"] {
+            assert!(!keys.contains(&w), "{w} listed: {keys:?}");
+        }
     }
 
     #[test]

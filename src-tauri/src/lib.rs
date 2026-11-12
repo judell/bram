@@ -16,6 +16,10 @@ mod search_index;
 // phase. See worklist_state.rs's module doc comment.
 mod worklist_state;
 
+// issue-486-token-accounting-instrument: per-call token accounting, its own
+// module so the instrument for #487 does not grow lib.rs.
+mod token_accounting;
+
 // authorization-step-0-grant-semantics: the target grant lifecycle (docs/authorization.md, "Target grant semantics"). Pure and not yet called; migration step 1 is its first caller.
 mod grant_lifecycle;
 
@@ -834,6 +838,32 @@ fn parse_cli_flags() {
                 std::process::exit(1);
             }
             let report = task_candidates_for_cli(root);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
+            );
+            std::process::exit(0);
+        }
+        // issue-486-token-accounting-instrument: the same report as
+        // GET /__token-accounting, headless: `--token-accounting <root>
+        // [--since <ISO>] [--calls]`.
+        "--token-accounting" => {
+            let Some(dir) = args.get(2) else {
+                eprintln!("bram: --token-accounting requires a project root path");
+                std::process::exit(1);
+            };
+            let root = Path::new(dir);
+            if !root.is_dir() {
+                eprintln!("bram: {} is not a directory", dir);
+                std::process::exit(1);
+            }
+            let since = args
+                .iter()
+                .position(|a| a == "--since")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
+            let calls = args.iter().any(|a| a == "--calls");
+            let report = token_accounting::run_cli(root, since, calls);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
@@ -74110,6 +74140,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                     }
                 } else {
                     kill_current_claude_turn_with_finished(app, verb, elapsed);
+                    token_accounting::sample_turn_end(app, "claude", path);
                     // footer-says-proposing-new-item: a genuine (non-stale)
                     // turn end is one of the flag's clear triggers,
                     // independent of whether an inflight claim exists.
@@ -74127,6 +74158,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                     );
                 }
                 agent_status_emit_finished(app, provider_label, None, None, "jsonl-end-turn");
+                token_accounting::sample_turn_end(app, "codex", path);
                 clear_proposing_flag(app, "turn-finished");
                 // issue-368: the addressed-turn window ends with the turn.
                 end_turn_context_unless_fresh(app, "jsonl-turn-end");
@@ -90648,6 +90680,18 @@ fn route_request<R: tauri::Runtime>(
         );
     }
 
+    // /__token-accounting[?since=<ISO>&session=<provider>:<id>&calls=1] —
+    // issue-486-token-accounting-instrument: per-call token readings from the
+    // agents' transcripts, joined to the claim ledger. `bram
+    // --token-accounting <root>` prints the same JSON.
+    if path == "__token-accounting" {
+        return (
+            200,
+            "application/json; charset=utf-8",
+            token_accounting::route(app, query),
+        );
+    }
+
     // /__story/lines?since=<ISO> — issue-473-readable-launch-log: the lines
     // the Status tab's Log narrator (helpers.js) tells episodes from. The host
     // only selects; the pane does the telling, so wording changes are a pane
@@ -102323,6 +102367,7 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
         .filter(|(s, _, _)| s == sid)
         .map(|(_, _, input)| input);
     agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
+    token_accounting::sample_opencode_turn_end(app, sid);
     clear_opencode_prompt_claims(app, "opencode-turn-ended", None);
     // search-index-opencode-sessions: no watcher sees OpenCode's database, so
     // a finished turn asks for a sessions pass (which re-exports the changed

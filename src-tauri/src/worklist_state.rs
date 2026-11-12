@@ -1002,6 +1002,41 @@ pub fn mirror_claim_clear(
     tx.commit()
 }
 
+/// One claim window: the span an agent turn held the board for `ids`.
+/// `to_ms` is `cleared_at_ms`, or `from_ms + 1` for a claim never cleared
+/// (a live claim, or one the host lost track of): the window then covers
+/// only its own write instant rather than everything after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimWindow {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub kind: String,
+    pub ids: Vec<String>,
+}
+
+/// issue-486-token-accounting-instrument: the claim windows that overlap
+/// `[from_ms, to_ms]`, oldest first. Read-only. A row whose `ids` is not a
+/// JSON array of strings reads as an empty id list (a window that belongs to
+/// no item).
+pub fn claims_overlapping(conn: &Connection, from_ms: i64, to_ms: i64) -> Result<Vec<ClaimWindow>> {
+    let mut stmt = conn.prepare(
+        "SELECT written_at_ms, COALESCE(cleared_at_ms, written_at_ms + 1), kind, ids \
+         FROM claims \
+         WHERE written_at_ms <= ?2 AND COALESCE(cleared_at_ms, written_at_ms + 1) >= ?1 \
+         ORDER BY written_at_ms",
+    )?;
+    let rows = stmt.query_map(params![from_ms, to_ms], |r| {
+        let ids_s: String = r.get(3)?;
+        Ok(ClaimWindow {
+            from_ms: r.get(0)?,
+            to_ms: r.get(1)?,
+            kind: r.get(2)?,
+            ids: serde_json::from_str::<Vec<String>>(&ids_s).unwrap_or_default(),
+        })
+    })?;
+    rows.collect()
+}
+
 // --- items ---------------------------------------------------------------
 //
 // state-mirror-items-shadow, the second slice of the mirror: the other
@@ -2497,5 +2532,23 @@ mod tests {
         let conn = open_in_memory().unwrap();
         assert!(!record_item_session(&conn, "item-a", "claude", "a\"b", 1).unwrap());
         assert_eq!(latest_item_session(&conn, "item-a").unwrap(), None);
+    }
+    #[test]
+    fn claims_overlapping_returns_windows_touching_the_range() {
+        let conn = open_in_memory().unwrap();
+        let a = vec!["item-a".to_string(), "item-b".to_string()];
+        mirror_claim_write(&conn, 100, "approved", &a, "t").unwrap();
+        mirror_claim_clear(&conn, &a, 200, "t").unwrap();
+        mirror_claim_write(&conn, 300, "approved", &["item-c".to_string()], "t").unwrap();
+        // Never cleared: a window of its own instant, not everything after.
+        let w = claims_overlapping(&conn, 150, 250).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!((w[0].from_ms, w[0].to_ms), (100, 200));
+        assert_eq!(w[0].ids, a);
+        let w = claims_overlapping(&conn, 302, 900).unwrap();
+        assert!(w.is_empty());
+        let w = claims_overlapping(&conn, 0, 1000).unwrap();
+        assert_eq!(w.len(), 2);
+        assert_eq!((w[1].from_ms, w[1].to_ms), (300, 301));
     }
 }

@@ -687,6 +687,67 @@ What the feature itself should be (which runner, a save flow, whether
 the agent or the host runs a saved command) is to be decided from these
 numbers and Greg's; the notes are in the item's draft.
 
+### What the agents spend: token accounting
+
+judell/bram#486 asks what the agents' model calls cost, and #477 and #487
+wait on the answer. `issue-486-token-accounting-instrument` shipped the
+instrument in its own module (`src-tauri/src/token_accounting.rs`), so that
+measuring `lib.rs` does not grow it. It reads the usage every provider already
+records per call (Claude's `message.usage`, Codex's `token_count` events,
+OpenCode's `message.data.tokens`), joins each call to the claim ledger (which
+item's work it was, or chat), and answers three questions: what each session
+and item spent, how much context Bram's real work needs, and which files the
+agents read into context.
+
+```sh
+src-tauri/target/debug/bram --token-accounting ~/bram > /tmp/ta.json
+src-tauri/target/debug/bram --token-accounting ~/bram --since 2026-11-08T00:00:00Z --calls
+curl -4 -sS "http://127.0.0.1:<port>/__token-accounting?session=claude:<id>"
+```
+
+The first is the whole history for Claude, Codex and OpenCode; the second is
+one window with a row per call; the third is one live session and its
+subagents. Each turn end also traces `[session-context] op=sample … tokens=`
+(the last call's context), so the log carries the curve as it happens. The
+shapes and definitions are in `apis.md`. Two matter most: context is
+`input + cacheRead + cacheCreation` for Claude and OpenCode, but plain
+`input_tokens` for Codex (whose `input_tokens` already includes the cached
+part); and attribution only reaches back as far as the state-mirror db, which
+on this machine begins 2026-11-07.
+
+**The constrained-environment reading** (Jon's goal of knowing whether Bram
+could run on a self-hosted model): `constrained.byModel` reports, per
+provider and model, how much context main-thread calls needed (nearest-rank
+p50, p90, p99 and the peak), the share of calls and of sessions that never
+exceeded 32k, 64k, 128k, 200k and 256k, the floor (context at each session's
+first call, which is Bram's own fixed cost before any work), the uncached
+tokens a cache-less server would process per call, and the pace. It does not
+say whether a smaller model could do the work, and it does not run one.
+
+**First baseline (2026-11-12, this repo: 247 Claude sessions with 27,545
+calls, 286 Codex rollouts with 24,530):**
+
+- Claude's floor is 74-104k (median 81k on `claude-opus-5-5`, 94k on
+  `claude-fable-5-1`), so a 32k or 64k window is out before any work starts.
+  Of `claude-opus-5-5` calls, 8% fit 128k, 23% fit 200k and 34% fit 256k;
+  its peak is 975k.
+- Codex's floor is 13-25k (median 18k on `gpt-5.5`), and 56% of its `gpt-5.5` calls fit 128k, 85% fit
+  200k and all fit 256k. Its fixed cost is a fifth of Claude's here.
+- Cache reads are 94-99% of context. The median uncached tokens per call are
+  892 for `claude-opus-5-5` and 1,739 for `gpt-5.5`; a server with no prompt
+  cache would instead process the whole context each call (median 363k and
+  117k).
+- `src-tauri/src/lib.rs`: 29,125 of 114,658 lines are inside test modules
+  (25%), counted by an independent script at 29,085. Agents read it mostly
+  through the shell: 15.6 MB via shell against 1.8 MB through `Read`, which
+  is why `viaShellBytes` is kept apart.
+
+The 2026-10-31 session `ebf9386c`, which the earlier scratch survey put at 786
+main-thread calls, reads 793 calls and 382.8M cache-read tokens now: the
+transcript kept growing after that survey, and an independent count of its
+unique non-synthetic message ids gives the same 793. Its 550 subagent calls
+and 73.2M cache-read tokens match exactly.
+
 ## Build vs. reload boundary
 
 **Settled 2026-08-26 (the helpers.js-needs-rebuild mantra was wrong,

@@ -2,7 +2,8 @@
   name="Status"
   var.refreshTick="{0}"
   var.rowInfoTitle="{''}"
-  var.rowInfoDescription="{''}">
+  var.rowInfoDescription="{''}"
+  var.tokensNonce="{0}">
 
   <DataSource id="status" url="/__coordination-status?t={refreshTick}" />
   <DataSource id="sessionSize" url="/__session-size?t={refreshTick}" pollIntervalInSeconds="30" />
@@ -218,6 +219,64 @@
         </Table>
       </VStack>
     </Items>
+
+    <!-- issue-486-token-accounting-instrument: a plain dump of
+         /__token-accounting until we know what the UI needs (Jon,
+         2026-11-12). The read walks every session (6-7 s), so it runs only
+         on Load: `when` holds the DataSource until the nonce moves
+         (https://www.xmlui.org/docs/howto/hide-an-element-until-its-datasource-is-ready).
+         Columns format with `type` (https://www.xmlui.org/docs/reference/components/Column). -->
+    <DataSource id="tokens" url="/__token-accounting?t={tokensNonce}" when="{tokensNonce > 0}" />
+    <VStack gap="$space-2">
+      <HStack gap="$space-3" verticalAlignment="center">
+        <Heading level="h3">Token accounting</Heading>
+        <Button
+          label="{tokensNonce > 0 ? 'Reload' : 'Load'}"
+          size="sm"
+          enabled="{!tokens.inProgress}"
+          onClick="tokensNonce = tokensNonce + 1" />
+        <Text
+          when="{tokens.inProgress}"
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="Reading every session (about 7 s)…" />
+        <Text
+          when="{tokens.loaded &amp;&amp; !!tokens.value}"
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="{(tokens.value.sessions || []).length + ' sessions, ' + tokens.value.ms + ' ms'}" />
+      </HStack>
+      <Text
+        when="{tokensNonce == 0}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="Per-call token readings from every agent's session files: context per call by model, how much would fit a smaller window, and what each session costs before any work." />
+      <VStack when="{tokens.loaded &amp;&amp; !!tokens.value}" gap="$space-2">
+        <Table data="{tokens.value.constrained.byModel}">
+          <Column bindTo="provider" width="80px" />
+          <Column bindTo="model" />
+          <Column bindTo="calls" type="integer" width="80px" />
+          <Column header="context p50"><Text value="{$item.context.p50}" /></Column>
+          <Column header="p90"><Text value="{$item.context.p90}" /></Column>
+          <Column header="peak"><Text value="{$item.context.peak}" /></Column>
+          <Column header="fit 64k"><Text value="{Math.round($item.fits['64k'] * 100) + '%'}" /></Column>
+          <Column header="fit 128k"><Text value="{Math.round($item.fits['128k'] * 100) + '%'}" /></Column>
+          <Column header="fit 200k"><Text value="{Math.round($item.fits['200k'] * 100) + '%'}" /></Column>
+          <Column header="fit 256k"><Text value="{Math.round($item.fits['256k'] * 100) + '%'}" /></Column>
+          <Column header="floor p50"><Text value="{$item.floor.p50}" /></Column>
+          <Column bindTo="cacheHitShare" header="cache hit" type="percent" width="90px" />
+        </Table>
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+          value="{'Providers: ' + JSON.stringify(tokens.value.providers)}" breakMode="word" />
+        <Table data="{(tokens.value.files || []).slice(0, 15)}">
+          <Column bindTo="path" />
+          <Column bindTo="reads" type="integer" width="80px" />
+          <Column bindTo="bytes" type="bytes" width="100px" />
+          <Column bindTo="viaShellBytes" header="via shell" type="bytes" width="100px" />
+          <Column bindTo="testBytes" header="test" type="bytes" width="90px" />
+        </Table>
+      </VStack>
+    </VStack>
 
     <!-- Row-info popups are short (a signal's description); override the global
          85vw default to a compact 50vw (modals-default-85vw-width iterate). -->

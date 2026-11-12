@@ -490,13 +490,50 @@ the discipline for completing them serially.
   dropped partner is no longer begun and staging then follows current
   content; (3) commit the surviving item (whole-file, clean; cut a
   branch first when each item drives its own PR); (4) the agent
-  restores the patch and re-proposes the dropped item — same id, same
-  draft, its history honestly reading drop → re-propose; (5) the user
+  restores the patch and re-proposes the dropped item under a new id
+  (ids are immutable, and its draft names the dropped one, so the history
+  reads drop → re-propose); (5) the user
   Starts & commits it under its own fresh boundary. Every line lands
   under its right id; the cost is one extra Drop and one extra Start.
   The host's `op=refuse-joint-interval` message names this path; don't
   undo a correctly parked worktree because the refusal fired before the
   Drop.
+- **When the gate says "commit together", offer a split as well.** In
+  one line: committing together lands every line; a split gives one
+  commit per item, at the cost of a Drop, a re-proposal and a new
+  approval. Don't present the combined commit as the only answer.
+  Receipt (2026-11-12): `issue-486-token-accounting-instrument` and
+  `task-protocol-filter-sees-url-variables` were refused as a joint
+  pair. Their content didn't overlap, and they were split and committed
+  as `f32644dc` after a Drop and a re-proposal as
+  `task-bram-routes-as-candidates`.
+- **If the user wants the split, first check whether it's clean.**
+  Classify every changed hunk in the shared files by content, using the
+  items' drafts, the names they introduce and their regions, and report
+  one verdict:
+  - **disjoint:** no hunk mixes the items;
+  - **separable by line:** a shared hunk splits line by line;
+  - **interleaved:** a line or construct belongs to both.
+
+  Name the hunks behind the verdict. When the work is interleaved, say
+  so and recommend committing together.
+- **Then separate them, in this order** (the dance above, made
+  concrete):
+  1. Back up every affected file.
+  2. Build the first item's tree as HEAD plus only its hunks.
+  3. Build-gate that tree: format check, build, the item's tests.
+  4. Post a plan of **Drop** on the partner and **Commit** on the first
+     item. Dropping removes the joint partner, so the gate takes the
+     first item alone.
+  5. After the commit, restore the partner's files from the backup and
+     confirm the difference against HEAD is exactly its hunks.
+  6. Propose the partner again under a new id. Ids are immutable, and
+     the dropped one is in the history; it's a chance to name it
+     better.
+  7. Its **Start & commit** lands it.
+- **Don't split with `git add -p` outside the gate.** That skips the
+  gate's checks and the history, and both rows read "Committed outside
+  the Worklist".
 - **A live claim locks row selection**, and the locked selection is
   where the Commit button lives. The claim retires on its own when your
   turn ends, so ending the turn to hand the user a commit decision is

@@ -405,7 +405,7 @@ risky.
 re-POST: check `git log` first and treat what you find as the answer. A
 response saying the commit "ALREADY RAN" is success.
 
-- **Entangled commits, 409 refusals, `op=refuse-joint-interval`, `split-shared-files`** → read `.claude/bram-reference/worklist-mechanics.md` (§Interval staging and entangled commits).
+- **Entangled commits, 409 refusals, `op=refuse-joint-interval`, `split-shared-files`** (a "commit together" refusal can usually be split; offer it) → read `.claude/bram-reference/worklist-mechanics.md` (§Interval staging and entangled commits; the split, §Serializing entangled items approved together).
 - **A slow or timed-out commit** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit timeouts: never re-POST).
 - **One click approved several items that share files** → read `.claude/bram-reference/worklist-mechanics.md` (§Serializing entangled items approved together).
 - **About to delegate worklist work to subagents** → read `.claude/bram-reference/worklist-mechanics.md` (§Delegating worklist items to subagents).

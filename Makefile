@@ -31,3 +31,26 @@ rust-tests-module:
 # The debug build, logged to build-log.jsonl (never --release).
 build-debug:
 	scripts/build.sh
+
+# Saved by Bram from the agents' `scripts/demo-instance.sh` runs. Replaces:
+#   scripts/demo-instance.sh stop 2>&1 | tail -1  ->  make demo-stop
+#   scripts/demo-instance.sh launch 2>&1 | tail -1  ->  make demo-launch
+#   scripts/demo-instance.sh launch 2>&1 | tail -2  ->  make demo-launch
+#   scripts/demo-instance.sh stop 2>&1 | tail -2  ->  make demo-stop
+#   scripts/demo-instance.sh launch 2>&1 | tail -3  ->  make demo-launch
+#   scripts/demo-instance.sh launch 2>&1 | tail -5  ->  make demo-launch
+#   scripts/demo-instance.sh launch 2>&1 | tail -4  ->  make demo-launch
+#   scripts/demo-instance.sh reset 2>&1 | tail -1  ->  make demo-reset
+.PHONY: demo-launch demo-stop demo-reset
+
+# Launch the default demo instance.
+demo-launch:
+	scripts/demo-instance.sh launch
+
+# Stop only the default demo's recorded process.
+demo-stop:
+	scripts/demo-instance.sh stop
+
+# Restore the active saved scenario, replacing live demo changes.
+demo-reset:
+	scripts/demo-instance.sh reset

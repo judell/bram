@@ -125,3 +125,26 @@ rust-fmt:
 # Check formatting without changing anything: what the commit gate and CI run.
 rust-fmt-check:
 	cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+# Saved by Bram from the agents' `scripts/switch-matrix.py` runs. Replaces:
+#   PYTHONIOENCODING=utf-8 python -I scripts/switch-matrix.py --no-turns --agents claude,codex,opencode > "$S/matrix-noturns-wave2.txt" 2>&1  ->  make switch-matrix AGENTS=claude,codex,opencode NO_TURNS=1
+#   PYTHONIOENCODING=utf-8 python -I scripts/switch-matrix.py --agents claude,opencode > "C:/Users/jon/AppData/Local/Temp/claude/C--Users-jon-bram/ffba9ce7-4ce8-47fc-a4dd-9734ecd62951/scratchpad/matrix2.txt" 2>&1  ->  make switch-matrix AGENTS=claude,opencode
+#   PYTHONIOENCODING=utf-8 python -I scripts/switch-matrix.py --no-turns --agents claude,codex,opencode > "$S/matrix-noturns-wave2-retry.txt" 2>&1  ->  make switch-matrix AGENTS=claude,codex,opencode NO_TURNS=1
+#   PYTHONIOENCODING=utf-8 python -I scripts/switch-matrix.py 2>&1 | tee "C:/Users/jon/AppData/Local/Temp/claude/C--Users-jon-bram/ffba9ce7-4ce8-47fc-a4dd-9734ecd62951/scratchpad/matrix.txt"  ->  make switch-matrix
+#   do PYTHONIOENCODING=utf-8 python -I scripts/switch-matrix.py --agents claude,opencode --new-session-claude-only > "$S/ns$i.txt" 2>&1  ->  make switch-matrix AGENTS=claude,opencode FLAGS=--new-session-claude-only
+#   do PYTHONIOENCODING=utf-8 python -I scripts/switch-matrix.py --agents claude,opencode > "$S/race$i.txt" 2>&1  ->  make switch-matrix AGENTS=claude,opencode
+#   python -I scripts/switch-matrix.py --agents claude --new-session-claude-only --keep 2>&1 | tail -8  ->  make switch-matrix AGENTS=claude FLAGS="--new-session-claude-only --keep"
+#   python -I scripts/switch-matrix.py --agents claude,codex 2>&1 | tail -60  ->  make switch-matrix AGENTS=claude,codex
+.PHONY: switch-matrix
+
+# The session-switching matrix against a demo instance, with the real agent
+# CLIs. Usage: make switch-matrix [AGENTS=claude,codex] [NO_TURNS=1] [FLAGS=...]
+# NO_TURNS=1 skips the cases that start a model turn. FLAGS passes the rest
+# (--new-session-claude-only, --keep). -X utf8 replaces PYTHONIOENCODING.
+ifeq ($(OS),Windows_NT)
+switch-matrix:
+	python -X utf8 -I scripts/switch-matrix.py $(if $(AGENTS),--agents $(AGENTS)) $(if $(NO_TURNS),--no-turns) $(FLAGS)
+else
+switch-matrix:
+	python3 -X utf8 -I scripts/switch-matrix.py $(if $(AGENTS),--agents $(AGENTS)) $(if $(NO_TURNS),--no-turns) $(FLAGS)
+endif

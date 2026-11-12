@@ -16,3 +16,18 @@ rust-tests-all:
 # One test module. Usage: make rust-tests-module M=pty_menu_tests
 rust-tests-module:
 	cargo test --manifest-path src-tauri/Cargo.toml $(M)
+
+# Saved by Bram from the agents' `scripts/build.sh` runs. Replaces:
+#   scripts/build.sh  ->  make build-debug
+#   scripts/build.sh 2>&1 | tail -1  ->  make build-debug
+#   scripts/build.sh 2>&1 | tail -2  ->  make build-debug
+#   scripts/build.sh 2>&1 | tail -3  ->  make build-debug
+#   scripts/build.sh 2>&1 | tail -4  ->  make build-debug
+#   scripts/build.sh 2>&1 | tail -5  ->  make build-debug
+#   scripts/build.sh 2>&1 | tail -1 | cut -c1-80  ->  make build-debug
+# Not a task: bash -n scripts/build.sh (checks the script's own syntax)
+.PHONY: build-debug
+
+# The debug build, logged to build-log.jsonl (never --release).
+build-debug:
+	scripts/build.sh

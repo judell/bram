@@ -54,3 +54,22 @@ demo-stop:
 # Restore the active saved scenario, replacing live demo changes.
 demo-reset:
 	scripts/demo-instance.sh reset
+
+# Saved by Bram from the agents' `cargo fmt` runs. Replaces:
+#   cargo fmt  ->  make rust-fmt
+#   cargo fmt --manifest-path src-tauri/Cargo.toml  ->  make rust-fmt
+#   cargo fmt --check  ->  make rust-fmt-check
+#   cargo fmt --manifest-path src-tauri/Cargo.toml --check  ->  make rust-fmt-check
+#   cargo fmt --check >/dev/null 2>&1  ->  make rust-fmt-check
+#   cargo fmt --manifest-path src-tauri/Cargo.toml --check >/dev/null 2>&1  ->  make rust-fmt-check
+#   cargo fmt --check >/dev/null  ->  make rust-fmt-check
+#   cargo fmt --manifest-path src-tauri/Cargo.toml --check >/dev/null  ->  make rust-fmt-check
+.PHONY: rust-fmt rust-fmt-check
+
+# Format the Rust in place. Run before committing.
+rust-fmt:
+	cargo fmt --manifest-path src-tauri/Cargo.toml
+
+# Check formatting without changing anything: what the commit gate and CI run.
+rust-fmt-check:
+	cargo fmt --manifest-path src-tauri/Cargo.toml --check

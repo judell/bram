@@ -148,3 +148,9 @@ else
 switch-matrix:
 	python3 -X utf8 -I scripts/switch-matrix.py $(if $(AGENTS),--agents $(AGENTS)) $(if $(NO_TURNS),--no-turns) $(FLAGS)
 endif
+
+# Saved by Bram from the agents' `curl` runs. Replaces:
+# Not a task: curl -4 -sS -o /dev/null -w 'site: %{http_code}\n' https://judell.github.io/bram-tasks-design/ (a one-off check that a page was up)
+# Not a task: curl …/__worklist/commit' command claims (a text fragment, not a command)
+# Not a task: c=$(curl -s -m 60 -o $S/probe.txt -w '%{http_code}' 'https://web.archive.org/cdx/search/cdx?url=educause.edu&limit=1') (a one-off probe)
+# Not a task: curl --retry-connrefused --retry 3 --retry-delay 1 -s https://api.github.com/repos/judell/bram/issues/103 (one issue fetch; gh does this)

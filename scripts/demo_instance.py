@@ -36,7 +36,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPO = SOURCE_ROOT.parent / "bram-demo-instance"
 MARKER = ".bram-demo.json"
 SCENARIO_META = ".bram-demo-scenario.json"
-# Board files, relative to the live state folder (bram_state.state_dir). A
+# Board files, relative to the live state folder (live_state_dir). A
 # scenario branch always stores them under SCENARIO_STATE, the 0.8.3 layout, so
 # captures made by either binary stay valid; hydration maps them into the
 # live layout and capture maps them back (judell/bram#474).
@@ -44,7 +44,10 @@ WORKLIST = "worklist.json"
 CLAIMS = ".claim-intervals.json"
 AUTH = ".worklist-authorization.json"
 DRAFTS = "worklist-drafts"
-SCENARIO_STATE = bram_state.STATE_DIR_LEGACY
+# The pre-0.8.4 name. Since issue-469-retire-resources Bram reads nothing
+# from it; the demo keeps it as the scenario branches' storage layout and as
+# the --legacy-layout live board, the held start's fixture.
+SCENARIO_STATE = "resources"
 # The live layouts: `.bram/` (0.8.4, the default) or `resources/` (0.8.3, kept
 # so the real mover can be exercised on a demo).
 LAYOUT_NEW = "dot-bram"
@@ -596,9 +599,20 @@ def capture_tree(
     return tree
 
 
+def live_state_dir(repo: Path) -> Path:
+    """The live board's folder. `.bram/` once it is Bram's. Until then the
+    board is in `resources/`: the starters build there, hydration checks it
+    out there, and a --legacy-layout board (the held start's fixture) stays
+    there until the real mover takes it. Nothing else here reads
+    `resources/` as live state."""
+    if bram_state.is_bram_state_dir(repo):
+        return repo / bram_state.STATE_DIR_NEW
+    return repo / SCENARIO_STATE
+
+
 def state_path(repo: Path, rel: str) -> Path:
-    """A board file in the live state folder, `.bram/` or `resources/`."""
-    return bram_state.state_dir(repo) / rel
+    """A board file in the live board's folder (live_state_dir)."""
+    return live_state_dir(repo) / rel
 
 
 def _load_controls(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -1049,7 +1063,7 @@ def _board_entries(repo: Path) -> list[tuple[str, Path]]:
     Anything else in the state folder is taken when the same file under
     `resources/` would not be ignored, which is what `git add -A` took from a
     0.8.3-layout board. So a capture is the same tree in either layout."""
-    state = bram_state.state_dir(repo)
+    state = live_state_dir(repo)
     if not state.is_dir():
         return []
     files = sorted(
@@ -1210,7 +1224,7 @@ def _settle_state_folder(repo: Path, layout: str) -> None:
     so the folder is never stageable, then the entries, then
     `.migrated-from`, so a 0.8.4 binary sees a moved folder and never runs
     the mover on a demo."""
-    legacy = repo / bram_state.STATE_DIR_LEGACY
+    legacy = repo / SCENARIO_STATE
     new = repo / bram_state.STATE_DIR_NEW
     # judell/bram#469: a `.bram/` that isn't Bram's (the foreign-dot-bram
     # starter) is never merged into or out of; the board stays in resources/.
@@ -1223,7 +1237,7 @@ def _settle_state_folder(repo: Path, layout: str) -> None:
         and any(entry.name not in live_only for entry in new.iterdir())
     ):
         return
-    if run_git(repo, "ls-files", "--", f"{bram_state.STATE_DIR_LEGACY}/", f"{bram_state.STATE_DIR_NEW}/"):
+    if run_git(repo, "ls-files", "--", f"{SCENARIO_STATE}/", f"{bram_state.STATE_DIR_NEW}/"):
         raise DemoError("refusing to move a state folder with tracked files")
     if layout == LAYOUT_LEGACY:
         if new.is_dir():
@@ -1272,7 +1286,7 @@ def use_scenario(repo: Path, name: str, layout: str | None = LAYOUT_NEW) -> None
     # then moves them into the layout's folder. The checked-out board under
     # resources/ is tracked at this point, so the clean leaves it alone.
     live: list[str] = []
-    for state in (bram_state.STATE_DIR_NEW, bram_state.STATE_DIR_LEGACY):
+    for state in (bram_state.STATE_DIR_NEW, SCENARIO_STATE):
         live += ["-e", f"{state}/.bram-port", "-e", f"{state}/.bram-port.json"]
         live += ["-e", f"{state}/bram-traces/"]
     run_git(
@@ -1650,7 +1664,7 @@ def status(repo: Path) -> dict[str, Any]:
     refs = run_git(
         repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/bram/claims"
     ).splitlines()
-    live_worklist = bram_state.state_dir(repo) / "worklist.json"
+    live_worklist = live_state_dir(repo) / "worklist.json"
     worklist = read_json(live_worklist) if live_worklist.exists() else {"items": []}
     process_path = runtime / "process.json"
     process = read_json(process_path) if process_path.exists() else {}
@@ -1659,7 +1673,7 @@ def status(repo: Path) -> dict[str, Any]:
         "activeScenario": active.get("name"),
         "claimRefs": refs,
         "layout": active.get("layout"),
-        "stateDir": bram_state.state_dir_name(repo),
+        "stateDir": live_state_dir(repo).name,
         "dirty": run_git(repo, "status", "--short").splitlines(),
         "items": len(worklist.get("items", [])),
         "log": str(runtime / "bram.log"),

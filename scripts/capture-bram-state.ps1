@@ -4,7 +4,7 @@
 #
 # 1. Snapshots bram-traces\bram-trace.log, .inflight-claim.json,
 #    worklist.json, .worklist-authorization.json from the state folder
-#    (.bram\ or resources\) into a staging dir.
+#    (.bram\) into a staging dir.
 # 2. Filters bram-trace.log to the last Duration (default 1h).
 # 3. Prompts the user to export an xs-trace via the Inspector
 #    (restarting Bram first if it's wedged).
@@ -16,7 +16,7 @@
 #   .\scripts\capture-bram-state.ps1 [-Duration 1h]
 #
 # Duration: lookback for bram-trace.log filtering. Accepts Nm or Nh.
-# Default 1h. Run from a Bram project directory (one with .bram\ or resources\).
+# Default 1h. Run from a Bram project directory (one with .bram\).
 #
 # Execution policy: Windows blocks unsigned .ps1 by default. Invoke with
 #   powershell -ExecutionPolicy Bypass -File .\scripts\capture-bram-state.ps1
@@ -40,14 +40,14 @@ if ($Duration -match '^(\d+)m$') {
 }
 
 # The state folder, by the host's rule (bram_state_dir in src-tauri/src/lib.rs):
-# .bram if it is Bram's (it carries .migrated-from, or a .gitignore that is
-# exactly `*`; judell/bram#469) and this isn't the home directory, else resources.
-$state = 'resources'
+# .bram, when it is Bram's (it carries .migrated-from, or a .gitignore that is
+# exactly `*`; judell/bram#469) and this isn't the home directory, where .bram
+# is the machine folder. Since 0.8.7 nothing reads the pre-0.8.4 resources\.
+$state = '.bram'
 $bramOwned = (Test-Path '.bram/.migrated-from') -or
     ((Test-Path '.bram/.gitignore' -PathType Leaf) -and ((Get-Content -Raw '.bram/.gitignore').Trim() -eq '*'))
-if ((Test-Path '.bram' -PathType Container) -and $bramOwned -and ((Get-Location).Path -ne $HOME)) { $state = '.bram' }
-if (-not (Test-Path $state -PathType Container)) {
-    Write-Error "No .bram\ or resources\ in $PWD - run from a Bram project directory"
+if (-not ((Test-Path '.bram' -PathType Container) -and $bramOwned -and ((Get-Location).Path -ne $HOME))) {
+    Write-Error "No Bram .bram\ in $PWD - run from a Bram project directory"
     exit 1
 }
 

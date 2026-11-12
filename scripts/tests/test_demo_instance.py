@@ -250,7 +250,7 @@ class DemoInstanceTests(unittest.TestCase):
     def test_hydrates_into_dot_bram_as_the_mover_lays_it_out(self) -> None:
         self.new()
         state = self.repo / ".bram"
-        self.assertEqual(demo.bram_state.state_dir_name(self.repo), ".bram")
+        self.assertEqual(demo.live_state_dir(self.repo).name, ".bram")
         self.assertFalse((self.repo / "resources").exists())
         self.assertEqual((state / ".gitignore").read_bytes(), b"*\n")
         marker = (state / ".migrated-from").read_text()
@@ -291,7 +291,7 @@ class DemoInstanceTests(unittest.TestCase):
             self.repo, "old", ["dependency"], layout=demo.LAYOUT_LEGACY
         )
         self.assertFalse((self.repo / ".bram").exists())
-        self.assertEqual(demo.bram_state.state_dir_name(self.repo), "resources")
+        self.assertEqual(demo.live_state_dir(self.repo).name, "resources")
         self.assertTrue((self.repo / "resources" / demo.WORKLIST).is_file())
         trace = self.repo / "resources/bram-traces/bram-trace.log"
         trace.parent.mkdir(parents=True)
@@ -325,10 +325,10 @@ class DemoInstanceTests(unittest.TestCase):
             ]
 
         demo.capture_scenario(self.repo, "from-new")
-        self.assertEqual(demo.bram_state.state_dir_name(self.repo), ".bram")
+        self.assertEqual(demo.live_state_dir(self.repo).name, ".bram")
         demo.use_scenario(self.repo, "from-new", demo.LAYOUT_LEGACY)
         demo.capture_scenario(self.repo, "from-legacy")
-        self.assertEqual(demo.bram_state.state_dir_name(self.repo), "resources")
+        self.assertEqual(demo.live_state_dir(self.repo).name, "resources")
         self.assertEqual(tree("from-new"), tree("from-legacy"))
         listed = git(self.repo, "ls-tree", "-r", "--name-only", "scenario/from-new").splitlines()
         for rel in (

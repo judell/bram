@@ -99,6 +99,8 @@ write/resize control. The parent shell uses these to render the
 update-available banner and to drive the terminal; the agent pane iframe
 uses them for the target app info dialog.
 
+**A held start (0.8.7, judell/bram#469).** When Bram's files are still in `resources/` and the startup move couldn't run, the start is held: `/__enhance/status` reports `projectFolder.kind: "state-held"` with `obstacle`, `retry` and `trackedFiles`. Every state-changing request (any POST, plus GET `__worklist/resolve`, `__worklist/init`, `__enhance/run`, `__restart-server`, `__issue/comment`) answers 409 `{ ok: false, held: <obstacle> }` and logs `[state-hold] op=refuse-write` to stderr (`held_write_refusal`). Allowed through: `__state-dir/migrate-relaunch` and `__state-dir/decision` (the way out), the self-update routes, `__trace/pane`, `__pane/flush` and `__startup-ready` (`HELD_ALLOWED_PATHS`). Under a hold, migrate-relaunch is the banner's Retry: it relaunches without an offer, and records `move` for a mixed folder.
+
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
 | `/__app-info` | HTTP GET | — | `{ current, latest, has_update, release_url, forge, embeddedAppHash, servingEmbedded, project?, projectKey?, repo?, targetAppUrl }`. `embeddedAppHash` / `servingEmbedded` say which `app/` tree this process serves; `project` / `projectKey` carry the window's project identity; `targetAppUrl` is where a person opens the project's app, or `null`. | parent shell, agent pane iframe, agents (version for forge signatures) |
@@ -578,7 +580,7 @@ change.
 | `/__shell/<path>` | HTTP GET | — | file body, content-typed | both iframes |
 | `/__vendor/<path>` | HTTP GET | — | vendor JS/CSS, content-typed | both iframes |
 | `/__tools/<path>` | HTTP GET | — | agent pane XMLUI sources | agent pane iframe |
-| `/resources/worklist.json` | HTTP GET | — | file body, or `{description:"", items:[]}` if missing | agent pane iframe |
+| `/__bram/<path>` | HTTP GET | — | a file in Bram's state folder (`.bram/`), content-typed; `worklist.json` answers `{description:"", items:[]}` if missing, anything else missing is 404. Refuses `..`, `.`, empty segments, backslashes and drive colons (`state_url_rel`). The `/resources/` alias that also served this was removed in 0.8.7: `/resources/<path>` is now an ordinary project path. | agent pane iframe |
 | `/__project/<path>` | Tauri scheme only | — | proxied to the target app's upstream with the prefix stripped (loopback default or an external dev server). Not handled by the loopback server. The isolated `bramapp://` target scheme serves only this project content and refuses every `__*` route and shell asset. | target-app iframe |
 | `/<project path>` | HTTP GET | — | project file served from the project root (the loopback fallback after every reserved route); extensionless misses fall back to the root `index.html` when one exists (SPA fallback, issue-358), other misses 404. | target app, browser |
 
@@ -587,7 +589,7 @@ change.
   user's project directory triggers a target app reload only. The
   parent shell (`app/index.html`, `app/main.js`) is not hot-reloaded —
   changes there require `cargo build` and a restart.
-- `/resources/worklist.json` returns the empty-worklist JSON instead of
+- `/__bram/worklist.json` returns the empty-worklist JSON instead of
   `404` when the file doesn't exist yet, so the Workspace tab's polling
   loop doesn't flood devtools with 404s in guest projects that haven't
   opted in to the worklist flow.

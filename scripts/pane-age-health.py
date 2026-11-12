@@ -47,6 +47,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bram_state  # noqa: E402
+
 LINE = re.compile(r"^\[(?P<ts>[^\]]+)\] \[(?P<cat>[^\]]+)\] (?P<rest>.*)$")
 LOAD_GAP = 10.0  # seconds of silence before a GET __app-info starts a new pane load
 CTX_MAX = 600.0  # a spike belongs to the latest tick only if it is this recent
@@ -237,7 +240,7 @@ def tables(title, rows, beats_ctx, nloads_note=""):
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    traces = root / "resources" / "bram-traces"
+    traces = bram_state.trace_dir(root)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("logs", nargs="*", help="trace logs or .gz archives (default: archives since --since plus the live trace)")
     ap.add_argument("--since", default="2026-10-15", metavar="DAY", help="first day to read, YYYY-MM-DD (default 2026-10-15)")

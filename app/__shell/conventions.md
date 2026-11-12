@@ -42,8 +42,7 @@ overwrites them.
 
 ## Coordinate via worklist.json
 
-Bram's state folder, written `<state>/` below, is `.bram/` if it
-exists, else `resources/`; whichever one holds `.bram-port` is in use.
+Bram's state folder, written `<state>/` below, is `.bram/`.
 Before 0.8.4 the folder was `resources/`; that path in older
 transcripts and issues means `.bram/`.
 

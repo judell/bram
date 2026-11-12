@@ -1,10 +1,13 @@
-"""Where a Bram project's state folder is: `.bram/` or `resources/`.
+"""Where a Bram project's state folder is: `.bram/`.
 
-The same rule as the host's `bram_state_dir` (src-tauri/src/lib.rs):
-`<root>/.bram` when that directory exists and is Bram's (carries a marker, see
-is_bram_state_dir), else `<root>/resources`. The
-host also ignores a `.bram/` in the home directory, so this does too.
-0.8.3 accepts both names; 0.8.4 moves the folder to `.bram/` (#469).
+The same rule as the host's `bram_state_dir` (src-tauri/src/lib.rs) for a
+writable project: `<root>/.bram`. Since 0.8.7 (issue-469-retire-resources) a
+project's state is moved there at startup, or the start is held, so nothing
+reads the pre-0.8.4 `resources/` any more. The one exception is the host's:
+the home directory, where `~/.bram` is the machine folder (it holds the
+bram-guard link), never a project's state, so a home root answers
+`resources` there as it does in the host, and nothing is ever read from or
+written to `~/.bram` as state.
 
 Scripts import it as a sibling (`import bram_state`): the script's own
 directory is on sys.path even under `python3 -I`.
@@ -16,7 +19,8 @@ import os
 from pathlib import Path
 
 STATE_DIR_NEW = ".bram"
-STATE_DIR_LEGACY = "resources"
+# The host's answer for a home root only (see above).
+_HOME_STATE_DIR = "resources"
 
 
 def _is_home(root: Path) -> bool:
@@ -32,7 +36,7 @@ def _is_home(root: Path) -> bool:
 def is_bram_state_dir(root: Path | str) -> bool:
     """Is `<root>/.bram` Bram's (#469)? Every folder Bram makes carries
     `.migrated-from` or a `.gitignore` of exactly `*`; a `.bram/` with
-    neither belongs to something else and is never the state folder."""
+    neither belongs to something else (the host then holds the start)."""
     dot = Path(root) / STATE_DIR_NEW
     if (dot / ".migrated-from").exists():
         return True
@@ -43,10 +47,7 @@ def is_bram_state_dir(root: Path | str) -> bool:
 
 
 def state_dir_name(root: Path | str) -> str:
-    root = Path(root)
-    if (root / STATE_DIR_NEW).is_dir() and not _is_home(root) and is_bram_state_dir(root):
-        return STATE_DIR_NEW
-    return STATE_DIR_LEGACY
+    return _HOME_STATE_DIR if _is_home(Path(root)) else STATE_DIR_NEW
 
 
 def state_dir(root: Path | str) -> Path:

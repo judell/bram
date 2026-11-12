@@ -429,9 +429,110 @@ scenario_already_setup() {
   shutdown_bram
 }
 
+# issue-469-retire-resources: the held start. When the startup move can't run
+# and Bram's state is still in resources/, the launch holds: like issue-448's
+# refusals it writes no port file, no trace and no .bram/, starts no agent and
+# runs no Setup, so its port comes from stderr (launch_refused). Step 2: a
+# state write while held is refused with 409 {"ok":false,"held":<obstacle>},
+# and the pane reads the held board from resources/.
+
+# The bytes of a folder, for before/after.
+tree_sum() { (cd "$1" && find . -type f -exec shasum {} + | sort | shasum); }
+
+# A repo whose resources/ holds a live Bram board. Git ignores resources/, so
+# nothing there is tracked. With "mixed", a file that isn't Bram's sits beside
+# the board, so the move needs the user's answer.
+legacy_board_project() {
+  local dir="$1" shape="$2"
+  mkdir -p "$dir/resources/worklist-drafts"
+  git -C "$dir" init -q
+  printf '# scratch\n' > "$dir/README.md"
+  printf 'resources/\n' > "$dir/.gitignore"
+  printf '{"description":"live","items":[{"id":"live-item","status":"proposed","files":["README.md"]},{"id":"second-item","status":"proposed","files":["README.md"]}],"version":3}\n' > "$dir/resources/worklist.json"
+  printf '# Before\n\nx\n\n# After\n\ny\n' > "$dir/resources/worklist-drafts/live-item.md"
+  [ "$shape" = "mixed" ] && printf 'png\n' > "$dir/resources/logo.png"
+  git -C "$dir" add -A
+  git -C "$dir" -c user.email=h@h -c user.name=harness commit -qm init
+}
+
+# What every held start must show, whatever the obstacle.
+assert_held() {
+  local dir="$1" obstacle="$2" before_res="$3" got p written=""
+  got="$(status_field projectFolder.kind)"
+  if [ "$got" = "state-held" ]; then ok "projectFolder.kind is state-held"; else bad "projectFolder.kind is state-held" "got: $got"; fi
+  got="$(status_field projectFolder.obstacle)"
+  if [ "$got" = "$obstacle" ]; then ok "obstacle is $obstacle"; else bad "obstacle is $obstacle" "got: $got"; fi
+  if grep -q "op=autostart-held reason=state-held obstacle=$obstacle" "$WORK_ROOT/$SCENARIO.log"; then
+    ok "autostart held (state-held)"
+  else
+    bad "autostart held (state-held)" "no op=autostart-held line in $WORK_ROOT/$SCENARIO.log"
+  fi
+  if grep -q "op=held .*obstacle=$obstacle" "$dir/.git/bram/state-hold.log" 2>/dev/null; then
+    ok "hold recorded in .git/bram/state-hold.log"
+  else
+    bad "hold recorded in .git/bram/state-hold.log" "missing"
+  fi
+  # A state write is refused, names the hold, and creates nothing.
+  local body code
+  body="$(curl -4 -sS --max-time 20 -o /dev/stdout -w ' %{http_code}' -X POST \
+    -H 'Content-Type: application/json' --data '{"ids":["second-item","live-item"]}' \
+    "http://127.0.0.1:$BRAM_PORT/__worklist/reorder")"
+  code="${body##* }"; body="${body% *}"
+  if [ "$code" = "409" ] && [ "$(printf '%s' "$body" | jq -r .held)" = "$obstacle" ]; then
+    ok "a state write is refused with 409 held=$obstacle"
+  else
+    bad "a state write is refused with 409 held=$obstacle" "got: $code $body"
+  fi
+  if grep -q "\[state-hold\] op=refuse-write method=POST path=/__worklist/reorder obstacle=$obstacle" "$WORK_ROOT/$SCENARIO.log"; then
+    ok "the refusal is on stderr"
+  else
+    bad "the refusal is on stderr" "no op=refuse-write line"
+  fi
+  for p in .claude AGENTS.md CLAUDE.md .bram.json resources/.bram-port resources/bram-traces; do
+    [ -e "$dir/$p" ] && written="$written $p"
+  done
+  if [ -z "$written" ]; then ok "nothing written (port, trace, Setup)"; else bad "nothing written (port, trace, Setup)" "found:$written"; fi
+  if [ "$(tree_sum "$dir/resources")" = "$before_res" ]; then
+    ok "resources/ byte-identical"
+  else
+    bad "resources/ byte-identical" "changed"
+  fi
+  check "tracked tree unchanged" git -C "$dir" diff --quiet
+}
+
+scenario_held_mixed() {
+  local dir="$WORK_ROOT/held_mixed"; mkdir -p "$dir"
+  legacy_board_project "$dir" mixed
+  local before; before="$(tree_sum "$dir/resources")"
+  launch_refused "$dir" || return
+  assert_held "$dir" mixed "$before"
+  check "no .bram/ created" test ! -e "$dir/.bram"
+  # The pane reads the held board from resources/.
+  local items; items="$(api __worklist | jq -r '[.items[].id] | join(",")')"
+  if [ "$items" = "live-item,second-item" ]; then ok "the held board reads from resources/"; else bad "the held board reads from resources/" "got: $items"; fi
+  local offer; offer="$(status_field projectFolder.retry.needsChoice)"
+  if [ "$offer" = "true" ]; then ok "retry asks for the move answer"; else bad "retry asks for the move answer" "got: $offer"; fi
+  shutdown_bram
+}
+
+scenario_plain_legacy_moves() {
+  # A board with nothing but Bram's files moves at startup and runs on .bram/.
+  local dir="$WORK_ROOT/plain_legacy_moves"; mkdir -p "$dir"
+  legacy_board_project "$dir" plain
+  launch "$dir" .bram || return
+  check "resources/ moved away" test ! -e "$dir/resources"
+  check ".bram/ carries .migrated-from" test -f "$dir/.bram/.migrated-from"
+  check "board moved into .bram/" grep -q live-item "$dir/.bram/worklist.json"
+  assert_trace "$dir" "\[state-migrate\] op=moved" "traces op=moved"
+  local got; got="$(status_field projectFolder.kind)"
+  if [ "$got" = "ok" ]; then ok "projectFolder.kind is ok"; else bad "projectFolder.kind is ok" "got: $got"; fi
+  shutdown_bram
+}
+
 # judell/bram#469 (Andrew's CodeExam): a `.bram/` of another tool's index files,
-# no Bram marker, beside a live board in resources/. Bram must keep resources/,
-# write nothing into `.bram/`, and trace reason=foreign-dot-bram. The variant
+# no Bram marker, beside a live board in resources/. Since step 1 of
+# issue-469-retire-resources that start holds (obstacle foreign-dot-bram):
+# Bram neither runs on resources/ nor writes into `.bram/`. The variant
 # "damaged" is the state 0.8.5 and 0.8.6 left behind: Bram's own files already
 # written into the unmarked folder; they are left alone, not adopted.
 foreign_dot_bram_project() {
@@ -440,7 +541,7 @@ foreign_dot_bram_project() {
   git -C "$dir" init -q
   printf '# scratch\n' > "$dir/README.md"
   printf 'resources/\n.bram/\n' > "$dir/.gitignore"
-  printf '{"description":"live","items":[{"id":"live-item","status":"proposed","files":["README.md"]}],"version":3}\n' > "$dir/resources/worklist.json"
+  printf '{"description":"live","items":[{"id":"live-item","status":"proposed","files":["README.md"]},{"id":"second-item","status":"proposed","files":["README.md"]}],"version":3}\n' > "$dir/resources/worklist.json"
   printf '# Before\n\nx\n\n# After\n\ny\n' > "$dir/resources/worklist-drafts/live-item.md"
   for i in 1 2 3; do printf '{"index":%s}\n' "$i" > "$dir/.bram/index-$i.json"; done
   git -C "$dir" add -A
@@ -448,34 +549,21 @@ foreign_dot_bram_project() {
 }
 
 assert_foreign_dot_bram() {
-  local dir="$1" before="$2" after
-  assert_trace_in "$dir/resources" "\[state-migrate\] op=skipped reason=foreign-dot-bram" "traces reason=foreign-dot-bram"
-  check "Bram keeps resources/ as the state folder" test -f "$dir/resources/.bram-port"
-  check "live board untouched in resources/" grep -q live-item "$dir/resources/worklist.json"
+  local dir="$1" before="$2" before_res="$3"
+  assert_held "$dir" foreign-dot-bram "$before_res"
   check "no .gitignore or .migrated-from written into .bram/" bash -c "test ! -e '$dir/.bram/.gitignore' && test ! -e '$dir/.bram/.migrated-from'"
-  after="$(cd "$dir/.bram" && find . -type f -exec shasum {} + | sort | shasum)"
-  if [ "$before" = "$after" ]; then ok ".bram/ contents unchanged"; else bad ".bram/ contents unchanged" "before/after differ"; fi
+  if [ "$before" = "$(tree_sum "$dir/.bram")" ]; then ok ".bram/ contents unchanged"; else bad ".bram/ contents unchanged" "before/after differ"; fi
   local f; f="$(api __state-dir/plan | jq -r '.foreignDotBram')"
   if [ "$f" = "true" ]; then ok "state-dir plan reports foreignDotBram"; else bad "state-dir plan reports foreignDotBram" "got: $f"; fi
-}
-
-# assert_trace for an explicit state folder (bram_state_dir adopts a foreign .bram/).
-assert_trace_in() {
-  local sdir="$1" pattern="$2" name="$3" i
-  for i in $(seq 1 20); do
-    if grep -q "$pattern" "$sdir/bram-traces/bram-trace.log" 2>/dev/null; then ok "$name"; return 0; fi
-    sleep 0.5
-  done
-  bad "$name" "no line matching: $pattern"
-  return 1
 }
 
 scenario_foreign_dot_bram() {
   local dir="$WORK_ROOT/foreign_dot_bram"; mkdir -p "$dir"
   foreign_dot_bram_project "$dir"
-  local before; before="$(cd "$dir/.bram" && find . -type f -exec shasum {} + | sort | shasum)"
-  launch "$dir" resources || return
-  assert_foreign_dot_bram "$dir" "$before"
+  local before before_res
+  before="$(tree_sum "$dir/.bram")"; before_res="$(tree_sum "$dir/resources")"
+  launch_refused "$dir" || return
+  assert_foreign_dot_bram "$dir" "$before" "$before_res"
   shutdown_bram
 }
 
@@ -487,11 +575,11 @@ scenario_foreign_dot_bram_damaged() {
   printf '{}\n' > "$dir/.bram/.worklist-authorization.json"
   printf '{}\n' > "$dir/.bram/settings.json"
   printf '1\n' > "$dir/.bram/.bram-port"
-  local before; before="$(cd "$dir/.bram" && find . -type f -exec shasum {} + | sort | shasum)"
-  # The stray .bram-port is stale; the real one is resources/.bram-port.
-  launch "$dir" resources || return
+  local before before_res
+  before="$(tree_sum "$dir/.bram")"; before_res="$(tree_sum "$dir/resources")"
+  launch_refused "$dir" || return
   # The damaged folder must not have gained, lost or changed a file.
-  assert_foreign_dot_bram "$dir" "$before"
+  assert_foreign_dot_bram "$dir" "$before" "$before_res"
   shutdown_bram
 }
 
@@ -615,7 +703,7 @@ require_bin
 command -v jq >/dev/null || { echo "jq required"; exit 127; }
 printf 'workdir: %s\n' "$WORK_ROOT"
 
-SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested foreign_dot_bram foreign_dot_bram_damaged)
+SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested held_mixed plain_legacy_moves foreign_dot_bram foreign_dot_bram_damaged)
 [ $# -gt 0 ] && SCENARIOS=("$@")
 
 for s in "${SCENARIOS[@]}"; do

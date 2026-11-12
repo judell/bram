@@ -5,8 +5,7 @@ the relevant section when your project's markup talks to the agent,
 binds project SQLite, uses the forge CLI, runs heavy test suites, hits a
 Windows block, or coordinates with a session across a project boundary.
 
-`<state>/` below is Bram's state folder: `.bram/` if it exists, else
-`resources/`.
+`<state>/` below is Bram's state folder: `.bram/`.
 
 ## Target app helpers
 

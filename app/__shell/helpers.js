@@ -1897,14 +1897,14 @@ window.__bramNewSessionBrief = function (words, predecessor) {
   // so name the digest Bram wrote; its header names the full transcript.
   if (predecessor && predecessor.digest) {
     prev += ", whose latest turns Bram wrote to `" + predecessor.digest +
-      "` in its state folder (`.bram/` if it exists, else `resources/`; the header names the full transcript if you need more)";
+      "` in its state folder (`.bram/`; the header names the full transcript if you need more)";
   }
   return [
     "You're starting a new session for this line of work, in my words:",
     "",
     String(words || "").trim(),
     "",
-    "Before anything else, build your context for it. Search the project history (/__search; the port is in .bram-port in Bram's state folder: .bram/ if it exists, else resources/) for what bears on it, and read " + prev + " where it's relevant.",
+    "Before anything else, build your context for it. Search the project history (/__search; the port is in .bram/.bram-port) for what bears on it, and read " + prev + " where it's relevant.",
     "",
     "Then tell me what you found, with citations; what you looked for and didn't find; and what you think should frame this work. Don't change files or propose worklist items yet. We'll settle the framing together first.",
   ].join("\n");
@@ -8036,6 +8036,78 @@ window.__bramProjectFolderIs = function (status, kind) {
 };
 window.__bramProjectFolderIsOk = function (status) {
   return window.__bramProjectFolderKind(status) === "ok";
+};
+
+// issue-469-retire-resources: the held-start banner (projectFolder.kind
+// "state-held"). Bram's files are still in resources/ and the startup move
+// couldn't run, so nothing started. `part` is heading | text | command | then
+// | button. One obstacle code per case, from the host's state_hold_obstacle.
+window.__bramStateHeld = function (status, part) {
+  var pf = (status && status.projectFolder) || {};
+  var ob = pf.obstacle || "";
+  var files = pf.trackedFiles || [];
+  var lead = "Bram keeps its working files in .bram/ now, but this project's are still in resources/, " +
+    "and Bram couldn't move them";
+  var cases = {
+    blocked: {
+      text: lead + ": another program had one of them open.",
+      then: "Close any program using files in resources/, then click Retry.",
+    },
+    "tracked-unknown": {
+      text: lead + ": git couldn't say which files it tracks.",
+      then: "Click Retry. If this keeps happening, run git status in the terminal below to see what git reports.",
+    },
+    "tracked-bram-files": {
+      text: lead + ", because git tracks some of them. Bram won't move files git tracks. " +
+        "Run this in the terminal below to stop tracking them (the files stay on disk):",
+      command: files.length ? "git rm --cached -- " + files.join(" ") : "",
+      then: "Then click Retry. Commit that change when you're ready.",
+    },
+    "foreign-dot-bram": {
+      text: "This project already has a .bram folder, and it belongs to another tool, so Bram won't touch it. " +
+        "Rename that folder in the terminal below, for example:",
+      command: "mv .bram .bram-othertool",
+      then: "Use a name that says which tool it belongs to, and tell that tool its new name. Then click Retry.",
+    },
+    mixed: {
+      text: lead + " without asking: resources/ also holds files that aren't Bram's. " +
+        "Bram will move only its own files and leave yours where they are.",
+      then: "",
+    },
+    "live-claim": {
+      text: lead + ": Bram is already open on this project in another window, part-way through a Worklist item.",
+      then: "Quit that Bram (⌘Q on a Mac), then click Retry.",
+    },
+    "staging-left": {
+      text: lead + ": an earlier move stopped part-way, and some of Bram's files are in .bram-moving/.",
+      then: "Move everything in .bram-moving/ back into resources/, delete the empty .bram-moving/, then click Retry.",
+    },
+  };
+  cases["rollback-failed"] = cases["staging-left"];
+  var c = cases[ob] || {
+    text: lead + " (" + (ob || "unknown reason") + ").",
+    then: "Click Retry.",
+  };
+  if (part === "heading") return "Bram hasn't started: its files need to move first";
+  if (part === "text") return c.text;
+  if (part === "command") return c.command || "";
+  if (part === "then") return c.then;
+  if (part === "button") return ob === "mixed" ? "Move Bram's files and relaunch" : "Retry";
+  return "";
+};
+
+// The banner's button: the same migrate-relaunch route as Status's Migrate
+// and relaunch. Under a hold the host relaunches without an offer (Retry), and
+// records the "move" answer first when the folder is mixed.
+window.__bramStateHeldRelaunch = function () {
+  return window.__bramPaneAction("stateHeldRelaunch", "/__state-dir/migrate-relaunch", { method: "POST", body: {} });
+};
+window.__bramStateHeldBusy = function (act) {
+  return !!(act && (act.busy || (act.ok && act.data && act.data.relaunching)));
+};
+window.__bramStateHeldError = function (act) {
+  if (!act || act.busy || act.ok) return "";
+  return "Bram couldn't relaunch: " + (act.error || "error " + act.status) + ".";
 };
 
 // issue-465: the Setup banner's heading, text, button label, tooltip and
@@ -19141,13 +19213,11 @@ window.__bramStateDirPlanMoved = function (p, part) {
 // can finish it. Reads the host's structured p.startupMove / p.retry only.
 window.__bramStateDirLeftover = function (p, part) {
   var r = (p && p.retry) || {};
-  // judell/bram#469: a .bram/ that isn't Bram's is in the way. Bram keeps
-  // resources/ and never writes into that folder, so there is nothing to offer.
   if (p && p.foreignDotBram) {
     // Warning color is earned here: plain words and a clear action.
     if (part === "show" || part === "warn") return true;
     if (part === "line") {
-      return "A folder named .bram/ that isn't Bram's is in the way. Bram keeps using resources/. To let Bram move its files, rename that folder and relaunch.";
+      return "A folder named .bram/ that isn't Bram's is in the way, so Bram hasn't started on this project. To let Bram move its files, rename that folder and relaunch.";
     }
     return part === "offer" ? false : "";
   }
@@ -19156,7 +19226,7 @@ window.__bramStateDirLeftover = function (p, part) {
   if (!r.leftover) return part === "offer" ? false : "";
   if (part === "offer") return !!r.offer;
   if (part === "line") {
-    return "This project's Bram state is still in resources/, an older Bram's folder. Bram keeps using it until it moves to .bram/.";
+    return "This project's Bram state is still in resources/, an older Bram's folder. Bram won't run on it: it has to move to .bram/ first.";
   }
   if (part === "tip") {
     return "Bram restarts and tries the move again. Another program holding a file open in resources/ can still block it.";
@@ -19248,6 +19318,8 @@ window.__bramStateMoveBanner = function (p, part, last) {
   // "move". Only Status reads `pending` / `offer` (Windows found both shown, #488).
   if (part === "pending") return !!(p && p.pending) && !(p.retry && p.retry.leftover);
   if (!p || !p.pending) return part === "text" || part === "stays" ? "" : false;
+  // issue-469-retire-resources: a held start's banner owns the question.
+  if (part === "show" && p.stateHold) return false;
   var recorded = p.decision || {};
   var latest = last && last.choice && (last.atMs || 0) >= (recorded.atMs || 0) ? last : recorded;
   var choice = latest.choice || "";

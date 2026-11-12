@@ -891,6 +891,44 @@
       <Text inline="true" fontFamily="$fontFamily-monospace" value="bram" />.
     </Text>
   </VStack>
+  <!-- issue-469-retire-resources: a held start. Bram's files are still in
+       resources/ and the startup move couldn't run, so nothing started (no
+       agent, Setup, port or trace). The words and the button come from
+       window.__bramStateHeld per obstacle; the button is migrate-relaunch
+       (Retry, or Move for a mixed folder). Button `enabled`:
+       https://www.xmlui.org/docs/reference/components/Button -->
+  <PushSource
+    id="stateHeldAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('stateHeldRelaunch')}" />
+  <VStack
+    when="{window.__bramProjectFolderIs(enhanceStatus.value, 'state-held')}"
+    backgroundColor="$color-warn-100"
+    padding="$space-3"
+    gap="$space-2">
+    <Text fontWeight="$fontWeight-bold" value="{window.__bramStateHeld(enhanceStatus.value, 'heading')}" />
+    <Text fontSize="$fontSize-sm" value="{window.__bramStateHeld(enhanceStatus.value, 'text')}" />
+    <Text
+      when="{window.__bramStateHeld(enhanceStatus.value, 'command')}"
+      fontSize="$fontSize-sm"
+      fontFamily="$fontFamily-monospace"
+      value="{window.__bramStateHeld(enhanceStatus.value, 'command')}" />
+    <Text
+      when="{window.__bramStateHeld(enhanceStatus.value, 'then')}"
+      fontSize="$fontSize-sm"
+      value="{window.__bramStateHeld(enhanceStatus.value, 'then')}" />
+    <HStack verticalAlignment="center" gap="$space-2" wrapContent="true">
+      <Button
+        label="{window.__bramStateHeld(enhanceStatus.value, 'button')}"
+        size="xs"
+        enabled="{!window.__bramStateHeldBusy(stateHeldAct.value)}"
+        onClick="window.__bramStateHeldRelaunch()" />
+      <Text
+        when="{window.__bramStateHeldError(stateHeldAct.value)}"
+        fontSize="$fontSize-sm"
+        value="{window.__bramStateHeldError(stateHeldAct.value)}" />
+    </HStack>
+  </VStack>
   <!-- issue-353: a stray Setup scaffold in the home directory (from an
        earlier mis-launch at $HOME). The host computes strayHomeScaffold
        at startup but until now nothing in the pane used it — Walt's

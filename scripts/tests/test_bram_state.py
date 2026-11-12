@@ -1,4 +1,4 @@
-"""The state-folder resolver: `.bram/` when it exists, else `resources/`."""
+"""The state-folder resolver: `.bram/` (issue-469-retire-resources)."""
 
 import importlib.util
 import os
@@ -61,16 +61,19 @@ class StateDirTests(unittest.TestCase):
         if BASH:
             self.assertEqual(self.sh_state_dir(), name)
 
-    def test_only_resources(self) -> None:
+    def test_only_resources_still_names_bram(self) -> None:
+        # The pre-0.8.4 folder is never read: the host moves it or holds.
         (self.root / "resources").mkdir()
-        self.assert_resolves("resources")
+        (self.root / "resources" / ".bram-port").write_text("1\n")
+        self.assert_resolves(".bram")
 
     def test_only_bram(self) -> None:
         (self.root / ".bram").mkdir()
         (self.root / ".bram" / ".gitignore").write_text("*\n")
         self.assert_resolves(".bram")
+        self.assertTrue(bram_state.is_bram_state_dir(self.root))
 
-    def test_both_prefers_bram(self) -> None:
+    def test_both_names_bram(self) -> None:
         (self.root / "resources").mkdir()
         (self.root / ".bram").mkdir()
         (self.root / ".bram" / ".gitignore").write_text("*\n")
@@ -79,25 +82,25 @@ class StateDirTests(unittest.TestCase):
     def test_migrated_from_marker_counts(self) -> None:
         (self.root / ".bram").mkdir()
         (self.root / ".bram" / ".migrated-from").write_text("x 2026-11-11T00:00:00Z\n")
+        self.assertTrue(bram_state.is_bram_state_dir(self.root))
         self.assert_resolves(".bram")
 
-    def test_foreign_bram_is_not_adopted(self) -> None:
-        # #469: another tool's .bram/ (no marker) is not the state folder.
+    def test_foreign_bram_is_not_bram_state(self) -> None:
+        # #469: another tool's .bram/ (no marker) is not Bram's; the host
+        # holds that start, and no script falls back to resources/.
         (self.root / "resources").mkdir()
         (self.root / ".bram").mkdir()
         (self.root / ".bram" / "index.json").write_text("{}\n")
-        self.assert_resolves("resources")
+        self.assertFalse(bram_state.is_bram_state_dir(self.root))
         (self.root / ".bram" / ".gitignore").write_text("node_modules\n")
-        self.assert_resolves("resources")
+        self.assertFalse(bram_state.is_bram_state_dir(self.root))
+        self.assert_resolves(".bram")
 
-    def test_neither_falls_back_to_resources(self) -> None:
-        self.assert_resolves("resources")
-
-    def test_bram_file_is_not_a_folder(self) -> None:
-        (self.root / ".bram").write_text("not a directory\n")
-        self.assert_resolves("resources")
+    def test_neither_names_bram(self) -> None:
+        self.assert_resolves(".bram")
 
     def test_home_bram_is_ignored(self) -> None:
+        # ~/.bram is the machine folder: the host answers resources there.
         (self.root / ".bram").mkdir()
         (self.root / ".bram" / ".gitignore").write_text("*\n")
         saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}

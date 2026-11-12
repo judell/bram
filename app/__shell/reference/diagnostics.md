@@ -4,8 +4,7 @@ Seeded by Bram Setup as `.claude/bram-reference/diagnostics.md`. Read
 the relevant section when a spinner sticks, something misbehaves, you
 are designing a mechanism, or you are citing evidence.
 
-`<state>/` below is Bram's state folder: `.bram/` if it exists, else
-`resources/`.
+`<state>/` below is Bram's state folder: `.bram/`.
 
 Bram internals, for diagnosing Bram itself (source-repo docs, not
 seeded):

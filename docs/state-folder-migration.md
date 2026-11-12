@@ -73,6 +73,17 @@ happen (issue-469-leftover-folder-reported):
 - A blocked retry on Windows still needs confirming on Windows; a held handle
   on macOS is not evidence for its rename behaviour.
 
+## 0.8.7: retirement (issue-469-retire-resources)
+
+Built in two steps, in one item. Step 1 is the held start; step 2 deletes the old reader.
+
+- **The held start (step 1).** The mover still runs first. When it can't move a `resources/` holding Bram state (a held file, git status unknown, Bram files tracked, a mixed folder, a live claim in another open Bram, a failed rollback or leftover staging, or a foreign `.bram/` in the way), the launch holds (`STATE_HOLD`): no port file, no trace, no `.bram/`, no agent, no Setup. It is recorded on stderr and in `<git-dir>/bram/state-hold.log`, and the pane shows one banner (`projectFolder.kind = "state-held"`) with **Move Bram's files and relaunch** or **Retry**. "Not now" is retired, and a leftover claim with no live owner moves with the folder.
+- **What was removed (step 2).** The resolver (`bram_state_dir_name`) answers `.bram`. The guard (`guard_policy::state_dir*`) has no old name: a project with no Bram `.bram/` is unmanaged, and a breadcrumb lands only in Bram's `.bram/` (`has_state_dir`). `guard::GUARD_TARGET_REL`, the `/resources/` alias, the OpenCode plugin's and the scripts' (`bram_state.py`, `capture-bram-state.ps1`, `pane-age-health.py`) fallbacks, and the seeded conventions' "else `resources/`" are gone. `/resources/...` is an ordinary project path now, so a target app's own `resources/` assets are served as they are on disk. `state_dir_legacy_name_stays_in_the_mover` fails on any new reader of the old name outside the mover, its plan and the hold, and the literal-path test scans the guard too.
+- **The hazard, and its fix.** Pane-driven writes still ran under a hold. With the old reader gone they would have created `.bram/` mid-hold, and the mover never moves into an existing `.bram/`, so the board would be stranded in `resources/`. Two layers stop that:
+  - Every state-changing loopback request (`request_changes_state`) is refused under a hold with 409 `{"ok":false,"held":<obstacle>}` and a `[state-hold] op=refuse-write` line on stderr (`held_write_refusal` in `handle_http`), apart from the hold's own Move / Retry and pane plumbing that writes no state (`HELD_ALLOWED_PATHS`). A route added later is refused by default. The pane's state-writing commands (a turn, a feedback draft, an agent switch or new session, a push, an issue close) refuse the same way (`held_command_refusal`).
+  - Under a hold, or an issue-448 refusal, the resolver answers `resources/` until Bram's `.bram/` exists (`bram_state_dir_name_held`). The pane reads the held board from there, and a write that slipped past the gate lands where the mover will take it, never in a new `.bram/`. A refused launch keeps its pre-retirement behavior, and never makes a `.bram/` without a marker, which a later launch would read as another tool's.
+- **Evidence.** `setup-harness.sh` scenarios `held_mixed`, `plain_legacy_moves`, `foreign_dot_bram` and `foreign_dot_bram_damaged`: a held start's write is refused with 409, `resources/` stays byte-identical and no `.bram/` appears; a plain board moves.
+
 ## Acceptance cases
 
 Four checkouts, each with its own checks, run before and after each release:

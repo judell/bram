@@ -5,8 +5,7 @@ The always-loaded conventions (`.claude/bram-conventions.md`) point
 here when one of these situations arises. Everything here binds when
 it applies; the core conventions stay authoritative for ordinary turns.
 
-`<state>/` below is Bram's state folder: `.bram/` if it exists, else
-`resources/`.
+`<state>/` below is Bram's state folder: `.bram/`.
 
 ## Opt-out plumbing
 

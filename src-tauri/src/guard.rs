@@ -9,10 +9,9 @@
 // must never gate or delay a tool call. Every invocation appends one
 // breadcrumb to <state>/bram-traces/hook-events.log, tagged `claude-rs` /
 // `codex-rs` / `opencode-rs` / `antigravity-rs`, written only when the root's
-// state folder already exists — `<root>/.bram` if it exists, else
-// `<root>/resources` (issue-469, `guard_policy::state_dir`). Outside that,
-// guard mode creates nothing (`guard_mode_is_inert_without_resources_dir`
-// and its `.bram/` twin hold the line).
+// state folder already exists — Bram's `<root>/.bram` (issue-469,
+// `guard_policy::has_state_dir`). Outside that, guard mode creates nothing
+// (`guard_mode_is_inert_without_a_state_dir` holds the line).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -112,15 +111,12 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
 // instances on different builds every project's hooks ran whichever guard
 // wrote last (2026-09-30: ~/bram's hooks on the installed guard while it
 // ran a dev build). Each instance now records its own guard in
-// <root>/resources/.bram-guard-target; whichever guard the link reaches
+// <root>/.bram/.bram-guard-target; whichever guard the link reaches
 // hands the call to that one. Registrations don't change for either
 // provider. Any routing failure falls back to deciding in-process, as
 // before; routing never denies on its own.
 //
-// issue-469: the file lives in the root's state folder, `.bram/` if it
-// exists, else `resources/`. `GUARD_TARGET_REL` keeps the legacy spelling
-// for the host's callers until they move to `guard_target_path`.
-pub const GUARD_TARGET_REL: &str = "resources/.bram-guard-target";
+// issue-469: the file lives in the root's state folder, `.bram/`.
 pub const GUARD_TARGET_LEAF: &str = ".bram-guard-target";
 
 /// `<root>/<state folder>/.bram-guard-target`, for the folder resolved for `root`.
@@ -128,9 +124,9 @@ pub fn guard_target_path(root: &Path) -> PathBuf {
     crate::guard_policy::state_path(root, GUARD_TARGET_LEAF)
 }
 
-/// The first readable `<dir>/<state folder>/<leaf>` walking up from `start`,
-/// trying `.bram/` then `resources/` at each level before moving up, so a
-/// nested instance is found before its parent. Returns the file's text and
+/// The first readable `<dir>/.bram/<leaf>` walking up from `start`, trying
+/// Bram's `.bram/` at each level before moving up, so a nested instance is
+/// found before its parent. Returns the file's text and
 /// the directory it was found under.
 fn find_state_file_upward(start: &Path, leaf: &str) -> Option<(String, PathBuf)> {
     let mut cur = start.to_path_buf();
@@ -149,7 +145,7 @@ const GUARD_ROUTED_ENV: &str = "BRAM_GUARD_ROUTED";
 
 // The project's recorded guard, when it exists and isn't `current`, with
 // the project root it was recorded in (where the breadcrumb belongs; the
-// hook's cwd can be a subdirectory with no resources/).
+// hook's cwd can be a subdirectory with no state folder).
 pub(crate) fn route_target(start: &Path, current: &Path) -> Option<(PathBuf, PathBuf)> {
     let (text, cur) = find_state_file_upward(start, GUARD_TARGET_LEAF)?;
     let target = PathBuf::from(text.trim());
@@ -257,8 +253,7 @@ fn route_to_project_guard(
 
 // --- Deciding worklist hooks ----------------------------------------------
 
-// Walk up from `start` to the nearest `.bram/.bram-port` or
-// `resources/.bram-port` (both names at each level, `.bram/` first,
+// Walk up from `start` to the nearest `.bram/.bram-port` (Bram's `.bram/`,
 // issue-469), mirroring the Python guard's port discovery so the [hook]
 // trace lands the same way.
 fn find_port_upward(start: &Path) -> Option<u16> {
@@ -342,7 +337,7 @@ fn session_report_body(
 }
 
 // POST a token-authenticated report to the Bram that launched this agent. The
-// port comes from this terminal's environment, not resources/.bram-port,
+// port comes from this terminal's environment, not .bram/.bram-port,
 // which names whichever instance wrote it last; the token is per terminal, so
 // any other instance would refuse it anyway. `body` builds the request from
 // the token and returns None when there is nothing to report. Never affects
@@ -1028,7 +1023,7 @@ fn str_field(payload: &serde_json::Value, key: &str) -> String {
 
 // Mirror of the Python adapters' root resolution. Claude: CLAUDE_PROJECT_DIR
 // first — the payload cwd tracks the shell's persistent `cd`, and a session
-// working outside the repo resolved a root with no resources/.bram-port,
+// working outside the repo resolved a root with no .bram/.bram-port,
 // silently losing every POST (2026-07-18 pane-blind windows). Codex has no
 // equivalent env pin; its hook payloads carry the project cwd.
 fn resolve_project_root(provider: &str, payload: &serde_json::Value) -> PathBuf {
@@ -1282,17 +1277,17 @@ fn authority_menu_hook(
 
 // One line per invocation into the hook breadcrumb file, same
 // refusal-to-create discipline the retired Python hooks applied: no
-// state folder under <root> (`.bram/` or `resources/`), no write anywhere;
+// state folder under <root> (Bram's `.bram/`), no write anywhere;
 // the existing log over the cap stops
 // growing rather than rotating. `reason=` fields are deliberately LAST and
 // run to end-of-line: Codex reasons are prose with spaces, so every
 // fixed-width field must precede them for lines to stay
 // whitespace-splittable.
 pub(crate) fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: &str, tail: &str) {
-    let state = crate::guard_policy::state_dir(root);
-    if !state.is_dir() {
+    if !crate::guard_policy::has_state_dir(root) {
         return;
     }
+    let state = crate::guard_policy::state_dir(root);
     let dir = state.join("bram-traces");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -1447,7 +1442,7 @@ pub fn ensure_bram_guard_link() -> Option<PathBuf> {
 
 // The guard this instance ships with: the dedicated guard binary beside the
 // running main binary, else the main binary itself. The link points here,
-// and the host records it in <root>/resources/.bram-guard-target.
+// and the host records it in <root>/.bram/.bram-guard-target.
 pub fn own_guard_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // windows-guard-bin-no-console: prefer the dedicated guard entrypoint
@@ -1569,13 +1564,13 @@ mod guard_mode_tests {
         let root = scratch("route-found");
         let nested = root.join("app").join("tools");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let project_guard = root.join("project-guard");
         std::fs::write(&project_guard, "").unwrap();
         let running_guard = root.join("running-guard");
         std::fs::write(&running_guard, "").unwrap();
         std::fs::write(
-            root.join(GUARD_TARGET_REL),
+            root.join(".bram/.bram-guard-target"),
             format!("{}\n", project_guard.display()),
         )
         .unwrap();
@@ -1591,24 +1586,24 @@ mod guard_mode_tests {
     #[test]
     fn route_target_declines_self_missing_and_absent_targets() {
         let root = scratch("route-declines");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let running_guard = root.join("running-guard");
         std::fs::write(&running_guard, "").unwrap();
         // No target file anywhere up the tree from here is fine only if the
         // walk ends; scratch dirs live under the system temp dir.
         std::fs::write(
-            root.join(GUARD_TARGET_REL),
+            root.join(".bram/.bram-guard-target"),
             format!("{}\n", running_guard.display()),
         )
         .unwrap();
         assert_eq!(route_target(&root, &running_guard), None, "self");
         std::fs::write(
-            root.join(GUARD_TARGET_REL),
+            root.join(".bram/.bram-guard-target"),
             format!("{}\n", root.join("gone").display()),
         )
         .unwrap();
         assert_eq!(route_target(&root, &running_guard), None, "missing binary");
-        std::fs::write(root.join(GUARD_TARGET_REL), "  \n").unwrap();
+        std::fs::write(root.join(".bram/.bram-guard-target"), "  \n").unwrap();
         assert_eq!(route_target(&root, &running_guard), None, "empty file");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1620,7 +1615,7 @@ mod guard_mode_tests {
     #[test]
     fn route_target_declines_a_hard_link_to_itself() {
         let root = scratch("route-declines-hardlink");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let running_guard = root.join("running-guard");
         std::fs::write(&running_guard, "guard").unwrap();
 
@@ -1634,7 +1629,7 @@ mod guard_mode_tests {
         assert_ne!(link, running_guard, "the two names must differ");
 
         std::fs::write(
-            root.join(GUARD_TARGET_REL),
+            root.join(".bram/.bram-guard-target"),
             format!("{}\n", running_guard.display()),
         )
         .unwrap();
@@ -1682,8 +1677,8 @@ mod guard_mode_tests {
     }
 
     #[test]
-    fn guard_mode_is_inert_without_resources_dir() {
-        // The contract: no <root>/resources, no write anywhere under root.
+    fn guard_mode_menu_hook_is_inert_on_a_bare_root() {
+        // The contract: no <root>/.bram, no write anywhere under root.
         let root = scratch("inert");
         let payload = serde_json::json!({
             "hook_event_name": "PermissionRequest",
@@ -1699,14 +1694,14 @@ mod guard_mode_tests {
     #[test]
     fn breadcrumb_lands_when_resources_exists() {
         let root = scratch("crumb");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let payload = serde_json::json!({
             "hook_event_name": "PermissionRequest",
             "tool_name": "Bash",
             "cwd": root.to_string_lossy(),
         });
         authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
-        let log = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+        let log = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
             .expect("breadcrumb written");
         assert!(
             log.contains("codex-rs PermissionRequest Bash"),
@@ -1720,7 +1715,8 @@ mod guard_mode_tests {
     #[test]
     fn over_the_cap_writes_the_paused_marker_once() {
         let root = scratch("crumb-cap");
-        let dir = root.join("resources/bram-traces");
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        let dir = root.join(".bram/bram-traces");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("hook-events.log");
         std::fs::write(&log, vec![b'x'; (EVENTS_LOG_CAP_BYTES + 10) as usize]).unwrap();
@@ -1734,8 +1730,7 @@ mod guard_mode_tests {
     }
 
     fn read_crumbs(root: &Path) -> String {
-        std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
-            .unwrap_or_default()
+        std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log")).unwrap_or_default()
     }
 
     #[test]
@@ -1744,7 +1739,7 @@ mod guard_mode_tests {
         // default" stderr, exit 2. The pre-fix Rust behavior was allow/exit 0
         // with no receipt.
         let root = scratch("fault-claude-stdin");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let code = authority_fail_closed(
             &root,
             "claude-rs",
@@ -1767,7 +1762,7 @@ mod guard_mode_tests {
         // both providers (codex-stdin-fault-decided-error), so guard faults
         // grep apart from ordinary policy denials.
         let root = scratch("fault-codex-stdin");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let code = authority_fail_closed(
             &root,
             "codex-rs",
@@ -1847,16 +1842,16 @@ mod guard_mode_tests {
     #[test]
     fn opencode_edits_outside_the_addressed_items_get_the_advisory() {
         let root = scratch("opencode-advisory");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
         std::fs::write(
-            root.join("resources/worklist.json"),
+            root.join(".bram/worklist.json"),
             r#"{"version":1,"items":[
                 {"id":"mine","status":"proposed","files":["a.txt"]},
                 {"id":"other","status":"proposed","files":["b.txt"]}]}"#,
         )
         .unwrap();
-        let context = root.join("resources/.turn-context.json");
+        let context = root.join(".bram/.turn-context.json");
         std::fs::write(
             &context,
             r#"{"schema":1,"addressedIds":["mine"],"kind":"approved"}"#,
@@ -1911,10 +1906,10 @@ mod guard_mode_tests {
     #[test]
     fn opencode_decisions_follow_worklist_coverage() {
         let root = scratch("opencode-coverage");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
         std::fs::write(
-            root.join("resources/worklist.json"),
+            root.join(".bram/worklist.json"),
             r#"{"version":1,"items":[{"id":"x","status":"proposed","files":["covered.txt"]}]}"#,
         )
         .unwrap();
@@ -2018,7 +2013,7 @@ mod guard_mode_tests {
     #[test]
     fn opencode_authority_fails_closed_on_unparseable_stdin() {
         let root = scratch("fault-opencode-stdin");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let code = authority_fail_closed(
             &root,
             "opencode-rs",
@@ -2102,10 +2097,10 @@ mod guard_mode_tests {
     #[test]
     fn antigravity_decisions_follow_worklist_coverage() {
         let root = scratch("antigravity-coverage");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
         std::fs::write(
-            root.join("resources/worklist.json"),
+            root.join(".bram/worklist.json"),
             r#"{"version":1,"items":[{"id":"x","status":"proposed","files":["covered.txt"]}]}"#,
         )
         .unwrap();
@@ -2164,7 +2159,7 @@ mod guard_mode_tests {
     #[test]
     fn antigravity_authority_fails_closed_on_unparseable_stdin() {
         let root = scratch("fault-antigravity-stdin");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let code = authority_fail_closed(
             &root,
             "antigravity-rs",
@@ -2231,11 +2226,11 @@ mod guard_mode_tests {
         let specimens =
             include_str!("../../docs/agent-specimens/antigravity/hooks/payloads/PreToolUse.jsonl");
         let root = scratch("antigravity-mcp-specimens");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
         std::fs::write(
-            root.join("resources/worklist.json"),
+            root.join(".bram/worklist.json"),
             r#"{"version":1,"items":[]}"#,
         )
         .unwrap();
@@ -2281,7 +2276,7 @@ mod guard_mode_tests {
         );
 
         std::fs::write(
-            root.join("resources/worklist.json"),
+            root.join(".bram/worklist.json"),
             r#"{"version":2,"items":[{"id":"mcp","status":"proposed","files":["sub/mcp-out.txt"]}]}"#,
         )
         .unwrap();
@@ -2336,11 +2331,11 @@ mod guard_mode_tests {
             .canonicalize()
             .unwrap();
         std::fs::create_dir_all(root.join(".agents")).unwrap();
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
         std::fs::write(
-            root.join("resources/worklist.json"),
+            root.join(".bram/worklist.json"),
             r#"{"version":1,"items":[{"id":"mcp","status":"proposed","files":["sub/mcp-out.txt"]}]}"#,
         )
         .unwrap();
@@ -2368,10 +2363,10 @@ mod guard_mode_tests {
     #[test]
     fn antigravity_hook_fails_closed_on_drift_and_decides_the_captured_shape() {
         let root = scratch("antigravity-drift");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        std::fs::write(root.join("resources/.worklist-authorization.json"), "{}").unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
         std::fs::write(
-            root.join("resources/worklist.json"),
+            root.join(".bram/worklist.json"),
             r#"{"version":1,"items":[]}"#,
         )
         .unwrap();
@@ -2422,7 +2417,7 @@ mod guard_mode_tests {
         // exit, never escape as 101 (which Claude Code reads as a
         // NON-blocking error — the tool call would proceed).
         let root = scratch("fault-panic");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let payload = serde_json::json!({
             "tool_name": "Bash",
             "cwd": root.to_string_lossy(),
@@ -2456,7 +2451,7 @@ mod guard_mode_tests {
         // the empty substitute payload is exactly what the policy would
         // wrongly allow.
         let root = scratch("fault-stdin-first");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let payload = serde_json::json!({ "cwd": root.to_string_lossy() });
         fn must_not_run(_: &str, _: &serde_json::Value, _: std::time::Instant) -> i32 {
             panic!("hook ran despite stdin fault");
@@ -2538,7 +2533,7 @@ mod guard_mode_tests {
         // No port file: skip, breadcrumb the skip, exit 0 — the menu hook is
         // deliberately fail-open (observe-only), unlike the worklist guard.
         let root = scratch("menu-auth");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let payload = serde_json::json!({
             "hook_event_name": "PermissionRequest",
             "tool_name": "Bash",
@@ -2560,7 +2555,7 @@ mod guard_mode_tests {
 
         // With a (dead) port: the POST fails, the breadcrumb names the
         // outcome, and the exit stays 0.
-        std::fs::write(root.join("resources/.bram-port"), "1").unwrap();
+        std::fs::write(root.join(".bram/.bram-port"), "1").unwrap();
         let code = authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
         assert_eq!(code, 0);
         assert!(
@@ -2623,9 +2618,9 @@ mod guard_mode_tests {
     }
 
     #[test]
-    fn guard_mode_is_inert_without_either_state_dir() {
-        // No `.bram/` and no `resources/` under root: nothing written, and
-        // no `.bram/` created either.
+    fn guard_mode_is_inert_without_a_state_dir() {
+        // No `.bram/` under root: nothing written, and none created. A
+        // `.bram/` that isn't Bram's (no marker) gets nothing either.
         let root = scratch("inert-both");
         let payload = serde_json::json!({
             "hook_event_name": "PermissionRequest",
@@ -2635,16 +2630,21 @@ mod guard_mode_tests {
         authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
         authority_menu_hook("claude-rs", &payload, std::time::Instant::now());
         assert_eq!(count_entries(&root), 0, "guard mode created files");
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        assert!(
+            !root.join(".bram/bram-traces").exists(),
+            "wrote into a foreign .bram/"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn breadcrumb_lands_under_dot_bram_when_it_exists() {
         let root = scratch("crumb-dot-bram");
-        std::fs::create_dir_all(root.join(".bram")).unwrap();
-        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
-        // A legacy folder beside it is not the state folder any more.
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        // A pre-0.8.4 folder beside it is not a state folder.
+        std::fs::create_dir_all(root.join("resources")).unwrap(); // state-dir: literal ok (the retired name, under test)
         let payload = serde_json::json!({
             "hook_event_name": "PermissionRequest",
             "tool_name": "Bash",
@@ -2658,15 +2658,15 @@ mod guard_mode_tests {
             "log: {log}"
         );
         assert!(log.contains("post=skipped port=none"), "log: {log}");
-        assert!(!root.join("resources/bram-traces").exists());
+        assert!(!root.join("resources/bram-traces").exists()); // state-dir: literal ok (the retired name, under test)
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn port_is_read_from_either_state_dir() {
         let legacy = scratch("port-legacy");
-        std::fs::create_dir_all(legacy.join("resources")).unwrap();
-        std::fs::write(legacy.join("resources/.bram-port"), "4101\n").unwrap();
+        crate::guard_policy::test_make_state_dir(&legacy).unwrap();
+        std::fs::write(legacy.join(".bram/.bram-port"), "4101\n").unwrap();
         assert_eq!(read_port(&legacy), Some(4101));
         assert_eq!(find_port_upward(&legacy), Some(4101));
 
@@ -2684,12 +2684,12 @@ mod guard_mode_tests {
 
     #[test]
     fn walk_up_finds_a_nested_dot_bram_instance_before_its_parent() {
-        // root/resources/.bram-port (parent, old name) and
+        // root/.bram/.bram-port (parent, old name) and
         // root/sub/.bram/.bram-port (nested, new name): a run from
         // root/sub/x resolves to root/sub.
         let root = scratch("nested-dot-bram");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        std::fs::write(root.join("resources/.bram-port"), "5001").unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        std::fs::write(root.join(".bram/.bram-port"), "5001").unwrap();
         let sub = root.join("sub");
         std::fs::create_dir_all(sub.join(".bram")).unwrap();
         std::fs::write(sub.join(".bram/.gitignore"), "*\n").unwrap();
@@ -2705,8 +2705,8 @@ mod guard_mode_tests {
     #[test]
     fn walk_up_reaches_the_parent_when_the_child_has_neither_name() {
         let root = scratch("parent-only");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        std::fs::write(root.join("resources/.bram-port"), "5003").unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        std::fs::write(root.join(".bram/.bram-port"), "5003").unwrap();
         let x = root.join("sub").join("x");
         std::fs::create_dir_all(&x).unwrap();
         let (_, found) = find_state_file_upward(&x, ".bram-port").expect("found");

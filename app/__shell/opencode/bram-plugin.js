@@ -39,11 +39,11 @@ const GUARD = join(
   process.platform === "win32" ? "bram-guard.exe" : "bram-guard",
 );
 const GUARD_TIMEOUT_MS = 15000;
-// Bram's per-project state folder: `.bram/` when it exists, else the older
-// `resources/` (issue #469). A path in `.bram/` wins only if that file is there.
+// Bram's per-project state folder: `.bram/` (issue #469). Since 0.8.7 a
+// project's state is moved there at startup, or its start is held, so the
+// pre-0.8.4 `resources/` is never read.
 function statePath(name) {
-  const moved = join(ROOT, ".bram", name);
-  return existsSync(moved) ? moved : join(ROOT, "resources", name);
+  return join(ROOT, ".bram", name);
 }
 // Built-in tools that can't change the project. Everything else goes to the
 // guard, which allows what it has no rule for; MCP calls go as MCP calls

@@ -168,7 +168,7 @@ fn deny_coverage_parts(
     let mut msg = format!(
         "Blocked: writing to {target} requires either a proposed/applied item in {sd}/worklist.json covering this path, or an explicit opt-out phrase in your last message.\n  - Propose the change in {sd}/worklist.json first (item with file=\"{target}\", non-empty before and after, status proposed). Wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.",
         target = target_rel,
-        sd = project_root.map_or(STATE_DIR_LEGACY, state_dir_name)
+        sd = STATE_DIR_NEW
     );
     if opt_out_attempted {
         msg.push_str("\n  - (Detected what looked like opt-out language, but it didn't match the expected phrasing. The verbal opt-out is exactly \"just do it\"; otherwise use the Skip worklist button.)");
@@ -211,8 +211,8 @@ fn claude_coverage_root_line(project_root: &Path) -> String {
 /// judell/bram#287's deny text as the Bash-redirect (python:2087-2096) and MCP
 /// (python:2179-2187) surfaces print it. The Write/Edit surface's copy carries
 /// an extra clause and is spelled out at that site instead. A template: the
-/// call sites pass it through `sd_text` for the root in question.
-const SUBAGENT_WORKLIST_WRITE_BODY: &str = "Worklist proposals and claim edits (resources/worklist.json, resources/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287.";
+/// call sites print it as is.
+const SUBAGENT_WORKLIST_WRITE_BODY: &str = "Worklist proposals and claim edits (.bram/worklist.json, .bram/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287.";
 
 /// `_BYPASS_DETAIL_LABELS` (python:1175-1180), with its `.get(detail, detail)`
 /// fallback to the raw detail token.
@@ -232,7 +232,7 @@ fn bypass_detail_label(root: &Path, detail: &str) -> String {
 
 // Every state path below is a LEAF inside the project's state folder, joined
 // onto the folder resolved for the root in question (`state_rel` /
-// `state_path`), never a literal `resources/…` prefix (issue-469).
+// `state_path`), never a literal folder prefix (issue-469).
 const WORKLIST_LEAF: &str = "worklist.json";
 const WORKLIST_DRAFTS_LEAF: &str = "worklist-drafts/";
 const WORKTREE_PREFIX: &str = ".claude/worktrees/";
@@ -262,17 +262,17 @@ const LIFECYCLE_LEAVES_PREFIXES: &[&str] = &[
 
 // --- state folder resolution (issue-469) -------------------------------------
 //
-// Bram's per-project state folder is moving from `resources/` to `.bram/`
-// (judell/bram#469). While projects run different Brams, this one shared
-// guard serves both: a root's state folder is `.bram/` when that directory
-// exists, else `resources/`. With no `.bram/` (every project before the
-// move) every path, message and verdict is what it was.
+// Bram's per-project state folder is `.bram/` (judell/bram#469). Since
+// issue-469-retire-resources the guard reads nothing from the pre-0.8.4
+// `resources/`: a 0.8.7 host either moved a project's state at startup or
+// held the start, and a held start runs no agent. A project with no Bram
+// `.bram/` is unmanaged here.
 //
 // `~/.bram` is the machine folder (it holds `bram-guard`), never a project's
-// state folder, so a root at the home directory still resolves `resources/`
-// and a breadcrumb never lands beside the guard binary.
+// state folder, and a `.bram/` without Bram's marker belongs to another tool:
+// neither is a state folder (`has_state_dir`), so no breadcrumb lands beside
+// the guard binary or in another tool's folder, and no walk-up stops there.
 pub const STATE_DIR_NEW: &str = ".bram";
-pub const STATE_DIR_LEGACY: &str = "resources";
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -312,68 +312,60 @@ fn has_project_bram_dir(dir: &Path, home: Option<&Path>) -> bool {
     dir.join(STATE_DIR_NEW).is_dir() && !is_home(dir, home) && is_bram_state_dir(dir)
 }
 
+/// Whether `root` has a state folder: Bram's `.bram/`, not `~/.bram`. The test
+/// before any write into it (the breadcrumb).
+pub fn has_state_dir(root: &Path) -> bool {
+    has_project_bram_dir(root, home_dir().as_deref())
+}
+
 /// One line for the `bash-write-no-coverage` denial when a `.bram/` that isn't
-/// Bram's hides a live board in `resources/` from the resolver. Deny path only.
+/// Bram's sits at the root: the host holds that start, so there is no board
+/// to cover the write. Deny path only.
 fn foreign_dot_bram_hint(root: &Path) -> Option<String> {
     let dot = root.join(STATE_DIR_NEW);
     if !dot.is_dir() || is_bram_state_dir(root) || is_home(root, home_dir().as_deref()) {
         return None;
     }
-    let text = std::fs::read_to_string(root.join(STATE_DIR_LEGACY).join(WORKLIST_LEAF)).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    if v["items"].as_array().is_none_or(|a| a.is_empty()) {
-        return None;
-    }
-    Some("\n  - A folder named .bram/ that isn't Bram's is in the way, so Bram reads its worklist from resources/, which this check cannot see. The user can rename .bram/ and relaunch Bram (judell/bram#469).".to_string())
+    Some("\n  - A folder named .bram/ that isn't Bram's is in the way, so Bram hasn't started on this project and there is no worklist to cover this. The user can rename that folder and relaunch Bram (judell/bram#469).".to_string())
 }
 
-fn state_dir_name_with_home(root: &Path, home: Option<&Path>) -> &'static str {
-    if has_project_bram_dir(root, home) {
-        STATE_DIR_NEW
-    } else {
-        STATE_DIR_LEGACY
-    }
+/// The state folder's name: `.bram`. Kept as a function of the root for its
+/// callers, which ask per root.
+pub fn state_dir_name(_root: &Path) -> &'static str {
+    STATE_DIR_NEW
 }
 
-/// The resolved state folder's name for `root`: `.bram` if it is Bram's
-/// (`is_bram_state_dir`), else `resources`.
-pub fn state_dir_name(root: &Path) -> &'static str {
-    state_dir_name_with_home(root, home_dir().as_deref())
-}
-
-/// `<root>/.bram` if it is Bram's, else `<root>/resources`.
+/// `<root>/.bram`.
 pub fn state_dir(root: &Path) -> PathBuf {
-    root.join(state_dir_name(root))
+    root.join(STATE_DIR_NEW)
 }
 
-/// `leaf` inside `root`'s resolved state folder, as an absolute-ish path.
+/// `leaf` inside `root`'s state folder, as an absolute-ish path.
 pub fn state_path(root: &Path, leaf: &str) -> PathBuf {
     state_dir(root).join(leaf)
 }
 
-/// `leaf` inside `root`'s resolved state folder, root-relative with `/`
-/// separators — the shape `normalize_target` produces.
+/// `leaf` inside `root`'s state folder, root-relative with `/` separators —
+/// the shape `normalize_target` produces.
 pub fn state_rel(root: &Path, leaf: &str) -> String {
     format!("{}/{}", state_dir_name(root), leaf)
 }
 
 fn state_dir_candidates_with_home(dir: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-    let mut v = Vec::with_capacity(2);
     if has_project_bram_dir(dir, home) {
-        v.push(dir.join(STATE_DIR_NEW));
+        vec![dir.join(STATE_DIR_NEW)]
+    } else {
+        Vec::new()
     }
-    v.push(dir.join(STATE_DIR_LEGACY));
-    v
 }
 
-/// For walk-ups: the state folders to try at one level, `.bram/` first, then
-/// `resources/`, so a level is checked under both names before moving up and
-/// a nested instance is found before its parent.
+/// For walk-ups: the state folder to try at one level (Bram's `.bram/`, or
+/// none), so a nested instance is found before its parent.
 pub fn state_dir_candidates(dir: &Path) -> Vec<PathBuf> {
     state_dir_candidates_with_home(dir, home_dir().as_deref())
 }
 
-/// `rel`'s path inside `root`'s resolved state folder, if it is inside it.
+/// `rel`'s path inside `root`'s state folder, if it is inside it.
 fn state_leaf<'a>(root: &Path, rel: &'a str) -> Option<&'a str> {
     rel.strip_prefix(state_dir_name(root))?.strip_prefix('/')
 }
@@ -382,31 +374,24 @@ fn is_worklist_rel(root: &Path, rel: &str) -> bool {
     state_leaf(root, rel) == Some(WORKLIST_LEAF)
 }
 
-// The legacy `resources/` spellings, for the tests that build fixtures in a
-// project with no `.bram/` (each has a `.bram/` twin below).
+// The state paths the tests build fixtures with.
 #[cfg(test)]
-const WORKLIST_REL: &str = "resources/worklist.json";
+const WORKLIST_REL: &str = ".bram/worklist.json";
 #[cfg(test)]
-const AUTH_REL: &str = "resources/.worklist-authorization.json";
+const AUTH_REL: &str = ".bram/.worklist-authorization.json";
 #[cfg(test)]
-const DIRECT_EDIT_REL: &str = "resources/.worklist-direct-edit.json";
+const DIRECT_EDIT_REL: &str = ".bram/.worklist-direct-edit.json";
 #[cfg(test)]
-const WORKLIST_INTENT_REL: &str = "resources/.worklist-intent.json";
+const WORKLIST_INTENT_REL: &str = ".bram/.worklist-intent.json";
 #[cfg(test)]
-const WORKLIST_RESULT_REL: &str = "resources/.worklist-result.json";
+const WORKLIST_RESULT_REL: &str = ".bram/.worklist-result.json";
 
-/// Rewrite a fixed message template's `resources/` mentions to the resolved
-/// folder. Only applied to template text (whose interpolations, if any, are
-/// tool names, item ids or numbers), never to text carrying a user path, so a
-/// project file under some other `resources/` is never renamed in a message;
-/// templates that quote a path use `state_rel` in their format args instead.
-fn sd_text(root: &Path, template: &str) -> String {
-    let sd = state_dir_name(root);
-    if sd == STATE_DIR_LEGACY {
-        template.to_string()
-    } else {
-        template.replace("resources/", &format!("{}/", sd))
-    }
+/// A test fixture's state folder as Bram makes it: `<root>/.bram` with a
+/// `.gitignore` of `*` (the marker `is_bram_state_dir` reads).
+#[cfg(test)]
+pub(crate) fn test_make_state_dir(root: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root.join(STATE_DIR_NEW))?;
+    std::fs::write(root.join(STATE_DIR_NEW).join(".gitignore"), "*\n")
 }
 
 const MCP_WRITE_TOKENS: &[&str] = &[
@@ -3010,8 +2995,8 @@ fn abspath_of(p: &Path) -> PathBuf {
 fn find_project_root(start: &str) -> Option<PathBuf> {
     let mut cur = abspath(start);
     loop {
-        // issue-469: `.bram/` then `resources/` at each level, so a nested
-        // instance's marker is found before its parent's.
+        // issue-469: Bram's `.bram/` at each level, so a nested instance's
+        // marker is found before its parent's.
         if state_dir_candidates(&cur)
             .iter()
             .any(|d| d.join(AUTH_LEAF).exists())
@@ -3261,7 +3246,7 @@ fn worklist_covered_files_filtered(
 }
 
 // --- issue-368-addressed-turn-context (observe-only) -------------------------
-// The host stamps `resources/.turn-context.json` while an ADDRESSED turn
+// The host stamps `.bram/.turn-context.json` while an ADDRESSED turn
 // (approved:/iterate:/drop: payload naming ids) is in flight, and removes it
 // at turn end or for general turns. When a file-mutating call is allowed
 // purely by worklist coverage but the active turn does not address a covering
@@ -3831,22 +3816,17 @@ fn iterate_feedback_text(project_root: &Path, last_msg: &str) -> String {
 
 /// issue-431-opt-out-in-outbound-turn: a turn Bram delivers through an
 /// outbound-turn file reaches the transcript only as its frame,
-/// `Read and follow this Bram turn: @resources/outbound-turns/<id>-turn.json
+/// `Read and follow this Bram turn: @.bram/outbound-turns/<id>-turn.json
 /// …`, so the user's words, "just do it" included, live in the file's `text`.
 /// Since 9b40e82 (2026-10-02, #416) every message with a line break takes
 /// that route; before it, short ones went inline and the phrase was visible.
 /// Same indirection as `iterate_feedback_text`, same name hygiene.
 fn outbound_turn_text(project_root: &Path, last_msg: &str) -> String {
-    // issue-469: the frame names the folder the host wrote the turn into,
-    // so either state folder name is honored as written; nothing else is.
-    let Some((at, mark, folder)) = [STATE_DIR_NEW, STATE_DIR_LEGACY]
-        .iter()
-        .filter_map(|folder| {
-            let mark = format!("@{}/outbound-turns/", folder);
-            last_msg.find(&mark).map(|at| (at, mark, *folder))
-        })
-        .min_by_key(|(at, _, _)| *at)
-    else {
+    // issue-469: the frame names the state folder the host wrote the turn
+    // into, `.bram/`; nothing else is honored.
+    let folder = STATE_DIR_NEW;
+    let mark = format!("@{}/outbound-turns/", folder);
+    let Some(at) = last_msg.find(&mark) else {
         return String::new();
     };
     let name: String = last_msg[at + mark.len()..]
@@ -4199,7 +4179,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
                     "Bash",
                     &preview,
                     &cwd_s,
-                    &sd_text(&project_root, SUBAGENT_WORKLIST_WRITE_BODY),
+                    &String::from(SUBAGENT_WORKLIST_WRITE_BODY),
                 );
             }
         }
@@ -4233,7 +4213,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     }
     // `deny_bash_coverage` (python:1284-1323). The root line is unconditional
     // here because this call site always passes a project_root.
-    let mut body = sd_text(&project_root, "Bash blocked: this command writes to the filesystem or performs a sensitive side effect, and resources/worklist.json has no proposed or applied items covering active work.\n  - Propose the work in the worklist first, wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.");
+    let mut body = "Bash blocked: this command writes to the filesystem or performs a sensitive side effect, and .bram/worklist.json has no proposed or applied items covering active work.\n  - Propose the work in the worklist first, wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.".to_string();
     body.push_str(&claude_coverage_root_line(&project_root));
     if let Some(hint) = foreign_dot_bram_hint(&project_root) {
         body.push_str(&hint);
@@ -4321,7 +4301,7 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
                 tool_name,
                 &rel,
                 &cwd_s,
-                &sd_text(&project_root, SUBAGENT_WORKLIST_WRITE_BODY),
+                &String::from(SUBAGENT_WORKLIST_WRITE_BODY),
             );
         }
         let (is_covered, _) = coverage_verdict(&covered, &rel);
@@ -4391,7 +4371,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
             tool_name,
             &rel,
             &hook_cwd,
-            &sd_text(&project_root, "Worklist proposals and claim edits (resources/worklist.json, resources/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly -- it can widen its own item's coverage, author new items, or edit claim state with no denial. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287."),
+            &"Worklist proposals and claim edits (.bram/worklist.json, .bram/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly -- it can widen its own item's coverage, author new items, or edit claim state with no denial. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287.".to_string(),
         );
     }
 
@@ -4453,7 +4433,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
             let inline_bad = worklist_items_with_inline_prose(&new);
             if !inline_bad.is_empty() {
                 // `deny_inline_prose` (python:1388-1409)
-                let mut lines = vec![sd_text(&project_root, "Blocked: inline `before` / `after` on proposed worklist item(s) — prose must live in resources/worklist-drafts/<id>.md.")];
+                let mut lines = vec!["Blocked: inline `before` / `after` on proposed worklist item(s) — prose must live in .bram/worklist-drafts/<id>.md.".to_string()];
                 for label in &inline_bad {
                     lines.push(format!(
                         "  - item {label}: remove inline before/after; write prose to {sd}/worklist-drafts/{label}.md instead",
@@ -4529,7 +4509,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
                 .join(", ");
             lines.push(format!("  - Status changes: {}", detail));
         }
-        lines.push(sd_text(&project_root, "  - Example: curl -4 -sS -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' http://127.0.0.1:$(cat resources/.bram-port)/__worklist/mutate"));
+        lines.push("  - Example: curl -4 -sS -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' http://127.0.0.1:$(cat .bram/.bram-port)/__worklist/mutate".to_string());
         return deny_msg(
             "mechanical-worklist-change",
             rel,
@@ -4599,7 +4579,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
 // - **No project-root walk.** `cwd` IS the root (`claude_coverage_root_line`'s
 //   "anchored at cwd"), so there is no `find_project_root`, no `resolve_
 //   session_root`, and no issue-262 cross-root bypass. A cwd with no
-//   `resources/.worklist-authorization.json` allows unconditionally.
+//   `.bram/.worklist-authorization.json` allows unconditionally.
 // - **No transcript, no prose opt-out at PreToolUse.** `has_opt_out` runs on
 //   the UserPromptSubmit surface only, where the Python guard WRITES a
 //   `direct-edit` record; PreToolUse then reads that record through
@@ -4610,7 +4590,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
 //   a reconstructed post-patch file.
 // - **The `.worklist-intent.json` coordination channel** (#130) plus its
 //   pending/stale gate, which has no Claude counterpart.
-// - **`resources/worklist-citations/` is an exemption of its own** here; the
+// - **`.bram/worklist-citations/` is an exemption of its own** here; the
 //   Claude guard folds it into `_LIFECYCLE_PATHS_PREFIXES`.
 // - **No `gh issue <verb>` entry in `_BASH_WRITE_PATTERNS`,** hence no
 //   `forge_issue_only_write` exemption — `gh issue close 5` is simply not a
@@ -4909,9 +4889,9 @@ fn intent_pending_message(tool_label: &str, detail: &IntentDetail) -> String {
         _ => ("None".to_string(), "None".to_string(), 0),
     };
     format!(
-        "{tool} blocked: resources/.worklist-intent.json already holds a pending \
+        "{tool} blocked: .bram/.worklist-intent.json already holds a pending \
 request (route={route}, nonce={nonce}, age={age}s) that has not drained yet. \
-Wait for resources/.worklist-result.json to appear, or retry once the prior \
+Wait for .bram/.worklist-result.json to appear, or retry once the prior \
 request clears.",
         tool = tool_label,
         route = route,
@@ -4989,7 +4969,7 @@ fn removed_block_text(patch: &str) -> String {
 }
 
 /// Codex `_worklist_content_after_apply_patch`: a best-effort interpreter for
-/// `*** Update File: resources/worklist.json` hunks. None means "too unusual to
+/// `*** Update File: .bram/worklist.json` hunks. None means "too unusual to
 /// apply confidently", which routes the caller to the patch-text heuristics.
 fn worklist_content_after_apply_patch(cwd: &Path, patch: &str) -> Option<String> {
     let old_content = current_worklist_text(cwd);
@@ -5180,12 +5160,10 @@ fn worklist_items_violating_draft_only(content: &str) -> Option<DraftViolations>
                 .unwrap_or(false)
         };
         if nonempty("before") {
-            violations
-                .push("inline `before` (move to resources/worklist-drafts/<id>.md)".to_string());
+            violations.push("inline `before` (move to .bram/worklist-drafts/<id>.md)".to_string());
         }
         if nonempty("after") {
-            violations
-                .push("inline `after` (move to resources/worklist-drafts/<id>.md)".to_string());
+            violations.push("inline `after` (move to .bram/worklist-drafts/<id>.md)".to_string());
         }
         if !violations.is_empty() {
             let label = if item_id.trim().is_empty() {
@@ -5232,13 +5210,13 @@ fn patch_adds_violating_draft_only(patch: &str) -> DraftViolations {
     }
     if befores > 0 {
         violations.push(format!(
-            "inline `before` (move to resources/worklist-drafts/<id>.md; saw {})",
+            "inline `before` (move to .bram/worklist-drafts/<id>.md; saw {})",
             befores
         ));
     }
     if afters > 0 {
         violations.push(format!(
-            "inline `after` (move to resources/worklist-drafts/<id>.md; saw {})",
+            "inline `after` (move to .bram/worklist-drafts/<id>.md; saw {})",
             afters
         ));
     }
@@ -5331,7 +5309,7 @@ fn worklist_validation_error(bad: &DraftViolations, tool_name: &str) -> String {
         "{tool} blocked: proposed worklist item(s) violate draft-only rule.\n{detail}\n\
 Required for every proposed item: \"id\" (kebab-case identifier) and \"file\" \
 (or \"files\" array for multi-file items). Prose must live in \
-resources/worklist-drafts/<id>.md (Markdown with `# Before` and `# After` \
+.bram/worklist-drafts/<id>.md (Markdown with `# Before` and `# After` \
 sections); inline \"before\"/\"after\" keys in worklist.json are rejected. \
 Write the draft file first, then add the metadata-only item to worklist.json.",
         tool = tool_name,
@@ -5347,7 +5325,7 @@ fn mechanical_worklist_change_error(
     let mut lines = vec![
         format!(
             "{} blocked: mechanical worklist state changes must go through \
-`POST /__worklist/mutate`, not a direct edit to `resources/worklist.json`.",
+`POST /__worklist/mutate`, not a direct edit to `.bram/worklist.json`.",
             tool_name
         ),
         "Direct worklist edits are for proposing items or refining prose during iterate."
@@ -5374,7 +5352,7 @@ fn mechanical_worklist_change_error(
     lines.push(
         "Example: curl -4 -sS -X POST -d \
 '{\"op\":\"advance\",\"ids\":[\"item-id\"],\"status\":\"applied\"}' \
-http://127.0.0.1:$(cat resources/.bram-port)/__worklist/mutate"
+http://127.0.0.1:$(cat .bram/.bram-port)/__worklist/mutate"
             .to_string(),
     );
     lines.join("\n")
@@ -5402,7 +5380,7 @@ the new content must set version={}.",
         )
     };
     format!(
-        "{} blocked: stale base on resources/worklist.json. {} Re-read the file, \
+        "{} blocked: stale base on .bram/worklist.json. {} Re-read the file, \
 base your edit on the current contents, and include the bumped version field. \
 This guards against concurrent-writer races between your propose / apply_patch \
 and other agents or the /__worklist/mutate route.",
@@ -5623,12 +5601,10 @@ fn codex_apply_patch_branch(
 
     if raw_targets.is_empty() {
         return codex_deny(
-            &sd_text(
-                cwd,
-                "apply_patch blocked: could not parse target file(s) from the patch \
-payload. Propose the change in resources/worklist.json first so the guard can \
-verify coverage.",
-            ),
+            &"apply_patch blocked: could not parse target file(s) from the patch \
+payload. Propose the change in .bram/worklist.json first so the guard can \
+verify coverage."
+                .to_string(),
             "-",
         );
     }
@@ -5643,7 +5619,7 @@ verify coverage.",
                 if let Some(bad) = worklist_items_violating_draft_only(&new_content) {
                     if !bad.is_empty() {
                         return codex_deny(
-                            &sd_text(cwd, &worklist_validation_error(&bad, "apply_patch")),
+                            &String::from(worklist_validation_error(&bad, "apply_patch")),
                             &trace_target,
                         );
                     }
@@ -5655,14 +5631,11 @@ verify coverage.",
                 );
                 if !removed.is_empty() || !status_changed.is_empty() {
                     return codex_deny(
-                        &sd_text(
-                            cwd,
-                            &mechanical_worklist_change_error(
-                                &removed,
-                                &status_changed,
-                                "apply_patch",
-                            ),
-                        ),
+                        &String::from(mechanical_worklist_change_error(
+                            &removed,
+                            &status_changed,
+                            "apply_patch",
+                        )),
                         &trace_target,
                     );
                 }
@@ -5670,15 +5643,12 @@ verify coverage.",
                 let (new_has, new_version) = worklist_version_from_text(&new_content);
                 if old_has && (!new_has || new_version != old_version + 1) {
                     return codex_deny(
-                        &sd_text(
-                            cwd,
-                            &stale_worklist_version_error(
-                                old_version,
-                                new_version,
-                                new_has,
-                                "apply_patch",
-                            ),
-                        ),
+                        &String::from(stale_worklist_version_error(
+                            old_version,
+                            new_version,
+                            new_has,
+                            "apply_patch",
+                        )),
                         &trace_target,
                     );
                 }
@@ -5687,17 +5657,18 @@ verify coverage.",
                 let removed = patch_removes_worklist_items(cwd, &patch_body);
                 if !removed.is_empty() {
                     return codex_deny(
-                        &sd_text(
-                            cwd,
-                            &mechanical_worklist_change_error(&removed, &[], "apply_patch"),
-                        ),
+                        &String::from(mechanical_worklist_change_error(
+                            &removed,
+                            &[],
+                            "apply_patch",
+                        )),
                         &trace_target,
                     );
                 }
                 let bad = patch_adds_violating_draft_only(&patch_body);
                 if !bad.is_empty() {
                     return codex_deny(
-                        &sd_text(cwd, &worklist_validation_error(&bad, "apply_patch")),
+                        &String::from(worklist_validation_error(&bad, "apply_patch")),
                         &trace_target,
                     );
                 }
@@ -5724,7 +5695,7 @@ verify coverage.",
             let (verdict, detail) = intent_write_verdict(cwd);
             if verdict == "deny" {
                 return codex_deny(
-                    &sd_text(cwd, &intent_pending_message("apply_patch", &detail)),
+                    &String::from(intent_pending_message("apply_patch", &detail)),
                     &trace_target,
                 );
             }
@@ -5875,7 +5846,7 @@ and retry. See judell/bram#277.",
     if command.contains(".worklist-intent.json") {
         let (verdict, detail) = intent_write_verdict(cwd);
         if verdict == "deny" {
-            return codex_deny(&sd_text(cwd, &intent_pending_message("Bash", &detail)), "-");
+            return codex_deny(&String::from(intent_pending_message("Bash", &detail)), "-");
         }
         if detail == IntentDetail::StaleOverwrite {
             return codex_allow("intent-stale-overwrite", "-");
@@ -5948,7 +5919,7 @@ shape whose resulting content the guard can inspect.",
             if let Some(bad) = worklist_items_violating_draft_only(&new_content) {
                 if !bad.is_empty() {
                     return codex_deny(
-                        &sd_text(cwd, &worklist_validation_error(&bad, tool_name)),
+                        &String::from(worklist_validation_error(&bad, tool_name)),
                         "-",
                     );
                 }
@@ -5960,10 +5931,11 @@ shape whose resulting content the guard can inspect.",
             );
             if !removed.is_empty() || !status_changed.is_empty() {
                 return codex_deny(
-                    &sd_text(
-                        cwd,
-                        &mechanical_worklist_change_error(&removed, &status_changed, tool_name),
-                    ),
+                    &String::from(mechanical_worklist_change_error(
+                        &removed,
+                        &status_changed,
+                        tool_name,
+                    )),
                     "-",
                 );
             }
@@ -5971,10 +5943,12 @@ shape whose resulting content the guard can inspect.",
             let (new_has, new_version) = worklist_version_from_text(&new_content);
             if old_has && (!new_has || new_version != old_version + 1) {
                 return codex_deny(
-                    &sd_text(
-                        cwd,
-                        &stale_worklist_version_error(old_version, new_version, new_has, tool_name),
-                    ),
+                    &String::from(stale_worklist_version_error(
+                        old_version,
+                        new_version,
+                        new_has,
+                        tool_name,
+                    )),
                     "-",
                 );
             }
@@ -6048,7 +6022,7 @@ mod guard_policy_tests {
         );
         assert_eq!(v, "deny");
         // A grep mentioning the URL is a read — never captured.
-        let (v, _) = session_url_verdict("grep -r claude.ai/code/ resources/", &cwd);
+        let (v, _) = session_url_verdict("grep -r claude.ai/code/ .bram/", &cwd);
         assert_eq!(v, "skip");
         // Clean commit passes.
         let (v, _) = session_url_verdict("git commit -m \"Honest message\"", &cwd);
@@ -6128,7 +6102,7 @@ mod guard_policy_tests {
         // An unreadable worklist would otherwise present as "no items", i.e.
         // no coverage for any path, denying every edit with a wrong reason.
         let dir = std::env::temp_dir().join(format!("bram-enc3-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(dir.join("resources"));
+        let _ = crate::guard_policy::test_make_state_dir(&dir);
         let mut bytes =
             br#"{"items":[{"id":"a","status":"proposed","files":["src/x.rs"]}],"#.to_vec();
         bytes.extend_from_slice(&[0xFF]);
@@ -6144,7 +6118,7 @@ mod guard_policy_tests {
     #[test]
     fn opt_out_in_an_outbound_turn_file_counts() {
         let root = scratch("opt-out-outbound");
-        let turns = root.join("resources").join("outbound-turns");
+        let turns = root.join(".bram").join("outbound-turns");
         std::fs::create_dir_all(&turns).unwrap();
         let write_turn = |id: &str, text: &str| {
             std::fs::write(
@@ -6168,7 +6142,7 @@ mod guard_policy_tests {
             "1791677856169-turn",
             "number the arrows so we see a record of the sequence\n\n7 and 8 should collapse into one step.\n\njust do it.",
         );
-        let frame = "Read and follow this Bram turn: @resources/outbound-turns/1791677856169-turn.json (end of Bram turn)";
+        let frame = "Read and follow this Bram turn: @.bram/outbound-turns/1791677856169-turn.json (end of Bram turn)";
         assert_eq!(
             opt_out_clears(&root, &payload_for(frame)).as_deref(),
             Some(frame)
@@ -6177,14 +6151,14 @@ mod guard_policy_tests {
         write_turn("2-turn", "number the arrows\n\nthanks");
         assert!(opt_out_clears(
             &root,
-            &payload_for("Read and follow this Bram turn: @resources/outbound-turns/2-turn.json (end of Bram turn)")
+            &payload_for("Read and follow this Bram turn: @.bram/outbound-turns/2-turn.json (end of Bram turn)")
         )
         .is_none());
         // A frame that tries to leave the directory is ignored.
         assert_eq!(
             outbound_turn_text(
                 &root,
-                "Read and follow this Bram turn: @resources/outbound-turns/../x-turn.json"
+                "Read and follow this Bram turn: @.bram/outbound-turns/../x-turn.json"
             ),
             ""
         );
@@ -6195,7 +6169,7 @@ mod guard_policy_tests {
     #[test]
     fn would_deny_reason_separates_unstarted_proposals_from_begun_items() {
         let root = scratch("would-deny-reason");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::write(
             root.join(WORKLIST_REL),
             serde_json::json!({ "items": [
@@ -6649,7 +6623,7 @@ mod guard_policy_tests {
     #[test]
     fn direct_edit_grant_survives_gate_click_clobber() {
         let td = scratch("sig352");
-        std::fs::create_dir_all(td.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&td).unwrap();
         let now = now_ms() as i64;
         // The grant, in its sidecar (new-binary shape).
         std::fs::write(
@@ -7003,8 +6977,8 @@ mod guard_policy_tests {
         assert_eq!(signature_version_verdict(&sig(current), &td).0, "ok");
 
         // Sidecar without a usable version: still the guard build.
-        std::fs::create_dir_all(td.join("resources")).unwrap();
-        let sidecar = td.join("resources").join(".bram-port.json");
+        crate::guard_policy::test_make_state_dir(&td).unwrap();
+        let sidecar = td.join(".bram").join(".bram-port.json");
         std::fs::write(&sidecar, "{\"schema\":1,\"version\":\"\"}").unwrap();
         assert_eq!(signature_version_verdict(&sig(current), &td).0, "ok");
 
@@ -7609,7 +7583,7 @@ mod guard_policy_tests {
         assert_eq!(
             subagent_worklist_write_verdict(
                 Path::new("/nonexistent-issue-469"),
-                Some("resources/worklist-drafts/some-item.md"),
+                Some(".bram/worklist-drafts/some-item.md"),
                 "b1iz1vf6f"
             ),
             ("deny", None)
@@ -7702,8 +7676,8 @@ mod guard_policy_tests {
         let base = scratch("crossroot");
         let target_root = base.join("target-project");
         let session_root = base.join("session-project");
-        std::fs::create_dir_all(target_root.join("resources")).unwrap();
-        std::fs::create_dir_all(session_root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&target_root).unwrap();
+        crate::guard_policy::test_make_state_dir(&session_root).unwrap();
 
         // resolve_session_root walks up to the marker, and fails quietly.
         write_auth(&session_root, "direct-edit", &["*"], 0.0);
@@ -7873,12 +7847,12 @@ mod guard_policy_tests {
     #[test]
     fn write_edit_pipeline_covers_worklist_surfaces() {
         let root = scratch("we");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
 
         // A lifecycle path is implicitly authorized.
-        let inflight = root.join("resources/.inflight-claim.json");
+        let inflight = root.join(".bram/.inflight-claim.json");
         let v = shadow_worklist_decision(
             "claude-rs",
             &serde_json::json!({
@@ -8031,7 +8005,7 @@ mod guard_policy_tests {
     #[test]
     fn issue_309_claude_worktree_pipeline_maps_only_coverage() {
         let root = scratch("worktree-claude");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
         std::fs::write(
             root.join(WORKLIST_REL),
@@ -8103,7 +8077,7 @@ mod guard_policy_tests {
     #[test]
     fn mcp_pipeline_branches() {
         let root = scratch("mcp");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
 
         let v = shadow_worklist_decision(
@@ -8140,7 +8114,7 @@ mod guard_policy_tests {
             (v.decision.as_str(), v.reason.as_str()),
             ("allow", "mcp-no-candidate-paths")
         );
-        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+        let events = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
             .unwrap_or_default();
         assert!(
             events.contains("mcp-write-verb-no-candidate-paths")
@@ -8168,11 +8142,11 @@ mod guard_policy_tests {
     fn helpers_match_the_python_predicates() {
         assert!(is_lifecycle_path(
             Path::new("/nonexistent-issue-469"),
-            "resources/.bram-port"
+            ".bram/.bram-port"
         ));
         assert!(is_lifecycle_path(
             Path::new("/nonexistent-issue-469"),
-            "resources/worklist-drafts/x.md"
+            ".bram/worklist-drafts/x.md"
         ));
         assert!(!is_lifecycle_path(Path::new("/nonexistent-issue-469"), ""));
         assert!(!is_lifecycle_path(
@@ -8181,15 +8155,15 @@ mod guard_policy_tests {
         ));
         assert!(is_worklist_draft(
             Path::new("/nonexistent-issue-469"),
-            "resources/worklist-drafts/x.md"
+            ".bram/worklist-drafts/x.md"
         ));
         assert!(!is_worklist_draft(
             Path::new("/nonexistent-issue-469"),
-            "resources/worklist-drafts/sub/x.md"
+            ".bram/worklist-drafts/sub/x.md"
         ));
         assert!(!is_worklist_draft(
             Path::new("/nonexistent-issue-469"),
-            "resources/worklist-drafts/x.json"
+            ".bram/worklist-drafts/x.json"
         ));
         assert!(push_cmd("git push"));
         assert!(push_cmd("git -C /tmp/repo push origin main"));
@@ -8220,7 +8194,7 @@ mod guard_policy_tests {
     #[test]
     fn mcp_zero_candidates_allowed_regardless_of_authorization() {
         let root = scratch("mcp360");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
 
         let payload = serde_json::json!({
@@ -8237,7 +8211,7 @@ mod guard_policy_tests {
             (v.decision.as_str(), v.reason.as_str()),
             ("allow", "mcp-no-candidate-paths")
         );
-        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+        let events = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
             .unwrap_or_default();
         assert!(
             events.contains("mcp-write-verb-no-candidate-paths")
@@ -8299,7 +8273,7 @@ mod guard_policy_tests {
 
     fn managed_claude(name: &str) -> PathBuf {
         let root = scratch(name);
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
         root
@@ -8322,7 +8296,7 @@ mod guard_policy_tests {
         }));
         assert_eq!(v.decision, "deny");
         let expected = format!(
-            "Blocked: writing to app/x.txt requires either a proposed/applied item in resources/worklist.json covering this path, or an explicit opt-out phrase in your last message.\n  - Propose the change in resources/worklist.json first (item with file=\"app/x.txt\", non-empty before and after, status proposed). Wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.\nresolved_project_root={root} (marker: resources/.worklist-authorization.json; if this is not the repo root, a stray marker file captured this subtree — remove that resources/.worklist-authorization.json)",
+            "Blocked: writing to app/x.txt requires either a proposed/applied item in .bram/worklist.json covering this path, or an explicit opt-out phrase in your last message.\n  - Propose the change in .bram/worklist.json first (item with file=\"app/x.txt\", non-empty before and after, status proposed). Wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.\nresolved_project_root={root} (marker: .bram/.worklist-authorization.json; if this is not the repo root, a stray marker file captured this subtree — remove that .bram/.worklist-authorization.json)",
             root = root.display()
         );
         assert_eq!(body_of(&v), expected);
@@ -8449,9 +8423,9 @@ mod guard_policy_tests {
         // python:1284-1323 (deny_bash_coverage), reached from :2117. The push
         // bullet (judell/bram#283) rides on _PUSH_CMD_RX only.
         let root = managed_claude("msg-bash-coverage");
-        let base = "Bash blocked: this command writes to the filesystem or performs a sensitive side effect, and resources/worklist.json has no proposed or applied items covering active work.\n  - Propose the work in the worklist first, wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.";
+        let base = "Bash blocked: this command writes to the filesystem or performs a sensitive side effect, and .bram/worklist.json has no proposed or applied items covering active work.\n  - Propose the work in the worklist first, wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.";
         let root_line = format!(
-            "\nresolved_project_root={} (marker: resources/.worklist-authorization.json; if this is not the repo root, a stray marker file captured this subtree — remove that resources/.worklist-authorization.json)",
+            "\nresolved_project_root={} (marker: .bram/.worklist-authorization.json; if this is not the repo root, a stray marker file captured this subtree — remove that .bram/.worklist-authorization.json)",
             root.display()
         );
 
@@ -8505,7 +8479,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "stale-worklist-version");
         assert_eq!(
             body_of(&v),
-            "Blocked: stale base on resources/worklist.json. You set version=1, but on-disk version is 1. Expected version=2.\n  - Re-read resources/worklist.json, base your edit on the current contents, and include the bumped version field on the write. This guards against concurrent-writer races between your propose / Edit and other agents or the /__worklist/mutate route."
+            "Blocked: stale base on .bram/worklist.json. You set version=1, but on-disk version is 1. Expected version=2.\n  - Re-read .bram/worklist.json, base your edit on the current contents, and include the bumped version field on the write. This guards against concurrent-writer races between your propose / Edit and other agents or the /__worklist/mutate route."
         );
 
         let v = claude_decide(serde_json::json!({
@@ -8515,7 +8489,7 @@ mod guard_policy_tests {
         }));
         assert_eq!(
             body_of(&v),
-            "Blocked: stale base on resources/worklist.json. Your write is missing the `version` field. On-disk version is 1; the new content must set version=2.\n  - Re-read resources/worklist.json, base your edit on the current contents, and include the bumped version field on the write. This guards against concurrent-writer races between your propose / Edit and other agents or the /__worklist/mutate route."
+            "Blocked: stale base on .bram/worklist.json. Your write is missing the `version` field. On-disk version is 1; the new content must set version=2.\n  - Re-read .bram/worklist.json, base your edit on the current contents, and include the bumped version field on the write. This guards against concurrent-writer races between your propose / Edit and other agents or the /__worklist/mutate route."
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -8538,7 +8512,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "worklist-inline-prose");
         assert_eq!(
             body_of(&v),
-            "Blocked: inline `before` / `after` on proposed worklist item(s) — prose must live in resources/worklist-drafts/<id>.md.\n  - item a: remove inline before/after; write prose to resources/worklist-drafts/a.md instead\n  - item <no-id>: remove inline before/after; write prose to resources/worklist-drafts/<no-id>.md instead\nDraft file format: `# Before` section then `# After` section, both in Markdown. The server merge surfaces the draft prose alongside the metadata in worklist.json."
+            "Blocked: inline `before` / `after` on proposed worklist item(s) — prose must live in .bram/worklist-drafts/<id>.md.\n  - item a: remove inline before/after; write prose to .bram/worklist-drafts/a.md instead\n  - item <no-id>: remove inline before/after; write prose to .bram/worklist-drafts/<no-id>.md instead\nDraft file format: `# Before` section then `# After` section, both in Markdown. The server merge surfaces the draft prose alongside the metadata in worklist.json."
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -8565,7 +8539,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "mechanical-worklist-change");
         assert_eq!(
             body_of(&v),
-            "Blocked: mechanical worklist state changes must go through `POST /__worklist/mutate`, not a direct edit to `resources/worklist.json`.\n  - Direct worklist edits are for proposing items or refining their prose during iterate.\n  - Use mutate for `prune` and `advance` after a verified `drop:` / `approved:` turn.\n  - Removed item ids: \"a\" (status=proposed)\n  - Status changes: \"b\" (proposed->applied)\n  - Example: curl -4 -sS -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' http://127.0.0.1:$(cat resources/.bram-port)/__worklist/mutate"
+            "Blocked: mechanical worklist state changes must go through `POST /__worklist/mutate`, not a direct edit to `.bram/worklist.json`.\n  - Direct worklist edits are for proposing items or refining their prose during iterate.\n  - Use mutate for `prune` and `advance` after a verified `drop:` / `approved:` turn.\n  - Removed item ids: \"a\" (status=proposed)\n  - Status changes: \"b\" (proposed->applied)\n  - Example: curl -4 -sS -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' http://127.0.0.1:$(cat .bram/.bram-port)/__worklist/mutate"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -8750,13 +8724,13 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "subagent-worklist-write");
         assert_eq!(
             body_of(&v),
-            "Worklist proposals and claim edits (resources/worklist.json, resources/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly -- it can widen its own item's coverage, author new items, or edit claim state with no denial. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287."
+            "Worklist proposals and claim edits (.bram/worklist.json, .bram/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly -- it can widen its own item's coverage, author new items, or edit claim state with no denial. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287."
         );
 
         let v = claude_decide(serde_json::json!({
             "tool_name": "Bash",
             "agent_id": "agent-7",
-            "tool_input": {"command": "echo x > resources/worklist.json"},
+            "tool_input": {"command": "echo x > .bram/worklist.json"},
             "cwd": root.to_string_lossy(),
         }));
         assert_eq!(v.reason, "subagent-worklist-write");
@@ -8778,7 +8752,7 @@ mod guard_policy_tests {
             (v.decision.as_str(), v.reason.as_str()),
             ("allow", "mcp-no-candidate-paths")
         );
-        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+        let events = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
             .unwrap_or_default();
         assert!(
             events.contains("mcp-write-verb-no-candidate-paths")
@@ -8794,7 +8768,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "mcp-worklist-write");
         assert_eq!(
             body_of(&v),
-            "mcp__fs__write_file blocked: edits to resources/worklist.json must use Write/Edit (so the guard can validate prunes, the version bump, and inline prose) or /__worklist/mutate for mechanical transitions."
+            "mcp__fs__write_file blocked: edits to .bram/worklist.json must use Write/Edit (so the guard can validate prunes, the version bump, and inline prose) or /__worklist/mutate for mechanical transitions."
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -9086,8 +9060,8 @@ mod codex_guard_policy_tests {
         assert!(
             codex_deny_reason(&stale_worklist_version_error(1, 1, true, "apply_patch"))
                 .starts_with(
-                "apply_patch blocked: stale base on resources/worklist.json. You set version=1,"
-            )
+                    "apply_patch blocked: stale base on .bram/worklist.json. You set version=1,"
+                )
         );
         // coverage_root_line opens with a newline, so it never reaches a reason.
         assert!(coverage_root_line(Path::new("/tmp")).starts_with('\n'));
@@ -9148,7 +9122,7 @@ mod codex_guard_policy_tests {
     #[test]
     fn apply_patch_worklist_reconstruction_and_validators() {
         let root = scratch("patch");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
 
         let old_doc = serde_json::json!({
             "description": "",
@@ -9284,7 +9258,7 @@ mod codex_guard_policy_tests {
     #[test]
     fn user_prompt_opt_out_decides_without_writing_the_record() {
         let root = scratch("prompt");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
 
         let v = shadow_worklist_decision(
@@ -9485,7 +9459,7 @@ mod codex_guard_policy_tests {
     #[test]
     fn intent_write_verdict_gate() {
         let root = scratch("intent");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         let intent_path = root.join(WORKLIST_INTENT_REL);
 
         assert_eq!(
@@ -9542,7 +9516,7 @@ mod codex_guard_policy_tests {
         let reason = codex_deny_reason(&intent_pending_message("Bash", &detail));
         assert!(
             reason.starts_with(
-                "Bash blocked: resources/.worklist-intent.json already holds a pending \
+                "Bash blocked: .bram/.worklist-intent.json already holds a pending \
 request (route=None, nonce=None, age=0s)"
             ),
             "reason: {reason}"
@@ -9602,15 +9576,15 @@ request (route=None, nonce=None, age=0s)"
     fn codex_helpers_match_the_python_predicates() {
         assert!(is_worklist_citation(
             Path::new("/nonexistent-issue-469"),
-            "resources/worklist-citations/x.json"
+            ".bram/worklist-citations/x.json"
         ));
         assert!(!is_worklist_citation(
             Path::new("/nonexistent-issue-469"),
-            "resources/worklist-citations/sub/x.json"
+            ".bram/worklist-citations/sub/x.json"
         ));
         assert!(!is_worklist_citation(
             Path::new("/nonexistent-issue-469"),
-            "resources/worklist-citations/x.md"
+            ".bram/worklist-citations/x.md"
         ));
         assert!(is_coordination_file(
             Path::new("/nonexistent-issue-469"),
@@ -9657,7 +9631,7 @@ request (route=None, nonce=None, age=0s)"
     #[test]
     fn codex_fresh_bypass_reads_snake_case_only() {
         let root = scratch("bypass");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         // camelCase issuedAtMs is NOT read by this guard: with no snake_case
         // field the record reads as issued at epoch 0, hence stale.
         std::fs::write(
@@ -9705,7 +9679,7 @@ request (route=None, nonce=None, age=0s)"
 
     fn managed(name: &str) -> PathBuf {
         let root = scratch(name);
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
         root
@@ -9764,7 +9738,7 @@ request (route=None, nonce=None, age=0s)"
         assert!(
             v.reason.starts_with(
                 "Bash blocked: this command writes to the filesystem, and \
-resources/worklist.json has no proposed"
+.bram/worklist.json has no proposed"
             ),
             "reason: {}",
             v.reason
@@ -9796,7 +9770,7 @@ resources/worklist.json has no proposed"
         let v = decide(
             &root,
             "Bash",
-            serde_json::json!({"command": "echo x > resources/worklist-drafts/a.md"}),
+            serde_json::json!({"command": "echo x > .bram/worklist-drafts/a.md"}),
         );
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
@@ -9806,7 +9780,7 @@ resources/worklist.json has no proposed"
         let v = decide(
             &root,
             "Bash",
-            serde_json::json!({"command": "echo '{}' > resources/.worklist-intent.json"}),
+            serde_json::json!({"command": "echo '{}' > .bram/.worklist-intent.json"}),
         );
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
@@ -9817,13 +9791,12 @@ resources/worklist.json has no proposed"
         let v = decide(
             &root,
             "Bash",
-            serde_json::json!({"command": "echo '{}' > resources/.worklist-intent.json"}),
+            serde_json::json!({"command": "echo '{}' > .bram/.worklist-intent.json"}),
         );
         assert_eq!(v.decision, "deny");
         assert!(
-            v.reason.starts_with(
-                "Bash blocked: resources/.worklist-intent.json already holds a pending"
-            ),
+            v.reason
+                .starts_with("Bash blocked: .bram/.worklist-intent.json already holds a pending"),
             "reason: {}",
             v.reason
         );
@@ -9921,8 +9894,8 @@ resources/worklist.json has no proposed"
 
         // Drafts, citations, and the result file are exempt without coverage.
         for (rel, label) in [
-            ("resources/worklist-drafts/i1.md", "draft"),
-            ("resources/worklist-citations/i1.json", "citation"),
+            (".bram/worklist-drafts/i1.md", "draft"),
+            (".bram/worklist-citations/i1.json", "citation"),
             (WORKLIST_RESULT_REL, "result"),
         ] {
             let p = format!(
@@ -9969,7 +9942,7 @@ resources/worklist.json has no proposed"
         assert_eq!(v.decision, "deny");
         assert!(
             v.reason
-                .starts_with("apply_patch blocked: stale base on resources/worklist.json."),
+                .starts_with("apply_patch blocked: stale base on .bram/worklist.json."),
             "reason: {}",
             v.reason
         );
@@ -10114,7 +10087,7 @@ resources/worklist.json has no proposed"
             (v.decision.as_str(), v.reason.as_str()),
             ("allow", "mcp-no-candidate-paths")
         );
-        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+        let events = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
             .unwrap_or_default();
         assert!(
             events.contains("mcp-write-verb-no-candidate-paths")
@@ -10183,9 +10156,10 @@ resources/worklist.json has no proposed"
     }
 }
 
-// issue-469: the `.bram/` twins. The legacy `resources/` coverage above runs
-// unchanged; these build the same shapes under `.bram/` and check the guard
-// resolves, gates and words them for the folder it found.
+// issue-469: the state folder's own cases. Since issue-469-retire-resources
+// the coverage above builds its fixtures under `.bram/` too; these check what
+// counts as a state folder, and that the pre-0.8.4 `resources/` is an
+// ordinary project folder to the guard.
 #[cfg(test)]
 mod state_dir_tests {
     use super::*;
@@ -10207,36 +10181,28 @@ mod state_dir_tests {
     #[test]
     fn foreign_dot_bram_is_not_adopted() {
         let root = scratch("foreign");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        // Index-style files, no marker: not Bram's.
+        // Index-style files, no marker: not Bram's, so not a state folder.
         std::fs::create_dir_all(root.join(".bram")).unwrap();
         std::fs::write(root.join(".bram/index.json"), "{}").unwrap();
         assert!(!is_bram_state_dir(&root));
-        assert_eq!(state_dir_name(&root), "resources");
-        assert_eq!(state_dir_candidates(&root), vec![root.join("resources")]);
+        assert!(!has_state_dir(&root));
+        assert!(state_dir_candidates(&root).is_empty());
         // A `.gitignore` that is not exactly `*` is not the marker.
         std::fs::write(root.join(".bram/.gitignore"), "node_modules\n").unwrap();
-        assert_eq!(state_dir_name(&root), "resources");
+        assert!(!has_state_dir(&root));
         std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
-        assert_eq!(state_dir_name(&root), ".bram");
+        assert!(has_state_dir(&root));
+        assert_eq!(state_dir_candidates(&root), vec![root.join(".bram")]);
         std::fs::remove_file(root.join(".bram/.gitignore")).unwrap();
         std::fs::write(root.join(".bram/.migrated-from"), "x 2026-11-11T00:00:00Z").unwrap();
-        assert_eq!(state_dir_name(&root), ".bram");
+        assert!(has_state_dir(&root));
     }
 
     #[test]
-    fn foreign_dot_bram_hint_needs_a_live_board_in_resources() {
+    fn foreign_dot_bram_hint_names_a_foreign_folder_only() {
         let root = scratch("foreign-hint");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
+        assert!(foreign_dot_bram_hint(&root).is_none());
         std::fs::create_dir_all(root.join(".bram")).unwrap();
-        assert!(foreign_dot_bram_hint(&root).is_none());
-        std::fs::write(root.join("resources/worklist.json"), r#"{"items":[]}"#).unwrap();
-        assert!(foreign_dot_bram_hint(&root).is_none());
-        std::fs::write(
-            root.join("resources/worklist.json"),
-            r#"{"items":[{"id":"a"}]}"#,
-        )
-        .unwrap();
         assert!(foreign_dot_bram_hint(&root)
             .unwrap()
             .contains("isn't Bram's"));
@@ -10268,29 +10234,27 @@ mod state_dir_tests {
     }
 
     #[test]
-    fn resolver_prefers_dot_bram_and_skips_the_home_folder() {
+    fn resolver_names_dot_bram_and_skips_the_home_folder() {
         let root = scratch("resolver");
-        assert_eq!(state_dir_name(&root), "resources");
-        assert_eq!(state_rel(&root, WORKLIST_LEAF), "resources/worklist.json");
-        assert_eq!(state_dir_candidates(&root), vec![root.join("resources")]);
-        mark_dot_bram(&root.join(".bram"));
         assert_eq!(state_dir_name(&root), ".bram");
-        assert_eq!(state_dir(&root), root.join(".bram"));
         assert_eq!(state_rel(&root, WORKLIST_LEAF), ".bram/worklist.json");
         assert_eq!(
             state_path(&root, AUTH_LEAF),
             root.join(".bram/.worklist-authorization.json")
         );
-        assert_eq!(
-            state_dir_candidates(&root),
-            vec![root.join(".bram"), root.join("resources")]
-        );
+        // No `.bram/` yet: nothing to walk to, nothing to write into.
+        assert!(state_dir_candidates(&root).is_empty());
+        assert!(!has_state_dir(&root));
+        // The pre-0.8.4 folder is never a candidate.
+        std::fs::create_dir_all(root.join("resources")).unwrap(); // state-dir: literal ok (the retired name, under test)
+        std::fs::write(root.join("resources").join(AUTH_LEAF), "{}").unwrap(); // state-dir: literal ok (the retired name, under test)
+        assert!(state_dir_candidates(&root).is_empty());
+        mark_dot_bram(&root.join(".bram"));
+        assert_eq!(state_dir(&root), root.join(".bram"));
+        assert_eq!(state_dir_candidates(&root), vec![root.join(".bram")]);
         // `~/.bram` holds the guard binary: never a project's state folder.
-        assert_eq!(state_dir_name_with_home(&root, Some(&root)), "resources");
-        assert_eq!(
-            state_dir_candidates_with_home(&root, Some(&root)),
-            vec![root.join("resources")]
-        );
+        assert!(!has_project_bram_dir(&root, Some(&root)));
+        assert!(state_dir_candidates_with_home(&root, Some(&root)).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -10304,41 +10268,47 @@ mod state_dir_tests {
             &root,
             ".bram/bram-traces/hook-events.log"
         ));
-        assert!(!is_lifecycle_path(&root, "resources/.bram-port"));
+        assert!(!is_lifecycle_path(&root, "resources/.bram-port")); // state-dir: literal ok (the retired name, under test)
         assert!(!is_lifecycle_path(&root, ".bram"));
         assert!(!is_lifecycle_path(&root, ".bramx/.bram-port"));
         assert!(is_worklist_draft(&root, ".bram/worklist-drafts/x.md"));
         assert!(!is_worklist_draft(&root, ".bram/worklist-drafts/sub/x.md"));
-        assert!(!is_worklist_draft(&root, "resources/worklist-drafts/x.md"));
+        assert!(!is_worklist_draft(&root, "resources/worklist-drafts/x.md")); // state-dir: literal ok (the retired name, under test)
         assert!(is_worklist_citation(
             &root,
             ".bram/worklist-citations/x.json"
         ));
         assert!(is_coordination_file(&root, ".bram/.worklist-intent.json"));
         assert!(is_coordination_file(&root, ".bram/.worklist-result.json"));
-        assert!(!is_coordination_file(&root, WORKLIST_INTENT_REL));
+        // The retired name, under test.
+        let old_intent = concat!("resources", "/.worklist-intent.json");
+        assert!(!is_coordination_file(&root, old_intent));
         assert!(is_worklist_rel(&root, ".bram/worklist.json"));
-        assert!(!is_worklist_rel(&root, WORKLIST_REL));
+        assert!(!is_worklist_rel(&root, "resources/worklist.json")); // state-dir: literal ok (the retired name, under test)
         assert_eq!(
             subagent_worklist_write_verdict(&root, Some(".bram/worklist.json"), "a1"),
             ("deny", None)
         );
         assert_eq!(
-            subagent_worklist_write_verdict(&root, Some(WORKLIST_REL), "a1"),
+            subagent_worklist_write_verdict(&root, Some("resources/worklist.json"), "a1"), // state-dir: literal ok (the retired name, under test)
             ("skip", None)
         );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn project_root_walk_checks_both_names_nearest_first() {
-        let root = managed("root-walk", "resources");
+    fn project_root_walk_finds_the_nearest_dot_bram() {
+        let root = managed("root-walk", ".bram");
         let sub = root.join("sub");
         let x = sub.join("x");
         std::fs::create_dir_all(&x).unwrap();
-        // Only the parent is managed: the child has neither name.
+        // Only the parent is managed.
         assert_eq!(find_project_root(&x.to_string_lossy()), Some(root.clone()));
-        // A nested `.bram/` instance is found before its `resources/` parent.
+        // A pre-0.8.4 marker in the child manages nothing.
+        std::fs::create_dir_all(sub.join("resources")).unwrap(); // state-dir: literal ok (the retired name, under test)
+        std::fs::write(sub.join("resources").join(AUTH_LEAF), "{}").unwrap(); // state-dir: literal ok (the retired name, under test)
+        assert_eq!(find_project_root(&x.to_string_lossy()), Some(root.clone()));
+        // A nested `.bram/` instance is found before its parent.
         mark_dot_bram(&sub.join(".bram"));
         std::fs::write(sub.join(".bram").join(AUTH_LEAF), "{}").unwrap();
         assert_eq!(find_project_root(&x.to_string_lossy()), Some(sub.clone()));
@@ -10372,7 +10342,7 @@ mod state_dir_tests {
             "message: {}",
             v.message
         );
-        assert!(!v.message.contains("resources/"), "message: {}", v.message);
+        assert!(!v.message.contains("resources/"), "message: {}", v.message); // state-dir: literal ok (the retired name, under test)
 
         let wl = root.join(".bram/worklist.json");
         std::fs::write(
@@ -10407,7 +10377,7 @@ mod state_dir_tests {
             v.message
         );
 
-        // Drafts sit under the lifecycle prefixes, as under `resources/`.
+        // Drafts sit under the lifecycle prefixes.
         let draft = root.join(".bram/worklist-drafts/i1.md");
         let v = write_payload("claude-rs", &root, &draft, "# Before\n");
         assert_eq!(
@@ -10415,8 +10385,8 @@ mod state_dir_tests {
             ("allow", "bram-lifecycle-channel")
         );
 
-        // With `.bram/` resolved, `resources/` is an ordinary project folder.
-        let legacy = root.join("resources/worklist.json");
+        // `resources/` is an ordinary project folder.
+        let legacy = root.join("resources/worklist.json"); // state-dir: literal ok (the retired name, under test)
         let v = write_payload("claude-rs", &root, &legacy, "{}");
         assert_eq!(v.decision, "deny");
         let _ = std::fs::remove_dir_all(&root);
@@ -10475,12 +10445,12 @@ mod state_dir_tests {
     }
 
     #[test]
-    fn codex_unmanaged_without_either_marker() {
+    fn codex_unmanaged_without_the_marker() {
         let root = scratch("codex-unmanaged");
         mark_dot_bram(&root.join(".bram"));
-        // The legacy marker does not manage a root whose state folder is `.bram/`.
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        std::fs::write(root.join(AUTH_REL), "{}").unwrap();
+        // The pre-0.8.4 marker manages nothing.
+        std::fs::create_dir_all(root.join("resources")).unwrap(); // state-dir: literal ok (the retired name, under test)
+        std::fs::write(root.join("resources").join(AUTH_LEAF), "{}").unwrap(); // state-dir: literal ok (the retired name, under test)
         let v = shadow_worklist_decision(
             "codex-rs",
             &serde_json::json!({
@@ -10499,7 +10469,7 @@ mod state_dir_tests {
     }
 
     #[test]
-    fn outbound_turn_frame_names_either_folder() {
+    fn outbound_turn_frame_names_the_state_folder() {
         let root = scratch("outbound-dot-bram");
         let turns = root.join(".bram").join("outbound-turns");
         std::fs::create_dir_all(&turns).unwrap();
@@ -10511,9 +10481,15 @@ mod state_dir_tests {
         let frame =
             "Read and follow this Bram turn: @.bram/outbound-turns/7-turn.json (end of Bram turn)";
         assert_eq!(outbound_turn_text(&root, frame), "fix it\n\njust do it.");
-        // A frame naming a folder that isn't a state folder name reads nothing.
+        // A frame naming a folder that isn't the state folder reads nothing,
+        // the pre-0.8.4 one included.
         let other = "Read and follow this Bram turn: @other/outbound-turns/7-turn.json";
         assert_eq!(outbound_turn_text(&root, other), "");
+        let old_turns = root.join("resources").join("outbound-turns"); // state-dir: literal ok (the retired name, under test)
+        std::fs::create_dir_all(&old_turns).unwrap();
+        std::fs::copy(turns.join("7-turn.json"), old_turns.join("7-turn.json")).unwrap();
+        let old = "Read and follow this Bram turn: @resources/outbound-turns/7-turn.json"; // state-dir: literal ok (the retired name, under test)
+        assert_eq!(outbound_turn_text(&root, old), "");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -2428,7 +2428,9 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
     // exists to prevent. Returning None silences both the startup
     // prepare/archive pass and every append_bram_trace_line call.
     // issue-448: likewise anywhere that isn't a project folder.
-    if !project_folder().is_ok() {
+    // issue-469-retire-resources: and under a held start (state still in
+    // resources/), whose record is stderr and <git-dir>/bram/state-hold.log.
+    if !project_writable() {
         return None;
     }
     project_resource_path(app, "bram-traces/bram-trace.log")
@@ -17833,6 +17835,12 @@ fn relaunch_self<R: tauri::Runtime>(
     if let Some(root) = project_root(Some(app)) {
         cmd.arg(root);
     }
+    // issue-469-retire-resources: this process still answers on its port for
+    // a moment after the spawn; the child's startup mover must not take it for
+    // another live Bram (startup_live_owner).
+    if let Some(port) = LOOPBACK_PORT.get() {
+        cmd.env(RELAUNCH_PARENT_PORT_ENV, port.to_string());
+    }
     // issue-361: detach the child from this dying process. A bare spawn
     // inherits the controlling terminal, process group, and stdio; for a
     // terminal-launched instance the parent's exit then leaves the child in
@@ -22424,6 +22432,16 @@ fn pty_spawn(
         );
         return Ok(());
     }
+    // issue-469-retire-resources: a held start (Bram's state still in
+    // resources/) starts nothing either; the pane's banner names the obstacle.
+    if let Some(obstacle) = state_hold() {
+        eprintln!(
+            "[bram] op=autostart-held reason=state-held obstacle={} root={}",
+            obstacle,
+            determine_project_root().display()
+        );
+        return Ok(());
+    }
     let first_unmanaged_launch = arm_repo_startup_greeting_if_needed(&app);
     // first-run-sequence-greeting-vs-setup: Setup runs here, AFTER the
     // greeting is armed (arming checks project_is_managed, which auto-setup
@@ -22796,6 +22814,7 @@ fn clear_pending_startup_agent_choice(app: &AppHandle, reason: &str) {
 // launches; the error comes back for the pane to show.
 #[tauri::command]
 fn choose_startup_agent(app: AppHandle, provider: String) -> Result<(), String> {
+    held_command_refusal("choose_startup_agent")?;
     let requested = provider.trim().to_ascii_lowercase();
     let chosen = SessionProvider::from_str(&requested)
         .ok_or_else(|| format!("unknown agent provider: {}", requested))?;
@@ -23190,6 +23209,7 @@ fn queue_feedback_draft<R: tauri::Runtime>(
     app: AppHandle<R>,
     payload: serde_json::Value,
 ) -> Result<(), String> {
+    held_command_refusal("queue_feedback_draft")?;
     let feedback_id = payload
         .get("feedback_id")
         .and_then(|v| v.as_str())
@@ -23231,6 +23251,7 @@ fn queue_pty_intent(
     payload: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    held_command_refusal("queue_pty_intent")?;
     queue_pty_intent_inner(&app, payload, &state)
 }
 
@@ -25760,6 +25781,7 @@ fn switch_agent(
     provider: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    held_command_refusal("switch_agent")?;
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
@@ -28589,6 +28611,7 @@ fn reload_agent_session(
     session: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    held_command_refusal("reload_agent_session")?;
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
@@ -28729,6 +28752,7 @@ fn start_agent_fresh(
     provider: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    held_command_refusal("start_agent_fresh")?;
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
@@ -29710,6 +29734,7 @@ fn create_new_session(
     pair_with_session: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    held_command_refusal("create_new_session")?;
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => "codex",
         "claude" | "claud" => "claude",
@@ -29912,7 +29937,7 @@ fn merged_project_config(root: &Path) -> Option<(PathBuf, serde_json::Value, u64
             break;
         }
     }
-    let settings_bytes = (bram_state_dir_name(root) == BRAM_STATE_DIR_NEW)
+    let settings_bytes = bram_state_dir_exists(root)
         .then(|| std::fs::read(bram_state_dir(root).join("settings.json")).ok())
         .flatten();
     if root_bytes.is_none() && settings_bytes.is_none() {
@@ -30995,7 +31020,7 @@ fn merge_settings_into_config(
 fn settings_target_path(root: &Path) -> PathBuf {
     // Once `.bram/` exists, writes go to its settings.json and the root file
     // is never rewritten (#469 finding 4). Never creates `.bram/` itself.
-    if bram_state_dir_name(root) == BRAM_STATE_DIR_NEW {
+    if bram_state_dir_exists(root) {
         return bram_state_dir(root).join("settings.json");
     }
     let bram = root.join(".bram.json");
@@ -31170,6 +31195,22 @@ fn bram_port_serves_project(port: u16, proj: &Path) -> Result<bool, String> {
         .is_some_and(|(owner, project)| owner == project))
 }
 
+// The port this project's port files record (the plain file, else the
+// metadata's), or None. The owner the publisher and the startup mover's
+// live-owner check (startup_live_owner) probe.
+fn recorded_bram_port(proj: &Path) -> Option<u16> {
+    let port_path = resource_relative_path(proj, ".bram-port");
+    std::fs::read_to_string(&port_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .or_else(|| {
+            let raw = std::fs::read(bram_port_metadata_path(&port_path)).ok()?;
+            let meta: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+            u16::try_from(meta.get("port")?.as_u64()?).ok()
+        })
+        .filter(|p| *p != 0)
+}
+
 // Returns the preserved owner's port, or None when this instance publishes.
 // Keep the lock in this worktree's git directory: it is local runtime state,
 // and separate worktrees must not share the lock. Never unlink a lock file;
@@ -31190,17 +31231,7 @@ fn publish_bram_port_files(
         .map_err(|e| format!("open {}: {}", lock_path.display(), e))?;
     lock.lock()
         .map_err(|e| format!("lock {}: {}", lock_path.display(), e))?;
-    let port_path = resource_relative_path(proj, ".bram-port");
-    let recorded_port = std::fs::read_to_string(&port_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .or_else(|| {
-            let raw = std::fs::read(bram_port_metadata_path(&port_path)).ok()?;
-            let meta: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-            u16::try_from(meta.get("port")?.as_u64()?).ok()
-        })
-        .filter(|p| *p != 0);
-    if let Some(previous) = recorded_port {
+    if let Some(previous) = recorded_bram_port(proj) {
         if previous != port && bram_port_serves_project(previous, proj)? {
             return Ok(Some(previous));
         }
@@ -32801,6 +32832,7 @@ async fn issue_close_manual(
     number: u64,
     comment: Option<String>,
 ) -> Result<(), String> {
+    held_command_refusal("issue_close_manual")?;
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         {
@@ -32854,6 +32886,7 @@ fn describe_stranded_closes<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
 // still awaits the same Result<(), String>-shaped promise.
 #[tauri::command]
 async fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
+    held_command_refusal("git_push")?;
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = forge_action_cell().lock();
@@ -58056,7 +58089,7 @@ opts out in a way the runtime guard allows. Mutations outside approved items \
 are blocked by a PreToolUse hook installed under ~/.bram. On approved:, drop:, \
 or iterate: turns, drive the Bram lifecycle through the filesystem channel: \
 write .worklist-intent.json ({nonce, route, body}) in Bram's state folder \
-(.bram/ if it exists, else resources/) and read the host's reply from \
+(.bram/) and read the host's reply from \
 .worklist-result.json in Bram's state folder, matching your nonce. Do \
 not silently continue after a missing result or an ok:false reply. The gate is \
 two-stage: an approved: on a proposed (TO APPLY) item means make the edits, \
@@ -60565,7 +60598,8 @@ fn record_own_guard_target<R: tauri::Runtime>(app: &AppHandle<R>) {
     // issue-448: nothing goes into a folder that isn't a project folder
     // (#353's home rule, generalized). A home that already had a resources/
     // folder got this file at startup and again from the throughput ticker.
-    if !project_folder().is_ok() {
+    // issue-469-retire-resources: nor under a held start.
+    if !project_writable() {
         return;
     }
     let Some(root) = project_root(Some(app)) else {
@@ -61379,14 +61413,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "strayHomeScaffold": stray_home_scaffold,
         // issue-448: whether the launch folder is a project folder (a git
         // repo's root); anything else drives the pane's banner.
-        "projectFolder": {
-            "kind": project_folder().kind(),
-            "root": determine_project_root().to_string_lossy(),
-            "toplevel": match project_folder() {
-                ProjectFolder::Subfolder(top) => Some(top.to_string_lossy().to_string()),
-                _ => None,
-            },
-        },
+        "projectFolder": project_folder_status(root.as_deref()),
         // issue-445: ancestor CLAUDE.md files still carrying a legacy
         // xmlui-desktop block (Setup names them; this shows them at startup).
         "legacyAncestorImports": root
@@ -61637,6 +61664,30 @@ fn project_folder() -> &'static ProjectFolder {
     })
 }
 
+// /__enhance/status `projectFolder`. issue-469-retire-resources: a project
+// folder whose start was held reads as kind "state-held", with the obstacle,
+// state_dir_retry's verdict and any Bram-owned tracked files beside it.
+fn project_folder_status(root: Option<&Path>) -> serde_json::Value {
+    let folder = project_folder();
+    let mut v = serde_json::json!({
+        "kind": folder.kind(),
+        "root": determine_project_root().to_string_lossy(),
+        "toplevel": match folder {
+            ProjectFolder::Subfolder(top) => Some(top.to_string_lossy().to_string()),
+            _ => None,
+        },
+    });
+    if let (true, Some(obstacle)) = (folder.is_ok(), state_hold()) {
+        v["kind"] = "state-held".into();
+        if let serde_json::Value::Object(extra) = state_hold_status(root, obstacle) {
+            for (k, val) in extra {
+                v[k] = val;
+            }
+        }
+    }
+    v
+}
+
 #[cfg(test)]
 mod project_folder_tests {
     use super::{project_folder_verdict, ProjectFolder};
@@ -61727,7 +61778,10 @@ fn stray_home_scaffold_marker(home: &Path, root: &Path) -> Option<PathBuf> {
     }
     // Not resource_relative_path: `~/.bram/` always exists (the guard link
     // lives there), so the resolver would never look at the `~/resources/`
-    // scaffold this check exists to find. Either name's marker counts.
+    // scaffold this check exists to find. Either name's marker counts. Since
+    // issue-469-retire-resources the guard reads neither at the home folder,
+    // so a marker here captures nothing; it is named so the user can delete
+    // a leftover, and the old name is read for that alone.
     [BRAM_STATE_DIR_LEGACY, BRAM_STATE_DIR_NEW]
         .iter()
         .map(|d| home.join(d).join(WORKLIST_AUTH_REL))
@@ -61896,6 +61950,16 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             ));
         }
         ProjectFolder::Ok | ProjectFolder::Home => {}
+    }
+    // issue-469-retire-resources: Setup writes into the state folder, and a
+    // held start has none it may use.
+    if let Some(obstacle) = state_hold() {
+        return Err(format!(
+            "Setup refused: Bram's files in {} are still in resources/ and couldn't be moved \
+             to .bram/ ({}). The banner at the top of the pane says what to do (issue #469).",
+            proj.display(),
+            obstacle
+        ));
     }
     if let Some(home) = home_dir() {
         if path_is_home_dir(&proj, &home) {
@@ -64317,35 +64381,51 @@ fn feedback_history_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
     project_resource_path(app, "feedback-history")
 }
 
-// Bram's per-project state folder (judell/bram#469). The one place the host
-// names it: `.bram/` when that directory exists at the project root, else
-// the legacy `resources/`. Computed per root and per call, not cached, so a
-// nested instance can get a different answer from its parent and a folder
-// created mid-run is picked up. Every other site reaches the folder through
+// Bram's per-project state folder (judell/bram#469): `.bram/`. The one place
+// the host names it. Computed per root and per call, not cached, so a nested
+// instance can get a different answer from its parent and a folder created
+// mid-run is picked up. Every other site reaches the folder through
 // bram_state_dir / resource_relative_path / project_resource_path, or, for
 // repo-relative path strings, bram_state_rel / bram_state_rel_strip.
 // `state_dir_literals_go_through_the_resolver` keeps it that way.
 const BRAM_STATE_DIR_NEW: &str = ".bram";
+// The pre-0.8.4 name. issue-469-retire-resources step 2: nothing reads state
+// from it except the mover and its plan (migrate_state_dir*,
+// state_dir_plan_core, state_migrate_eligibility*, write_state_move_decision,
+// state_dir_retry), the held start (state_hold*), and the two read-only
+// answers bram_state_dir_name_held gives below.
+// `state_dir_legacy_name_stays_in_the_mover` keeps it that way.
 const BRAM_STATE_DIR_LEGACY: &str = "resources";
 
-// The guard-routing record (guard.rs's GUARD_TARGET_REL, which still spells
-// the legacy folder), relative to the state folder.
+// The guard-routing record, relative to the state folder.
 const GUARD_TARGET_STATE_REL: &str = ".bram-guard-target";
 
-// `~/.bram` is the machine folder (it holds the bram-guard link), never a
-// project's state folder, so a root at the home directory resolves the
-// legacy name (the guard's guard_policy::state_dir rule, the same answer).
-//
-// A `.bram/` that isn't Bram's (no marker, see is_bram_state_dir) is not
-// adopted: the legacy folder stays the answer (judell/bram#469).
 fn bram_state_dir_name(root: &Path) -> &'static str {
-    if root.join(BRAM_STATE_DIR_NEW).is_dir()
-        && !home_dir().is_some_and(|home| path_is_home_dir(root, &home))
-        && is_bram_state_dir(root)
-    {
-        BRAM_STATE_DIR_NEW
-    } else {
+    bram_state_dir_name_held(root, state_write_obstacle().is_some())
+}
+
+// `.bram` is the answer, with two read-only exceptions, both places Bram
+// writes nothing:
+//
+// - A launch that may not write state (state_write_obstacle: a held start,
+//   issue-469-retire-resources step 1, or an issue-448 refusal) whose `.bram/`
+//   isn't Bram's yet. A held board is still in `resources/`, so the pane
+//   reads it from there to show what's held. Under a hold, writes are refused
+//   (held_write_refusal for the loopback routes, held_command_refusal for the
+//   pane's commands); one that slipped past, or a refused launch's write,
+//   lands in `resources/`, which the mover moves. Neither makes a `.bram/`:
+//   under a hold that would strand the board (the mover never moves into an
+//   existing `.bram/`), and anywhere it would have no marker, so the next
+//   launch would read it as another tool's folder.
+// - The home folder, where `~/.bram` is the machine folder (it holds the
+//   bram-guard link), never a project's state. issue-448 refuses a launch
+//   there, so the first case covers its writes too.
+fn bram_state_dir_name_held(root: &Path, held: bool) -> &'static str {
+    let home = home_dir().is_some_and(|home| path_is_home_dir(root, &home));
+    if home || (held && !is_bram_state_dir(root)) {
         BRAM_STATE_DIR_LEGACY
+    } else {
+        BRAM_STATE_DIR_NEW
     }
 }
 
@@ -64362,6 +64442,24 @@ fn foreign_dot_bram(root: &Path) -> bool {
     root.join(BRAM_STATE_DIR_NEW).is_dir()
         && !home_dir().is_some_and(|home| path_is_home_dir(root, &home))
         && !is_bram_state_dir(root)
+}
+
+// Bram's `.bram/` is on disk at `root` (and `root` isn't the home folder).
+// The test for "has this project's folder moved / been made yet", which the
+// settings split asks; the resolver's answer is `.bram` either way.
+fn bram_state_dir_exists(root: &Path) -> bool {
+    !home_dir().is_some_and(|home| path_is_home_dir(root, &home)) && is_bram_state_dir(root)
+}
+
+// For the mover, its plan and the hold only: where Bram's state is on disk
+// right now, `.bram` once Bram's `.bram/` exists, else the pre-0.8.4 name.
+// Everything else uses bram_state_dir_name.
+fn state_dir_on_disk_name(root: &Path) -> &'static str {
+    if bram_state_dir_exists(root) {
+        BRAM_STATE_DIR_NEW
+    } else {
+        BRAM_STATE_DIR_LEGACY
+    }
 }
 
 fn bram_state_dir(root: &Path) -> PathBuf {
@@ -64626,42 +64724,49 @@ fn state_dir_entry_for(name: &str) -> Option<&'static OwnedEntry> {
 // ignores it (same-turn resolve -> commit). An unreadable board keeps the
 // record live. The fourth value is true when a fresh record was set aside.
 fn state_dir_live_claim(root: &Path, now_ms: i64) -> (bool, Vec<String>, Option<String>, bool) {
-    let claim_ids: Vec<String> =
-        std::fs::read_to_string(resource_relative_path(root, INFLIGHT_CLAIM_REL))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|v| {
-                v.get("ids").and_then(|ids| ids.as_array()).map(|arr| {
-                    arr.iter()
-                        .filter_map(|id| id.as_str().map(String::from))
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
-    let fresh_auth = std::fs::read_to_string(resource_relative_path(root, WORKLIST_AUTH_REL))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .filter(|v| {
-            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("none");
-            let issued = v.get("issuedAtMs").and_then(|i| i.as_i64()).unwrap_or(0);
-            kind != "none"
-                && issued > 0
-                && worklist_auth_freshness_ok(v, now_ms, WorklistAuthUse::Reconcile).is_ok()
-        });
+    let claim_ids: Vec<String> = std::fs::read_to_string(
+        root.join(state_dir_on_disk_name(root))
+            .join(INFLIGHT_CLAIM_REL),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .and_then(|v| {
+        v.get("ids").and_then(|ids| ids.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|id| id.as_str().map(String::from))
+                .collect()
+        })
+    })
+    .unwrap_or_default();
+    let fresh_auth = std::fs::read_to_string(
+        root.join(state_dir_on_disk_name(root))
+            .join(WORKLIST_AUTH_REL),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .filter(|v| {
+        let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("none");
+        let issued = v.get("issuedAtMs").and_then(|i| i.as_i64()).unwrap_or(0);
+        kind != "none"
+            && issued > 0
+            && worklist_auth_freshness_ok(v, now_ms, WorklistAuthUse::Reconcile).is_ok()
+    });
     let mut stale_authorization = false;
     let auth_kind = fresh_auth.and_then(|v| {
-        let board_ids: Option<std::collections::HashSet<String>> =
-            std::fs::read_to_string(resource_relative_path(root, "worklist.json"))
-                .ok()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|w| {
-                    w.get("items").and_then(|i| i.as_array()).map(|arr| {
-                        arr.iter()
-                            .filter_map(|it| it.get("id").and_then(|id| id.as_str()))
-                            .map(String::from)
-                            .collect()
-                    })
-                });
+        let board_ids: Option<std::collections::HashSet<String>> = std::fs::read_to_string(
+            root.join(state_dir_on_disk_name(root))
+                .join("worklist.json"),
+        )
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|w| {
+            w.get("items").and_then(|i| i.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|it| it.get("id").and_then(|id| id.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+        });
         let on_board = match &board_ids {
             None => true,
             Some(board) => v
@@ -64749,8 +64854,8 @@ struct StateDirPlan {
 }
 
 fn state_dir_plan_core(root: &Path, now_ms: i64) -> StateDirPlan {
-    let state_name = bram_state_dir_name(root);
-    let state_dir = bram_state_dir(root);
+    let state_name = state_dir_on_disk_name(root);
+    let state_dir = root.join(state_name);
     let mut would_move = Vec::new();
     let mut foreign = Vec::new();
     if let Ok(read) = std::fs::read_dir(&state_dir) {
@@ -64930,7 +65035,7 @@ fn root_settings_signature(root: &Path) -> Option<String> {
 // locally on purpose) and unparseable files stay. Returns the trace line, or
 // None when there is no root file or the folder hasn't moved.
 fn fold_untracked_root_settings(root: &Path) -> Option<String> {
-    if bram_state_dir_name(root) != BRAM_STATE_DIR_NEW {
+    if !bram_state_dir_exists(root) {
         return None;
     }
     let root_file = root.join(".bram.json");
@@ -65020,7 +65125,7 @@ fn fold_untracked_root_settings(root: &Path) -> Option<String> {
 // Called at startup after the trace log opens. Returns the trace line, and
 // queues the note only for a state of the file it hasn't asked about yet.
 fn state_settings_note<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> String {
-    if bram_state_dir_name(root) != BRAM_STATE_DIR_NEW {
+    if !bram_state_dir_exists(root) {
         return "op=settings-note skipped reason=not-moved".to_string();
     }
     let Some(sig) = root_settings_signature(root) else {
@@ -65093,13 +65198,328 @@ fn state_dir_plan(root: &Path) -> serde_json::Value {
         // issue-469-leftover-folder-reported: what the startup move did this
         // launch (null for the CLI), and whether a relaunch could finish it.
         "startupMove": STATE_MIGRATE_STARTUP.get().cloned(),
-        "retry": state_dir_retry(root, unix_now_ms(), STATE_MIGRATE_STARTUP.get()),
+        "retry": state_dir_retry(root, unix_now_ms(), startup_rollback_failed()),
+        // issue-469-retire-resources: this launch was held; the pane's
+        // state-held banner owns the question, so the mixed-folder banner
+        // (Move / Not now) stays hidden.
+        "stateHold": state_hold(),
     })
 }
 
 // The startup mover's outcome as data, recorded once at launch (the mover
 // runs before the trace opens, so the pane can't read it from there).
 static STATE_MIGRATE_STARTUP: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+// What state_dir_retry needs from that outcome, typed: a selective move at
+// startup that couldn't put the old folder back.
+static STATE_MIGRATE_STARTUP_ROLLBACK_FAILED: std::sync::OnceLock<bool> =
+    std::sync::OnceLock::new();
+
+fn startup_rollback_failed() -> bool {
+    STATE_MIGRATE_STARTUP_ROLLBACK_FAILED
+        .get()
+        .copied()
+        .unwrap_or(false)
+}
+
+// issue-469-retire-resources, step 1: the held start. When the startup move
+// didn't happen and Bram's state is still in `resources/`, this launch does
+// not run on the old folder: a third refusal beside issue-448's, so it writes
+// no port file, no trace and no `.bram/`, starts no agent and runs no Setup
+// (project_writable). The terminal still opens a shell. Set once, right after
+// the mover; Some(obstacle) is a hold. Unset (before the mover, or the CLI)
+// reads as no hold, which is what every pre-mover caller saw before.
+static STATE_HOLD: std::sync::OnceLock<Option<StateHoldObstacle>> = std::sync::OnceLock::new();
+
+fn state_hold() -> Option<StateHoldObstacle> {
+    STATE_HOLD.get().copied().flatten()
+}
+
+// Why a start is held (and why state_dir_retry can't move the folder): the
+// codes the pane's banner (window.__bramStateHeld) and Status key on. They
+// serialize as these kebab-case strings. `Other` carries a mover reason this
+// list doesn't name yet (the mover's reasons are `&'static str`), so a new
+// one still reaches the pane by its own name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StateHoldObstacle {
+    Blocked,
+    TrackedUnknown,
+    TrackedBramFiles,
+    ForeignDotBram,
+    Mixed,
+    LiveClaim,
+    RollbackFailed,
+    StagingLeft,
+    IgnoreUnreadable,
+    IgnoreWriteFailed,
+    Other(&'static str),
+}
+
+impl StateHoldObstacle {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::TrackedUnknown => "tracked-unknown",
+            Self::TrackedBramFiles => "tracked-bram-files",
+            Self::ForeignDotBram => "foreign-dot-bram",
+            Self::Mixed => "mixed",
+            Self::LiveClaim => "live-claim",
+            Self::RollbackFailed => "rollback-failed",
+            Self::StagingLeft => "staging-left",
+            Self::IgnoreUnreadable => "ignore-unreadable",
+            Self::IgnoreWriteFailed => "ignore-write-failed",
+            Self::Other(code) => code,
+        }
+    }
+
+    // A mover or eligibility reason that is already an obstacle code.
+    fn from_code(code: &'static str) -> Self {
+        match code {
+            "blocked" => Self::Blocked,
+            "tracked-unknown" => Self::TrackedUnknown,
+            "tracked-bram-files" => Self::TrackedBramFiles,
+            "foreign-dot-bram" => Self::ForeignDotBram,
+            "mixed" => Self::Mixed,
+            "live-claim" => Self::LiveClaim,
+            "rollback-failed" => Self::RollbackFailed,
+            "staging-left" => Self::StagingLeft,
+            "ignore-unreadable" => Self::IgnoreUnreadable,
+            "ignore-write-failed" => Self::IgnoreWriteFailed,
+            other => Self::Other(other),
+        }
+    }
+}
+
+impl std::fmt::Display for StateHoldObstacle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for StateHoldObstacle {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+// The startup writes' gate: a project folder (issue-448) with no hold.
+fn project_writable() -> bool {
+    project_folder().is_ok() && state_hold().is_none()
+}
+
+// What the hold decision needs from disk, gathered once at startup.
+#[derive(Clone, Copy, Debug, Default)]
+struct StateHoldFacts {
+    project_ok: bool,
+    // `resources/` holds a Bram entry other than seeded content (the test
+    // ensure_new_state_dir uses) and other than `.gitignore`, which a
+    // project's own asset folder often carries.
+    resources_holds_bram_state: bool,
+    // A tracked path under `resources/` falls under a Bram inventory entry.
+    tracked_owned: bool,
+    // `.bram-moving/` (a selective move's staging folder) is on disk.
+    staging_left: bool,
+}
+
+fn resources_holds_bram_state(root: &Path) -> bool {
+    std::fs::read_dir(root.join(BRAM_STATE_DIR_LEGACY)).is_ok_and(|read| {
+        read.flatten().any(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name != ".gitignore"
+                && matches!(
+                    state_dir_entry_for(&name),
+                    Some(entry) if entry.class != OwnedClass::SeededContent
+                )
+        })
+    })
+}
+
+// Tracked paths under the old folder that Bram owns: what the user must
+// `git rm --cached` before the move can run. Empty when git can't say.
+fn state_dir_tracked_owned(root: &Path) -> Vec<String> {
+    if state_dir_on_disk_name(root) != BRAM_STATE_DIR_LEGACY {
+        return Vec::new();
+    }
+    let plan = state_dir_plan_core(root, unix_now_ms());
+    plan.tracked
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| state_dir_tracked_is_owned(t, plan.state_name))
+        .collect()
+}
+
+fn state_hold_facts(root: &Path) -> StateHoldFacts {
+    let resources_holds_bram_state = resources_holds_bram_state(root);
+    StateHoldFacts {
+        project_ok: project_folder().is_ok(),
+        resources_holds_bram_state,
+        tracked_owned: resources_holds_bram_state && !state_dir_tracked_owned(root).is_empty(),
+        staging_left: root.join(STATE_MOVE_STAGING).exists(),
+    }
+}
+
+// A mover reason (Skipped, Abandoned or a selective failure) as the hold's
+// obstacle code. None: nothing to hold for.
+fn state_hold_reason(reason: &'static str, f: &StateHoldFacts) -> Option<StateHoldObstacle> {
+    match reason {
+        "already-moved" | "no-old-folder" | "not-repo" => None,
+        "tracked" | "mixed" | "declined" | "tracked-owned" => Some(if f.tracked_owned {
+            StateHoldObstacle::TrackedBramFiles
+        } else {
+            StateHoldObstacle::Mixed
+        }),
+        "staging-exists" => Some(StateHoldObstacle::StagingLeft),
+        // foreign-dot-bram, tracked-unknown, live-claim, blocked,
+        // ignore-unreadable, ignore-write-failed, and any reason added later.
+        other => Some(StateHoldObstacle::from_code(other)),
+    }
+}
+
+// The hold decision, pure. Obstacle codes: blocked, tracked-unknown,
+// tracked-bram-files, foreign-dot-bram, mixed (unanswered or "not-now":
+// "not-now" no longer suppresses anything), live-claim (only reached when
+// another Bram is live here: call (c)), rollback-failed, staging-left, and the
+// mover's own ignore-unreadable / ignore-write-failed.
+//
+// A foreign `.bram/` holds even when `resources/` has no Bram state yet:
+// otherwise a first launch would run on `resources/`, create state there,
+// and the next launch would hold.
+fn state_hold_obstacle(
+    outcome: &StateMigrateOutcome,
+    f: &StateHoldFacts,
+) -> Option<StateHoldObstacle> {
+    if !f.project_ok || state_migrate_moved(outcome) {
+        return None;
+    }
+    match outcome {
+        StateMigrateOutcome::Skipped("already-moved" | "not-repo") => return None,
+        StateMigrateOutcome::Skipped("foreign-dot-bram") => {
+            return Some(StateHoldObstacle::ForeignDotBram)
+        }
+        StateMigrateOutcome::SelectiveFailed {
+            rolled_back: false, ..
+        } => return Some(StateHoldObstacle::RollbackFailed),
+        _ => {}
+    }
+    if f.staging_left {
+        return Some(StateHoldObstacle::StagingLeft);
+    }
+    if !f.resources_holds_bram_state {
+        return None;
+    }
+    match outcome {
+        StateMigrateOutcome::Skipped(reason)
+        | StateMigrateOutcome::Abandoned { reason, .. }
+        | StateMigrateOutcome::SelectiveFailed { reason, .. } => state_hold_reason(reason, f),
+        StateMigrateOutcome::Blocked { .. } => Some(StateHoldObstacle::Blocked),
+        StateMigrateOutcome::Moved { .. } | StateMigrateOutcome::MovedSelective { .. } => None,
+    }
+}
+
+// The hold's record. The trace lives in the state folder, so it can't be
+// used: stderr, plus one line per held launch in `<git-dir>/bram/state-hold.log`.
+fn record_state_hold<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    obstacle: StateHoldObstacle,
+    outcome: &StateMigrateOutcome,
+) {
+    let line = format!(
+        "{} op=held root={} obstacle={} outcome={} reason={}",
+        format_iso_utc(unix_now_ms()),
+        root.display(),
+        obstacle,
+        outcome.kind(),
+        outcome.reason().unwrap_or("none"),
+    );
+    eprintln!("[state-hold] {}", line);
+    let Some(dir) = git_dir_path(app).map(|g| g.join("bram")) else {
+        eprintln!("[state-hold] op=log-skipped reason=no-git-dir");
+        return;
+    };
+    let written = std::fs::create_dir_all(&dir).and_then(|()| {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("state-hold.log"))
+            .and_then(|mut f| writeln!(f, "{}", line))
+    });
+    if let Err(e) = written {
+        eprintln!("[state-hold] op=log-failed error={}", e);
+    }
+}
+
+// /__enhance/status `projectFolder` additions for a held start: the obstacle,
+// what state_dir_retry says, and the Bram-owned tracked files to untrack.
+fn state_hold_status(root: Option<&Path>, obstacle: StateHoldObstacle) -> serde_json::Value {
+    let Some(root) = root else {
+        return serde_json::json!({ "obstacle": obstacle });
+    };
+    serde_json::json!({
+        "obstacle": obstacle,
+        "retry": state_dir_retry(root, unix_now_ms(), startup_rollback_failed()),
+        "trackedFiles": if obstacle == StateHoldObstacle::TrackedBramFiles {
+            state_dir_tracked_owned(root)
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+// Call (c): at startup a claim file is leftover state, not live work, unless
+// another Bram is live on this project. Liveness is the port publisher's own
+// test (bram_port_serves_project on the recorded port). An uncertain probe
+// counts as live: a hold the user can retry beats moving a folder under a
+// running Bram.
+//
+// migrate-relaunch: relaunch_self passes the parent's port in
+// RELAUNCH_PARENT_PORT_ENV, and the parent exits ~400 ms after the spawn, so
+// the child's mover can run while the parent still answers /__app-info. When
+// the recorded owner is that port, the child waits for it to go away (up to
+// `attempts` probes `pause` apart) before calling it live. A port still live
+// after that is a real owner (the env var outlives the relaunch in the
+// child's environment, and a later launch may reuse the port).
+const RELAUNCH_PARENT_PORT_ENV: &str = "BRAM_RELAUNCH_PARENT_PORT";
+
+fn startup_live_owner_with(
+    recorded: Option<u16>,
+    relaunch_parent: Option<u16>,
+    probe: &mut dyn FnMut(u16) -> Result<bool, String>,
+    attempts: u32,
+    pause: std::time::Duration,
+) -> (bool, u32) {
+    let Some(port) = recorded else {
+        return (false, 0);
+    };
+    let mut tried = 0;
+    loop {
+        tried += 1;
+        let live = probe(port).unwrap_or(true);
+        if !live {
+            return (false, tried);
+        }
+        if relaunch_parent != Some(port) || tried >= attempts {
+            return (true, tried);
+        }
+        std::thread::sleep(pause);
+    }
+}
+
+// (live, probes, whether the recorded owner was the relaunching parent).
+fn startup_live_owner(root: &Path) -> (bool, u32, bool) {
+    let parent = std::env::var(RELAUNCH_PARENT_PORT_ENV)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok());
+    let recorded = recorded_bram_port(root);
+    let (live, probes) = startup_live_owner_with(
+        recorded,
+        parent,
+        &mut |port| bram_port_serves_project(port, root),
+        30,
+        std::time::Duration::from_millis(100),
+    );
+    (live, probes, recorded.is_some() && recorded == parent)
+}
 
 fn state_migrate_outcome_json(outcome: &StateMigrateOutcome, at_ms: i64) -> serde_json::Value {
     let mut v = serde_json::json!({
@@ -65162,15 +65582,20 @@ fn state_migrate_outcome_json(outcome: &StateMigrateOutcome, at_ms: i64) -> serd
 // Read-only: never clears a claim, removes staging or touches tracked files.
 // `obstacle` names why not when it can't. `needsChoice`: the move needs the
 // user's "move" answer written first (foreign entries stay behind).
-fn state_dir_retry(
-    root: &Path,
-    now_ms: i64,
-    startup: Option<&serde_json::Value>,
-) -> serde_json::Value {
-    let none = serde_json::json!({
-        "leftover": false, "offer": false, "needsChoice": false, "obstacle": null,
-    });
-    if bram_state_dir_name(root) != BRAM_STATE_DIR_LEGACY
+// state_dir_retry's verdict. Serialized into /__state-dir/plan's `retry` and
+// /__enhance/status's `projectFolder.retry`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StateDirRetry {
+    leftover: bool,
+    offer: bool,
+    needs_choice: bool,
+    obstacle: Option<StateHoldObstacle>,
+}
+
+fn state_dir_retry(root: &Path, now_ms: i64, startup_rollback_failed: bool) -> StateDirRetry {
+    let none = StateDirRetry::default();
+    if state_dir_on_disk_name(root) != BRAM_STATE_DIR_LEGACY
         || !root.join(BRAM_STATE_DIR_LEGACY).is_dir()
     {
         return none;
@@ -65179,18 +65604,18 @@ fn state_dir_retry(
     if plan.would_move.is_empty() {
         return none;
     }
-    let verdict = |offer: bool, needs_choice: bool, obstacle: Option<&str>| {
-        serde_json::json!({
-            "leftover": true, "offer": offer, "needsChoice": needs_choice, "obstacle": obstacle,
-        })
-    };
-    if let Some(s) = startup {
-        if s["outcome"] == "selective-failed" && s["rolledBack"] == false {
-            return verdict(false, false, Some("rollback-failed"));
-        }
+    let verdict =
+        |offer: bool, needs_choice: bool, obstacle: Option<StateHoldObstacle>| StateDirRetry {
+            leftover: true,
+            offer,
+            needs_choice,
+            obstacle,
+        };
+    if startup_rollback_failed {
+        return verdict(false, false, Some(StateHoldObstacle::RollbackFailed));
     }
     if root.join(STATE_MOVE_STAGING).exists() {
-        return verdict(false, false, Some("staging-left"));
+        return verdict(false, false, Some(StateHoldObstacle::StagingLeft));
     }
     match state_migrate_eligibility(root, now_ms) {
         Ok(_) => verdict(true, false, None),
@@ -65198,10 +65623,12 @@ fn state_dir_retry(
         // files, unknown git status and live claims; it takes the rest.
         Err("mixed" | "tracked") => match state_migrate_selective_check(root, now_ms) {
             Ok(_) => verdict(true, true, None),
-            Err("tracked-owned") => verdict(false, false, Some("tracked-bram-files")),
-            Err(other) => verdict(false, false, Some(other)),
+            Err("tracked-owned") => {
+                verdict(false, false, Some(StateHoldObstacle::TrackedBramFiles))
+            }
+            Err(other) => verdict(false, false, Some(StateHoldObstacle::from_code(other))),
         },
-        Err(other) => verdict(false, false, Some(other)),
+        Err(other) => verdict(false, false, Some(StateHoldObstacle::from_code(other))),
     }
 }
 
@@ -65351,36 +65778,53 @@ fn write_state_move_decision(root: &Path, choice: &str, now_ms: i64) -> Result<S
 // when state_dir_retry offers it; writes the "move" answer first when the
 // folder is mixed, and never relaunches if that write fails. Ends this
 // process (the new one's startup mover does the move).
+//
+// issue-469-retire-resources: under a held start it is also the banner's
+// Retry, and relaunches without an offer. The obstacle may be gone by then
+// (a closed file, an untracked path, a renamed folder, another Bram quit),
+// and the runtime check can't say so: it counts any claim file as live,
+// while the next startup weighs it by call (c). A relaunch that still meets
+// the obstacle holds again, with a fresh state-hold.log line.
 fn handle_state_migrate_relaunch<R: tauri::Runtime>(
     app: &AppHandle<R>,
     root: &Path,
 ) -> (u16, &'static str, Vec<u8>) {
     const JSON: &str = "application/json; charset=utf-8";
     let now = unix_now_ms();
-    let retry = state_dir_retry(root, now, STATE_MIGRATE_STARTUP.get());
-    let obstacle = retry["obstacle"].as_str().unwrap_or("none").to_string();
-    let needs_choice = retry["needsChoice"].as_bool().unwrap_or(false);
+    let retry = state_dir_retry(root, now, startup_rollback_failed());
+    let obstacle = retry.obstacle.map_or("none", StateHoldObstacle::as_str);
+    let needs_choice = retry.needs_choice;
+    let held = state_hold();
     let trace = |status: u16| {
-        append_bram_trace_line(
-            app,
-            "state-dir",
-            &format!(
-                "op=migrate-relaunch needs_choice={} status={} obstacle={}",
-                needs_choice, status, obstacle
-            ),
-        )
+        let line = format!(
+            "op=migrate-relaunch needs_choice={} status={} obstacle={} held={}",
+            needs_choice,
+            status,
+            obstacle,
+            held.map_or("none", StateHoldObstacle::as_str)
+        );
+        // A held start has no trace file: stderr instead.
+        if held.is_some() {
+            eprintln!("[state-dir] {}", line);
+        }
+        append_bram_trace_line(app, "state-dir", &line)
     };
-    if retry["offer"].as_bool() != Some(true) {
+    let offered = retry.offer;
+    if !offered && held.is_none() {
         trace(409);
         return (
             409,
             JSON,
-            serde_json::json!({ "ok": false, "obstacle": retry["obstacle"] })
+            serde_json::json!({ "ok": false, "obstacle": retry.obstacle })
                 .to_string()
                 .into_bytes(),
         );
     }
-    if needs_choice {
+    // A mixed hold's button is "Move Bram's files": record the answer even
+    // when the runtime check withholds the offer (a leftover claim reads as
+    // live here; the next startup weighs it by call (c)).
+    let record_move = (offered && needs_choice) || held == Some(StateHoldObstacle::Mixed);
+    if record_move {
         if let Err(e) = write_state_move_decision(root, "move", now) {
             trace(500);
             return (
@@ -65407,7 +65851,7 @@ fn handle_state_migrate_relaunch<R: tauri::Runtime>(
         Ok(_) => (
             200,
             JSON,
-            serde_json::json!({ "ok": true, "relaunching": true, "choiceRecorded": needs_choice })
+            serde_json::json!({ "ok": true, "relaunching": true, "choiceRecorded": record_move })
                 .to_string()
                 .into_bytes(),
         ),
@@ -65462,6 +65906,29 @@ enum StateMigrateOutcome {
         rolled_back: bool,
     },
     Skipped(&'static str),
+}
+
+impl StateMigrateOutcome {
+    // The `outcome` code state_migrate_outcome_json writes.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Skipped(_) => "skipped",
+            Self::Moved { .. } => "moved",
+            Self::Blocked { .. } => "blocked",
+            Self::Abandoned { .. } => "abandoned",
+            Self::MovedSelective { .. } => "moved-selective",
+            Self::SelectiveFailed { .. } => "selective-failed",
+        }
+    }
+
+    fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Skipped(reason)
+            | Self::Abandoned { reason, .. }
+            | Self::SelectiveFailed { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 // Why a rename loop stopped: the OS kept refusing, or eligibility changed
@@ -65551,14 +66018,28 @@ fn ensure_new_state_dir_with_home(root: &Path, home: Option<&Path>) -> Option<&'
     Some(reason)
 }
 
-fn migrate_state_dir(root: &Path) -> StateMigrateOutcome {
-    migrate_state_dir_with(
+// The startup mover. Call (c): a claim file blocks it only when another
+// Bram is live on this project (startup_live_owner, probed once, and only
+// when a claim is there to weigh).
+// Returns the outcome and, when a claim made the mover ask, the owner check
+// as a trace line (`op=owner-check live=… probes=… relaunch_parent=…`).
+fn migrate_state_dir(root: &Path) -> (StateMigrateOutcome, Option<String>) {
+    let owner = std::cell::OnceCell::new();
+    let outcome = migrate_state_dir_with(
         root,
         unix_now_ms(),
         &mut |from, to| std::fs::rename(from, to),
         STATE_MIGRATE_ATTEMPTS,
         STATE_MIGRATE_PAUSE,
-    )
+        &|| owner.get_or_init(|| startup_live_owner(root)).0,
+    );
+    let line = owner.get().map(|(live, probes, parent)| {
+        format!(
+            "op=owner-check live={} probes={} relaunch_parent={}",
+            live, probes, parent
+        )
+    });
+    (outcome, line)
 }
 
 // Why the mover must not run now, or the plan it would act on. Checked
@@ -65566,6 +66047,16 @@ fn migrate_state_dir(root: &Path) -> StateMigrateOutcome {
 // or agent can create a claim, a foreign entry or tracked content while a
 // blocked rename waits (Codex review, 2026-11-04).
 fn state_migrate_eligibility(root: &Path, now_ms: i64) -> Result<StateDirPlan, &'static str> {
+    state_migrate_eligibility_with(root, now_ms, &|| true)
+}
+
+// `claim_blocks` says whether a live claim on disk is an obstacle: always at
+// runtime (above), only with another live Bram at startup (call (c)).
+fn state_migrate_eligibility_with(
+    root: &Path,
+    now_ms: i64,
+    claim_blocks: &dyn Fn() -> bool,
+) -> Result<StateDirPlan, &'static str> {
     if root.join(BRAM_STATE_DIR_NEW).exists() {
         // judell/bram#469: only Bram's own `.bram/` means the move is done.
         return Err(if is_bram_state_dir(root) {
@@ -65586,7 +66077,7 @@ fn state_migrate_eligibility(root: &Path, now_ms: i64) -> Result<StateDirPlan, &
     if !plan.foreign.is_empty() {
         return Err("mixed");
     }
-    if plan.live_claim {
+    if plan.live_claim && claim_blocks() {
         return Err("live-claim");
     }
     Ok(plan)
@@ -65598,17 +66089,20 @@ fn migrate_state_dir_with(
     rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
     attempts: u32,
     pause: std::time::Duration,
+    claim_blocks: &dyn Fn() -> bool,
 ) -> StateMigrateOutcome {
     let old = root.join(BRAM_STATE_DIR_LEGACY);
     let new = root.join(BRAM_STATE_DIR_NEW);
-    let plan = match state_migrate_eligibility(root, now_ms) {
+    let plan = match state_migrate_eligibility_with(root, now_ms, claim_blocks) {
         Ok(plan) => plan,
         // Foreign or tracked entries: the user's answer decides.
         Err(reason @ ("tracked" | "mixed")) => {
             let choice =
                 state_move_decision(root).and_then(|d| d["choice"].as_str().map(String::from));
             return match choice.as_deref() {
-                Some("move") => migrate_state_dir_selective(root, now_ms, rename, attempts, pause),
+                Some("move") => {
+                    migrate_state_dir_selective(root, now_ms, rename, attempts, pause, claim_blocks)
+                }
                 Some(_) => StateMigrateOutcome::Skipped("declined"),
                 None => StateMigrateOutcome::Skipped(reason),
             };
@@ -65637,7 +66131,7 @@ fn migrate_state_dir_with(
         Some(bytes) => std::fs::write(&ignore, bytes).is_ok(),
         None => std::fs::remove_file(&ignore).is_ok(),
     };
-    let recheck = || state_migrate_eligibility(root, now_ms).map(|_| ());
+    let recheck = || state_migrate_eligibility_with(root, now_ms, claim_blocks).map(|_| ());
     match state_migrate_rename(rename, &old, &new, attempts, pause, &recheck) {
         Ok(()) => {}
         Err((RenameStop::Blocked(os_error), tried)) => {
@@ -65674,6 +66168,14 @@ fn migrate_state_dir_with(
 // until the staged folder is renamed into place): no unknown or Bram-owned
 // tracked content, no live claim. Checked first and before every retry.
 fn state_migrate_selective_check(root: &Path, now_ms: i64) -> Result<StateDirPlan, &'static str> {
+    state_migrate_selective_check_with(root, now_ms, &|| true)
+}
+
+fn state_migrate_selective_check_with(
+    root: &Path,
+    now_ms: i64,
+    claim_blocks: &dyn Fn() -> bool,
+) -> Result<StateDirPlan, &'static str> {
     let plan = state_dir_plan_core(root, now_ms);
     match &plan.tracked {
         None => Err("tracked-unknown"),
@@ -65683,7 +66185,7 @@ fn state_migrate_selective_check(root: &Path, now_ms: i64) -> Result<StateDirPla
         {
             Err("tracked-owned")
         }
-        _ if plan.live_claim => Err("live-claim"),
+        _ if plan.live_claim && claim_blocks() => Err("live-claim"),
         _ => Ok(plan),
     }
 }
@@ -65705,11 +66207,12 @@ fn migrate_state_dir_selective(
     rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
     attempts: u32,
     pause: std::time::Duration,
+    claim_blocks: &dyn Fn() -> bool,
 ) -> StateMigrateOutcome {
     let old = root.join(BRAM_STATE_DIR_LEGACY);
     let new = root.join(BRAM_STATE_DIR_NEW);
     let staging = root.join(STATE_MOVE_STAGING);
-    let plan = match state_migrate_selective_check(root, now_ms) {
+    let plan = match state_migrate_selective_check_with(root, now_ms, claim_blocks) {
         Ok(plan) => plan,
         Err(reason) => return StateMigrateOutcome::Skipped(reason),
     };
@@ -65724,7 +66227,7 @@ fn migrate_state_dir_selective(
         let _ = std::fs::remove_dir(&staging);
         return StateMigrateOutcome::Skipped("ignore-write-failed");
     }
-    let recheck = || state_migrate_selective_check(root, now_ms).map(|_| ());
+    let recheck = || state_migrate_selective_check_with(root, now_ms, claim_blocks).map(|_| ());
     let mut moved: Vec<&str> = Vec::new();
     let mut stop = None;
     for (name, _, _) in plan
@@ -85290,7 +85793,7 @@ fn close_withdrawn_note_text(issue: u64, commit_sha: &str, via: &str) -> String 
     let how = if via == "pane" {
         "the user withdrew it from the Commits tab"
     } else {
-        "it was removed from .worklist-issue-close.json in Bram's state folder (.bram/ if it exists, else resources/) by hand"
+        "it was removed from .worklist-issue-close.json in Bram's state folder (.bram/) by hand"
     };
     format!(
         "the queued close of #{} (commit {}) was withdrawn -- {}; it will NOT fire on Push, and #{} stays open",
@@ -90346,20 +90849,18 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
-    // judell/bram#469 0.8.4: `/__bram/<rel>` serves Bram's state folder,
-    // whatever it is called; `/resources/<rel>` is its alias until 0.8.5. The
-    // alias answers a file still in `resources/` first (a target app's own
-    // asset, or one a selective move left behind). worklist.json is always
-    // present, empty when the project hasn't opted in, so a poll of it doesn't
-    // flood devtools with 404s.
-    if let Some((rel, alias)) = state_url_rel(path) {
+    // judell/bram#469: `/__bram/<rel>` serves Bram's state folder.
+    // worklist.json is always present, empty when the project hasn't opted
+    // in, so a poll of it doesn't flood devtools with 404s.
+    //
+    // issue-469-retire-resources step 2: the `/resources/<rel>` alias is
+    // gone. A `/resources/...` URL is an ordinary project path now, served by
+    // the root serve below, so a target app's own `resources/` assets (and
+    // anything a selective move left there) are served as they are on disk;
+    // a miss there no longer falls through to Bram's state.
+    if let Some(rel) = state_url_rel(path) {
         let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
-        let legacy = proj.join(BRAM_STATE_DIR_LEGACY).join(rel);
-        let file = if alias && legacy.is_file() {
-            legacy
-        } else {
-            resource_relative_path(&proj, rel)
-        };
+        let file = resource_relative_path(&proj, rel);
         return match std::fs::read(&file) {
             Ok(bytes) => (200, mime_for(&file), bytes),
             Err(_) if rel == "worklist.json" => (
@@ -90397,7 +90898,7 @@ fn route_request<R: tauri::Runtime>(
     // code-behind files that must genuinely 404 — so only extensionless
     // misses fall back (the try_files-shaped predicate below), and asset
     // typos keep their honest 404s. Reserved namespaces (__*, /query, the
-    // state folder's resources/ alias) returned earlier in this function, so they
+    // state folder's /__bram/) returned earlier in this function, so they
     // are unshadowable by position. Projects without a root index.html keep
     // the old behavior exactly.
     let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
@@ -90466,24 +90967,16 @@ fn project_path_refusal(path: &str) -> Option<&'static str> {
     dot.then_some("dot-segment")
 }
 
-// judell/bram#469: the part of a `__bram/<rel>` or alias `resources/<rel>`
-// request path below the state folder, and whether it came by the alias.
-// None for any other path, and for a `rel` that could leave the folder
-// (empty, `.` or `..` segments, a backslash or a drive colon).
-fn state_url_rel(path: &str) -> Option<(&str, bool)> {
-    let (rest, alias) = match path.strip_prefix("__bram/") {
-        Some(rest) => (rest, false),
-        None => (
-            path.strip_prefix(BRAM_STATE_DIR_LEGACY)?
-                .strip_prefix('/')?,
-            true,
-        ),
-    };
+// judell/bram#469: the part of a `__bram/<rel>` request path below the state
+// folder. None for any other path, and for a `rel` that could leave the
+// folder (empty, `.` or `..` segments, a backslash or a drive colon).
+fn state_url_rel(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("__bram/")?;
     let inside = !rest.contains(['\\', ':'])
         && rest
             .split('/')
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
-    inside.then_some((rest, alias))
+    inside.then_some(rest)
 }
 
 #[cfg(test)]
@@ -90764,21 +91257,19 @@ mod state_url_tests {
         assert!(super::parse_migrated_from("2026-11-04T22:02:15Z").is_none());
     }
 
-    use super::{state_migrate_moved, state_url_rel, StateMigrateOutcome, BRAM_STATE_DIR_LEGACY};
+    use super::{state_migrate_moved, state_url_rel, StateMigrateOutcome};
 
+    // issue-469-retire-resources step 2: the `resources/` alias is gone, so a
+    // `resources/...` URL is an ordinary project path (the root serve).
     #[test]
-    fn bram_route_and_alias_map_into_the_state_folder() {
-        assert_eq!(
-            state_url_rel("__bram/worklist.json"),
-            Some(("worklist.json", false))
-        );
+    fn bram_route_maps_into_the_state_folder() {
+        assert_eq!(state_url_rel("__bram/worklist.json"), Some("worklist.json"));
         assert_eq!(
             state_url_rel("__bram/bram-traces/bram-trace.log"),
-            Some(("bram-traces/bram-trace.log", false))
+            Some("bram-traces/bram-trace.log")
         );
-        let alias = format!("{}/worklist.json", BRAM_STATE_DIR_LEGACY);
-        assert_eq!(state_url_rel(&alias), Some(("worklist.json", true)));
         for other in [
+            "resources/worklist.json", // state-dir: literal ok (the retired alias, now a project path)
             "index.html",
             "__bramx/a",
             "resourcesx/a",
@@ -90803,8 +91294,6 @@ mod state_url_tests {
         ] {
             assert_eq!(state_url_rel(bad), None, "{bad}");
         }
-        let alias_up = format!("{}/../Cargo.toml", BRAM_STATE_DIR_LEGACY);
-        assert_eq!(state_url_rel(&alias_up), None);
     }
 
     #[test]
@@ -96775,7 +97264,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
              can't tell whether this commit would take another item's work. Nothing was \
              committed. If this repeats, retrying won't clear it: the trace line \
              `op=membership … reason=` in bram-traces/bram-trace.log, in Bram's state \
-             folder (.bram/ if it exists, else resources/), says why."
+             folder (.bram/), says why."
                 .to_string(),
         );
     };
@@ -98419,54 +98908,123 @@ mod worklist_authorization_tests {
     }
 
     #[test]
-    fn resource_relative_path_joins_under_resources() {
-        // judell/bram#469: no `.bram/` means the legacy folder, exactly as
-        // before the resolver existed.
-        let legacy = Path::new("/tmp/bram").join(super::BRAM_STATE_DIR_LEGACY);
-        assert_eq!(super::BRAM_STATE_DIR_LEGACY, "resources");
+    fn resource_relative_path_joins_under_dot_bram() {
+        // issue-469-retire-resources: `.bram/` is the state folder, whether
+        // or not it exists yet.
+        let dot = Path::new("/tmp/bram").join(super::BRAM_STATE_DIR_NEW);
+        assert_eq!(super::BRAM_STATE_DIR_NEW, ".bram");
         assert_eq!(
             resource_relative_path(Path::new("/tmp/bram"), "worklist.json"),
-            legacy.join("worklist.json")
+            dot.join("worklist.json")
         );
         assert_eq!(
             resource_relative_path(Path::new("/tmp/bram"), Path::new("feedback-drafts")),
-            legacy.join("feedback-drafts")
+            dot.join("feedback-drafts")
         );
     }
 
     #[test]
-    fn state_dir_resolver_prefers_dot_bram_when_present() {
+    fn state_dir_resolver_names_dot_bram_and_reads_resources_only_when_held() {
         let root = std::env::temp_dir().join(format!("bram-469-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let legacy = super::BRAM_STATE_DIR_LEGACY;
         let legacy_wl = format!("{}/worklist.json", legacy);
-        assert_eq!(super::bram_state_dir(&root), root.join(legacy));
-        assert_eq!(super::bram_state_rel(&root, "worklist.json"), legacy_wl);
-        assert_eq!(super::bram_state_rel(&root, ""), legacy);
-        assert_eq!(
-            super::bram_state_rel_strip(&root, &legacy_wl),
-            Some("worklist.json")
-        );
-        assert_eq!(super::bram_state_rel_strip(&root, "resourcesX/a"), None);
-        // A `.bram` file is not the folder.
-        std::fs::write(root.join(".bram"), "").unwrap();
-        assert_eq!(super::bram_state_dir(&root), root.join(legacy));
-        std::fs::remove_file(root.join(".bram")).unwrap();
-        std::fs::create_dir_all(root.join(".bram")).unwrap();
-        // An unmarked `.bram/` is not Bram's (judell/bram#469).
-        assert_eq!(super::bram_state_dir(&root), root.join(legacy));
-        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
+        // Writable: `.bram`, with or without `resources/` beside it.
+        std::fs::create_dir_all(root.join(legacy)).unwrap();
         assert_eq!(super::bram_state_dir(&root), root.join(".bram"));
-        assert_eq!(
-            resource_relative_path(&root, ".bram-port"),
-            root.join(".bram").join(".bram-port")
-        );
         assert_eq!(
             super::bram_state_rel(&root, "worklist.json"),
             ".bram/worklist.json"
         );
+        assert_eq!(super::bram_state_rel(&root, ""), ".bram");
+        assert_eq!(
+            super::bram_state_rel_strip(&root, ".bram/worklist.json"),
+            Some("worklist.json")
+        );
         assert_eq!(super::bram_state_rel_strip(&root, &legacy_wl), None);
+        assert_eq!(super::bram_state_rel_strip(&root, ".bramX/a"), None);
+        // Held (or refused): the board is read from `resources/` until a
+        // `.bram/` that is Bram's exists; an unmarked one isn't.
+        assert_eq!(super::bram_state_dir_name_held(&root, true), legacy);
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        assert_eq!(super::bram_state_dir_name_held(&root, true), legacy);
+        assert_eq!(super::bram_state_dir_name_held(&root, false), ".bram");
+        std::fs::write(root.join(".bram/.gitignore"), "*\n").unwrap();
+        assert_eq!(super::bram_state_dir_name_held(&root, true), ".bram");
+        assert!(super::bram_state_dir_exists(&root));
+        assert_eq!(super::state_dir_on_disk_name(&root), ".bram");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The step-2 hazard (issue-469-retire-resources): under a hold, a write
+    // that reaches the resolver must not create `.bram/`, or the mover (which
+    // never moves into an existing `.bram/`) strands the board in
+    // `resources/`. Every state path the host writes goes through
+    // resource_relative_path's name, so write the whole inventory the way a
+    // writer would (create_dir_all of the parent, then the file) and check.
+    #[test]
+    fn a_write_under_a_hold_never_creates_dot_bram() {
+        let root = std::env::temp_dir().join(format!("bram-469-held-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join(super::BRAM_STATE_DIR_LEGACY);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("worklist.json"), r#"{"items":[]}"#).unwrap();
+        std::fs::write(legacy.join("logo.png"), "png").unwrap();
+        for entry in super::BRAM_OWNED_ENTRIES
+            .iter()
+            .filter(|e| !e.root_relative)
+        {
+            let rel = match entry.kind {
+                super::OwnedKind::File => entry.rel.to_string(),
+                super::OwnedKind::Dir => format!("{}/x.json", entry.rel),
+                _ => continue,
+            };
+            let name = super::bram_state_dir_name_held(&root, true);
+            let path = root.join(name).join(&rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{}").unwrap();
+        }
+        assert!(!root.join(".bram").exists(), "a held write made .bram/");
+        // The mover can still take the folder.
+        assert!(super::resources_holds_bram_state(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The loopback half of the hold: every state-changing route is refused
+    // with the obstacle, except the hold's own way out and pane plumbing that
+    // writes no state; reads pass.
+    #[test]
+    fn held_write_refusal_refuses_state_writes_only() {
+        use super::{held_write_refusal, StateHoldObstacle, HELD_ALLOWED_PATHS};
+        let held = Some(StateHoldObstacle::Mixed);
+        for path in [
+            "__worklist/mutate",
+            "__worklist/commit",
+            "__worklist/drop",
+            "__worklist/end",
+            "__worklist/reorder",
+            "__worklist/plan",
+            "__queue/save",
+            "__draft/save",
+            "__settings",
+            "__agent/session",
+            "__needs-you/dismiss",
+            "__paste-image",
+            "__test/switch",
+            "__anything-added-later",
+        ] {
+            assert_eq!(held_write_refusal("POST", path, held), held, "{path}");
+            assert_eq!(held_write_refusal("POST", path, None), None, "{path}");
+        }
+        for path in ["__worklist/resolve", "__worklist/init", "__enhance/run"] {
+            assert_eq!(held_write_refusal("GET", path, held), held, "{path}");
+        }
+        for path in HELD_ALLOWED_PATHS {
+            assert_eq!(held_write_refusal("POST", path, held), None, "{path}");
+        }
+        for path in ["__worklist", "__enhance/status", "__bram/worklist.json"] {
+            assert_eq!(held_write_refusal("GET", path, held), None, "{path}");
+        }
+        assert_eq!(held_write_refusal("POST", "query", held), None);
     }
 
     #[test]
@@ -98486,7 +99044,7 @@ mod worklist_authorization_tests {
     }
 
     #[test]
-    fn foreign_dot_bram_is_left_alone_and_resources_stays_the_state_folder() {
+    fn foreign_dot_bram_is_left_alone_and_a_held_start_reads_resources() {
         // judell/bram#469: Andrew's CodeExam index, no marker.
         for with_resources in [true, false] {
             let root = state_dir_plan_temp_root();
@@ -98499,8 +99057,10 @@ mod worklist_authorization_tests {
                 std::fs::write(res.join("worklist.json"), r#"{"items":[]}"#).unwrap();
             }
             assert!(super::foreign_dot_bram(&root));
+            assert!(!super::bram_state_dir_exists(&root));
+            // The startup hold reads `resources/`; nothing writes `.bram/`.
             assert_eq!(
-                super::bram_state_dir_name(&root),
+                super::bram_state_dir_name_held(&root, true),
                 super::BRAM_STATE_DIR_LEGACY
             );
             assert_eq!(super::ensure_new_state_dir_with_home(&root, None), None);
@@ -98571,7 +99131,7 @@ mod worklist_authorization_tests {
     // counts as live work only while one of its ids is still on the board.
     fn state_dir_live_claim_fixture(board_ids: &[&str], auth_ids: &[&str]) -> std::path::PathBuf {
         let root = state_dir_plan_temp_root();
-        let res = super::bram_state_dir(&root);
+        let res = &root.join(super::BRAM_STATE_DIR_LEGACY);
         std::fs::create_dir_all(&res).unwrap();
         let items: Vec<serde_json::Value> = board_ids
             .iter()
@@ -98619,7 +99179,9 @@ mod worklist_authorization_tests {
     fn state_dir_live_claim_counts_the_inflight_claim_alone() {
         let root = state_dir_live_claim_fixture(&[], &["gone"]);
         std::fs::write(
-            super::resource_relative_path(&root, super::INFLIGHT_CLAIM_REL),
+            &root
+                .join(super::BRAM_STATE_DIR_LEGACY)
+                .join(super::INFLIGHT_CLAIM_REL),
             serde_json::json!({ "ids": ["x"] }).to_string(),
         )
         .unwrap();
@@ -98649,11 +99211,25 @@ mod worklist_authorization_tests {
     fn state_dir_plan_splits_owned_foreign_and_nested() {
         let root = state_dir_plan_temp_root();
         let legacy = super::BRAM_STATE_DIR_LEGACY;
-        std::fs::create_dir_all(super::bram_state_dir(&root)).unwrap();
-        std::fs::write(resource_relative_path(&root, "worklist.json"), "{}").unwrap();
-        std::fs::write(resource_relative_path(&root, ".bram-port"), "1").unwrap();
+        std::fs::create_dir_all(&root.join(super::BRAM_STATE_DIR_LEGACY)).unwrap();
+        std::fs::write(
+            &root
+                .join(super::BRAM_STATE_DIR_LEGACY)
+                .join("worklist.json"),
+            "{}",
+        )
+        .unwrap();
+        std::fs::write(
+            &root.join(super::BRAM_STATE_DIR_LEGACY).join(".bram-port"),
+            "1",
+        )
+        .unwrap();
         let foreign_name = "custom.txt";
-        std::fs::write(super::bram_state_dir(&root).join(foreign_name), "x").unwrap();
+        std::fs::write(
+            &root.join(super::BRAM_STATE_DIR_LEGACY).join(foreign_name),
+            "x",
+        )
+        .unwrap();
         let sub_state = root.join("sub").join(legacy);
         std::fs::create_dir_all(&sub_state).unwrap();
         std::fs::write(sub_state.join(".bram-port"), "2").unwrap();
@@ -98749,6 +99325,7 @@ mod worklist_authorization_tests {
             rename,
             3,
             std::time::Duration::ZERO,
+            &|| true,
         )
     }
 
@@ -98804,27 +99381,55 @@ mod worklist_authorization_tests {
             "*\n",
         )
         .unwrap();
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["leftover"], false);
-        assert_eq!(r["offer"], false);
-        assert!(r["obstacle"].is_null());
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.leftover, false);
+        assert_eq!(r.offer, false);
+        assert!(r.obstacle.is_none());
         let empty = state_dir_plan_temp_root();
         assert_eq!(
-            super::state_dir_retry(&empty, super::unix_now_ms(), None)["leftover"],
+            super::state_dir_retry(&empty, super::unix_now_ms(), false).leftover,
             false
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&empty);
     }
 
+    // The typed verdict keeps the wire shape the pane reads.
+    #[test]
+    fn state_dir_retry_serializes_as_before() {
+        let r = super::StateDirRetry {
+            leftover: true,
+            offer: false,
+            needs_choice: true,
+            obstacle: Some(super::StateHoldObstacle::TrackedBramFiles),
+        };
+        assert_eq!(
+            serde_json::to_value(r).unwrap(),
+            serde_json::json!({
+                "leftover": true, "offer": false, "needsChoice": true,
+                "obstacle": "tracked-bram-files",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(super::StateDirRetry::default()).unwrap(),
+            serde_json::json!({
+                "leftover": false, "offer": false, "needsChoice": false, "obstacle": null,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(super::StateHoldObstacle::from_code("some-new-reason")).unwrap(),
+            "some-new-reason"
+        );
+    }
+
     #[test]
     fn state_dir_retry_offers_a_clean_leftover() {
         let root = state_migrate_root();
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["leftover"], true);
-        assert_eq!(r["offer"], true);
-        assert_eq!(r["needsChoice"], false);
-        assert!(r["obstacle"].is_null());
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.leftover, true);
+        assert_eq!(r.offer, true);
+        assert_eq!(r.needs_choice, false);
+        assert!(r.obstacle.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -98836,10 +99441,10 @@ mod worklist_authorization_tests {
             "x",
         )
         .unwrap();
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["leftover"], true);
-        assert_eq!(r["offer"], true);
-        assert_eq!(r["needsChoice"], true);
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.leftover, true);
+        assert_eq!(r.offer, true);
+        assert_eq!(r.needs_choice, true);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -98847,22 +99452,24 @@ mod worklist_authorization_tests {
     fn state_dir_retry_names_a_live_claim() {
         let root = state_migrate_root();
         std::fs::write(
-            super::resource_relative_path(&root, super::INFLIGHT_CLAIM_REL),
+            &root
+                .join(super::BRAM_STATE_DIR_LEGACY)
+                .join(super::INFLIGHT_CLAIM_REL),
             serde_json::json!({ "ids": ["x"] }).to_string(),
         )
         .unwrap();
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["offer"], false);
-        assert_eq!(r["obstacle"], "live-claim");
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.offer, false);
+        assert_eq!(r.obstacle.map(|o| o.as_str()), Some("live-claim"));
         // A mixed folder with a live claim is refused by the selective path too.
         std::fs::write(
             root.join(super::BRAM_STATE_DIR_LEGACY).join("logo.png"),
             "x",
         )
         .unwrap();
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["offer"], false);
-        assert_eq!(r["obstacle"], "live-claim");
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.offer, false);
+        assert_eq!(r.obstacle.map(|o| o.as_str()), Some("live-claim"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -98873,30 +99480,21 @@ mod worklist_authorization_tests {
         let old = root.join(super::BRAM_STATE_DIR_LEGACY);
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("worklist.json"), "{}").unwrap();
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["obstacle"], "tracked-unknown");
-        assert_eq!(r["offer"], false);
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.obstacle.map(|o| o.as_str()), Some("tracked-unknown"));
+        assert_eq!(r.offer, false);
         let _ = std::fs::remove_dir_all(&root);
         // A staging folder left by a crashed selective move.
         let root = state_migrate_root();
         std::fs::create_dir_all(root.join(super::STATE_MOVE_STAGING)).unwrap();
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["obstacle"], "staging-left");
-        assert_eq!(r["offer"], false);
-        // A failed rollback at startup outranks everything.
-        let startup = super::state_migrate_outcome_json(
-            &super::StateMigrateOutcome::SelectiveFailed {
-                reason: "blocked",
-                os_error: None,
-                entry: "x".to_string(),
-                moved: 1,
-                rolled_back: false,
-            },
-            1,
-        );
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.obstacle.map(|o| o.as_str()), Some("staging-left"));
+        assert_eq!(r.offer, false);
+        // A failed rollback at startup (STATE_MIGRATE_STARTUP_ROLLBACK_FAILED)
+        // outranks everything.
         let root2 = state_migrate_root();
-        let r = super::state_dir_retry(&root2, super::unix_now_ms(), Some(&startup));
-        assert_eq!(r["obstacle"], "rollback-failed");
+        let r = super::state_dir_retry(&root2, super::unix_now_ms(), true);
+        assert_eq!(r.obstacle.map(|o| o.as_str()), Some("rollback-failed"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&root2);
     }
@@ -98913,12 +99511,366 @@ mod worklist_authorization_tests {
                 .status
                 .success())
         };
-        let tracked = super::bram_state_rel(&root, "worklist.json");
+        let tracked = format!("{}/worklist.json", super::BRAM_STATE_DIR_LEGACY);
         git(&["add", "-f", "--", tracked.as_str()]);
-        let r = super::state_dir_retry(&root, super::unix_now_ms(), None);
-        assert_eq!(r["offer"], false);
-        assert_eq!(r["obstacle"], "tracked-bram-files");
+        let r = super::state_dir_retry(&root, super::unix_now_ms(), false);
+        assert_eq!(r.offer, false);
+        assert_eq!(r.obstacle.map(|o| o.as_str()), Some("tracked-bram-files"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // issue-469-retire-resources step 1: the held start's decision.
+    fn hold_facts(holds: bool) -> super::StateHoldFacts {
+        super::StateHoldFacts {
+            project_ok: true,
+            resources_holds_bram_state: holds,
+            tracked_owned: false,
+            staging_left: false,
+        }
+    }
+
+    #[test]
+    fn state_hold_names_each_obstacle() {
+        use super::{state_hold_obstacle as hold, StateMigrateOutcome as O};
+        let f = hold_facts(true);
+        let blocked = O::Blocked {
+            os_error: Some(32),
+            attempts: 10,
+            restored: true,
+        };
+        assert_eq!(
+            hold(&blocked, &f),
+            Some(super::StateHoldObstacle::from_code("blocked"))
+        );
+        assert_eq!(
+            hold(&O::Skipped("tracked-unknown"), &f),
+            Some(super::StateHoldObstacle::from_code("tracked-unknown"))
+        );
+        assert_eq!(
+            hold(&O::Skipped("mixed"), &f),
+            Some(super::StateHoldObstacle::from_code("mixed"))
+        );
+        // Foreign files tracked (none of Bram's): the selective move applies.
+        assert_eq!(
+            hold(&O::Skipped("tracked"), &f),
+            Some(super::StateHoldObstacle::from_code("mixed"))
+        );
+        // Call (b): "Not now" holds like an unanswered folder.
+        assert_eq!(
+            hold(&O::Skipped("declined"), &f),
+            Some(super::StateHoldObstacle::from_code("mixed"))
+        );
+        let owned = super::StateHoldFacts {
+            tracked_owned: true,
+            ..f
+        };
+        assert_eq!(
+            hold(&O::Skipped("tracked"), &owned),
+            Some(super::StateHoldObstacle::from_code("tracked-bram-files"))
+        );
+        assert_eq!(
+            hold(&O::Skipped("tracked-owned"), &owned),
+            Some(super::StateHoldObstacle::from_code("tracked-bram-files"))
+        );
+        assert_eq!(
+            hold(&O::Skipped("live-claim"), &f),
+            Some(super::StateHoldObstacle::from_code("live-claim"))
+        );
+        assert_eq!(
+            hold(&O::Skipped("ignore-write-failed"), &f),
+            Some(super::StateHoldObstacle::from_code("ignore-write-failed"))
+        );
+        let abandoned = O::Abandoned {
+            reason: "mixed",
+            attempts: 2,
+            restored: true,
+        };
+        assert_eq!(
+            hold(&abandoned, &f),
+            Some(super::StateHoldObstacle::from_code("mixed"))
+        );
+        let rolled_back = O::SelectiveFailed {
+            reason: "blocked",
+            os_error: None,
+            entry: "worklist.json".to_string(),
+            moved: 1,
+            rolled_back: true,
+        };
+        assert_eq!(
+            hold(&rolled_back, &f),
+            Some(super::StateHoldObstacle::from_code("blocked"))
+        );
+        // A failed rollback or a leftover staging folder holds even when
+        // resources/ no longer has Bram's files (they're half in staging).
+        let failed = O::SelectiveFailed {
+            reason: "blocked",
+            os_error: None,
+            entry: "worklist.json".to_string(),
+            moved: 1,
+            rolled_back: false,
+        };
+        assert_eq!(
+            hold(&failed, &hold_facts(false)),
+            Some(super::StateHoldObstacle::from_code("rollback-failed"))
+        );
+        let staging = super::StateHoldFacts {
+            staging_left: true,
+            ..hold_facts(false)
+        };
+        assert_eq!(
+            hold(&O::Skipped("staging-exists"), &staging),
+            Some(super::StateHoldObstacle::from_code("staging-left"))
+        );
+        assert_eq!(
+            hold(&O::Skipped("no-old-folder"), &staging),
+            Some(super::StateHoldObstacle::from_code("staging-left"))
+        );
+        // Call (a): a foreign `.bram/` holds, with or without Bram state.
+        assert_eq!(
+            hold(&O::Skipped("foreign-dot-bram"), &f),
+            Some(super::StateHoldObstacle::from_code("foreign-dot-bram"))
+        );
+        assert_eq!(
+            hold(&O::Skipped("foreign-dot-bram"), &hold_facts(false)),
+            Some(super::StateHoldObstacle::from_code("foreign-dot-bram"))
+        );
+    }
+
+    #[test]
+    fn state_hold_is_quiet_when_there_is_nothing_to_hold() {
+        use super::{state_hold_obstacle as hold, StateMigrateOutcome as O};
+        let f = hold_facts(true);
+        let moved = O::Moved {
+            entries: 3,
+            ms: 1,
+            marker_written: true,
+        };
+        let selective = O::MovedSelective {
+            entries: 3,
+            left: 1,
+            marker_written: true,
+        };
+        assert_eq!(hold(&moved, &f), None);
+        assert_eq!(hold(&selective, &f), None);
+        // No Bram state in resources/ (a project's own asset folder).
+        assert_eq!(hold(&O::Skipped("mixed"), &hold_facts(false)), None);
+        assert_eq!(hold(&O::Skipped("no-old-folder"), &hold_facts(false)), None);
+        // Already in .bram/, or not a project folder (issue-448 refuses).
+        assert_eq!(hold(&O::Skipped("already-moved"), &f), None);
+        assert_eq!(hold(&O::Skipped("not-repo"), &f), None);
+        let not_project = super::StateHoldFacts {
+            project_ok: false,
+            ..f
+        };
+        assert_eq!(hold(&O::Skipped("mixed"), &not_project), None);
+        assert_eq!(hold(&O::Skipped("foreign-dot-bram"), &not_project), None);
+    }
+
+    #[test]
+    fn resources_holds_bram_state_ignores_a_projects_own_folder() {
+        let root = state_dir_plan_temp_root();
+        let res = root.join(super::BRAM_STATE_DIR_LEGACY);
+        assert!(!super::resources_holds_bram_state(&root));
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::write(res.join("logo.svg"), "<svg/>").unwrap();
+        std::fs::write(res.join(".gitignore"), "*.tmp\n").unwrap();
+        assert!(!super::resources_holds_bram_state(&root));
+        std::fs::write(res.join("worklist.json"), "{}").unwrap();
+        assert!(super::resources_holds_bram_state(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The mover and the hold together, on disk: a mixed folder (answered
+    // "not-now" or not at all) holds and creates no `.bram/`.
+    #[test]
+    fn state_hold_holds_a_mixed_folder_on_disk() {
+        let root = state_migrate_root();
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_LEGACY).join("logo.png"),
+            "x",
+        )
+        .unwrap();
+        let facts = |root: &std::path::Path| super::StateHoldFacts {
+            project_ok: true,
+            resources_holds_bram_state: super::resources_holds_bram_state(root),
+            tracked_owned: !super::state_dir_tracked_owned(root).is_empty(),
+            staging_left: root.join(super::STATE_MOVE_STAGING).exists(),
+        };
+        let outcome = state_migrate(&root, &mut real_rename);
+        assert_eq!(outcome, super::StateMigrateOutcome::Skipped("mixed"));
+        assert_eq!(
+            super::state_hold_obstacle(&outcome, &facts(&root)),
+            Some(super::StateHoldObstacle::Mixed)
+        );
+        super::write_state_move_decision(&root, "not-now", 1).unwrap();
+        let outcome = state_migrate(&root, &mut real_rename);
+        assert_eq!(outcome, super::StateMigrateOutcome::Skipped("declined"));
+        assert_eq!(
+            super::state_hold_obstacle(&outcome, &facts(&root)),
+            Some(super::StateHoldObstacle::Mixed)
+        );
+        assert!(!root.join(super::BRAM_STATE_DIR_NEW).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn state_hold_names_tracked_bram_files_on_disk() {
+        let root = state_migrate_root();
+        let rel = format!("{}/worklist.json", super::BRAM_STATE_DIR_LEGACY);
+        assert!(std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["add", "-f", "--", rel.as_str()])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert_eq!(super::state_dir_tracked_owned(&root), vec![rel]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Call (c): at startup, a leftover claim moves with the folder unless
+    // another Bram is live on this project.
+    #[test]
+    fn startup_move_takes_a_leftover_claim_with_no_live_owner() {
+        let claim = |root: &std::path::Path| {
+            std::fs::write(
+                root.join(super::BRAM_STATE_DIR_LEGACY)
+                    .join(super::INFLIGHT_CLAIM_REL),
+                serde_json::json!({ "ids": ["x"] }).to_string(),
+            )
+            .unwrap();
+        };
+        let run = |root: &std::path::Path, owner_live: bool| {
+            super::migrate_state_dir_with(
+                root,
+                super::unix_now_ms(),
+                &mut real_rename,
+                3,
+                std::time::Duration::ZERO,
+                &move || owner_live,
+            )
+        };
+        let root = state_migrate_root();
+        claim(&root);
+        assert_eq!(
+            run(&root, true),
+            super::StateMigrateOutcome::Skipped("live-claim")
+        );
+        assert!(matches!(
+            run(&root, false),
+            super::StateMigrateOutcome::Moved { .. }
+        ));
+        assert!(root
+            .join(super::BRAM_STATE_DIR_NEW)
+            .join(super::INFLIGHT_CLAIM_REL)
+            .is_file());
+        let _ = std::fs::remove_dir_all(&root);
+        // The selective path weighs the claim the same way.
+        let root = state_migrate_root();
+        claim(&root);
+        std::fs::write(
+            root.join(super::BRAM_STATE_DIR_LEGACY).join("logo.png"),
+            "x",
+        )
+        .unwrap();
+        super::write_state_move_decision(&root, "move", 1).unwrap();
+        assert_eq!(
+            run(&root, true),
+            super::StateMigrateOutcome::Skipped("live-claim")
+        );
+        assert!(matches!(
+            run(&root, false),
+            super::StateMigrateOutcome::MovedSelective { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        // The runtime check (Status, migrate-relaunch's offer) still counts it.
+        let root = state_migrate_root();
+        claim(&root);
+        assert_eq!(
+            super::state_migrate_eligibility(&root, super::unix_now_ms()).err(),
+            Some("live-claim")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn startup_move_probes_no_owner_without_a_claim() {
+        let root = state_migrate_root();
+        let outcome = super::migrate_state_dir_with(
+            &root,
+            super::unix_now_ms(),
+            &mut real_rename,
+            3,
+            std::time::Duration::ZERO,
+            &|| panic!("no claim, so no owner probe"),
+        );
+        assert!(matches!(outcome, super::StateMigrateOutcome::Moved { .. }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn startup_live_owner_waits_out_the_relaunching_parent() {
+        fn live(
+            recorded: Option<u16>,
+            parent: Option<u16>,
+            probe: &mut dyn FnMut(u16) -> Result<bool, String>,
+            attempts: u32,
+            pause: std::time::Duration,
+        ) -> bool {
+            super::startup_live_owner_with(recorded, parent, probe, attempts, pause).0
+        }
+        let zero = std::time::Duration::ZERO;
+        let mut never = |_: u16| -> Result<bool, String> { panic!("no port, no probe") };
+        assert!(!live(None, Some(1), &mut never, 5, zero));
+        assert!(!live(Some(50000), None, &mut |_| Ok(false), 5, zero));
+        assert!(live(Some(50000), None, &mut |_| Ok(true), 5, zero));
+        // Uncertain counts as live.
+        assert!(live(
+            Some(50000),
+            None,
+            &mut |_| Err("timeout".into()),
+            5,
+            zero
+        ));
+        // The relaunching parent answers twice, then is gone: no live owner.
+        let mut calls = 0;
+        assert!(!live(
+            Some(50000),
+            Some(50000),
+            &mut |_| {
+                calls += 1;
+                Ok(calls < 3)
+            },
+            5,
+            zero
+        ));
+        assert_eq!(calls, 3);
+        // A parent port still live after every probe is a real owner.
+        let mut calls = 0;
+        assert!(live(
+            Some(50000),
+            Some(50000),
+            &mut |_| {
+                calls += 1;
+                Ok(true)
+            },
+            5,
+            zero
+        ));
+        assert_eq!(calls, 5);
+        // Another Bram (not the parent) is called live on the first probe.
+        let mut calls = 0;
+        assert!(live(
+            Some(50001),
+            Some(50000),
+            &mut |_| {
+                calls += 1;
+                Ok(true)
+            },
+            5,
+            zero
+        ));
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -99004,7 +99956,9 @@ mod worklist_authorization_tests {
         // A live claim.
         let root = state_migrate_root();
         std::fs::write(
-            resource_relative_path(&root, super::INFLIGHT_CLAIM_REL),
+            &root
+                .join(super::BRAM_STATE_DIR_LEGACY)
+                .join(super::INFLIGHT_CLAIM_REL),
             r#"{"ids":["some-item"]}"#,
         )
         .unwrap();
@@ -99046,7 +100000,9 @@ mod worklist_authorization_tests {
         // Codex review: the first rename is blocked, and while it waits a
         // running instance writes a claim. The retry must not move it.
         let root = state_migrate_root();
-        let claim = resource_relative_path(&root, super::INFLIGHT_CLAIM_REL);
+        let claim = &root
+            .join(super::BRAM_STATE_DIR_LEGACY)
+            .join(super::INFLIGHT_CLAIM_REL);
         let mut calls = 0;
         let outcome = state_migrate(&root, &mut |from, to| {
             calls += 1;
@@ -99275,6 +100231,9 @@ mod worklist_authorization_tests {
         for (name, src) in [
             ("lib.rs", include_str!("lib.rs")),
             ("worklist_state.rs", include_str!("worklist_state.rs")),
+            // issue-469-retire-resources: the guard reads `.bram/` only.
+            ("guard.rs", include_str!("guard.rs")),
+            ("guard_policy.rs", include_str!("guard_policy.rs")),
         ] {
             for (i, line) in src.lines().enumerate() {
                 if line.contains(marker) {
@@ -99289,6 +100248,87 @@ mod worklist_authorization_tests {
             offenders.is_empty(),
             "state-folder literals outside the resolver (use bram_state_dir / \
              resource_relative_path / bram_state_rel, or mark the line):\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    // issue-469-retire-resources step 2: `.bram/` is the state folder, and
+    // the pre-0.8.4 name is read only by the mover, its plan and the held
+    // start. Outside test modules, the constant may appear only inside these
+    // functions (and its own declaration); a new reader of the old folder
+    // fails here. The guard has no such constant at all.
+    #[test]
+    fn state_dir_legacy_name_stays_in_the_mover() {
+        const ALLOWED: &[&str] = &[
+            // The resolver's two read-only answers, and the mover's view.
+            "bram_state_dir_name_held",
+            "state_dir_on_disk_name",
+            // The plan (GET /__state-dir/plan, Status, the CLI).
+            "state_dir_nested",
+            "state_dir_plan",
+            "state_dir_pending",
+            "state_dir_left_behind",
+            "state_dir_tracked_owned",
+            "state_dir_retry",
+            // The mixed-folder answer, which the mover reads.
+            "state_move_decision",
+            "handle_state_move_decision",
+            "write_state_move_decision",
+            // The mover, and the new-project check beside it.
+            "ensure_new_state_dir_with_home",
+            "state_migrate_eligibility_with",
+            "migrate_state_dir_with",
+            "migrate_state_dir_selective",
+            // The held start.
+            "resources_holds_bram_state",
+            // Names a leftover home scaffold for deletion; reads no state.
+            "stray_home_scaffold_marker",
+        ];
+        let needle = concat!("BRAM_STATE_DIR_", "LEGACY");
+        let src: &str = include_str!("lib.rs");
+        let (mut func, mut in_test, mut prev) = (String::new(), false, "");
+        let mut offenders: Vec<String> = Vec::new();
+        for (i, line) in src.lines().enumerate() {
+            if prev.trim() == "#[cfg(test)]" && line.starts_with("mod ") {
+                in_test = true;
+            }
+            if in_test && line == "}" {
+                in_test = false;
+            }
+            let decl = line
+                .trim_start_matches("pub ")
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("async ");
+            if let Some(rest) = decl.strip_prefix("fn ") {
+                func = rest
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+            }
+            let declaration = line.starts_with(concat!("const BRAM_STATE_DIR_", "LEGACY"));
+            if !in_test
+                && line.contains(needle)
+                && !declaration
+                && !ALLOWED.contains(&func.as_str())
+            {
+                offenders.push(format!("lib.rs:{} (in {}): {}", i + 1, func, line.trim()));
+            }
+            prev = line;
+        }
+        for (name, guard_src) in [
+            ("guard.rs", include_str!("guard.rs")),
+            ("guard_policy.rs", include_str!("guard_policy.rs")),
+        ] {
+            for (i, line) in guard_src.lines().enumerate() {
+                if line.contains(concat!("STATE_DIR_", "LEGACY")) {
+                    offenders.push(format!("{}:{}: {}", name, i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "the pre-0.8.4 state folder read outside the mover, its plan and the hold:\n{}",
             offenders.join("\n")
         );
     }
@@ -104939,12 +105979,34 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         );
     }
 
+    // issue-469-retire-resources step 2: no state write while the start is
+    // held. The trace is off then, so stderr.
+    let held_refusal = if gate_refusal.is_none() {
+        held_write_refusal(&method, path, state_hold())
+    } else {
+        None
+    };
+    if let Some(obstacle) = held_refusal {
+        eprintln!(
+            "[state-hold] op=refuse-write method={} path=/{} obstacle={}",
+            method, path, obstacle
+        );
+    }
+
     // POST-only routes (route_request is GET-only).
     let (status, content_type, body) = if gate_refusal.is_some() {
         (
             403,
             "text/plain; charset=utf-8",
             b"forbidden: cross-origin caller".to_vec(),
+        )
+    } else if let Some(obstacle) = held_refusal {
+        (
+            409,
+            "application/json; charset=utf-8",
+            serde_json::json!({ "ok": false, "held": obstacle })
+                .to_string()
+                .into_bytes(),
         )
     } else if path == "__self-update" {
         // clickable-update-from-banner: start the install flow (idempotent
@@ -105379,6 +106441,75 @@ const STATE_CHANGING_GET_PATHS: &[&str] = &[
 // (for `query`: read-only open plus `PRAGMA query_only`, #355), so a project
 // page's own loopback origin may call them. Hand-kept like its sibling above.
 const READ_ONLY_POST_PATHS: &[&str] = &["query"];
+
+// issue-469-retire-resources step 2: the routes that may still change
+// something while the start is held. None of them writes Bram's state: the
+// hold's own Move / Retry (migrate-relaunch, and Status's decision, which
+// writes the mover's answer into the old folder by its literal name), a
+// self-update (a newer Bram is a way out), the pane's trace (off under a
+// hold), its reload, and the startup-ready signal.
+const HELD_ALLOWED_PATHS: &[&str] = &[
+    "__state-dir/migrate-relaunch",
+    "__state-dir/decision",
+    "__self-update",
+    "__self-update/relaunch",
+    "__trace/pane",
+    "__pane/flush",
+    "__startup-ready",
+];
+
+// Why this process may not write Bram's state: the held start's obstacle, or
+// the issue-448 refusal's kind (home, not-git, subfolder). None in a
+// writable project. The resolver reads `resources/` then
+// (bram_state_dir_name_held). Only a hold refuses writes outright
+// (held_write_refusal, held_command_refusal); a refused launch keeps its
+// pre-retirement behavior, writing to `resources/`, never a `.bram/` with no
+// marker, which a later launch would read as another tool's.
+//
+// STATE_HOLD is set once at startup, right after the mover, in every launch;
+// unset (unit tests, the CLI, the mover itself) reads as writable.
+fn state_write_obstacle() -> Option<&'static str> {
+    if let Some(obstacle) = *STATE_HOLD.get()? {
+        return Some(obstacle.as_str());
+    }
+    match project_folder() {
+        ProjectFolder::Ok => None,
+        other => Some(other.kind()),
+    }
+}
+
+// The loopback gate's hold half, pure: Some(obstacle) when a request that
+// changes state (request_changes_state) arrives while `obstacle` holds and
+// isn't one of HELD_ALLOWED_PATHS. Every route added later is refused by
+// default.
+fn held_write_refusal(
+    method: &str,
+    path: &str,
+    obstacle: Option<StateHoldObstacle>,
+) -> Option<StateHoldObstacle> {
+    let obstacle = obstacle?;
+    (request_changes_state(method, path) && !HELD_ALLOWED_PATHS.contains(&path)).then_some(obstacle)
+}
+
+// The same refusal for the pane's Tauri commands that write state (a turn,
+// a feedback draft, an agent switch or new session, a push). Under a hold
+// no agent runs, so nothing is lost; the terminal's own keystrokes
+// (pty_write) are not refused.
+fn held_command_refusal(command: &str) -> Result<(), String> {
+    match state_hold() {
+        Some(obstacle) => {
+            eprintln!(
+                "[state-hold] op=refuse-write command={} obstacle={}",
+                command, obstacle
+            );
+            Err(format!(
+                "held: Bram hasn't started on this project ({})",
+                obstacle
+            ))
+        }
+        None => Ok(()),
+    }
+}
 
 fn request_changes_state(method: &str, path: &str) -> bool {
     if method == "POST" && READ_ONLY_POST_PATHS.contains(&path) {
@@ -106103,25 +107234,42 @@ pub fn run() {
             // judell/bram#469: move resources/ to .bram/ before anything
             // opens a file under it. Traced after prepare_bram_trace_log.
             let state_migrate_lines = startup_project_root.as_deref().map(|root| {
-                let outcome = if project_folder().is_ok() {
+                let (outcome, owner_line) = if project_folder().is_ok() {
                     migrate_state_dir(root)
                 } else {
-                    StateMigrateOutcome::Skipped("not-repo")
+                    (StateMigrateOutcome::Skipped("not-repo"), None)
                 };
                 // Kept for GET /__state-dir/plan, so Status can say why a
                 // folder is still in resources/ without parsing the trace.
-                let _ = STATE_MIGRATE_STARTUP.set(state_migrate_outcome_json(&outcome, unix_now_ms()));
+                let outcome_json = state_migrate_outcome_json(&outcome, unix_now_ms());
+                let _ = STATE_MIGRATE_STARTUP.set(outcome_json.clone());
+                let _ = STATE_MIGRATE_STARTUP_ROLLBACK_FAILED.set(matches!(
+                    outcome,
+                    StateMigrateOutcome::SelectiveFailed {
+                        rolled_back: false,
+                        ..
+                    }
+                ));
+                // issue-469-retire-resources: no move and Bram's state still
+                // in resources/ holds this launch (project_writable).
+                let hold = state_hold_obstacle(&outcome, &state_hold_facts(root));
+                let _ = STATE_HOLD.set(hold);
+                if let Some(obstacle) = hold {
+                    record_state_hold(app.handle(), root, obstacle, &outcome);
+                }
                 let mut lines = state_migrate_trace_lines(&outcome);
+                lines.extend(owner_line);
                 // A new project starts in `.bram/`: only when the mover had
-                // nothing to move (never after a move, block or abandon).
-                if project_folder().is_ok() && matches!(outcome, StateMigrateOutcome::Skipped(_)) {
+                // nothing to move (never after a move, block or abandon), and
+                // never under a hold.
+                if project_writable() && matches!(outcome, StateMigrateOutcome::Skipped(_)) {
                     if let Some(reason) = ensure_new_state_dir(root) {
                         lines.push(format!("op=created-new reason={}", reason));
                     }
                 }
                 // Only an outcome the trace can't record goes to stderr: outside
-                // a project folder nothing is traced at all.
-                if matches!(outcome, StateMigrateOutcome::Skipped("not-repo")) {
+                // a project folder, or under a hold, nothing is traced at all.
+                if matches!(outcome, StateMigrateOutcome::Skipped("not-repo")) || hold.is_some() {
                     for line in &lines {
                         eprintln!("[state-migrate] {}", line);
                     }
@@ -106190,8 +107338,12 @@ pub fn run() {
                 if let Some(line) = fold_untracked_root_settings(proj) {
                     append_bram_trace_line(app.handle(), "state-migrate", &line);
                 }
-                let line = state_settings_note(app.handle(), proj);
-                append_bram_trace_line(app.handle(), "state-migrate", &line);
+                // issue-469-retire-resources: queues a host note, a state
+                // write; not under a hold.
+                if project_writable() {
+                    let line = state_settings_note(app.handle(), proj);
+                    append_bram_trace_line(app.handle(), "state-migrate", &line);
+                }
             }
             if test_drive_enabled() {
                 append_bram_trace_line(app.handle(), "test-drive", "op=enabled env=BRAM_TEST_DRIVE");
@@ -106209,11 +107361,18 @@ pub fn run() {
             // Remove any stale inflight sentinel from a prior session
             // that didn't complete cleanly. Refs #84.
             note_process_start();
-            cleanup_stale_inflight_claim(app.handle());
-            cleanup_stale_turn_context(app.handle());
-            // Remove any stale Codex lifecycle intent/result files from a
-            // prior session. Refs #130.
-            cleanup_stale_worklist_intent(app.handle());
+            // issue-469-retire-resources: a held start leaves the old folder
+            // as found. Its claim files are the next startup's to weigh
+            // (call (c)), and under a live-claim hold they belong to the
+            // other, live Bram. The stale-state cleanups below are skipped.
+            let state_writable = project_writable();
+            if state_writable {
+                cleanup_stale_inflight_claim(app.handle());
+                cleanup_stale_turn_context(app.handle());
+                // Remove any stale Codex lifecycle intent/result files from a
+                // prior session. Refs #130.
+                cleanup_stale_worklist_intent(app.handle());
+            }
             // Windows self-update leaves renamed-aside *.exe.old files
             // (clickable-update-from-banner); delete them best-effort.
             cleanup_self_update_leftovers();
@@ -106227,11 +107386,13 @@ pub fn run() {
             // survives relaunch (its turn's pty-intent does not, by #86's
             // design), so name it at startup too — the trace dedupe keeps
             // this and the board serve from double-logging one record.
-            let _ = stranded_approval_ids(app.handle());
-            harmonize_antigravity_members_at_startup(app.handle().clone());
-            // Remove any stale pty-intent queue from a prior session so
-            // its intents don't replay into the fresh PTY. Refs #86.
-            cleanup_stale_pty_intents(app.handle());
+            if state_writable {
+                let _ = stranded_approval_ids(app.handle());
+                harmonize_antigravity_members_at_startup(app.handle().clone());
+                // Remove any stale pty-intent queue from a prior session so
+                // its intents don't replay into the fresh PTY. Refs #86.
+                cleanup_stale_pty_intents(app.handle());
+            }
             // issue-338: warm the forge-notifications snapshot in the
             // background so opening Awaiting You never waits on gh, then
             // keep it fresh on a 90s cadence, emitting needs-you-changed
@@ -106396,6 +107557,15 @@ pub fn run() {
                          startup scaffold (port files, trace directory) not written \
                          (issues #353, #448)",
                         project_folder().kind(),
+                        proj.display()
+                    );
+                } else if let Some(obstacle) = state_hold() {
+                    // issue-469-retire-resources: a held start publishes no
+                    // port, so no guard or plugin finds this instance.
+                    eprintln!(
+                        "[bram] op=refuse-scaffold reason=state-held obstacle={} root={} — \
+                         Bram's state is still in resources/; port files not written",
+                        obstacle,
                         proj.display()
                     );
                 } else if wait_for_loopback_http(port, 5000) {

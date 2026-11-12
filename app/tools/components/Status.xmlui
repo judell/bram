@@ -3,7 +3,8 @@
   var.refreshTick="{0}"
   var.rowInfoTitle="{''}"
   var.rowInfoDescription="{''}"
-  var.tokensNonce="{0}">
+  var.tokensNonce="{0}"
+  var.tokenInfoKey="{''}">
 
   <DataSource id="status" url="/__coordination-status?t={refreshTick}" />
   <DataSource id="sessionSize" url="/__session-size?t={refreshTick}" pollIntervalInSeconds="30" />
@@ -252,31 +253,119 @@
         color="$textColor-secondary"
         value="Per-call token readings from every agent's session files: context per call by model, how much would fit a smaller window, and what each session costs before any work." />
       <VStack when="{tokens.loaded &amp;&amp; !!tokens.value}" gap="$space-2">
-        <Table data="{tokens.value.constrained.byModel}">
-          <Column bindTo="provider" width="80px" />
-          <Column bindTo="model" />
-          <Column bindTo="calls" type="integer" width="80px" />
-          <Column header="context p50"><Text value="{$item.context.p50}" /></Column>
-          <Column header="p90"><Text value="{$item.context.p90}" /></Column>
-          <Column header="peak"><Text value="{$item.context.peak}" /></Column>
-          <Column header="fit 64k"><Text value="{Math.round($item.fits['64k'] * 100) + '%'}" /></Column>
-          <Column header="fit 128k"><Text value="{Math.round($item.fits['128k'] * 100) + '%'}" /></Column>
-          <Column header="fit 200k"><Text value="{Math.round($item.fits['200k'] * 100) + '%'}" /></Column>
-          <Column header="fit 256k"><Text value="{Math.round($item.fits['256k'] * 100) + '%'}" /></Column>
-          <Column header="floor p50"><Text value="{$item.floor.p50}" /></Column>
-          <Column bindTo="cacheHitShare" header="cache hit" type="percent" width="90px" />
-        </Table>
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="{'Providers: ' + JSON.stringify(tokens.value.providers)}" breakMode="word" />
-        <Table data="{(tokens.value.files || []).slice(0, 15)}">
-          <Column bindTo="path" />
-          <Column bindTo="reads" type="integer" width="80px" />
-          <Column bindTo="bytes" type="bytes" width="100px" />
-          <Column bindTo="viaShellBytes" header="via shell" type="bytes" width="100px" />
-          <Column bindTo="testBytes" header="test" type="bytes" width="90px" />
-        </Table>
+        <!-- Hand-built header rows, because Column has no header template;
+             each heading carries an ⓘ that sets tokenInfoKey and opens the
+             dialog below. Same pattern as Tasks.xmlui.
+             https://www.xmlui.org/docs/reference/components/Column
+             https://www.xmlui.org/docs/reference/components/ModalDialog -->
+        <HStack gap="$space-2" paddingHorizontal="$space-1" verticalAlignment="start">
+          <HStack width="7rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Provider" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Provider" onClick="tokenInfoKey = 'provider'" />
+          </HStack>
+          <HStack width="*" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Model" />
+          </HStack>
+          <HStack width="5rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Calls" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Calls" onClick="tokenInfoKey = 'calls'" />
+          </HStack>
+          <VStack width="168px" gap="0">
+            <HStack gap="0" verticalAlignment="center">
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Context" />
+              <Button icon="info" size="xs" variant="ghost" tooltip="About Context" onClick="tokenInfoKey = 'context'" />
+            </HStack>
+            <HStack gap="0">
+              <Text width="56px" fontSize="$fontSize-xs" color="$textColor-secondary" value="p50" />
+              <Text width="56px" fontSize="$fontSize-xs" color="$textColor-secondary" value="p90" />
+              <Text width="56px" fontSize="$fontSize-xs" color="$textColor-secondary" value="peak" />
+            </HStack>
+          </VStack>
+          <VStack width="192px" gap="0">
+            <HStack gap="0" verticalAlignment="center">
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Fit" />
+              <Button icon="info" size="xs" variant="ghost" tooltip="About Fit" onClick="tokenInfoKey = 'fit'" />
+            </HStack>
+            <HStack gap="0">
+              <Text width="48px" fontSize="$fontSize-xs" color="$textColor-secondary" value="64k" />
+              <Text width="48px" fontSize="$fontSize-xs" color="$textColor-secondary" value="128k" />
+              <Text width="48px" fontSize="$fontSize-xs" color="$textColor-secondary" value="200k" />
+              <Text width="48px" fontSize="$fontSize-xs" color="$textColor-secondary" value="256k" />
+            </HStack>
+          </VStack>
+          <HStack width="5rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Floor" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Floor" onClick="tokenInfoKey = 'floor'" />
+          </HStack>
+          <HStack width="6rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Cache hit" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Cache hit" onClick="tokenInfoKey = 'cache'" />
+          </HStack>
+        </HStack>
+        <Items data="{tokens.value.constrained.byModel}">
+          <HStack gap="$space-2" paddingHorizontal="$space-1" verticalAlignment="center">
+            <Text width="7rem" value="{$item.provider}" />
+            <Text width="*" breakMode="anywhere" value="{$item.model}" />
+            <Text width="5rem" value="{window.__bramTokenInt($item.calls)}" />
+            <Text width="56px" value="{window.__bramTokenK($item.context.p50)}" />
+            <Text width="56px" value="{window.__bramTokenK($item.context.p90)}" />
+            <Text width="56px" value="{window.__bramTokenK($item.context.peak)}" />
+            <Text width="48px" value="{window.__bramTokenFit($item, '64k')}" />
+            <Text width="48px" value="{window.__bramTokenFit($item, '128k')}" />
+            <Text width="48px" value="{window.__bramTokenFit($item, '200k')}" />
+            <Text width="48px" value="{window.__bramTokenFit($item, '256k')}" />
+            <Text width="5rem" value="{window.__bramTokenFloor($item)}" />
+            <Text width="6rem" value="{window.__bramTokenPct($item.cacheHitShare)}" />
+          </HStack>
+        </Items>
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" breakMode="word"
+          value="Which files the agents pull into their context, and how: the figures show how much a read returns compared with the file, which is the evidence for whether splitting a big file such as lib.rs would change what they read." />
+        <HStack gap="$space-2" paddingHorizontal="$space-1" verticalAlignment="center">
+          <Text width="*" fontSize="$fontSize-sm" color="$textColor-secondary" value="Path" />
+          <HStack width="5rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Reads" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Reads" onClick="tokenInfoKey = 'reads'" />
+          </HStack>
+          <HStack width="6rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Per read" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Per read" onClick="tokenInfoKey = 'perRead'" />
+          </HStack>
+          <HStack width="8rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Read in total" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Read in total" onClick="tokenInfoKey = 'total'" />
+          </HStack>
+          <Text width="6rem" fontSize="$fontSize-sm" color="$textColor-secondary" value="File size" />
+          <HStack width="6rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Via shell" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Via shell" onClick="tokenInfoKey = 'shell'" />
+          </HStack>
+          <HStack width="5rem" gap="0" verticalAlignment="center">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Tests" />
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Tests" onClick="tokenInfoKey = 'tests'" />
+          </HStack>
+        </HStack>
+        <Items data="{window.__bramTokenFileRows(tokens.value)}">
+          <HStack gap="$space-2" paddingHorizontal="$space-1" verticalAlignment="center">
+            <Text width="*" variant="code" breakMode="anywhere" value="{$item.path}" />
+            <Text width="5rem" value="{window.__bramTokenInt($item.reads)}" />
+            <Text width="6rem" value="{window.__bramTokenPerRead($item)}" />
+            <Text width="8rem" value="{window.__bramTokenBytes($item.bytes)}" />
+            <Text width="6rem" value="{window.__bramTokenFileSize($item)}" />
+            <Text width="6rem" value="{window.__bramTokenBytes($item.viaShellBytes)}" />
+            <Text width="5rem" value="{window.__bramTokenTests($item)}" />
+          </HStack>
+        </Items>
       </VStack>
     </VStack>
+
+    <Theme maxWidth-ModalDialog="50vw">
+      <ModalDialog when="{!!tokenInfoKey}" title="{window.__bramTokenInfoTitle(tokenInfoKey)}" onClose="tokenInfoKey = ''">
+        <VStack gap="$space-3" padding="$space-2">
+          <Markdown interpolateBindings="false" allowHtml="false"
+            content="{window.__bramTokenInfoText(tokenInfoKey, tokens.value)}" />
+        </VStack>
+      </ModalDialog>
+    </Theme>
 
     <!-- Row-info popups are short (a signal's description); override the global
          85vw default to a compact 50vw (modals-default-85vw-width iterate). -->

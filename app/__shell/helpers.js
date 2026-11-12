@@ -22584,3 +22584,109 @@ window.__bramStoryTell = (function () {
   };
 })();
 // END bram-story
+
+// Status > Token accounting (token-accounting-status-explains-columns, Jon
+// 2026-11-12). Formatting and the header ⓘ texts for the two tables, called
+// from Status.xmlui as window.__bramToken*. Pure functions; definitions only.
+window.__bramTokenK = function (n) {
+  if (typeof n !== "number" || !isFinite(n)) return "—";
+  return n >= 1000 ? Math.round(n / 1000) + "k" : String(Math.round(n));
+};
+window.__bramTokenInt = function (n) {
+  if (typeof n !== "number" || !isFinite(n)) return "—";
+  return Math.round(n).toLocaleString("en-US");
+};
+window.__bramTokenPct = function (x) {
+  if (typeof x !== "number" || !isFinite(x)) return "—";
+  return Math.round(x * 100) + "%";
+};
+window.__bramTokenFit = function (row, key) {
+  return window.__bramTokenPct(row && row.fits ? row.fits[key] : null);
+};
+// No session started on the model: the host reports sessions 0 and p50 0,
+// which is "none", not a measurement.
+window.__bramTokenFloor = function (row) {
+  var f = row && row.floor;
+  if (!f || !f.sessions || !f.p50) return "—";
+  return window.__bramTokenK(f.p50);
+};
+window.__bramTokenBytes = function (n) {
+  if (typeof n !== "number" || !isFinite(n)) return "—";
+  if (n < 1024) return Math.round(n) + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+  return (n / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+};
+window.__bramTokenPerRead = function (row) {
+  if (!row || !row.reads) return "—";
+  return window.__bramTokenBytes(row.bytes / row.reads);
+};
+window.__bramTokenFileSize = function (row) {
+  if (!row || typeof row.sizeBytes !== "number") return "—";
+  return window.__bramTokenBytes(row.sizeBytes);
+};
+window.__bramTokenTests = function (row) {
+  if (!row || typeof row.testBytes !== "number" || !row.bytes) return "—";
+  return window.__bramTokenPct(row.testBytes / row.bytes);
+};
+window.__bramTokenFileRows = function (report) {
+  return ((report && report.files) || []).slice(0, 15);
+};
+window.__bramTokenInfoTitle = function (key) {
+  return {
+    provider: "Provider", calls: "Calls", context: "Context", fit: "Fit",
+    floor: "Floor", cache: "Cache hit", reads: "Reads", perRead: "Per read",
+    total: "Read in total", shell: "Via shell", tests: "Tests"
+  }[key] || "";
+};
+window.__bramTokenProviderText = function (report) {
+  var p = (report && report.providers) || {};
+  var names = { claude: "Claude", codex: "Codex", opencode: "OpenCode", antigravity: "Antigravity" };
+  var lines = Object.keys(p).map(function (k) {
+    var s = p[k] || {};
+    var name = names[k] || k;
+    if (s.status === "read") {
+      return "- **" + name + "**: read, " + window.__bramTokenInt(s.sessions || 0) + " sessions, " +
+        window.__bramTokenInt(s.calls || 0) + " calls.";
+    }
+    return "- **" + name + "**: not read. " + (s.reason || "No reason was given.");
+  });
+  return lines.length ? "\n\n" + lines.join("\n") : "";
+};
+window.__bramTokenInfoText = function (key, report) {
+  if (key === "provider") {
+    return "Which AI coding agent the row belongs to. Each agent keeps a record of every request it sends to its model, " +
+      "and these figures are read from those records, so only agents whose records Bram can read are counted." +
+      window.__bramTokenProviderText(report);
+  }
+  if (key === "calls") return "How many requests this agent sent to this model. One call is one request. A single turn of work usually makes many calls, because the agent asks, reads a result, then asks again.";
+  if (key === "context") {
+    return "Context is everything the model is sent on one call: the whole conversation so far plus the standing instructions. " +
+      "Bigger context means a bigger model window is needed.\n\n" +
+      "- **p50** is the typical call: half of the calls were smaller than this.\n" +
+      "- **p90** is a large call: nine in ten were smaller.\n" +
+      "- **peak** is the largest call seen.\n\n" +
+      "Sizes are in thousands (364k is about 364,000 tokens, a token being roughly three-quarters of a word).";
+  }
+  if (key === "fit") {
+    return "The share of calls whose context would have fit inside a model with that much room (64k, 128k, 200k or 256k tokens). " +
+      "This is the question of whether the same work could run on a smaller or self-hosted model. " +
+      "A low percentage means most calls needed more room than that model has.";
+  }
+  if (key === "floor") {
+    return "How much context the first call of a session already needed, before any work was done. " +
+      "That is Bram's own instructions plus the agent's, so it is the least any model must be able to hold. " +
+      "A dash means no session started on that model, so there is nothing to measure.";
+  }
+  if (key === "cache") {
+    return "The share of the context the provider served from its cache instead of processing again. " +
+      "Most of each call repeats the one before it, so this is usually very high. " +
+      "A server with no such cache would have to process all of the context on every call.";
+  }
+  if (key === "reads") return "How many times an agent's Read or Grep tool pulled text out of this file. Shell commands are counted separately, under Via shell.";
+  if (key === "perRead") return "The average amount returned by one read (Read in total divided by Reads). Agents take pieces of a file rather than the whole thing, so this is usually far smaller than the file itself.";
+  if (key === "total") return "The sum of everything those reads returned. This is not the file's size: a large file read in many small pieces adds up to far less than the file, or, read over and over, to more.";
+  if (key === "shell") return "Bytes that came back from shell commands naming this file, such as `sed -n` or `grep -n`. This is approximate: a command naming several files has its output split evenly between them, and the output can include other text.";
+  if (key === "tests") return "The share of what Read returned that fell inside test code. It is only worked out for `src-tauri/src/lib.rs`; other files show a dash.";
+  return "";
+};

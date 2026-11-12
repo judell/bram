@@ -564,3 +564,57 @@ fn the_tail_reader_returns_only_whole_new_lines() {
     assert!(reset, "a shorter file starts over");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// token-accounting-status-explains-columns: files rows carry the size on disk.
+struct NoSpansHere;
+impl SpanSource for NoSpansHere {
+    fn spans_at(&mut self, _at_ms: i64) -> Option<Arc<Vec<(u32, u32)>>> {
+        None
+    }
+}
+
+fn report_for(root: &str, path: &str) -> Report {
+    let pf = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s".into(),
+        thread: Some(Thread::Main),
+        reads: vec![ReadEvent {
+            path: path.into(),
+            bytes: 5,
+            via_shell: false,
+            at_ms: 1,
+            lines: vec![],
+        }],
+        ..Default::default()
+    });
+    build_report(
+        ReportInput {
+            root,
+            files: vec![pf],
+            windows: None,
+            since_ms: None,
+            session_filter: None,
+            include_calls: false,
+            instruction_bytes: vec![],
+        },
+        &mut NoSpansHere,
+        None,
+    )
+}
+
+#[test]
+fn a_files_row_serializes_size_bytes_and_null_when_missing() {
+    let dir = std::env::temp_dir().join(format!("bram-ta-size-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), b"12345").unwrap();
+    let root = dir.to_string_lossy().into_owned();
+    let present = report_for(&root, "a.txt");
+    assert_eq!(
+        serde_json::to_value(&present.files[0]).unwrap()["sizeBytes"],
+        5
+    );
+    let missing = report_for(&root, "gone.txt");
+    let v = serde_json::to_value(&missing.files[0]).unwrap();
+    assert!(v.get("sizeBytes").is_some_and(|s| s.is_null()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

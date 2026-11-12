@@ -1632,6 +1632,8 @@ pub struct FileRow {
     pub test_lines: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_bytes: Option<u64>,
+    /// The file's size on disk now; null when it is gone.
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1912,6 +1914,13 @@ pub fn build_report(
     });
     let files_total = files.len();
     files.truncate(FILES_CAP);
+    let root_dir = Path::new(input.root);
+    for f in files.iter_mut() {
+        f.size_bytes = std::fs::metadata(root_dir.join(&f.path))
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len());
+    }
 
     Report {
         root: input.root.to_string(),

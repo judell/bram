@@ -22610,6 +22610,29 @@ window.__bramTokenFloor = function (row) {
   if (!f || !f.sessions || !f.p50) return "—";
   return window.__bramTokenK(f.p50);
 };
+// "18k + 11k + 52k": the agent's own, Bram's conventions, the project's own.
+// A dash when the agent's own part was not measured. A trailing * marks an
+// agent figure taken from the same provider's other models.
+window.__bramTokenFloorParts = function (row) {
+  var p = row && row.floorParts;
+  var f = row && row.floor;
+  if (!p || !p.native || typeof p.project !== "number" || !f || !f.sessions) return "—";
+  var K = window.__bramTokenK;
+  var text = K(p.native.p50) + " + " + K(p.conventions.approxTokens) + " + " + K(p.project);
+  return p.nativeBasis === "same model" ? text : text + " *";
+};
+window.__bramTokenDate = function (ms) {
+  if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "";
+  return new Date(ms).toISOString().slice(0, 10);
+};
+window.__bramTokenFilesLead = function (report) {
+  var r = report && report.range;
+  var span = r && r.fromMs ? "every session from " + window.__bramTokenDate(r.fromMs) + " to " +
+    window.__bramTokenDate(r.toMs) : "every session the history holds";
+  return "Which files the agents pull into their context, and how: " + span +
+    ", main threads and subagents together. The figures show how much a read returns compared with the file, " +
+    "which is the evidence for whether splitting a big file such as lib.rs would change what they read.";
+};
 window.__bramTokenBytes = function (n) {
   if (typeof n !== "number" || !isFinite(n)) return "—";
   if (n < 1024) return Math.round(n) + " B";
@@ -22635,7 +22658,8 @@ window.__bramTokenFileRows = function (report) {
 window.__bramTokenInfoTitle = function (key) {
   return {
     provider: "Provider", calls: "Calls", context: "Context", fit: "Fit",
-    floor: "Floor", cache: "Cache hit", reads: "Reads", perRead: "Per read",
+    floor: "Floor", cache: "Cache hit", reads: "Reads", main: "Main",
+    subagents: "Subagents", sessions: "Sessions", mostSession: "Most in one session", perRead: "Per read",
     total: "Read in total", shell: "Via shell", tests: "Tests"
   }[key] || "";
 };
@@ -22675,17 +22699,25 @@ window.__bramTokenInfoText = function (key, report) {
   }
   if (key === "floor") {
     return "How much context the first call of a session already needed, before any work was done. " +
-      "That is Bram's own instructions plus the agent's, so it is the least any model must be able to hold. " +
-      "A dash means no session started on that model, so there is nothing to measure.";
+      "That is the least any model must be able to hold. A dash means no session started on that model, so there is nothing to measure.\n\n" +
+      "**Floor parts** splits it into three, written as *agent + Bram + project*:\n\n" +
+      "- **The agent's own** instructions and tools. This is measured: the typical first call of that agent's sessions in folders with no instruction files, on this machine. It includes whatever skills and servers you have enabled, so it differs between machines. When no session on that exact model qualifies, the figure comes from the same agent's other models and is marked with an asterisk.\n" +
+      "- **Bram's conventions**, the standing instructions Bram installs. This is estimated from the file's size at about 4 bytes per token.\n" +
+      "- **This project's own** instructions, such as its CLAUDE.md and the files it pulls in. This is what is left after the other two, so it carries the estimate's error.\n\n" +
+      "A dash in Floor parts means there was no folder without instructions to measure the agent's own part from.";
   }
   if (key === "cache") {
     return "The share of the context the provider served from its cache instead of processing again. " +
       "Most of each call repeats the one before it, so this is usually very high. " +
       "A server with no such cache would have to process all of the context on every call.";
   }
-  if (key === "reads") return "How many times an agent's Read or Grep tool pulled text out of this file. Shell commands are counted separately, under Via shell.";
+  if (key === "reads") return "How many times an agent's Read or Grep tool pulled text out of this file, across every session in the dates above, main threads and subagents together. A repeated record of the same tool call counts once. Shell commands are counted separately, under Via shell.";
+  if (key === "main") return "Of the reads, how many were made by the agent you talk to, in its own conversation.";
+  if (key === "subagents") return "Of the reads, how many were made by helper agents the main agent started for a piece of work. Each helper starts with an empty context, so it reads a file again even when the main agent already has.";
+  if (key === "sessions") return "How many separate sessions read this file. A helper counts toward the session that started it.";
+  if (key === "mostSession") return "The most any one session read of this file, its own reads and its helpers' together. This is the figure to compare with the file's size.";
   if (key === "perRead") return "The average amount returned by one read (Read in total divided by Reads). Agents take pieces of a file rather than the whole thing, so this is usually far smaller than the file itself.";
-  if (key === "total") return "The sum of everything those reads returned. This is not the file's size: a large file read in many small pieces adds up to far less than the file, or, read over and over, to more.";
+  if (key === "total") return "The sum of everything those reads returned, over every session in the dates above. This is not the file's size and not one session's cost: it adds up reads from many sessions, so it can be many times the file's size. For one session, see Most in one session.";
   if (key === "shell") return "Bytes that came back from shell commands naming this file, such as `sed -n` or `grep -n`. This is approximate: a command naming several files has its output split evenly between them, and the output can include other text.";
   if (key === "tests") return "The share of what Read returned that fell inside test code. It is only worked out for `src-tauri/src/lib.rs`; other files show a dash.";
   return "";

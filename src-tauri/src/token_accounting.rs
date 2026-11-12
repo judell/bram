@@ -322,6 +322,13 @@ struct ClaudeRecord {
     message: Option<ClaudeMessage>,
 }
 
+/// Just the folder a Claude session ran in.
+#[derive(Debug, Default, Deserialize)]
+struct CwdProbe {
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct CodexUsage {
     #[serde(default)]
@@ -1575,6 +1582,45 @@ pub struct FloorStats {
     pub sessions: usize,
 }
 
+/// The median first-call context of this agent's sessions in folders that
+/// carry no instruction files, on this machine.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct NativeFloor {
+    pub p50: u64,
+    pub sessions: usize,
+}
+
+/// Bram's seeded conventions as the project loads them. The token figure is
+/// bytes / 4, an estimate, not a measurement.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConventionsPart {
+    pub bytes: u64,
+    pub approx_tokens: u64,
+}
+
+/// The floor in three parts: the agent's own instructions (measured), Bram's
+/// conventions (sized from the file) and the project's own (the rest).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FloorParts {
+    pub native: Option<NativeFloor>,
+    /// "same model", "same provider, other models" or "not measured".
+    pub native_basis: String,
+    pub conventions: ConventionsPart,
+    /// Approximate tokens; null when `native` is.
+    pub project: Option<u64>,
+}
+
+/// First main-thread call of a session that ran in a folder with no
+/// instruction files.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeSample {
+    pub provider: String,
+    pub model: String,
+    pub context: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct P50P90 {
     pub p50: u64,
@@ -1599,6 +1645,7 @@ pub struct ModelRow {
     /// Share of sessions whose peak stayed within each window.
     pub sessions_fit: BTreeMap<String, f64>,
     pub floor: FloorStats,
+    pub floor_parts: FloorParts,
     pub uncached_per_call: P50P90,
     pub cache_hit_share: f64,
     pub gap_ms: P50,
@@ -1634,6 +1681,23 @@ pub struct FileRow {
     pub test_bytes: Option<u64>,
     /// The file's size on disk now; null when it is gone.
     pub size_bytes: Option<u64>,
+    /// `reads` and `bytes` split by thread (they add up to those).
+    pub main_reads: u64,
+    pub main_bytes: u64,
+    pub subagent_reads: u64,
+    pub subagent_bytes: u64,
+    /// Distinct sessions that read the file; a subagent counts for its parent.
+    pub sessions: u64,
+    /// The most bytes any one session (main plus subagents) read of it.
+    pub max_session_bytes: u64,
+}
+
+/// First and last model call the report covers.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRange {
+    pub from_ms: i64,
+    pub to_ms: i64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -1661,6 +1725,8 @@ pub struct Report {
     pub constrained: Constrained,
     pub files: Vec<FileRow>,
     pub files_total: usize,
+    /// First and last call covered; null when there were none.
+    pub range: Option<CallRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lib_rs_now: Option<LibRsNow>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1668,6 +1734,7 @@ pub struct Report {
     pub ms: u128,
 }
 
+#[derive(Default)]
 pub struct ReportInput<'a> {
     pub root: &'a str,
     pub files: Vec<Arc<ParsedFile>>,
@@ -1677,6 +1744,10 @@ pub struct ReportInput<'a> {
     pub session_filter: Option<(String, String)>,
     pub include_calls: bool,
     pub instruction_bytes: Vec<InstructionFile>,
+    /// First calls of sessions in folders with no instruction files.
+    pub native_samples: Vec<NativeSample>,
+    /// Bytes of Bram's seeded conventions the project loads, per provider.
+    pub conventions_bytes: BTreeMap<String, u64>,
 }
 
 /// Nearest-rank percentile of an ascending slice: the value at rank
@@ -1731,6 +1802,9 @@ pub fn build_report(
     let mut readings: Vec<CallReading> = Vec::new();
     let mut statuses: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut file_aggs: HashMap<String, FileRow> = HashMap::new();
+    // path -> (provider, session) -> bytes read, main plus subagents.
+    let mut file_sessions: HashMap<String, HashMap<(String, String), u64>> = HashMap::new();
+    let mut range: Option<CallRange> = None;
     let mut model_acc: HashMap<(String, String), ModelAcc> = HashMap::new();
 
     for pf in &input.files {
@@ -1753,6 +1827,18 @@ pub fn build_report(
             } else {
                 e.reads += 1;
                 e.bytes += r.bytes;
+                if thread == Thread::Main {
+                    e.main_reads += 1;
+                    e.main_bytes += r.bytes;
+                } else {
+                    e.subagent_reads += 1;
+                    e.subagent_bytes += r.bytes;
+                }
+                *file_sessions
+                    .entry(path.clone())
+                    .or_default()
+                    .entry((pf.provider.to_string(), pf.session_id.clone()))
+                    .or_default() += r.bytes;
                 if path == LIB_RS && !r.lines.is_empty() {
                     let (tl, tb) = spans
                         .spans_at(r.at_ms)
@@ -1767,6 +1853,18 @@ pub fn build_report(
         if calls.is_empty() {
             continue;
         }
+        let lo = calls.iter().map(|c| c.at_ms).min().unwrap_or(0);
+        let hi = calls.iter().map(|c| c.at_ms).max().unwrap_or(0);
+        range = Some(match range {
+            Some(r) => CallRange {
+                from_ms: r.from_ms.min(lo),
+                to_ms: r.to_ms.max(hi),
+            },
+            None => CallRange {
+                from_ms: lo,
+                to_ms: hi,
+            },
+        });
         let st = statuses.entry(pf.provider.to_string()).or_default();
         st.0 += 1;
         st.1 += calls.len();
@@ -1909,6 +2007,12 @@ pub fn build_report(
     );
 
     let mut files: Vec<FileRow> = file_aggs.into_values().collect();
+    for f in files.iter_mut() {
+        if let Some(per) = file_sessions.get(&f.path) {
+            f.sessions = per.len() as u64;
+            f.max_session_bytes = per.values().copied().max().unwrap_or(0);
+        }
+    }
     files.sort_by(|a, b| {
         (b.bytes + b.via_shell_bytes, &a.path).cmp(&(a.bytes + a.via_shell_bytes, &b.path))
     });
@@ -1935,12 +2039,13 @@ pub fn build_report(
             windows: windows.len(),
         },
         constrained: Constrained {
-            by_model: finish_models(model_acc),
+            by_model: finish_models(model_acc, &input.native_samples, &input.conventions_bytes),
             instruction_bytes: input.instruction_bytes,
         },
         sessions,
         files,
         files_total,
+        range,
         lib_rs_now,
         calls: input.include_calls.then_some(readings),
         ms: started.elapsed().as_millis(),
@@ -1992,7 +2097,71 @@ fn accumulate_models(
     }
 }
 
-fn finish_models(acc: HashMap<(String, String), ModelAcc>) -> Vec<ModelRow> {
+/// The agent's own floor: the median first-call context of its sessions in
+/// folders with no instruction files. Prefers the same model; falls back to
+/// the provider's other models, saying so.
+pub fn native_floor(
+    samples: &[NativeSample],
+    provider: &str,
+    model: &str,
+) -> (Option<NativeFloor>, &'static str) {
+    let median = |mut v: Vec<u64>| -> Option<NativeFloor> {
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_unstable();
+        Some(NativeFloor {
+            p50: nearest_rank(&v, 50.0),
+            sessions: v.len(),
+        })
+    };
+    let same: Vec<u64> = samples
+        .iter()
+        .filter(|s| s.provider == provider && s.model == model)
+        .map(|s| s.context)
+        .collect();
+    if let Some(n) = median(same) {
+        return (Some(n), "same model");
+    }
+    let any: Vec<u64> = samples
+        .iter()
+        .filter(|s| s.provider == provider)
+        .map(|s| s.context)
+        .collect();
+    match median(any) {
+        Some(n) => (Some(n), "same provider, other models"),
+        None => (None, "not measured"),
+    }
+}
+
+/// Split a measured floor into the agent's own, Bram's conventions (bytes / 4)
+/// and the project's remainder.
+pub fn floor_parts(
+    floor_p50: u64,
+    native: Option<NativeFloor>,
+    basis: &str,
+    conventions_bytes: u64,
+) -> FloorParts {
+    let approx = (conventions_bytes as f64 / 4.0).round() as u64;
+    let project = native
+        .as_ref()
+        .map(|n| floor_p50.saturating_sub(n.p50 + approx));
+    FloorParts {
+        native,
+        native_basis: basis.to_string(),
+        conventions: ConventionsPart {
+            bytes: conventions_bytes,
+            approx_tokens: approx,
+        },
+        project,
+    }
+}
+
+fn finish_models(
+    acc: HashMap<(String, String), ModelAcc>,
+    native_samples: &[NativeSample],
+    conventions_bytes: &BTreeMap<String, u64>,
+) -> Vec<ModelRow> {
     let mut rows: Vec<ModelRow> = acc
         .into_iter()
         .map(|((provider, model), mut a)| {
@@ -2014,6 +2183,18 @@ fn finish_models(acc: HashMap<(String, String), ModelAcc>) -> Vec<ModelRow> {
             }
             let mut floors: Vec<u64> = a.floors.values().copied().collect();
             floors.sort_unstable();
+            let floor_p50 = nearest_rank(&floors, 50.0);
+            let (native, basis) = native_floor(native_samples, &provider, &model);
+            let mut floor_parts = floor_parts(
+                floor_p50,
+                native,
+                basis,
+                conventions_bytes.get(&provider).copied().unwrap_or(0),
+            );
+            if floors.is_empty() {
+                // No session started on this model: nothing to split.
+                floor_parts.project = None;
+            }
             ModelRow {
                 provider,
                 model,
@@ -2027,8 +2208,9 @@ fn finish_models(acc: HashMap<(String, String), ModelAcc>) -> Vec<ModelRow> {
                 },
                 fits,
                 sessions_fit,
+                floor_parts,
                 floor: FloorStats {
-                    p50: nearest_rank(&floors, 50.0),
+                    p50: floor_p50,
                     min: floors.first().copied().unwrap_or(0),
                     max: floors.last().copied().unwrap_or(0),
                     sessions: floors.len(),
@@ -2090,6 +2272,149 @@ pub fn instruction_files(root: &Path) -> Vec<InstructionFile> {
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+// --- the floor's parts ------------------------------------------------------
+
+/// Lines read from the head of a transcript while looking for its first call.
+const NATIVE_HEAD_LINES: usize = 3000;
+
+/// True when `dir` or any folder above it holds one of `names` (or, for
+/// `CLAUDE.md`, `.claude/CLAUDE.md`): the instruction files an agent started
+/// there would load.
+fn has_instruction_file(dir: &Path, names: &[&str]) -> bool {
+    dir.ancestors().any(|a| {
+        names.iter().any(|n| a.join(n).is_file())
+            || (names.contains(&"CLAUDE.md") && a.join(".claude").join("CLAUDE.md").is_file())
+    })
+}
+
+/// First main-thread call of a Claude transcript and the folder it ran in,
+/// reading only its head.
+fn claude_head(path: &Path) -> Option<(String, RawCall)> {
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut parser = ClaudeParser::new(false);
+    let mut cwd: Option<String> = None;
+    for line in reader.lines().take(NATIVE_HEAD_LINES) {
+        let Ok(line) = line else { break };
+        if cwd.is_none() {
+            cwd = serde_json::from_str::<CwdProbe>(&line)
+                .ok()
+                .and_then(|p| p.cwd);
+        }
+        parser.feed_line(&line);
+        if !parser.calls.is_empty() {
+            break;
+        }
+    }
+    Some((cwd?, parser.calls.into_iter().next()?))
+}
+
+/// First call of a Codex main rollout, reading only its head.
+fn codex_head(path: &Path) -> Option<RawCall> {
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut parser = CodexParser::new(false);
+    for line in reader.lines().take(NATIVE_HEAD_LINES) {
+        let Ok(line) = line else { break };
+        parser.feed_line(&line);
+        if !parser.calls.is_empty() {
+            break;
+        }
+    }
+    if parser.is_subagent {
+        return None;
+    }
+    parser.calls.into_iter().next()
+}
+
+/// The first call of every main-thread session on this machine whose folder
+/// still exists and has no instruction files: the agent's own floor, with
+/// no project or Bram text in it. Reads only each transcript's head.
+pub fn native_samples(home: &Path) -> Vec<NativeSample> {
+    let mut out = Vec::new();
+    if let Ok(dirs) = std::fs::read_dir(home.join(".claude").join("projects")) {
+        for dir in dirs.flatten() {
+            let Ok(files) = std::fs::read_dir(dir.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some((cwd, call)) = claude_head(&p) else {
+                    continue;
+                };
+                let cwd = Path::new(&cwd);
+                if !cwd.is_dir() || has_instruction_file(cwd, &["CLAUDE.md", "CLAUDE.local.md"]) {
+                    continue;
+                }
+                out.push(NativeSample {
+                    provider: "claude".to_string(),
+                    model: call.model,
+                    context: call.context,
+                });
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    let _ = crate::collect_codex_session_paths(&home.join(".codex").join("sessions"), &mut paths);
+    for p in paths {
+        let Ok(Some((_, cwd))) = crate::codex_session_meta(&p) else {
+            continue;
+        };
+        let cwd = Path::new(&cwd);
+        if !cwd.is_dir() || has_instruction_file(cwd, &["AGENTS.md", "AGENTS.override.md"]) {
+            continue;
+        }
+        if let Some(call) = codex_head(&p) {
+            out.push(NativeSample {
+                provider: "codex".to_string(),
+                model: call.model,
+                context: call.context,
+            });
+        }
+    }
+    out
+}
+
+/// The text between Bram's `<!-- bram:start -->` and `<!-- bram:end -->`.
+pub fn bram_marker_block(text: &str) -> Option<&str> {
+    let start = text.find("<!-- bram:start -->")?;
+    let end = text[start..].find("<!-- bram:end -->")? + start;
+    Some(&text[start..end + "<!-- bram:end -->".len()])
+}
+
+/// Bytes of the seeded Bram conventions each provider loads from `root`.
+///
+/// - Claude: `.claude/bram-conventions.md`, which `CLAUDE.md` imports; in the
+///   Bram source repo (no seeded copy) `app/__shell/conventions.md`.
+/// - Codex: the Bram block in `AGENTS.md`. Codex is only pointed at the
+///   conventions file, and the gate prose in its `developer_instructions`
+///   is already in every Codex session here, so it sits in the agent's part.
+pub fn conventions_bytes(root: &Path) -> BTreeMap<String, u64> {
+    let size = |rel: &str| {
+        std::fs::metadata(root.join(rel))
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+    };
+    let claude = size(".claude/bram-conventions.md").or_else(|| {
+        if root.join("src-tauri").join("Cargo.toml").is_file() {
+            size("app/__shell/conventions.md")
+        } else {
+            None
+        }
+    });
+    let codex = std::fs::read_to_string(root.join("AGENTS.md"))
+        .ok()
+        .and_then(|t| bram_marker_block(&t).map(|b| b.len() as u64));
+    let mut out = BTreeMap::new();
+    out.insert("claude".to_string(), claude.unwrap_or(0));
+    out.insert("codex".to_string(), codex.unwrap_or(0));
     out
 }
 
@@ -2179,6 +2504,10 @@ pub fn run(
             session_filter,
             include_calls,
             instruction_bytes: instruction_files(root),
+            native_samples: crate::home_dir()
+                .map(|h| native_samples(&h))
+                .unwrap_or_default(),
+            conventions_bytes: conventions_bytes(root),
         },
         &mut spans,
         lib_rs_now(root),

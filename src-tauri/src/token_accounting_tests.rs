@@ -345,6 +345,7 @@ fn attribution_splits_a_window_across_its_items_and_leaves_the_rest_to_chat() {
             session_filter: None,
             include_calls: true,
             instruction_bytes: vec![],
+            ..Default::default()
         },
         &mut NoSpans,
         None,
@@ -391,6 +392,7 @@ fn window_fit_floor_and_uncached_math_on_fixed_calls() {
                 path: "CLAUDE.md".into(),
                 bytes: 9,
             }],
+            ..Default::default()
         },
         &mut NoSpans,
         None,
@@ -444,6 +446,7 @@ fn since_and_session_filters_limit_the_report() {
                 session_filter: filter,
                 include_calls: false,
                 instruction_bytes: vec![],
+                ..Default::default()
             },
             &mut NoSpans,
             None,
@@ -504,6 +507,7 @@ fn lib_rs_reads_report_test_lines_and_bytes_and_shell_reads_stay_apart() {
             session_filter: None,
             include_calls: false,
             instruction_bytes: vec![],
+            ..Default::default()
         },
         &mut FixedSpans(vec![(6, 10)]),
         None,
@@ -596,6 +600,7 @@ fn report_for(root: &str, path: &str) -> Report {
             session_filter: None,
             include_calls: false,
             instruction_bytes: vec![],
+            ..Default::default()
         },
         &mut NoSpansHere,
         None,
@@ -617,4 +622,179 @@ fn a_files_row_serializes_size_bytes_and_null_when_missing() {
     let v = serde_json::to_value(&missing.files[0]).unwrap();
     assert!(v.get("sizeBytes").is_some_and(|s| s.is_null()));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn read_event(path: &str, bytes: u64) -> ReadEvent {
+    ReadEvent {
+        path: path.into(),
+        bytes,
+        via_shell: false,
+        at_ms: 5,
+        lines: vec![],
+    }
+}
+
+fn call_at(at_ms: i64, context: u64) -> RawCall {
+    RawCall {
+        at_ms,
+        model: "m".into(),
+        context,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_files_row_splits_main_and_subagent_reads_and_counts_sessions() {
+    let main_a = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "a".into(),
+        thread: Some(Thread::Main),
+        calls: vec![call_at(1000, 10), call_at(2000, 10)],
+        reads: vec![read_event("/r/x.rs", 100), read_event("/r/x.rs", 50)],
+        ..Default::default()
+    });
+    let sub_a = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "a".into(),
+        thread: Some(Thread::Subagent),
+        agent_id: Some("g".into()),
+        reads: vec![read_event("/r/x.rs", 400)],
+        ..Default::default()
+    });
+    let main_b = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "b".into(),
+        thread: Some(Thread::Main),
+        calls: vec![call_at(500, 10)],
+        reads: vec![read_event("/r/x.rs", 30)],
+        ..Default::default()
+    });
+    let report = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![main_a, sub_a, main_b],
+            ..Default::default()
+        },
+        &mut NoSpansHere,
+        None,
+    );
+    let f = &report.files[0];
+    assert_eq!(f.path, "x.rs");
+    assert_eq!((f.reads, f.bytes), (4, 580));
+    assert_eq!((f.main_reads, f.main_bytes), (3, 180));
+    assert_eq!((f.subagent_reads, f.subagent_bytes), (1, 400));
+    assert_eq!(f.sessions, 2, "a's subagent counts for a");
+    assert_eq!(f.max_session_bytes, 550, "a: 150 main + 400 subagent");
+    let range = report.range.unwrap();
+    assert_eq!((range.from_ms, range.to_ms), (500, 2000));
+    let v = serde_json::to_value(f).unwrap();
+    assert_eq!(v["mainReads"], 3);
+    assert_eq!(v["maxSessionBytes"], 550);
+}
+
+#[test]
+fn a_replayed_tool_result_is_one_read() {
+    // Resumed transcripts repeat earlier records; a tool call is one read.
+    let use_line = r#"{"type":"assistant","message":{"id":"m","model":"x","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/r/a.rs"}}]}}"#;
+    let result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"     1\thello"}]}}"#;
+    let text = [use_line, result, result].join("\n");
+    let pf = parse_claude_text(&text, "s", Thread::Main, None);
+    assert_eq!(pf.reads.len(), 1);
+}
+
+#[test]
+fn floor_parts_add_up_to_the_floor() {
+    // 81k floor, 18k native, 45,000 bytes of conventions (11,250 tokens).
+    let native = Some(NativeFloor {
+        p50: 18_000,
+        sessions: 4,
+    });
+    let p = floor_parts(81_000, native, "same model", 45_000);
+    assert_eq!(p.conventions.approx_tokens, 11_250);
+    assert_eq!(p.project, Some(81_000 - 18_000 - 11_250));
+    // Parts never go negative when the estimate overshoots.
+    let small = floor_parts(
+        20_000,
+        Some(NativeFloor {
+            p50: 18_000,
+            sessions: 1,
+        }),
+        "same model",
+        45_000,
+    );
+    assert_eq!(small.project, Some(0));
+    // Without a native measurement there is no remainder to name.
+    let none = floor_parts(81_000, None, "not measured", 45_000);
+    assert_eq!(none.project, None);
+    assert_eq!(none.native_basis, "not measured");
+}
+
+#[test]
+fn native_floor_prefers_the_model_then_the_provider() {
+    let s = |provider: &str, model: &str, context: u64| NativeSample {
+        provider: provider.into(),
+        model: model.into(),
+        context,
+    };
+    let samples = vec![
+        s("claude", "a", 10_000),
+        s("claude", "a", 20_000),
+        s("claude", "a", 30_000),
+        s("claude", "b", 50_000),
+        s("codex", "g", 7_000),
+    ];
+    let (n, basis) = native_floor(&samples, "claude", "a");
+    assert_eq!((n.unwrap().p50, basis), (20_000, "same model"));
+    let (n, basis) = native_floor(&samples, "claude", "c");
+    let n = n.unwrap();
+    assert_eq!(
+        (n.p50, n.sessions, basis),
+        (20_000, 4, "same provider, other models")
+    );
+    let (n, basis) = native_floor(&samples, "opencode", "z");
+    assert_eq!((n, basis), (None, "not measured"));
+}
+
+#[test]
+fn the_model_row_carries_floor_parts_and_the_report_serializes_them() {
+    let pf = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s".into(),
+        thread: Some(Thread::Main),
+        calls: vec![call_at(1, 81_000)],
+        ..Default::default()
+    });
+    let mut conv = BTreeMap::new();
+    conv.insert("claude".to_string(), 44_000u64);
+    let report = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![pf],
+            native_samples: vec![NativeSample {
+                provider: "claude".into(),
+                model: "m".into(),
+                context: 18_000,
+            }],
+            conventions_bytes: conv,
+            ..Default::default()
+        },
+        &mut NoSpansHere,
+        None,
+    );
+    let v = serde_json::to_value(&report.constrained.by_model[0]).unwrap();
+    let fp = &v["floorParts"];
+    assert_eq!(fp["native"]["p50"], 18_000);
+    assert_eq!(fp["nativeBasis"], "same model");
+    assert_eq!(fp["conventions"]["approxTokens"], 11_000);
+    assert_eq!(fp["project"], 52_000);
+}
+
+#[test]
+fn the_bram_marker_block_is_the_text_between_the_markers() {
+    let t = "intro\n<!-- bram:start -->\nabc\n<!-- bram:end -->\ntail";
+    assert_eq!(
+        bram_marker_block(t),
+        Some("<!-- bram:start -->\nabc\n<!-- bram:end -->")
+    );
+    assert_eq!(bram_marker_block("no markers"), None);
 }

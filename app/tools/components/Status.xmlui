@@ -279,13 +279,18 @@
           <Column header="200k" width="65px"><Text value="{window.__bramTokenFit($item, '200k')}" /></Column>
           <Column header="256k" width="65px"><Text value="{window.__bramTokenFit($item, '256k')}" /></Column>
           <Column header="Floor" width="70px"><Text value="{window.__bramTokenFloor($item)}" /></Column>
+          <Column header="Floor parts" width="150px"><Text value="{window.__bramTokenFloorParts($item)}" /></Column>
           <Column bindTo="cacheHitShare" header="Cache hit" width="90px"><Text value="{window.__bramTokenPct($item.cacheHitShare)}" /></Column>
         </Table>
         <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="Which files the agents pull into their context, and how: the figures show how much a read returns compared with the file, which is the evidence for whether splitting a big file such as lib.rs would change what they read." />
+          value="{window.__bramTokenFilesLead(tokens.value)}" />
         <HStack gap="$space-1" verticalAlignment="center" wrapContent="true">
           <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About the columns:" />
           <Button size="xs" variant="ghost" icon="info" label="Reads" onClick="tokenInfoKey = 'reads'" />
+          <Button size="xs" variant="ghost" icon="info" label="Main" onClick="tokenInfoKey = 'main'" />
+          <Button size="xs" variant="ghost" icon="info" label="Subagents" onClick="tokenInfoKey = 'subagents'" />
+          <Button size="xs" variant="ghost" icon="info" label="Sessions" onClick="tokenInfoKey = 'sessions'" />
+          <Button size="xs" variant="ghost" icon="info" label="Most in one session" onClick="tokenInfoKey = 'mostSession'" />
           <Button size="xs" variant="ghost" icon="info" label="Per read" onClick="tokenInfoKey = 'perRead'" />
           <Button size="xs" variant="ghost" icon="info" label="Read in total" onClick="tokenInfoKey = 'total'" />
           <Button size="xs" variant="ghost" icon="info" label="Via shell" onClick="tokenInfoKey = 'shell'" />
@@ -294,6 +299,10 @@
         <Table data="{window.__bramTokenFileRows(tokens.value)}">
           <Column bindTo="path" header="Path"><Text variant="code" breakMode="anywhere" value="{$item.path}" /></Column>
           <Column bindTo="reads" header="Reads" width="80px"><Text value="{window.__bramTokenInt($item.reads)}" /></Column>
+          <Column header="Main" width="80px"><Text value="{window.__bramTokenInt($item.mainReads)}" /></Column>
+          <Column header="Subagents" width="90px"><Text value="{window.__bramTokenInt($item.subagentReads)}" /></Column>
+          <Column header="Sessions" width="85px"><Text value="{window.__bramTokenInt($item.sessions)}" /></Column>
+          <Column header="Most in one session" width="130px"><Text value="{window.__bramTokenBytes($item.maxSessionBytes)}" /></Column>
           <Column header="Per read" width="90px"><Text value="{window.__bramTokenPerRead($item)}" /></Column>
           <Column bindTo="bytes" header="Read in total" width="110px"><Text value="{window.__bramTokenBytes($item.bytes)}" /></Column>
           <Column bindTo="sizeBytes" header="File size" width="90px"><Text value="{window.__bramTokenFileSize($item)}" /></Column>

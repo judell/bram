@@ -32,6 +32,7 @@ const inert = () =>
 
 const listeners = {};
 const posted = []; // what the pane posts to the shell
+const docListeners = {}; // document-level listeners helpers.js registers
 const real = {
   console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
   Date, JSON, Math, Object, Array, String, Number, Boolean, RegExp, Error, Promise, Map, Set, WeakMap, Symbol,
@@ -51,7 +52,12 @@ const real = {
   },
   parent: { postMessage: (m) => posted.push(m) },
   document: new Proxy(
-    { activeElement: null, addEventListener: () => {}, currentScript: null },
+    {
+      activeElement: null,
+      addEventListener: (type, fn) => (docListeners[type] = docListeners[type] || []).push(fn),
+      contains: () => true,
+      currentScript: null,
+    },
     { get: (t, k) => (k in t ? t[k] : inert()) },
   ),
 };
@@ -210,6 +216,89 @@ test("a replaced span keeps its case and punctuation", () => {
   assert.strictEqual(r("This is it. This works.", 12, 16, "however").text, "This is it. However works.");
   const c = r(b1, 22, 25, "However...");
   assert.strictEqual(c.text.slice(0, c.caret), "This is one sentence, however");
+});
+
+// Voice over a selection (fa8f57df). A textarea stand-in whose selection the
+// test moves the way the browser would, and the document events that follow.
+const fire = (type, ev) => (docListeners[type] || []).forEach((fn) => fn(Object.assign({ type }, ev)));
+const textarea = (value, a, b) => ({ tagName: "TEXTAREA", value, selectionStart: a, selectionEnd: b });
+const withSelectionTraces = () => {
+  const mark = traces.length;
+  return () => traces.slice(mark).filter((x) => /^selection-/.test(x.stage));
+};
+const selectAndLeave = (el) => {
+  real.document.activeElement = el;
+  fire("selectionchange", {});
+  fire("mouseup", {});
+  real.document.activeElement = { tagName: "BODY" }; // the mic click took focus
+  fire("focusout", { target: el });
+};
+
+test("selected phrase is the target when the mic is clicked at once", () => {
+  const seen = withSelectionTraces();
+  const el = textarea("Say the quick brown fox now", 8, 19);
+  selectAndLeave(el);
+  const sel = real.__bramVoiceCaptureSelection("message-agent");
+  assert.ok(sel, "captured");
+  assert.deepStrictEqual([sel.start, sel.end], [8, 19]);
+  assert.strictEqual(seen()[0].stage, "selection-captured");
+});
+
+test("a selection survives a pause longer than 15 s before the mic click", () => {
+  const el = textarea("Say the quick brown fox now", 8, 19);
+  selectAndLeave(el);
+  const realNow = Date.now;
+  const t0 = realNow();
+  Date.now = () => t0 + 40000; // sandbox shares this Date
+  try {
+    const sel = real.__bramVoiceCaptureSelection("message-agent");
+    assert.ok(sel, "a 40 s old range still replaces");
+    assert.deepStrictEqual([sel.start, sel.end], [8, 19]);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("a collapse nobody clicked (value rewrite) does not lose the selection", () => {
+  const seen = withSelectionTraces();
+  const el = textarea("Say the quick brown fox now", 8, 19);
+  real.document.activeElement = el;
+  fire("selectionchange", {});
+  fire("mouseup", {});
+  // The box rewrites its value: the caret jumps to the end, no gesture.
+  el.selectionStart = el.selectionEnd = el.value.length;
+  fire("selectionchange", {});
+  real.document.activeElement = { tagName: "BODY" };
+  fire("focusout", { target: el });
+  const sel = real.__bramVoiceCaptureSelection("message-agent");
+  assert.ok(sel, "restored");
+  assert.deepStrictEqual([sel.start, sel.end], [8, 19]);
+  const cap = seen().find((x) => x.stage === "selection-captured");
+  assert.strictEqual(cap.via, "restored");
+});
+
+test("a caret the user placed after selecting cancels the selection", () => {
+  const seen = withSelectionTraces();
+  const el = textarea("Say the quick brown fox now", 8, 19);
+  real.document.activeElement = el;
+  fire("selectionchange", {});
+  fire("mouseup", {});
+  el.selectionStart = el.selectionEnd = el.value.length; // a click at the end
+  fire("mouseup", {});
+  real.document.activeElement = { tagName: "BODY" };
+  assert.strictEqual(real.__bramVoiceCaptureSelection("message-agent"), null);
+  const sk = seen().pop();
+  assert.strictEqual(sk.reason, "at-end");
+  assert.ok(Array.isArray(sk.ring) && sk.ring.length > 0, "the skip carries the event ring");
+  assert.strictEqual(sk.baseLen, el.value.length);
+});
+
+test("replacing a selected phrase puts the words there once", () => {
+  const el = textarea("Say the quick brown fox now", 8, 19);
+  selectAndLeave(el);
+  const sel = real.__bramVoiceCaptureSelection("message-agent");
+  const out = real.__bramVoiceReplaceSpan(sel, "slow green");
+  assert.strictEqual(out.text, "Say the slow green fox now");
 });
 
 let failed = 0;

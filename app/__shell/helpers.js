@@ -11372,21 +11372,36 @@ window.bramSubscribeEnhanceStatusTick = (function () {
 window.__bramVoicePendingSel = {};
 window.__bramVoicePendingTarget = "";
 window.__bramLastTextSel = null;
+// The last few selection events (type, active tag, start, end, age), for the
+// selection-skipped trace: when a selection never reaches the mic click, the
+// ring says what happened to it (judell/bram: voice-over-selection duplicates).
+window.__bramSelRing = [];
 (function () {
   // A non-empty range is remembered from any event; a collapsed caret only
   // from a user gesture (mouseup, keyup, select), since a restored or
-  // code-focused textarea can report selectionStart 0 unplaced.
+  // code-focused textarea can report selectionStart 0 unplaced. A range is
+  // also kept apart (m.range): a collapse that no gesture of ours saw
+  // (a value rewrite puts the caret at the end) must not erase it, but a
+  // click or key that places a caret does.
+  var rangeOf = function (el) {
+    return { start: el.selectionStart, end: el.selectionEnd, text: String(el.value || "").slice(el.selectionStart, el.selectionEnd), at: Date.now() };
+  };
   var remember = function (ev) {
     try {
       var el = document.activeElement;
+      try {
+        var ring = window.__bramSelRing;
+        ring.push([ev ? ev.type : "?", el ? el.tagName : "none", el && typeof el.selectionStart === "number" ? el.selectionStart : -1, el && typeof el.selectionEnd === "number" ? el.selectionEnd : -1, Date.now() % 1000000]);
+        if (ring.length > 8) ring.shift();
+      } catch (e) {}
       if (!el || el.tagName !== "TEXTAREA") return;
       var gesture = !!ev && (ev.type === "mouseup" || ev.type === "keyup" || ev.type === "select");
       if (typeof el.selectionStart !== "number") return;
       var prev = window.__bramLastTextSel;
       if (el.selectionStart < el.selectionEnd) {
-        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: gesture || (!!prev && prev.el === el && prev.gesture) };
+        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: gesture || (!!prev && prev.el === el && prev.gesture), range: rangeOf(el) };
       } else if (gesture) {
-        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: true };
+        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: true, range: null };
       } else if (prev && prev.el === el) {
         // Caret moved without a gesture we saw: keep the position, not the claim.
         prev.start = el.selectionStart; prev.end = el.selectionEnd;
@@ -11403,21 +11418,41 @@ window.__bramLastTextSel = null;
       var el = ev && ev.target;
       if (el && el.tagName === "TEXTAREA" && el.selectionStart < el.selectionEnd) {
         var prev = window.__bramLastTextSel;
-        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: !!prev && prev.el === el && prev.gesture };
+        window.__bramLastTextSel = { el: el, start: el.selectionStart, end: el.selectionEnd, at: Date.now(), gesture: !!prev && prev.el === el && prev.gesture, range: rangeOf(el) };
       }
     } catch (e) {}
   }, true);
 })();
 window.__bramVoiceCaptureSelection = function (target) {
+  var diag = function () {
+    var d = {};
+    try {
+      var m = window.__bramLastTextSel;
+      var a = document.activeElement;
+      var t = (a && a.tagName === "TEXTAREA") ? a : (m && m.el);
+      d.memAge = m ? Date.now() - m.at : -1;
+      d.mem = m ? [m.start, m.end, m.gesture ? 1 : 0, m.range ? 1 : 0] : null;
+      d.elSel = t && typeof t.selectionStart === "number" ? [t.selectionStart, t.selectionEnd] : null;
+      d.baseLen = t ? String(t.value || "").length : -1;
+      d.ring = window.__bramSelRing.slice();
+    } catch (e) {}
+    return d;
+  };
   var skip = function (reason) {
-    try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "selection-skipped", target: target, reason: reason }); } catch (e) {}
+    try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", Object.assign({ stage: "selection-skipped", target: target, reason: reason }, diag())); } catch (e) {}
     return null;
   };
   try {
     var el = document.activeElement;
     var m = window.__bramLastTextSel;
-    var fresh = !!m && !!m.el && document.contains(m.el) && Date.now() - m.at <= 15000;
-    var start, end;
+    var now = Date.now();
+    var attached = !!m && !!m.el && document.contains(m.el);
+    var fresh = attached && now - m.at <= 15000;
+    // A range outlives the 15 s caret window while the text under it is
+    // unchanged: selecting, thinking, then clicking the mic is ordinary.
+    var rg = attached && m.range && now - m.range.at <= 120000 &&
+      String(m.el.value || "").slice(m.range.start, m.range.end) === m.range.text ? m.range : null;
+    var start, end, via = "live";
     if (el && el.tagName === "TEXTAREA" && el.selectionStart < el.selectionEnd) {
       start = el.selectionStart; end = el.selectionEnd;
     } else if (el && el.tagName === "TEXTAREA" && typeof el.selectionStart === "number") {
@@ -11427,12 +11462,19 @@ window.__bramVoiceCaptureSelection = function (target) {
     } else {
       var why = "active:" + (el ? el.tagName : "none");
       if (!m) return skip(why + ",no-memory");
-      if (!fresh) return skip("stale");
-      if (m.start === m.end && !m.gesture) return skip("caret-no-gesture");
-      if (m.start === m.end && m.el.selectionStart === m.el.selectionEnd) {
-        start = end = m.el.selectionStart;
-      } else if (m.el.selectionStart < m.el.selectionEnd) {
-        start = m.el.selectionStart; end = m.el.selectionEnd;
+      var liveRange = attached && m.el.selectionStart < m.el.selectionEnd;
+      if (liveRange && (fresh || rg)) {
+        start = m.el.selectionStart; end = m.el.selectionEnd; via = "memory";
+      } else if (rg) {
+        // The box lost the selection (a rewrite collapsed it) but no click
+        // or key placed a caret since: the selection is still the target.
+        start = rg.start; end = rg.end; via = "restored";
+      } else if (!fresh) {
+        return skip("stale");
+      } else if (m.start === m.end && !m.gesture) {
+        return skip("caret-no-gesture");
+      } else if (m.start === m.end && m.el.selectionStart === m.el.selectionEnd) {
+        start = end = m.el.selectionStart; via = "memory";
       } else {
         return skip("empty");
       }
@@ -11441,7 +11483,7 @@ window.__bramVoiceCaptureSelection = function (target) {
     var base = String(el.value || "");
     if (start === end && start >= base.length) return skip("at-end");
     var sel = { el: el, start: start, end: end, base: base };
-    try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "selection-captured", target: target, kind: start === end ? "caret" : "range", start: start, end: end, len: end - start }); } catch (e) {}
+    try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "selection-captured", target: target, kind: start === end ? "caret" : "range", start: start, end: end, len: end - start, via: via }); } catch (e) {}
     return sel;
   } catch (e) { return skip("error"); }
 };

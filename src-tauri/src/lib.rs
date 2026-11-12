@@ -111582,7 +111582,7 @@ struct TaskCandidatesReport {
     commands: usize,
     steps: usize,
     sessions: usize,
-    excluded: [usize; 4], // bramProtocol, forge, git, shell
+    excluded: [usize; 5], // bramProtocol, forge, git, shell, notACommand
     candidates: Vec<TaskCandidate>,
     excluded_steps: Vec<(String, &'static str, usize)>,
     // issue-483-save-as-task: `make <target>` steps in the walk, by target
@@ -111590,7 +111590,11 @@ struct TaskCandidatesReport {
     make_runs: HashMap<String, (usize, BTreeSet<String>)>,
 }
 
-const TASK_BUCKETS: [&str; 4] = ["bramProtocol", "forge", "git", "shell"];
+const TASK_BUCKETS: [&str; 5] = ["bramProtocol", "forge", "git", "shell", "notACommand"];
+// issue-483-tasks-runnable-first-word: the bucket for steps that aren't
+// commands at all (a line of a multi-line script, text split out of a
+// message, a hashtable entry).
+const TASK_BUCKET_NOT_A_COMMAND: usize = 4;
 const TASK_MIN_RUNS: usize = 3;
 const TASK_SPELLINGS_MAX: usize = 8;
 const TASK_EXCLUDED_STEPS_MAX: usize = 200;
@@ -112485,7 +112489,28 @@ struct TaskCluster {
     spellings: std::collections::HashMap<String, usize>,
 }
 
+// The tests' entry: every first word counts as runnable, so a test's
+// commands don't depend on what the machine running it has installed.
+#[cfg(test)]
 fn task_candidates_core(root: &str, steps: &[TaskStep]) -> TaskCandidatesReport {
+    task_candidates_core_with(root, steps, &mut |_| true)
+}
+
+// A step that isn't data: `name = …` (PowerShell hashtable entries and
+// assignments, which Codex's multi-line scripts split into lines) is never a
+// command, whatever `name` is (`route` is also a Windows program).
+fn task_step_is_data(toks: &[&str]) -> bool {
+    toks.get(1) == Some(&"=") || toks.first().is_some_and(|t| t.ends_with('='))
+}
+
+// `runnable(first_word)`: whether the step's first word is something you
+// can run (task_first_word_runnable in production). A step that isn't is
+// counted as notACommand, not clustered (issue-483-tasks-runnable-first-word).
+fn task_candidates_core_with(
+    root: &str,
+    steps: &[TaskStep],
+    runnable: &mut dyn FnMut(&str) -> bool,
+) -> TaskCandidatesReport {
     let mut report = TaskCandidatesReport::default();
     let mut sessions: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut clusters: std::collections::HashMap<String, TaskCluster> =
@@ -112515,7 +112540,12 @@ fn task_candidates_core(root: &str, steps: &[TaskStep]) -> TaskCandidatesReport 
                     e.1.insert(rec.session.clone());
                 }
             }
-            if let Some(b) = task_bucket(&text) {
+            let bucket = task_bucket(&text).or_else(|| {
+                let toks = task_tokens(&text);
+                let first = toks.first().copied().unwrap_or("");
+                (task_step_is_data(&toks) || !runnable(first)).then_some(TASK_BUCKET_NOT_A_COMMAND)
+            });
+            if let Some(b) = bucket {
                 report.excluded[b] += 1;
                 *excluded.entry((text, b)).or_insert(0) += 1;
                 continue;
@@ -112703,6 +112733,7 @@ fn task_report_json(
             "forge": report.excluded[1],
             "git": report.excluded[2],
             "shell": report.excluded[3],
+            "notACommand": report.excluded[4],
         },
         "runner": runner,
         "candidates": candidates,
@@ -113468,7 +113499,19 @@ fn task_candidates_run(
         .canonicalize()
         .map(|p| strip_unc_prefix(p).to_string_lossy().to_string())
         .unwrap_or_else(|_| root.to_string_lossy().to_string());
-    let mut report = task_candidates_core(&root_str, &steps);
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let mut seen: HashMap<String, bool> = HashMap::new();
+    let mut runnable = |word: &str| -> bool {
+        if let Some(&hit) = seen.get(word) {
+            return hit;
+        }
+        let hit = task_first_word_runnable(word, root, &path_dirs);
+        seen.insert(word.to_string(), hit);
+        hit
+    };
+    let mut report = task_candidates_core_with(&root_str, &steps, &mut runnable);
     report.sessions = files.len();
     let (mut runner, makefile) = task_runner_state(root);
     if let Some(mk) = makefile {
@@ -113491,6 +113534,80 @@ fn task_candidates_run(
             .count(),
     };
     (doc, stats)
+}
+
+// Whether a step's first word is something you can run: a file in the
+// project (or at an absolute path), or a program on PATH whose file name
+// matches the word's case as typed. On Windows PATHEXT extensions are tried
+// and the found file's true case comes from its folder's listing, so prose
+// (`OpenCode`, `So`) doesn't match a program by case-folding. PowerShell
+// keywords and cmdlets, hashtable keys and an agent's in-session shell
+// functions resolve to nothing (issue-483-tasks-runnable-first-word).
+fn task_first_word_runnable(word: &str, root: &Path, path_dirs: &[PathBuf]) -> bool {
+    let word = word.trim_matches(|c| c == '"' || c == '\'');
+    if word.is_empty() {
+        return false;
+    }
+    if word.contains('/') || word.contains('\\') || word.starts_with('.') {
+        // Git Bash spells C:\x as /c/x.
+        let native = if cfg!(windows) {
+            let b = word.as_bytes();
+            if b.len() > 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/' {
+                format!("{}:/{}", b[1] as char, &word[3..])
+            } else {
+                word.to_string()
+            }
+        } else {
+            word.to_string()
+        };
+        let p = Path::new(&native);
+        let full = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        };
+        return full.is_file();
+    }
+    let exts: Vec<String> = if cfg!(windows) {
+        let mut v = vec![String::new()];
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        v.extend(
+            pathext
+                .split(';')
+                .filter(|e| !e.is_empty())
+                .map(|e| e.to_string()),
+        );
+        v
+    } else {
+        vec![String::new()]
+    };
+    for dir in path_dirs {
+        for ext in &exts {
+            let candidate = dir.join(format!("{word}{ext}"));
+            if !candidate.is_file() {
+                continue;
+            }
+            // The entry's own name from its folder's listing: the case on
+            // disk, without following an alias (WindowsApps `python.exe`
+            // is a reparse point that canonicalize may not resolve).
+            let wanted = format!("{word}{ext}");
+            let actual = std::fs::read_dir(dir)
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .find(|n| n.eq_ignore_ascii_case(&wanted))
+                })
+                .unwrap_or_default();
+            // The on-disk name must begin with the word exactly as typed;
+            // only the extension's case may differ.
+            if actual.starts_with(word) && actual.len() == word.len() + ext.len() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn task_candidates_for_cli(root: &Path) -> serde_json::Value {
@@ -113548,6 +113665,80 @@ mod task_candidates_tests {
             session: session.into(),
             ts_ms: 1000,
         }
+    }
+
+    // issue-483-tasks-runnable-first-word: Windows rows from this repo's
+    // Codex sessions (2026-11-12) that the report listed as commands.
+    #[test]
+    fn only_runnable_first_words_that_are_not_data_are_commands() {
+        let script = "$body = @{\n  route = 'worklist-mutate'\n  ids = @('x')\n  body = @{} } | ConvertTo-Json -Depth 8 -Compress\n}";
+        let guarded = "try {\n  Get-CimInstance Win32_Process\n} catch {\n  Write-Error 'No matching worklist result'\n}";
+        let mut steps = Vec::new();
+        for s in ["a", "b", "c"] {
+            steps.push(step(script, s));
+            steps.push(step(guarded, s));
+            steps.push(step("foreach ($file in $files) {", s));
+            steps.push(step("So the interpretation should be this", s));
+            steps.push(step("OpenCode transcript sync fix applied", s));
+            steps.push(step("mk terminal:start", s));
+            steps.push(step("cargo test --lib", s));
+            steps.push(step("node --check app/main.js", s));
+            steps.push(step("powershell -NoProfile -File scripts/build.ps1", s));
+        }
+        // The machine's programs, as the real lookup would find them:
+        // `route` is a Windows program, but `route = …` is data.
+        let known = ["cargo", "node", "powershell", "route"];
+        let r = task_candidates_core_with("/r", &steps, &mut |w| known.contains(&w));
+        let keys: Vec<&str> = r.candidates.iter().map(|c| c.key.as_str()).collect();
+        for junk in [
+            "route",
+            "ids",
+            "body",
+            "try",
+            "Get-CimInstance",
+            "Write-Error",
+            "foreach",
+            "So",
+            "OpenCode",
+            "mk",
+        ] {
+            assert!(!keys.contains(&junk), "{junk} listed: {keys:?}");
+        }
+        assert!(keys.contains(&"cargo test"), "{keys:?}");
+        assert!(keys.contains(&"node --check"), "{keys:?}");
+        assert!(keys.iter().any(|k| k.contains("build.ps1")), "{keys:?}");
+        assert!(r.excluded[TASK_BUCKET_NOT_A_COMMAND] > 0);
+        assert!(task_step_is_data(&["route", "=", "'x'"]));
+        assert!(!task_step_is_data(&["cargo", "test"]));
+    }
+
+    #[test]
+    fn first_word_runnable_needs_a_file_or_a_program_in_its_typed_case() {
+        let root =
+            std::env::temp_dir().join(format!("bram-task-runnable-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(root.join("scripts").join("build.ps1"), "").unwrap();
+        std::fs::write(bin.join("mytool"), "").unwrap();
+        let path = vec![bin.clone()];
+        assert!(task_first_word_runnable("scripts/build.ps1", &root, &path));
+        assert!(task_first_word_runnable(
+            "./scripts/build.ps1",
+            &root,
+            &path
+        ));
+        assert!(!task_first_word_runnable(
+            "scripts/missing.sh",
+            &root,
+            &path
+        ));
+        assert!(task_first_word_runnable("mytool", &root, &path));
+        // Prose that case-folds to a program is not that program.
+        assert!(!task_first_word_runnable("MyTool", &root, &path));
+        assert!(!task_first_word_runnable("foreach", &root, &path));
+        assert!(!task_first_word_runnable("", &root, &path));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -113746,7 +113937,7 @@ mod task_candidates_tests {
         steps.push(step("curl http://127.0.0.1:1/__x", "s0"));
         let r = task_candidates_core("/r", &steps);
         assert_eq!(r.commands, 11);
-        assert_eq!(r.excluded, [1, 1, 1, 1]);
+        assert_eq!(r.excluded, [1, 1, 1, 1, 0]);
         assert_eq!(r.candidates.len(), 1);
         let c = &r.candidates[0];
         assert_eq!(c.key, "cargo test");

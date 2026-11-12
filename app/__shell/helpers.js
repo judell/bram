@@ -18625,7 +18625,8 @@ window.__bramTaskInfoText = function (key, report) {
       "- " + (x.bramProtocol || 0) + " steps that talk to Bram\n" +
       "- " + (x.shell || 0) + " that look around or tidy up (`ls`, `cat`, `grep`, `rm` and the like)\n" +
       "- " + (x.git || 0) + " git\n" +
-      "- " + (x.forge || 0) + " GitHub or GitLab\n\n" +
+      "- " + (x.forge || 0) + " GitHub or GitLab\n" +
+      "- " + (x.notACommand || 0) + " that aren't commands at all (lines of a script, or text split out of a message)\n\n" +
       "Rows seen in the most sessions come first; the rest fold under **Show all**.";
   }
   if (key === "runs") return "How many times the command ran, every way it was typed added together. On a saved row, runs by name are in the row's own table.";

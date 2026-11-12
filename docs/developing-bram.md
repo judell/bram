@@ -659,11 +659,27 @@ sessions (falling back to two, then all, when a small project has fewer
 than five such rows), at most ten, with the rest behind "N more recur in
 fewer sessions" and a **Show all** button. That took xmlui from 33 rows to
 8 and bram-studio from 54 to 8 (40 and 57 before the scratch rule); Bram's 62 widely recurring rows hit the
-cap. The agent-defined functions stay in the list for now, below the
-widely recurring rows; giving them their own fold is the next step if the
-folded list still reads as clutter. The ranking and fold are in
+cap. The ranking and fold are in
 `helpers.js` (`__bramTaskRows`, `__bramTaskHeadline`), repeated client-side
 so a pane served by an older host reads the same.
+
+**A row is a command only if its first word is something you can run**
+(issue-483-tasks-runnable-first-word, 2026-11-12). The first Windows page
+was mostly not commands: Codex's multi-line PowerShell split into lines
+(`body = @{…}`, `route = 'worklist-mutate'`, `try {`, `foreach (…) {`,
+`Write-Error`) and prose split out of messages (`Windows`, `So`, `the`).
+Word lists can't keep up with that (Jon: "rather than whack-a-mole what is
+the rule"), so the host asks one question of every step the lists let
+through: does its first word name a file in the project, or a program on
+PATH spelled in the case it was typed (PATHEXT on Windows, the on-disk name
+from the folder listing, so `OpenCode` doesn't match `opencode.cmd`)? And
+is it not data (`name = …`, even when `route` is a Windows program)? A step
+that fails is counted as `notACommand`. That also drops the one-word shell
+functions an agent defines in a session (bram-studio's `post` and `band`),
+which used to sit below the widely recurring rows. On this repo's Windows
+sessions it took the list from 49 rows to 28 and removed every non-command.
+The answer depends on the machine running the report, which is the machine
+whose sessions it reads.
 
 The run costs about 13 s here (`[tasks] op=candidates … ms=`), all in
 parsing session files, so the pane fetches on open and Refresh only.

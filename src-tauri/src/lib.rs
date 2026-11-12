@@ -104834,6 +104834,7 @@ fn antigravity_turn_ended<R: tauri::Runtime>(
 ) {
     stop_antigravity_turn_watch();
     agent_status_emit_finished(app, "antigravity", None, None, "osc7501");
+    token_accounting::sample_antigravity_turn_end(app);
     // The finished conversation's transcript has changed; a sessions pass
     // re-projects and indexes it (antigravity-sessions-browser).
     search_index_request(IndexBucket::Sessions);

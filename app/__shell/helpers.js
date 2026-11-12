@@ -22671,7 +22671,8 @@ window.__bramTokenProviderText = function (report) {
     var name = names[k] || k;
     if (s.status === "read") {
       return "- **" + name + "**: read, " + window.__bramTokenInt(s.sessions || 0) + " sessions, " +
-        window.__bramTokenInt(s.calls || 0) + " calls.";
+        window.__bramTokenInt(s.calls || 0) + " calls." +
+        (s.modelSource === "selection-log" ? " Its records name no model, so the model shown is the one selected in " + name + "'s own log at the time of each call." : "");
     }
     return "- **" + name + "**: not read. " + (s.reason || "No reason was given.");
   });

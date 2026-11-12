@@ -31,8 +31,13 @@
 //!   cache_write_input_tokens`, and the reported `input` is the remainder.
 //! - **OpenCode**: `tokens.input` EXCLUDES cache (observed: input 4 beside
 //!   cache.read 30633), so `context = input + cache.read + cache.write`.
-//! - **Antigravity**: unavailable. Its brain log has per-step tokens but no
-//!   model field, and Bram's exported copy drops usage.
+//! - **Antigravity**: each `PLANNER_RESPONSE` record in a conversation's
+//!   `transcript_full.jsonl` is one call. `input_tokens` EXCLUDES cache
+//!   (observed: step 1 input 21787 beside cache_read 0, step 3 input 2547
+//!   beside cache_read 19733, so the 22.3k context carried over), so `context
+//!   = input_tokens + cache_read_tokens`. No record names a model: it comes
+//!   from agy's own selection log (see `agy_model_selections`) and is marked
+//!   `modelSource: "selection-log"` in the report.
 //!
 //! Uncached tokens per call (the prompt processing a server with no prompt
 //! cache would do) is `context - cacheRead` for every provider.
@@ -48,9 +53,6 @@ use crate::worklist_state::{claims_overlapping, ClaimWindow};
 #[cfg(test)]
 #[path = "token_accounting_tests.rs"]
 mod tests;
-
-pub const ANTIGRAVITY_REASON: &str =
-    "brain log has per-step tokens but no model field; Bram's export drops usage";
 
 /// Context windows the fit table reports, as shipped: 32k, 64k, 128k and 256k
 /// are powers of two, 200k is the round number Claude sells.
@@ -86,8 +88,14 @@ pub enum Attribution {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum ProviderStatus {
-    Read { sessions: usize, calls: usize },
-    Unavailable { reason: String },
+    Read {
+        sessions: usize,
+        calls: usize,
+        /// Where the model names come from when the provider's records carry
+        /// none (Antigravity: `"selection-log"`).
+        #[serde(rename = "modelSource", skip_serializing_if = "Option::is_none")]
+        model_source: Option<&'static str>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1279,6 +1287,430 @@ pub fn opencode_parse(conn: &rusqlite::Connection, root: &Path) -> Vec<ParsedFil
     out
 }
 
+// --- Antigravity reader ---------------------------------------------------
+
+/// A count that agy writes as a JSON number or as a string.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum AgyNum {
+    Int(u64),
+    Float(f64),
+    Text(String),
+}
+
+impl AgyNum {
+    fn get(&self) -> u64 {
+        match self {
+            AgyNum::Int(n) => *n,
+            AgyNum::Float(f) => f.max(0.0) as u64,
+            AgyNum::Text(s) => s.trim().parse::<u64>().unwrap_or(0),
+        }
+    }
+}
+
+/// One `transcript_full.jsonl` record; only `PLANNER_RESPONSE` ones are calls.
+#[derive(Debug, Default, Deserialize)]
+struct AgyRecord {
+    #[serde(default)]
+    step_index: Option<AgyNum>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    input_tokens: Option<AgyNum>,
+    #[serde(default)]
+    cache_read_tokens: Option<AgyNum>,
+    #[serde(default)]
+    output_tokens: Option<AgyNum>,
+}
+
+/// One model call from a transcript line, or None for any other record.
+/// `input_tokens` excludes cache, so `context = input + cache_read`. The
+/// model is left empty: the caller fills it from the selection log.
+pub fn agy_call(line: &str) -> Result<Option<RawCall>, ()> {
+    let r: AgyRecord = serde_json::from_str(line).map_err(|_| ())?;
+    if r.kind.as_deref() != Some("PLANNER_RESPONSE") {
+        return Ok(None);
+    }
+    let Some(step) = r.step_index else {
+        return Err(());
+    };
+    let input = r.input_tokens.map(|n| n.get()).unwrap_or(0);
+    let cache_read = r.cache_read_tokens.map(|n| n.get()).unwrap_or(0);
+    let at_ms = r
+        .created_at
+        .as_deref()
+        .and_then(crate::parse_iso_to_epoch_ms)
+        .ok_or(())?;
+    Ok(Some(RawCall {
+        key: step.get().to_string(),
+        at_ms,
+        model: String::new(),
+        context: input + cache_read,
+        input,
+        cache_read,
+        cache_creation: 0,
+        output: r.output_tokens.map(|n| n.get()).unwrap_or(0),
+        reasoning: None,
+        attribution: None,
+    }))
+}
+
+/// A model chosen in agy, as its own log records it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelSelection {
+    pub at_ms: i64,
+    pub label: String,
+}
+
+/// Local calendar fields of a glog timestamp (`I1112 13:45:58.188560`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlogStamp {
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    pub millis: u32,
+}
+
+const AGY_SELECTION_MARK: &str = "Propagating selected model override to backend: label=\"";
+
+/// The glog time and model label of a selection line.
+pub fn parse_agy_selection_line(line: &str) -> Option<(GlogStamp, String)> {
+    let label_at = line.find(AGY_SELECTION_MARK)? + AGY_SELECTION_MARK.len();
+    let label = line[label_at..].split('"').next()?.to_string();
+    if label.is_empty() {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let head = parts.next()?;
+    let clock = parts.next()?;
+    let md = head.get(1..5)?;
+    let num = |s: &str| s.parse::<u32>().ok();
+    let (hms, frac) = clock.split_once('.').unwrap_or((clock, "0"));
+    let mut hms = hms.split(':');
+    let millis = format!("{frac:0<3}").get(..3).and_then(num)?;
+    Some((
+        GlogStamp {
+            month: num(md.get(..2)?)?,
+            day: num(md.get(2..)?)?,
+            hour: num(hms.next()?)?,
+            minute: num(hms.next()?)?,
+            second: num(hms.next()?)?,
+            millis,
+        },
+        label,
+    ))
+}
+
+/// `cli-YYYYMMDD_HHMMSS.log` -> the year the log's lines belong to.
+pub fn agy_log_year(file_name: &str) -> Option<i32> {
+    file_name
+        .strip_prefix("cli-")?
+        .get(..4)?
+        .parse::<i32>()
+        .ok()
+}
+
+/// Local wall-clock time to epoch ms. agy's log carries no zone, so the
+/// machine's zone is the only guess; off Unix the fields read as UTC.
+fn local_stamp_ms(year: i32, s: GlogStamp) -> Option<i64> {
+    #[cfg(unix)]
+    {
+        // SAFETY: tm is plain data and mktime only reads and normalizes it.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        tm.tm_year = year - 1900;
+        tm.tm_mon = s.month as i32 - 1;
+        tm.tm_mday = s.day as i32;
+        tm.tm_hour = s.hour as i32;
+        tm.tm_min = s.minute as i32;
+        tm.tm_sec = s.second as i32;
+        tm.tm_isdst = -1;
+        let t = unsafe { libc::mktime(&mut tm) };
+        (t != -1).then(|| t as i64 * 1000 + s.millis as i64)
+    }
+    #[cfg(not(unix))]
+    {
+        let month = time::Month::try_from(s.month as u8).ok()?;
+        let date = time::Date::from_calendar_date(year, month, s.day as u8).ok()?;
+        let t = time::Time::from_hms(s.hour as u8, s.minute as u8, s.second as u8).ok()?;
+        Some(
+            (time::PrimitiveDateTime::new(date, t)
+                .assume_utc()
+                .unix_timestamp()
+                * 1000)
+                + s.millis as i64,
+        )
+    }
+}
+
+/// Every model selection in agy's logs under `data_dir/log`, oldest first.
+pub fn agy_model_selections_in(data_dir: &Path) -> Vec<ModelSelection> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(data_dir.join("log")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.ends_with(".log") {
+            continue;
+        }
+        let Some(year) = agy_log_year(name) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            if let Some((stamp, label)) = parse_agy_selection_line(line) {
+                if let Some(at_ms) = local_stamp_ms(year, stamp) {
+                    out.push(ModelSelection { at_ms, label });
+                }
+            }
+        }
+    }
+    out.sort_by_key(|s| s.at_ms);
+    out
+}
+
+fn agy_model_selections() -> Vec<ModelSelection> {
+    antigravity_data_dir_here()
+        .map(|d| agy_model_selections_in(&d))
+        .unwrap_or_default()
+}
+
+/// The last selection at or before `at_ms`, else "unknown".
+pub fn agy_model_at(selections: &[ModelSelection], at_ms: i64) -> String {
+    selections
+        .iter()
+        .rev()
+        .find(|s| s.at_ms <= at_ms)
+        .map(|s| s.label.clone())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn antigravity_data_dir_here() -> Option<PathBuf> {
+    Some(crate::home_dir()?.join(".gemini").join("antigravity-cli"))
+}
+
+/// An agy conversation of this project; `parent` set for a subagent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgyConversation {
+    pub id: String,
+    pub parent: Option<String>,
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A `file://` URI as a path string.
+fn file_uri_path(uri: &str) -> Option<String> {
+    let rest = uri.trim().strip_prefix("file://")?;
+    let mut path = percent_decode(rest);
+    let b = path.as_bytes();
+    if b.len() > 2 && b[0] == b'/' && b[2] == b':' && b[1].is_ascii_alphabetic() {
+        path.remove(0);
+    }
+    Some(path)
+}
+
+/// `workspace_uris` is a JSON array of `file://` URIs (observed:
+/// `["file:///Users/jonudell/bram"]`); a bare comma list also reads.
+pub fn workspace_uris_include(uris: &str, canonical_root: &str) -> bool {
+    let list: Vec<String> = serde_json::from_str(uris)
+        .unwrap_or_else(|_| uris.split(',').map(|s| s.trim().to_string()).collect());
+    list.iter()
+        .filter_map(|u| file_uri_path(u))
+        .any(|p| crate::canonical_path_string(Path::new(&p)) == canonical_root)
+}
+
+/// This project's conversations in `conversation_summaries`.
+pub fn agy_conversations(conn: &rusqlite::Connection, root: &Path) -> Vec<AgyConversation> {
+    let canonical = crate::canonical_path_string(root);
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT conversation_id, workspace_uris, parent_conversation_id \
+         FROM conversation_summaries",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .filter(|(_, uris, _)| {
+            uris.as_deref()
+                .is_some_and(|u| workspace_uris_include(u, &canonical))
+        })
+        .map(|(id, _, parent)| AgyConversation {
+            id,
+            parent: parent.filter(|p| !p.is_empty()),
+        })
+        .collect()
+}
+
+/// agy keeps the database in WAL mode, so a plain read-only open sees the
+/// newest rows; the immutable URI is the fallback when that cannot open.
+fn open_agy_summaries(data_dir: &Path) -> Option<rusqlite::Connection> {
+    use rusqlite::OpenFlags;
+    let db = data_dir.join("conversation_summaries.db");
+    if !db.is_file() {
+        return None;
+    }
+    rusqlite::Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .ok()
+        .or_else(|| {
+            let uri = format!("file:{}?mode=ro&immutable=1", db.to_string_lossy());
+            rusqlite::Connection::open_with_flags(
+                uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )
+            .ok()
+        })
+}
+
+/// The transcript files of one conversation: the main file, else its chunks.
+fn agy_transcript_files(data_dir: &Path, id: &str) -> Vec<PathBuf> {
+    let logs = data_dir
+        .join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs");
+    let main = logs.join("transcript_full.jsonl");
+    if main.is_file() {
+        return vec![main];
+    }
+    let mut chunks: Vec<PathBuf> = std::fs::read_dir(logs.join("chunks").join("transcript_full"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                .collect()
+        })
+        .unwrap_or_default();
+    chunks.sort();
+    chunks
+}
+
+pub fn antigravity_sources_in(data_dir: &Path, root: &Path) -> Vec<Source> {
+    let Some(conn) = open_agy_summaries(data_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for conv in agy_conversations(&conn, root) {
+        for path in agy_transcript_files(data_dir, &conv.id) {
+            out.push(Source::Antigravity {
+                id: conv.id.clone(),
+                parent: conv.parent.clone(),
+                path,
+            });
+        }
+    }
+    out
+}
+
+fn antigravity_sources(root: &Path) -> Vec<Source> {
+    antigravity_data_dir_here()
+        .map(|d| antigravity_sources_in(&d, root))
+        .unwrap_or_default()
+}
+
+fn agy_ident(id: &str, parent: Option<&str>) -> Ident {
+    Ident {
+        provider: Provider::Antigravity,
+        session: parent.unwrap_or(id).to_string(),
+        thread: if parent.is_some() {
+            Thread::Subagent
+        } else {
+            Thread::Main
+        },
+        agent_id: parent.map(|_| id.to_string()),
+        label: None,
+    }
+}
+
+fn fetch_antigravity(
+    chunk: &str,
+    state: &SourceState,
+    id: &str,
+    parent: Option<&str>,
+    models: &[ModelSelection],
+) -> Fetched {
+    let mut st = state.clone();
+    let mut calls: Vec<RawCall> = Vec::new();
+    feed_lines(chunk, 0, |line, _| {
+        if line.trim().is_empty() {
+            return;
+        }
+        match agy_call(line) {
+            Ok(Some(mut c)) => {
+                c.model = agy_model_at(models, c.at_ms);
+                // A step written twice is one call: the later record wins.
+                match calls.iter_mut().find(|x| x.key == c.key) {
+                    Some(prev) => *prev = c,
+                    None => calls.push(c),
+                }
+            }
+            Ok(None) => {}
+            Err(()) => st.unreadable += 1,
+        }
+    });
+    Fetched {
+        key: String::new(),
+        path: None,
+        ident: agy_ident(id, parent),
+        size: 0,
+        mtime_ms: 0,
+        inode: 0,
+        read_to: 0,
+        state: st,
+        quota: None,
+        calls,
+        reads: Vec::new(),
+    }
+}
+
+pub fn parse_antigravity_text(
+    text: &str,
+    id: &str,
+    parent: Option<&str>,
+    models: &[ModelSelection],
+) -> ParsedFile {
+    let f = fetch_antigravity(text, &SourceState::default(), id, parent, models);
+    ParsedFile {
+        provider: "antigravity",
+        session_id: f.ident.session,
+        thread: Some(f.ident.thread),
+        agent_id: f.ident.agent_id,
+        calls: f.calls,
+        unreadable: f.state.unreadable,
+        ..Default::default()
+    }
+}
+
 // --- lib.rs test spans ----------------------------------------------------
 
 /// The 1-based inclusive line spans of every `#[cfg(test)] mod name { ... }`
@@ -1523,6 +1955,13 @@ pub enum Source {
         id: String,
         path: PathBuf,
     },
+    /// One Antigravity transcript file of a conversation (`parent` set for a
+    /// subagent conversation).
+    Antigravity {
+        id: String,
+        parent: Option<String>,
+        path: PathBuf,
+    },
 }
 
 impl Source {
@@ -1530,7 +1969,8 @@ impl Source {
         match self {
             Source::ClaudeMain { path, .. }
             | Source::ClaudeSubagent { path, .. }
-            | Source::Codex { path, .. } => path,
+            | Source::Codex { path, .. }
+            | Source::Antigravity { path, .. } => path,
         }
     }
 }
@@ -1589,6 +2029,7 @@ pub fn discover(root: &Path) -> Vec<Source> {
             out.push(Source::Codex { id, path });
         }
     }
+    out.extend(antigravity_sources(root));
     out
 }
 
@@ -1626,6 +2067,9 @@ pub fn parse_source(src: &Source) -> Option<Arc<ParsedFile>> {
             parse_claude_text(&text, id, Thread::Subagent, Some(agent.clone()))
         }
         Source::Codex { id, .. } => parse_codex_text(&text, id),
+        Source::Antigravity { id, parent, .. } => {
+            parse_antigravity_text(&text, id, parent.as_deref(), &agy_model_selections())
+        }
     });
     if let Ok(mut g) = cache.lock() {
         g.insert(path.to_path_buf(), (key, parsed.clone()));
@@ -2116,22 +2560,17 @@ pub fn build_report(
     });
 
     let mut providers: BTreeMap<String, ProviderStatus> = BTreeMap::new();
-    for name in ["claude", "codex", "opencode"] {
+    for name in ["claude", "codex", "opencode", "antigravity"] {
         let (s, c) = statuses.get(name).copied().unwrap_or((0, 0));
         providers.insert(
             name.to_string(),
             ProviderStatus::Read {
                 sessions: s,
                 calls: c,
+                model_source: (name == "antigravity").then_some("selection-log"),
             },
         );
     }
-    providers.insert(
-        "antigravity".to_string(),
-        ProviderStatus::Unavailable {
-            reason: ANTIGRAVITY_REASON.to_string(),
-        },
-    );
 
     let mut files: Vec<FileRow> = file_aggs.into_values().collect();
     for f in files.iter_mut() {
@@ -2578,6 +3017,7 @@ enum Provider {
     Claude,
     Codex,
     OpenCode,
+    Antigravity,
 }
 
 impl Provider {
@@ -2586,6 +3026,7 @@ impl Provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
             Provider::OpenCode => "opencode",
+            Provider::Antigravity => "antigravity",
         }
     }
     fn parse(s: &str) -> Option<Provider> {
@@ -2593,6 +3034,7 @@ impl Provider {
             "claude" => Some(Provider::Claude),
             "codex" => Some(Provider::Codex),
             "opencode" => Some(Provider::OpenCode),
+            "antigravity" => Some(Provider::Antigravity),
             _ => None,
         }
     }
@@ -2837,6 +3279,7 @@ impl Ledger {
         let started = std::time::Instant::now();
         let now_ms = now_epoch_ms();
         let mut stats = IngestStats::default();
+        let mut agy_models: Option<Vec<ModelSelection>> = None;
         for src in sources {
             let path = src.path();
             let Some((mtime_ms, size)) = file_key(path) else {
@@ -2889,6 +3332,10 @@ impl Ledger {
                     },
                 ),
                 Source::Codex { id, .. } => fetch_codex(&chunk, offset, &state, id),
+                Source::Antigravity { id, parent, .. } => {
+                    let models = agy_models.get_or_insert_with(agy_model_selections);
+                    fetch_antigravity(&chunk, &state, id, parent.as_deref(), models)
+                }
             };
             fetched.key = key;
             fetched.path = Some(key_path(path));
@@ -3911,6 +4358,65 @@ pub fn sample_opencode_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>, si
         turn_calls: turn.len(),
         turn_output: turn.iter().map(|c| c.output).sum(),
         cache_read: calls.iter().map(|c| c.cache_read).sum(),
+        ..Default::default()
+    };
+    crate::append_bram_trace_line(app, "session-context", &format_sample(&s));
+}
+
+/// Antigravity's turn end. The finished cue names no conversation, so this
+/// ingests every conversation of the project that changed (sources keep byte
+/// offsets, so unchanged ones cost a stat) and samples the most recently
+/// modified main-thread one. A turn is its trailing run of calls with gaps
+/// under `TURN_GAP_MS`; agy's transcript has no user-message cue to cut on.
+pub fn sample_antigravity_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(root) = crate::project_root(Some(app)) else {
+        return;
+    };
+    let sources = antigravity_sources(&root);
+    if sources.is_empty() {
+        return;
+    }
+    if let Some(mut ledger) = ledger_path_for_app(app, &root)
+        .as_deref()
+        .and_then(Ledger::open)
+    {
+        let wc = crate::worklist_state_open(app);
+        let stats = ledger.ingest_sources(&sources, wc.as_ref());
+        if crate::bram_trace_enabled() {
+            crate::append_bram_trace_line(app, "token-accounting", &stats.trace_fields());
+        }
+    }
+    if !crate::bram_trace_enabled() {
+        return;
+    }
+    let newest = sources
+        .iter()
+        .filter(|s| matches!(s, Source::Antigravity { parent: None, .. }))
+        .filter_map(|s| file_key(s.path()).map(|k| (k.0, s)))
+        .max_by_key(|(m, _)| *m)
+        .map(|(_, s)| s);
+    let Some(src) = newest else {
+        return;
+    };
+    let Some(pf) = parse_source(src) else {
+        return;
+    };
+    let Some(last) = pf.calls.last() else {
+        return;
+    };
+    let mut start = pf.calls.len() - 1;
+    while start > 0 && pf.calls[start].at_ms - pf.calls[start - 1].at_ms <= TURN_GAP_MS {
+        start -= 1;
+    }
+    let turn = &pf.calls[start..];
+    let s = Sample {
+        provider: "antigravity",
+        session: pf.session_id.clone(),
+        model: last.model.clone(),
+        tokens: last.context,
+        turn_calls: turn.len(),
+        turn_output: turn.iter().map(|c| c.output).sum(),
+        cache_read: pf.calls.iter().map(|c| c.cache_read).sum(),
         ..Default::default()
     };
     crate::append_bram_trace_line(app, "session-context", &format_sample(&s));

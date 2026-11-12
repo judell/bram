@@ -1195,3 +1195,104 @@ fn chrono_like(ms: i64) -> String {
         ms.rem_euclid(1000)
     )
 }
+
+// --- Antigravity ---------------------------------------------------------
+
+#[test]
+fn agy_planner_response_is_a_call_whose_context_adds_cache_back() {
+    let line = r#"{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-12T21:47:06Z","input_tokens":2547,"cache_read_tokens":"19733","output_tokens":352.0,"content":"x"}"#;
+    let c = agy_call(line).unwrap().unwrap();
+    assert_eq!(c.key, "3");
+    assert_eq!(c.input, 2547);
+    assert_eq!(c.cache_read, 19733, "strings and numbers both read");
+    assert_eq!(c.context, 2547 + 19733, "input excludes cache");
+    assert_eq!(c.output, 352);
+    assert_eq!(c.at_ms, t("2026-11-12T21:47:06Z"));
+    // other record types are not calls; a broken line is an error
+    let other = r#"{"step_index":2,"type":"VIEW_FILE","created_at":"2026-11-12T21:47:06Z"}"#;
+    assert_eq!(agy_call(other).unwrap(), None);
+    assert!(agy_call("nope").is_err());
+}
+
+#[test]
+fn agy_conversation_summaries_match_the_root_and_mark_subagents() {
+    let dir = std::env::temp_dir().join(format!("agy-root-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = dir.to_string_lossy().into_owned();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, \
+         workspace_uris TEXT, project_id TEXT, parent_conversation_id TEXT, nesting_depth INTEGER);",
+    )
+    .unwrap();
+    let ins = |id: &str, uris: &str, parent: Option<&str>| {
+        conn.execute(
+            "INSERT INTO conversation_summaries VALUES (?1,'t',?2,'p',?3,0)",
+            rusqlite::params![id, uris, parent],
+        )
+        .unwrap();
+    };
+    ins("main1", &format!(r#"["file://{root}"]"#), None);
+    ins("sub1", &format!(r#"["file://{root}"]"#), Some("main1"));
+    ins("other", r#"["file:///somewhere/else"]"#, None);
+    let got = agy_conversations(&conn, &dir);
+    assert_eq!(
+        got,
+        vec![
+            AgyConversation {
+                id: "main1".into(),
+                parent: None
+            },
+            AgyConversation {
+                id: "sub1".into(),
+                parent: Some("main1".into())
+            },
+        ]
+    );
+    let pf = parse_antigravity_text("", "sub1", Some("main1"), &[]);
+    assert_eq!(pf.thread, Some(Thread::Subagent));
+    assert_eq!(pf.session_id, "main1");
+    assert_eq!(pf.agent_id.as_deref(), Some("sub1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn agy_log_line_gives_a_model_label_with_its_time() {
+    let line = r#"I1112 13:45:59.815853     471 model_config_manager.go:375] Propagating selected model override to backend: label="Gemini 4 Argon (Medium)""#;
+    let (stamp, label) = parse_agy_selection_line(line).unwrap();
+    assert_eq!(label, "Gemini 4 Argon (Medium)");
+    assert_eq!(
+        stamp,
+        GlogStamp {
+            month: 11,
+            day: 12,
+            hour: 13,
+            minute: 45,
+            second: 59,
+            millis: 815
+        }
+    );
+    assert_eq!(agy_log_year("cli-20261112_134518.log"), Some(2026));
+    assert!(parse_agy_selection_line("I1112 13:45:59.8 x.go:1] something else").is_none());
+}
+
+#[test]
+fn agy_step_takes_the_last_selection_at_or_before_it() {
+    let sels = vec![
+        ModelSelection {
+            at_ms: 1000,
+            label: "A".into(),
+        },
+        ModelSelection {
+            at_ms: 2000,
+            label: "B".into(),
+        },
+    ];
+    assert_eq!(agy_model_at(&sels, 999), "unknown");
+    assert_eq!(agy_model_at(&sels, 1000), "A");
+    assert_eq!(agy_model_at(&sels, 2500), "B");
+    let text = r#"{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-12T21:47:00Z","input_tokens":5,"cache_read_tokens":0,"output_tokens":1}"#;
+    let pf = parse_antigravity_text(text, "c1", None, &sels);
+    assert_eq!(pf.calls.len(), 1);
+    assert_eq!(pf.calls[0].model, "B");
+}

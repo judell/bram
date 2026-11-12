@@ -106,6 +106,9 @@ pub struct Hit {
     /// Self-contained structured detail (serialized JSON), empty when the
     /// bucket fetches detail live. History rows carry the WorklistHistoryGroup.
     pub extra: String,
+    /// Epoch seconds when the scan noticed the original source file was gone;
+    /// None while it exists (or for synthetic keys). The row keeps its text.
+    pub source_gone_at: Option<i64>,
 }
 
 /// Open (or create) the index at `path`, in WAL mode, with the current schema.
@@ -147,7 +150,7 @@ pub fn open_in_memory() -> Result<Connection> {
 ///
 /// When you bump this, add the matching arm to `apply_bookkeeping_migration`
 /// in the same change.
-const BOOKKEEPING_VERSION: i64 = 1;
+const BOOKKEEPING_VERSION: i64 = 2;
 
 const BOOKKEEPING_VERSION_KEY: &str = "bookkeeping_version";
 
@@ -193,7 +196,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
            USING fts5(type, source, date, link, content, intent, file UNINDEXED, extra UNINDEXED, tokenize='unicode61'); \
          CREATE TABLE IF NOT EXISTS indexed_files( \
            path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, \
-           rowid_ref INTEGER, indexed_at INTEGER); \
+           rowid_ref INTEGER, indexed_at INTEGER, source_gone_at INTEGER); \
          CREATE TABLE IF NOT EXISTS session_tools( \
            tool_id TEXT NOT NULL, session_path TEXT NOT NULL, \
            PRIMARY KEY(tool_id, session_path)); \
@@ -233,6 +236,13 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
 /// is a dead index. The FTS table is untouched by anything in here, which is
 /// what makes swallowing correct rather than merely convenient.
 fn migrate_bookkeeping(conn: &Connection, freshly_built: bool) {
+    // An index adopted without a stored version (the seed path) is never
+    // altered by a step arm, so the column is also ensured here. Idempotent.
+    if let Err(e) = ensure_source_gone_column(conn) {
+        eprintln!(
+            "[search-index] op=bookkeeping-failed detail={e} (source_gone_at; retried next open)"
+        );
+    }
     if let Err(e) = migrate_bookkeeping_inner(conn, freshly_built) {
         eprintln!(
             "[search-index] op=bookkeeping-failed detail={} (index opened anyway; retried next open)",
@@ -297,6 +307,9 @@ fn apply_bookkeeping_migration(conn: &Connection, step: i64) -> Result<()> {
     match step {
         // The shape an arm takes:
         //   1 => conn.execute_batch("ALTER TABLE indexed_files ADD COLUMN bucket TEXT")?,
+        // 1 -> 2: `source_gone_at`, when the scan noticed a session's original
+        // file was gone (search-index-keeps-sessions-whose-source-is-gone).
+        1 => ensure_source_gone_column(conn)?,
         other => {
             // A gap in this match is a programming error (someone bumped the
             // constant without adding the arm), not a data condition, so it is
@@ -306,6 +319,22 @@ fn apply_bookkeeping_migration(conn: &Connection, step: i64) -> Result<()> {
             let _ = conn;
             eprintln!("[search-index] op=bookkeeping-migration-missing step={other}");
         }
+    }
+    Ok(())
+}
+
+/// `ALTER TABLE indexed_files ADD COLUMN source_gone_at`, only when absent, so
+/// the migration arm, the seed path and a fresh build all converge.
+fn ensure_source_gone_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(indexed_files)")?;
+    let has = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>>>()?
+        .iter()
+        .any(|c| c == "source_gone_at");
+    drop(stmt);
+    if !has {
+        conn.execute_batch("ALTER TABLE indexed_files ADD COLUMN source_gone_at INTEGER")?;
     }
     Ok(())
 }
@@ -598,38 +627,49 @@ pub fn session_paths_for_tools(conn: &Connection, tool_ids: &[String]) -> Result
     Ok(out)
 }
 
-/// Reconcile the index against the filesystem: remove rows whose file-backed
-/// source no longer exists. Only `indexed_files.path` values that are absolute
-/// filesystem paths (start with '/') are file-backed — session transcripts
-/// (Claude + Codex). Synthetic keys (`commit:<sha>`, `issue:<n>`,
-/// `history:<ts>`) never start with '/' and are always exempt. Returns the
-/// number of docs pruned.
+/// Reconcile the index against the filesystem: note which file-backed sources
+/// are gone, WITHOUT forgetting them. Only `indexed_files.path` values that are
+/// absolute filesystem paths (start with '/') are file-backed -- session
+/// transcripts and Bram's exports of other providers' sessions. Synthetic keys
+/// (`commit:<sha>`, `issue:<n>`, `history:<ts>`) never start with '/' and are
+/// always exempt.
 ///
-/// Needed because the incremental passes only walk *existing* files, so a
-/// deleted transcript (e.g. Claude Code's 30-day cleanup sweep, which a Bram
-/// relaunch triggers) would otherwise leave an orphaned row that surfaces as a
-/// phantom search hit whose detail view is empty (search-index-prune-orphaned-rows).
-pub fn prune_missing_files(conn: &Connection) -> Result<usize> {
+/// The index is where history lives. Upstream deletes sources (Claude Code's
+/// `cleanupPeriodDays` sweep, a recreated `~/.local/share/opencode` or
+/// `~/.gemini`); the indexed text survives, the row records `source_gone_at`,
+/// and the pane says so. A path that exists again has its mark cleared (a
+/// changed file is also re-indexed by the ordinary pass, whose upsert resets
+/// the mark; this covers a file back unchanged). `session_tools` rows stay:
+/// they map tool ids to the session. Returns (newly marked, cleared).
+pub fn mark_missing_sources(conn: &Connection) -> Result<(usize, usize)> {
     let mut stmt =
-        conn.prepare("SELECT path, rowid_ref FROM indexed_files WHERE path LIKE '/%'")?;
+        conn.prepare("SELECT path, source_gone_at FROM indexed_files WHERE path LIKE '/%'")?;
     let candidates = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-        .collect::<Result<Vec<(String, i64)>>>()?;
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+        })?
+        .collect::<Result<Vec<(String, Option<i64>)>>>()?;
     drop(stmt);
-    let mut removed = 0usize;
-    for (path, rowid) in candidates {
-        if std::path::Path::new(&path).exists() {
-            continue;
+    let mut marked = 0usize;
+    let mut cleared = 0usize;
+    for (path, gone_at) in candidates {
+        let exists = std::path::Path::new(&path).exists();
+        if exists && gone_at.is_some() {
+            conn.execute(
+                "UPDATE indexed_files SET source_gone_at = NULL WHERE path = ?1",
+                params![path],
+            )?;
+            cleared += 1;
+        } else if !exists && gone_at.is_none() {
+            conn.execute(
+                "UPDATE indexed_files SET source_gone_at = CAST(strftime('%s','now') AS INTEGER) \
+                 WHERE path = ?1",
+                params![path],
+            )?;
+            marked += 1;
         }
-        conn.execute("DELETE FROM search_index WHERE rowid = ?1", params![rowid])?;
-        conn.execute("DELETE FROM indexed_files WHERE path = ?1", params![path])?;
-        conn.execute(
-            "DELETE FROM session_tools WHERE session_path = ?1",
-            params![path],
-        )?;
-        removed += 1;
     }
-    Ok(removed)
+    Ok((marked, cleared))
 }
 
 /// Total indexed rows — for the scan trace.
@@ -667,7 +707,8 @@ pub fn counts_by_type(conn: &Connection) -> Result<Vec<(String, i64)>> {
 /// scan. `snippet`/`rank` are unused here (empty / 0).
 pub fn list_by_type(conn: &Connection, kind: &str, limit: usize) -> Result<Vec<Hit>> {
     let mut stmt = conn.prepare(
-        "SELECT type, source, date, link, '', 0.0, file, extra \
+        "SELECT type, source, date, link, '', 0.0, file, extra, \
+                (SELECT source_gone_at FROM indexed_files WHERE path = search_index.file) \
          FROM search_index WHERE type = ?1 \
          ORDER BY CAST(date AS INTEGER) DESC LIMIT ?2",
     )?;
@@ -682,6 +723,7 @@ pub fn list_by_type(conn: &Connection, kind: &str, limit: usize) -> Result<Vec<H
                 rank: r.get(5)?,
                 key: r.get(6)?,
                 extra: r.get(7)?,
+                source_gone_at: r.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -697,7 +739,8 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
     let mut sql = String::from(
         "SELECT type, source, date, link, \
                 snippet(search_index, -1, '[', ']', '…', 40), \
-                bm25(search_index, 1.0, 1.0, 1.0, 1.0, 1.0, 0.35), file, extra \
+                bm25(search_index, 1.0, 1.0, 1.0, 1.0, 1.0, 0.35), file, extra, \
+                (SELECT source_gone_at FROM indexed_files WHERE path = search_index.file) \
          FROM search_index WHERE search_index MATCH ?",
     );
     let mut args: Vec<Value> = vec![Value::Text(q.to_string())];
@@ -726,6 +769,7 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
             rank: r.get(5)?,
             key: r.get(6)?,
             extra: r.get(7)?,
+            source_gone_at: r.get(8)?,
         })
     })?;
     rows.collect()
@@ -740,6 +784,19 @@ pub fn get_doc(conn: &Connection, key: &str) -> Result<Option<String>> {
         |r| r.get::<_, String>(0),
     )
     .optional()
+}
+
+/// When the scan noticed this doc's original source file was gone (epoch
+/// seconds), or None when it exists, is unknown, or is a synthetic key.
+pub fn get_source_gone(conn: &Connection, key: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT source_gone_at FROM indexed_files WHERE path = ?1",
+            params![key],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
 }
 
 /// Read the `extra` column for a doc key (the cached structured payload).
@@ -1210,53 +1267,92 @@ mod tests {
     }
 
     #[test]
-    fn prune_removes_missing_file_rows_only() {
+    fn missing_sources_are_marked_not_removed_and_clear_on_return() {
         use std::io::Write;
         let conn = open_in_memory().unwrap();
+        let mut path = std::env::temp_dir();
+        path.push(format!("bram-gone-{}.jsonl", std::process::id()));
+        writeln!(std::fs::File::create(&path).unwrap(), "x").unwrap();
+        let key = path.to_string_lossy().to_string();
 
-        // A real, existing transcript path → its row must survive.
-        let mut present = std::env::temp_dir();
-        present.push("bram-prune-present.jsonl");
-        writeln!(std::fs::File::create(&present).unwrap(), "x").unwrap();
-        let present_key = present.to_string_lossy().to_string();
-
-        index_doc(
-            &conn,
-            &row("session", &present_key, "present", "alpha"),
-            1,
-            1,
-        )
-        .unwrap();
-        index_doc(
-            &conn,
-            &row("session", "/no/such/gone-session.jsonl", "gone", "beta"),
-            1,
-            1,
-        )
-        .unwrap();
-        // Synthetic key (real commit-row format) — no leading '/', must be exempt.
+        index_doc(&conn, &row("session", &key, "kept", "alpha"), 1, 1).unwrap();
         index_doc(&conn, &row("commit", "commit:abc123", "abc", "gamma"), 1, 1).unwrap();
-        assert_eq!(row_count(&conn).unwrap(), 3);
-
-        let removed = prune_missing_files(&conn).unwrap();
-        assert_eq!(removed, 1, "only the missing-file row is pruned");
-        assert_eq!(row_count(&conn).unwrap(), 2);
-        assert_eq!(
-            query(&conn, "beta", 10, &[]).unwrap().len(),
-            0,
-            "gone transcript pruned"
-        );
-        assert_eq!(
-            query(&conn, "alpha", 10, &[]).unwrap().len(),
+        index_doc(
+            &conn,
+            &row("session", "/no/such/never-there.jsonl", "ghost", "beta"),
             1,
-            "present transcript kept"
-        );
-        assert_eq!(
-            query(&conn, "gamma", 10, &[]).unwrap().len(),
             1,
-            "synthetic key exempt"
-        );
+        )
+        .unwrap();
 
-        let _ = std::fs::remove_file(&present);
+        // Everything present or synthetic stays unmarked; the ghost is marked.
+        assert_eq!(mark_missing_sources(&conn).unwrap(), (1, 0));
+        assert_eq!(mark_missing_sources(&conn).unwrap(), (0, 0), "idempotent");
+        assert_eq!(row_count(&conn).unwrap(), 3, "nothing is deleted");
+        let ghost = query(&conn, "beta", 10, &[]).unwrap();
+        assert_eq!(ghost.len(), 1, "gone transcript still searchable");
+        assert!(ghost[0].source_gone_at.is_some());
+        assert!(get_source_gone(&conn, "/no/such/never-there.jsonl")
+            .unwrap()
+            .is_some());
+        assert!(get_doc(&conn, "/no/such/never-there.jsonl")
+            .unwrap()
+            .is_some());
+        assert!(query(&conn, "alpha", 10, &[]).unwrap()[0]
+            .source_gone_at
+            .is_none());
+        assert!(query(&conn, "gamma", 10, &[]).unwrap()[0]
+            .source_gone_at
+            .is_none());
+
+        // The real file goes away, then comes back.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(mark_missing_sources(&conn).unwrap(), (1, 0));
+        assert!(query(&conn, "alpha", 10, &[]).unwrap()[0]
+            .source_gone_at
+            .is_some());
+        writeln!(std::fs::File::create(&path).unwrap(), "x").unwrap();
+        // Back unchanged: the reconcile alone clears the mark.
+        assert_eq!(mark_missing_sources(&conn).unwrap(), (0, 1));
+        assert!(!needs_index(&conn, &key, 1, 1).unwrap());
+        assert!(query(&conn, "alpha", 10, &[]).unwrap()[0]
+            .source_gone_at
+            .is_none());
+
+        // Gone again, then back changed: the ordinary re-index replaces the
+        // row (no duplicate) and its upsert drops the mark.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(mark_missing_sources(&conn).unwrap(), (1, 0));
+        writeln!(std::fs::File::create(&path).unwrap(), "xy").unwrap();
+        assert!(needs_index(&conn, &key, 2, 3).unwrap());
+        index_doc(&conn, &row("session", &key, "kept", "alpha delta"), 2, 3).unwrap();
+        assert_eq!(row_count(&conn).unwrap(), 3, "no duplicate row");
+        let again = query(&conn, "delta", 10, &[]).unwrap();
+        assert_eq!(again.len(), 1);
+        assert!(again[0].source_gone_at.is_none(), "reindex clears the mark");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn source_gone_column_is_added_to_an_old_bookkeeping_table() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(
+            "DROP TABLE indexed_files; \
+             CREATE TABLE indexed_files(path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, \
+               rowid_ref INTEGER, indexed_at INTEGER); \
+             UPDATE schema_meta SET value = 1;",
+        )
+        .unwrap();
+        migrate_bookkeeping(&conn, false);
+        assert!(get_source_gone(&conn, "/x").unwrap().is_none());
+        let has: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('indexed_files') WHERE name='source_gone_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1);
     }
 }

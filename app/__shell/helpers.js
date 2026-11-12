@@ -1630,6 +1630,15 @@ window.__bramSearchTypeLabel = function (h) {
   return h.type;
 };
 
+// search-index-keeps-sessions-whose-source-is-gone: the line a hit or detail
+// shows when /__search says the original session file no longer exists. Empty
+// for every other hit. The wording lives here so the row and the modal agree.
+window.__bramSourceGoneNote = function (h) {
+  return h && h.sourceGone
+    ? "The original session file is gone; this is the indexed copy."
+    : "";
+};
+
 // issue-461-refuse-placeholder-pair: throw the host's refusal text, so the
 // toast says why instead of "HTTP 409". Falls back to the status when the
 // body is empty.

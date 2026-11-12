@@ -34,7 +34,7 @@
                  button, on session hits. /__search carries provider and id;
                  ResultList's __bramRowClickHit skips BUTTON clicks, so this
                  doesn't also open the detail modal. -->
-            <Button when="{$item.type === 'session'}"
+            <Button when="{$item.type === 'session' &amp;&amp; !$item.sourceGone}"
               icon="swap" variant="ghost" size="xs"
               tooltip="Switch to this session (restarts the agent on it)"
               onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
@@ -56,6 +56,11 @@
           <Text width="100%" whiteSpace="pre-wrap"
             fontSize="$fontSize-sm" color="$textColor-secondary"
             segments="{$item.snippetSegs}" />
+          <!-- search-index-keeps-sessions-whose-source-is-gone: the file this
+               session was indexed from no longer exists; the text is kept. -->
+          <Text when="{!!$item.sourceGone}"
+            fontSize="$fontSize-xs" fontStyle="italic" color="$textColor-secondary"
+            value="{window.__bramSourceGoneNote($item)}" />
         </VStack>
       </HStack>
     </property>

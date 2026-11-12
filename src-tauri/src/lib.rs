@@ -40135,10 +40135,12 @@ mod search_index_phase_timing_tests {
 /// One incremental pass over the current project's Claude sessions. Returns
 /// secret-safe phase timing and count metrics.
 /// Reconcile the search index against the filesystem after the session passes:
-/// drop rows whose transcript file is gone (Claude Code's 30-day sweep, /clear,
-/// a plain delete). Runs with the Sessions bucket, so it fires on the
-/// post-relaunch refresh and each periodic session pass. Cheap: one existence
-/// check per indexed session path. Traced only when it removes something.
+/// mark sessions whose transcript file is gone (Claude Code's retention sweep,
+/// /clear, a recreated provider data dir) as `sourceGone`, keeping their
+/// indexed text, and clear the mark on any that came back. Runs with the
+/// Sessions bucket, so it fires on the post-relaunch refresh and each periodic
+/// session pass. Cheap: one existence check per indexed session path. Traced
+/// only when it changes something.
 fn run_search_index_prune<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(db) = search_index_db_path(app) else {
         return;
@@ -40147,27 +40149,32 @@ fn run_search_index_prune<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     };
     let started = std::time::Instant::now();
-    match search_index::prune_missing_files(&conn) {
-        Ok(removed) if removed > 0 => {
+    match search_index::mark_missing_sources(&conn) {
+        Ok((marked, cleared)) => {
             if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "search-index",
-                    &format!(
-                        "op=prune removed={} ms={}",
-                        removed,
-                        started.elapsed().as_millis()
-                    ),
-                );
+                let ms = started.elapsed().as_millis();
+                if marked > 0 {
+                    append_bram_trace_line(
+                        app,
+                        "search-index",
+                        &format!("op=source-gone marked={} ms={}", marked, ms),
+                    );
+                }
+                if cleared > 0 {
+                    append_bram_trace_line(
+                        app,
+                        "search-index",
+                        &format!("op=source-back cleared={}", cleared),
+                    );
+                }
             }
         }
-        Ok(_) => {}
         Err(e) => {
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     app,
                     "search-index",
-                    &format!("op=prune-error detail={}", e),
+                    &format!("op=source-gone-error detail={}", e),
                 );
             }
         }
@@ -87961,16 +87968,24 @@ fn route_request<R: tauri::Runtime>(
                 key = percent_decode(v);
             }
         }
-        let content = if key.is_empty() {
+        let conn = if key.is_empty() {
             None
         } else {
-            search_index_db_path(app)
-                .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
-                .and_then(|conn| search_index::get_doc(&conn, &key).ok().flatten())
+            search_index_db_path(app).and_then(|db| search_index::open(&db.to_string_lossy()).ok())
         };
-        let body =
-            serde_json::to_vec(&serde_json::json!({ "content": content.unwrap_or_default() }))
-                .unwrap_or_default();
+        let content = conn
+            .as_ref()
+            .and_then(|conn| search_index::get_doc(conn, &key).ok().flatten());
+        // The original source file is gone; the content is the indexed copy.
+        let gone_at = conn
+            .as_ref()
+            .and_then(|conn| search_index::get_source_gone(conn, &key).ok().flatten());
+        let body = serde_json::to_vec(&serde_json::json!({
+            "content": content.unwrap_or_default(),
+            "sourceGone": gone_at.is_some(),
+            "sourceGoneAt": gone_at,
+        }))
+        .unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }
 
@@ -88125,6 +88140,8 @@ fn route_request<R: tauri::Runtime>(
                     "key": h.key,
                     "id": id,
                     "provider": provider,
+                    "sourceGone": h.source_gone_at.is_some(),
+                    "sourceGoneAt": h.source_gone_at,
                     // Self-contained detail parsed to JSON (history rows carry
                     // the WorklistHistoryGroup); null for buckets fetched live.
                     "extra": if h.extra.is_empty() {

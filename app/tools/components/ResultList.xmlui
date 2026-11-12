@@ -125,13 +125,25 @@
       <property name="titleTemplate">
         <HStack gap="$space-2" verticalAlignment="center">
           <Text value="{selectedHit ? selectedHit.source : ''}" fontSize="inherit" fontWeight="inherit" width="*" overflowMode="flow" />
-          <Button when="{selectedHit &amp;&amp; selectedHit.type === 'session'}"
+          <Button when="{selectedHit &amp;&amp; selectedHit.type === 'session' &amp;&amp; !selectedHit.sourceGone}"
             icon="swap" variant="ghost" size="xs"
             tooltip="Switch to this session (restarts the agent on it)"
             onClick="window.__bramReloadAgentSessionClick(selectedHit.provider, selectedHit.id, toast)" />
         </HStack>
       </property>
-      <VStack when="{selectedHit.type === 'session'}">
+      <!-- search-index-keeps-sessions-whose-source-is-gone: no file to project
+           turns from, so show the indexed text (/__search/doc) under a note. -->
+      <VStack when="{selectedHit.type === 'session' &amp;&amp; selectedHit.sourceGone}" gap="$space-2">
+        <Text fontSize="$fontSize-sm" fontStyle="italic" color="$textColor-secondary"
+          value="{window.__bramSourceGoneNote(selectedHit)}" />
+        <DataSource id="goneDoc" url="/__search/doc" queryParams="{{ key: selectedHit.key }}" />
+        <ScrollViewer height="70vh">
+          <Text whiteSpace="pre-wrap" fontSize="$fontSize-sm"
+            highlightText="{window.__bramSearchTerms($props.query)}"
+            value="{goneDoc.value ? goneDoc.value.content : 'Loading…'}" />
+        </ScrollViewer>
+      </VStack>
+      <VStack when="{selectedHit.type === 'session' &amp;&amp; !selectedHit.sourceGone}">
         <SessionDetail sessionId="{selectedHit.id}" provider="{selectedHit.provider || 'claude'}"
           query="{$props.query}" height="70vh" />
       </VStack>

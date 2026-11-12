@@ -745,8 +745,8 @@ drill is described in `app/__shell/conventions.md` (Search-first).
 
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
-| `/__search` | HTTP GET | `q=`, `limit=` (default 50, clamped 1–500), `types=session,commit,issue,worklist-history` (optional), `mode=and\|phrase\|prefix\|raw` (default `and`) | `[{ type, source, date, link, snippet, rank, key, id, provider, extra }, …]`; **503** `{ error: "search index not ready", reason: holding\|initial-scan, hint, … }` until a first index cycle completes (never read it as "no history") | agent pane iframe (Search page), agents |
-| `/__search/doc` | HTTP GET | `key=<hit key>` | `{ content }` — the stored full content of one hit (empty when unknown); same 503 as `/__search` | agent pane iframe (inline expanders), agents |
+| `/__search` | HTTP GET | `q=`, `limit=` (default 50, clamped 1–500), `types=session,commit,issue,worklist-history` (optional), `mode=and\|phrase\|prefix\|raw` (default `and`) | `[{ type, source, date, link, snippet, rank, key, id, provider, extra, sourceGone, sourceGoneAt }, …]` (`sourceGone` is true when the original session file no longer exists and the hit is the indexed copy; `sourceGoneAt` is epoch seconds when the scan noticed, else null); **503** `{ error: "search index not ready", reason: holding\|initial-scan, hint, … }` until a first index cycle completes (never read it as "no history") | agent pane iframe (Search page), agents |
+| `/__search/doc` | HTTP GET | `key=<hit key>` | `{ content, sourceGone, sourceGoneAt }` — the stored full content of one hit (empty when unknown), and whether its original source file is gone (as on `/__search` hits); same 503 as `/__search` | agent pane iframe (inline expanders), agents |
 | `/__search-index-status` | HTTP GET | — | `{ active_buckets, total, issuesThrough, lastCycleMs, progress?, last_added }` — indexer state for the footer indicator and the Search page | agent pane iframe |
 
 ## 15. Needs You inbox

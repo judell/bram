@@ -2,7 +2,8 @@
   name="Tasks"
   var.tick="{0}"
   var.showAll="{false}"
-  var.expanded="{[]}">
+  var.expanded="{[]}"
+  var.infoKey="">
 
   <!-- issue-483-task-candidates-report: the measurement before the feature.
        judell/bram#483 asks for Tasks (a repeated command saved to an external
@@ -22,20 +23,23 @@
          have any idea what a runner is"): no "runner", "target" or "recipe"
          here. The page talks about commands the agents keep running, and
          about a file of saved commands, named by its filename. -->
-    <Text color="$textColor-secondary"
-      value="Commands the agents in this project keep running, and how many ways they've been typed. The ways typed are of two kinds: the same job with slightly different arguments, which one saved command would replace, and different jobs done with the same tool, each a saved command of its own. Telling them apart takes the context a command ran in, which the agent has and this page doesn't. This version of the page only reads; nothing here runs or changes anything." />
+    <!-- The button's label in bold, so the sentence names what to click
+         without looking clickable itself (Jon, 2026-11-12). Inline Text, as
+         Main.xmlui's banners nest theirs. -->
+    <Text color="$textColor-secondary">
+      Commands the agents in this project keep running, and the ways each was typed. Nothing here needs doing.
+      <Text inline="true" fontWeight="$fontWeight-bold" value="Save as task" />
+      is optional housekeeping: it gives a command one name in the project's Makefile, which agents or you can run instead of retyping it. If you practice continuous integration (CI), this makes the same commands available in that environment.
+    </Text>
     <!-- The plan, in Jon's words (2026-11-09): "Let's even be more explicit
-         about it": four iterations, this page being the first. Markdown for
+         about it": four iterations, this page being the first. A done step
+         is struck through (~~…~~: the vendored XMLUI bundles remark-gfm,
+         which the Markdown docs don't mention). Markdown for
          the bullet list, as the Log and History entries render theirs.
          https://www.xmlui.org/docs/reference/components/Markdown -->
     <Heading level="h3">Provisional plan for this feature, staged across releases</Heading>
     <Markdown interpolateBindings="false" allowHtml="false"
-      content="{['- **v0.8.6:** Gather evidence about single commands that are typed in several ways: which are one job that could be normalized to one saved command, and which are different jobs sharing a tool. Once normalized, agents can look a command up and use it the same way every time.', '- **v0.8.7:** Offer a Save as Task button. The agent will convert the placeholder name to one derived from context, and you will be able to rewrite it. A Run button will let you run the task interactively, and agents will be able to look it up by name and run it.', '- **v0.8.8:** Gather evidence again, this time looking for compositions of named tasks that can be captured, named, and handled the same way.', '- **v0.8.9:** Add compositions to Save as Task.'].join('\n')}" />
-    <!-- Names are placeholders (Jon, 2026-11-09): the real name comes from
-         the agent, from the context the command ran in, when a task is
-         saved, and is editable then. Not editable here. -->
-    <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-      value="The names shown are placeholders. When saving arrives, the agent will propose each name from the context the command ran in, and you can change it then." />
+      content="{['- ~~**v0.8.6:** Gather evidence about single commands that are typed in several ways: which are one job that could be normalized to one saved command, and which are different jobs sharing a tool. Once normalized, agents can look a command up and use it the same way every time.~~', '- ~~**v0.8.7:** A Save as Task button. The agent names each task from the context its command ran in and saves it in the Makefile, where agents look it up and run it by name.~~', '- **v0.?.?:** Gather evidence again, this time looking for compositions of named tasks that can be captured, named, and handled the same way.', '- **v0.?.?:** Add compositions to Save as Task.'].join('\n')}" />
     <Spinner when="{!cands.loaded}" />
     <VStack when="{cands.loaded &amp;&amp; !!cands.value}" gap="$space-2">
       <Text value="{'From ' + cands.value.commands + ' shell commands in ' + cands.value.sessions + ' sessions.'}" />
@@ -47,11 +51,10 @@
       <Text when="{!!window.__bramTaskHeadline(cands.value)}" fontWeight="$fontWeight-bold"
         value="{window.__bramTaskHeadline(cands.value)}" />
       <Text when="{!cands.value.runner || !cands.value.runner.files || cands.value.runner.files.length == 0}"
-        value="This project has no file of saved commands yet." />
-      <Text when="{!!cands.value.runner &amp;&amp; !!cands.value.runner.files &amp;&amp; cands.value.runner.files.length > 0}"
-        value="{'Saved commands live in ' + cands.value.runner.files.join(', ') + ': ' + (cands.value.runner.targets || []).join(', ')}" />
-      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-        value="{'Left out: ' + cands.value.excluded.bramProtocol + ' that talk to Bram, ' + cands.value.excluded.shell + ' that look around or tidy up, ' + cands.value.excluded.git + ' git, ' + cands.value.excluded.forge + ' GitHub/GitLab.'}" />
+        value="This project has no file of saved tasks yet." />
+      <!-- The saved-tasks line and the "Left out" counts moved into the
+           header's ⓘ for Saved and Command (Jon, 2026-11-12: "remove this
+           clutter"). -->
     </VStack>
 
     <Text when="{cands.loaded &amp;&amp; !!cands.value &amp;&amp; (cands.value.candidates || []).length == 0}"
@@ -65,29 +68,75 @@
          https://www.xmlui.org/docs/reference/components/Items -->
     <HStack when="{cands.loaded &amp;&amp; !!cands.value &amp;&amp; (cands.value.candidates || []).length > 0}"
       gap="$space-3" paddingHorizontal="$space-1">
-      <Text width="*" fontSize="$fontSize-sm" color="$textColor-secondary" value="Command" />
-      <Text width="4rem" fontSize="$fontSize-sm" color="$textColor-secondary" value="Runs" />
-      <Text width="5rem" fontSize="$fontSize-sm" color="$textColor-secondary" value="Sessions" />
-      <Text width="9rem" fontSize="$fontSize-sm" color="$textColor-secondary" value="Agents" />
-      <Text width="6rem" fontSize="$fontSize-sm" color="$textColor-secondary" value="Ways typed" />
+      <!-- ⓘ per header (Jon, 2026-11-12), Status's info-button look. The
+           click sets infoKey; the dialog below shows when it is set, as
+           newSessionDialog does, so the handler stays one assignment.
+           https://www.xmlui.org/docs/reference/components/ModalDialog -->
+      <HStack width="*" gap="0" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Command" />
+        <Button icon="info" size="xs" variant="ghost" tooltip="About Command" onClick="infoKey = 'command'" />
+      </HStack>
+      <HStack width="4rem" gap="0" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Runs" />
+        <Button icon="info" size="xs" variant="ghost" tooltip="About Runs" onClick="infoKey = 'runs'" />
+      </HStack>
+      <HStack width="5rem" gap="0" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Sessions" />
+        <Button icon="info" size="xs" variant="ghost" tooltip="About Sessions" onClick="infoKey = 'sessions'" />
+      </HStack>
+      <HStack width="9rem" gap="0" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Agents" />
+        <Button icon="info" size="xs" variant="ghost" tooltip="About Agents" onClick="infoKey = 'agents'" />
+      </HStack>
+      <HStack width="6rem" gap="0" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Ways typed" />
+        <Button icon="info" size="xs" variant="ghost" tooltip="About Ways typed" onClick="infoKey = 'ways'" />
+      </HStack>
+      <HStack width="9rem" gap="0" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Saved" />
+        <Button icon="info" size="xs" variant="ghost" tooltip="About Saved" onClick="infoKey = 'saved'" />
+      </HStack>
     </HStack>
-    <Items data="{window.__bramTaskRows(cands.value, showAll)}">
+    <Items data="{window.__bramTaskVisibleRows(cands.value, showAll, expanded)}">
       <VStack gap="$space-1">
-        <HStack testId="task-row" gap="$space-3" verticalAlignment="center" cursor="pointer"
-          paddingHorizontal="$space-1"
-          onClick="expanded = window.__bramToggleInArray(expanded, $item.key)">
-          <HStack width="*" gap="$space-2" verticalAlignment="center">
-            <Text color="$textColor-secondary" value="{expanded.includes($item.key) ? '▾' : '▸'}" />
+        <HStack testId="task-row" gap="$space-3" verticalAlignment="center"
+          paddingHorizontal="$space-1">
+          <!-- The toggle is on the cells, not the row, so a click on the Save
+               as task button does not also expand the row. -->
+          <HStack width="*" gap="$space-2" verticalAlignment="center" cursor="pointer"
+            onClick="expanded = window.__bramToggleInArray(expanded, $item.key)">
+            <!-- Full-size ▶ / ▼ in xl, as the Worklist files table's
+                 disclosure triangle (Jon, 2026-11-12: "make the right and down
+                 arrows bigger as they are there"). -->
+            <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(expanded, $item.key)}" />
             <!-- width="*" gives breakMode a bound to break against; without
                  it the code text sizes to its content and never wraps
                  (Jon, 2026-11-09: "long lines should wrap").
                  https://www.xmlui.org/docs/reference/components/Text -->
-            <Text width="*" variant="code" breakMode="anywhere" value="{$item.key}" />
+            <!-- A saved row names its tasks under the command, in this flexible
+                 cell: the fixed cells to the right overflow a narrow pane, and
+                 the names were cut off there (Jon, 2026-11-12). -->
+            <VStack width="*" gap="0">
+              <Text variant="code" breakMode="anywhere" value="{$item.key}" />
+              <Text when="{!!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" fontSize="$fontSize-sm"
+                color="$textColor-secondary" breakMode="word" value="{window.__bramTaskSavedLine($item)}" />
+            </VStack>
           </HStack>
-          <Text width="4rem" value="{$item.runs}" />
-          <Text width="5rem" value="{$item.sessions}" />
-          <Text width="9rem" value="{($item.agents || []).join(', ')}" />
-          <Text width="6rem" value="{($item.spellings || []).length}" />
+          <Text width="4rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{$item.runs}" />
+          <Text width="5rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{$item.sessions}" />
+          <Text width="9rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{($item.agents || []).join(', ')}" />
+          <Text width="6rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{($item.spellings || []).length}" />
+          <!-- Save as task: one call, the payload is built in helpers.js. A
+               saved row reads its names instead. The click must not toggle
+               the row, hence the wrapper stops propagation.
+               https://www.xmlui.org/docs/reference/components/Button -->
+          <HStack width="9rem" verticalAlignment="center">
+            <Button when="{!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" size="xs" variant="outlined"
+              label="Save as task" onClick="window.__bramSaveTaskTurn($item)" />
+            <Button when="{!!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" size="xs" variant="ghost"
+              label="View" tooltip="Open the Makefile at these saved tasks"
+              onClick="window.__bramTaskViewSaved($item)" />
+          </HStack>
         </HStack>
         <VStack when="{expanded.includes($item.key)}" paddingLeft="$space-5" gap="$space-1">
           <!-- Same job or different jobs? (Jon, 2026-11-09: "Sometimes, Bram
@@ -98,16 +147,34 @@
                read a duration, while ffmpeg-loudnorm and ffmpeg-silencedetect
                are different jobs. The names are its guess; a trailing number
                means it couldn't tell two spellings apart. -->
+          <!-- breakMode="word": wrap between words, inside one only when it
+               can't fit (https://www.xmlui.org/docs/reference/components/Text).
+               issue-483-save-as-task (Jon, 2026-11-12: "the explanation under
+               cargo test is completely confusing"): a saved row says what it
+               was saved as; an unsaved row says what saving would do. -->
           <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-            value="Some of these are one job typed differently, some are different jobs with the same tool. The names are a first guess from the command text; a name ending in a number means the guess could not tell two spellings apart. The agent will sort them out, with the context each ran in, when it offers to save." />
+            value="{window.__bramTaskRowNote($item, cands.value)}" />
+          <!-- A saved row's runs by name, one row per task: a small Table, as
+               the Worklist's files table and Status use.
+               https://www.xmlui.org/docs/reference/components/Table -->
+          <Table when="{window.__bramTaskByNameRows($item, cands.value).length > 0}"
+            data="{window.__bramTaskByNameRows($item, cands.value)}" idKey="name">
+            <Column header="Saved task" width="2*">
+              <Text variant="code" fontSize="$fontSize-sm" value="{$item.name}" />
+            </Column>
+            <Column header="Runs by name" width="*" bindTo="runs" />
+            <Column header="Sessions" width="*" bindTo="sessions" />
+          </Table>
           <!-- Each repeated spelling is the unit a saved command would name.
-               The host's placeholder name ($item.name) is shown, not edited:
-               the agent proposes the real one when a task is saved. -->
-          <Items data="{$item.spellings || []}">
+               The host's placeholder names aren't shown (Jon, 2026-11-12:
+               "lose the provisional names"); they still go to the agent in
+               the save-task payload as hints. -->
+          <Items data="{window.__bramTaskSpellings($item)}">
             <HStack gap="$space-2" verticalAlignment="start">
               <Text width="3.5rem" fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item.runs + '×'}" />
-              <Text width="12rem" fontSize="$fontSize-sm" color="$textColor-secondary" breakMode="anywhere" value="{$item.name}" />
               <Text width="*" variant="code" breakMode="anywhere" value="{$item.text}" />
+              <Text when="{!!$item.nowLine}" width="20rem" fontSize="$fontSize-sm"
+                color="$textColor-secondary" breakMode="word" value="{$item.nowLine}" />
             </HStack>
           </Items>
         </VStack>
@@ -115,7 +182,7 @@
     </Items>
     <!-- The fold: rows seen in fewer sessions, or past the top 10, are one
          line and a button, so a newcomer's first look is the few that matter. -->
-    <HStack when="{cands.loaded &amp;&amp; !!cands.value &amp;&amp; (showAll || window.__bramTaskHidden(cands.value, showAll) > 0)}"
+    <HStack when="{cands.loaded &amp;&amp; !!cands.value &amp;&amp; !window.__bramTaskAnyOpen(cands.value, showAll, expanded) &amp;&amp; (showAll || window.__bramTaskHidden(cands.value, showAll) > 0)}"
       gap="$space-3" verticalAlignment="center" paddingHorizontal="$space-1">
       <Text fontSize="$fontSize-sm" color="$textColor-secondary"
         value="{window.__bramTaskFoldLine(cands.value, showAll)}" />
@@ -123,4 +190,12 @@
         onClick="showAll = !showAll" />
     </HStack>
   </VStack>
+  <Theme maxWidth-ModalDialog="50vw">
+    <ModalDialog when="{!!infoKey}" title="{window.__bramTaskInfoTitle(infoKey)}" onClose="infoKey = ''">
+      <VStack gap="$space-3" padding="$space-2">
+        <Markdown interpolateBindings="false" allowHtml="false"
+          content="{window.__bramTaskInfoText(infoKey, cands.value)}" />
+      </VStack>
+    </ModalDialog>
+  </Theme>
 </Component>

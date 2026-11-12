@@ -684,3 +684,89 @@ session to resume reads titles, so err toward verbose and descriptive:
   issue number such as `#412`), not only verbs.
 - Leave out ephemera (today's date, "part 2") unless they distinguish
   the session.
+
+## Saving a task
+
+The Tasks page (More › Tasks) lists commands the agents keep running. Its
+**Save as task** button sends you a turn that begins `save-task: ` and
+names one row in plain words: the command (such as `cargo test`), how many
+times and sessions it ran, and a list of the ways it was typed, each as a
+code span with its run count. Use each listed spelling exactly as written
+when you map it in the `Makefile`. A `save-task:` turn is a change request: it goes
+through the Worklist like any other, and nothing is written until the user
+clicks.
+
+**Run saved tasks by name.** When the project's `Makefile` has a target for
+what you're about to run, run `make <name>` (with its variable, such as
+`make rust-tests-module M=pty_menu_tests`), not the command it wraps. The
+Tasks page counts both, so typing the body by hand shows.
+
+### What to do with the turn
+
+1. **Find what each spelling was for.** Search the history with the
+   spelling's text (`/__search?q=…&types=session`) and read a hit or two.
+2. **Sort the spellings into jobs.** One job with an argument, or separate
+   jobs? `cargo test pty_menu_tests` and bare `cargo test` are two jobs (one
+   module, everything); the five module names are one job's argument; a
+   spelling that only reshapes output (`… | grep "test result"`) is not a
+   task. Sorting is the work: the host can't do it from the text.
+3. **Name each job** the way you name Worklist items: what it does, to what,
+   in the project's words, told apart from every other name by scope and
+   effect, kebab-case. `rust-tests-all`, `rust-tests-module`, `rust-fmt`,
+   `rust-fmt-check`. Not the tool alone (`cargo-test`), not too thin
+   (`test`), never a number. The host's placeholder is a hint; it never
+   survives. Name an argument for what it is (`M` for a module, `CITY` for a
+   city).
+4. **Propose a Worklist item** `task-<name>` (the main job's name), `files:
+   ["Makefile"]`, no `closesIssues`. Its draft shows the block you'd add,
+   says why each spelling went where it did, and names any spelling left
+   out as not a task. **Start & commit** writes it. Don't offer to rename
+   tasks through feedback; renaming is a separate, open question.
+
+### The Makefile
+
+At the project root, created on the first save and added to after. Only
+Make. A project with a `justfile` or `package.json` scripts is not written
+to by this flow. Targets are `.PHONY`; recipe lines start with a tab; an
+argument is a variable with a usage comment. Above each saved target, write
+the record of what it replaces, in this exact shape, because the host parses
+it to show what's saved and to count runs:
+
+```make
+# Saved by Bram from the agents' `cargo test` runs. Replaces:
+#   cargo test  ->  make rust-tests-all
+#   cargo test --manifest-path src-tauri/Cargo.toml  ->  make rust-tests-all
+#   cargo test pty_menu_tests  ->  make rust-tests-module M=pty_menu_tests
+# Not a task: cargo test … | grep "test result" | head -1 (reads the output)
+.PHONY: rust-tests-all rust-tests-module
+rust-tests-all:
+	cargo test --manifest-path src-tauri/Cargo.toml
+
+# Usage: make rust-tests-module M=<module>
+rust-tests-module:
+	cargo test --manifest-path src-tauri/Cargo.toml $(M)
+```
+
+Each `->` line is `#`, the spelling as the Tasks page shows it, two or more
+spaces, `->`, two or more spaces, and the invocation. One block can map to
+several targets.
+
+**One name on every platform.** A recipe that calls a platform-specific
+script (a `.sh` with a `.ps1` twin) gets both, under Make's platform switch,
+so a save made on one platform works on the other:
+
+```make
+ifeq ($(OS),Windows_NT)
+build-debug:
+	powershell -NoProfile -File scripts\build.ps1
+else
+build-debug:
+	scripts/build.sh
+endif
+```
+
+A plain tool call (`cargo …`, forward slashes and all) needs no branch.
+
+**Windows.** `make` isn't installed there by default. The `Makefile` is
+still the record: on Windows, run the target's recipe line (with its
+variable filled in) and say that's what you did.

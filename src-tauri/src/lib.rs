@@ -111557,6 +111557,9 @@ struct TaskSpelling {
     text: String,
     runs: usize,
     name: String,
+    // issue-483-save-as-task: what a saved Makefile says this spelling is
+    // now (`make rust-tests-module M=x`, or "not a task"); None when unsaved.
+    now: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -111568,6 +111571,10 @@ struct TaskCandidate {
     first_seen_ms: i64,
     last_seen_ms: i64,
     spellings: Vec<TaskSpelling>,
+    // issue-483-save-as-task: the Makefile targets this candidate is saved as.
+    saved_as: Vec<String>,
+    // The Makefile lines (1-based, inclusive) the saved targets occupy.
+    saved_lines: Option<[usize; 2]>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -111578,6 +111585,9 @@ struct TaskCandidatesReport {
     excluded: [usize; 4], // bramProtocol, forge, git, shell
     candidates: Vec<TaskCandidate>,
     excluded_steps: Vec<(String, &'static str, usize)>,
+    // issue-483-save-as-task: `make <target>` steps in the walk, by target
+    // name ("" for a bare `make`, the default goal): runs and sessions.
+    make_runs: HashMap<String, (usize, BTreeSet<String>)>,
 }
 
 const TASK_BUCKETS: [&str; 4] = ["bramProtocol", "forge", "git", "shell"];
@@ -111829,7 +111839,11 @@ fn task_bucket(step: &str) -> Option<usize> {
     }
     let toks = task_tokens(step);
     let first = toks.first().copied().unwrap_or("");
-    let base = first.rsplit('/').next().unwrap_or(first);
+    // Windows paths end in `\` and executables in `.exe` (judell/bram#483:
+    // a Windows report listed `git.exe` and PowerShell cmdlets as tasks).
+    let base_raw = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    let base_owned = base_raw.to_ascii_lowercase();
+    let base = base_owned.strip_suffix(".exe").unwrap_or(&base_owned);
     if base == "gh" || base == "glab" {
         return Some(1);
     }
@@ -111949,6 +111963,71 @@ fn task_bucket(step: &str) -> Option<usize> {
         "sqlite3",
     ];
     if SHELL.contains(&base) {
+        return Some(3);
+    }
+    // PowerShell's looking-around and tidying cmdlets, and their aliases,
+    // compared without case (Windows sessions, 2026-11-12).
+    const POWERSHELL: &[&str] = &[
+        "get-content",
+        "set-content",
+        "add-content",
+        "get-childitem",
+        "get-item",
+        "get-itemproperty",
+        "test-path",
+        "resolve-path",
+        "join-path",
+        "split-path",
+        "set-location",
+        "get-location",
+        "push-location",
+        "pop-location",
+        "select-string",
+        "select-object",
+        "where-object",
+        "foreach-object",
+        "sort-object",
+        "measure-object",
+        "group-object",
+        "format-table",
+        "format-list",
+        "out-null",
+        "out-file",
+        "out-string",
+        "write-host",
+        "write-output",
+        "new-item",
+        "remove-item",
+        "copy-item",
+        "move-item",
+        "rename-item",
+        "get-process",
+        "stop-process",
+        "start-sleep",
+        "get-date",
+        "get-command",
+        "get-filehash",
+        "get-acl",
+        "get-volume",
+        "get-psdrive",
+        "clear-host",
+        "gci",
+        "gc",
+        "sls",
+        "dir",
+        "del",
+        "copy",
+        "move",
+        "ren",
+        "md",
+        "rd",
+        "cls",
+        "where",
+        "findstr",
+        "tasklist",
+        "taskkill",
+    ];
+    if POWERSHELL.contains(&base) {
         return Some(3);
     }
     // A helper left in a scratch or temp directory is not a project task.
@@ -112419,6 +112498,23 @@ fn task_candidates_core(root: &str, steps: &[TaskStep]) -> TaskCandidatesReport 
         for raw in task_split_steps(&rec.command) {
             report.steps += 1;
             let text = task_normalize_step(&raw, root);
+            // A dry run (`make -n`) prints a recipe without running it: not a
+            // run of the task, and not a command worth listing.
+            if task_make_dry_run(&text) {
+                continue;
+            }
+            if let Some(targets) = task_make_invocation(&text) {
+                let names = if targets.is_empty() {
+                    vec![String::new()]
+                } else {
+                    targets
+                };
+                for n in names {
+                    let e = report.make_runs.entry(n).or_default();
+                    e.0 += 1;
+                    e.1.insert(rec.session.clone());
+                }
+            }
             if let Some(b) = task_bucket(&text) {
                 report.excluded[b] += 1;
                 *excluded.entry((text, b)).or_insert(0) += 1;
@@ -112455,6 +112551,7 @@ fn task_candidates_core(root: &str, steps: &[TaskStep]) -> TaskCandidatesReport 
                 name: task_suggest_name(&key, &text),
                 text,
                 runs,
+                now: None,
             })
             .collect();
         spellings.sort_by(|a, b| b.runs.cmp(&a.runs).then_with(|| a.text.cmp(&b.text)));
@@ -112476,6 +112573,8 @@ fn task_candidates_core(root: &str, steps: &[TaskStep]) -> TaskCandidatesReport 
             first_seen_ms: c.first,
             last_seen_ms: c.last,
             spellings,
+            saved_as: Vec::new(),
+            saved_lines: None,
         });
     }
     report
@@ -112502,30 +112601,96 @@ fn task_candidates_core(root: &str, steps: &[TaskStep]) -> TaskCandidatesReport 
     report
 }
 
+// Wire rows for `/__tasks/candidates`. The doc is assembled as a
+// `serde_json::Value`, whose maps sort their keys, so these serialize to the
+// same bytes the hand-built `json!` rows did (pinned by a test).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskSpellingRow {
+    text: String,
+    runs: usize,
+    name: String,
+    #[serde(default)]
+    now: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskCandidateRow {
+    key: String,
+    runs: usize,
+    sessions: usize,
+    agents: Vec<String>,
+    first_seen_ms: i64,
+    last_seen_ms: i64,
+    spellings: Vec<TaskSpellingRow>,
+    #[serde(default)]
+    saved_as: Vec<String>,
+    // Unsaved rows omit it, so their wire shape is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_lines: Option<[usize; 2]>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskExcludedStepRow {
+    text: String,
+    bucket: String,
+    runs: usize,
+}
+
+// One runner target. `body`, `runs` and `sessions` are filled for the root
+// Makefile only; other runner files list their targets by name, with an
+// empty body and null counts (not counted, as opposed to never run).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskRunnerTarget {
+    name: String,
+    file: String,
+    #[serde(default)]
+    body: Vec<String>,
+    #[serde(default)]
+    runs: Option<usize>,
+    #[serde(default)]
+    sessions: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskRunnerState {
+    files: Vec<String>,
+    targets: Vec<TaskRunnerTarget>,
+}
+
 fn task_report_json(
     root: &str,
     report: &TaskCandidatesReport,
-    runner: serde_json::Value,
+    runner: &TaskRunnerState,
     all: bool,
     ms: u128,
 ) -> serde_json::Value {
-    let candidates: Vec<serde_json::Value> = report
+    let candidates: Vec<TaskCandidateRow> = report
         .candidates
         .iter()
-        .map(|c| {
-            serde_json::json!({
-                "key": c.key,
-                "runs": c.runs,
-                "sessions": c.sessions,
-                "agents": c.agents,
-                "firstSeenMs": c.first_seen_ms,
-                "lastSeenMs": c.last_seen_ms,
-                "spellings": c.spellings.iter().map(|s| serde_json::json!({
-                    "text": s.text.chars().take(400).collect::<String>(),
-                    "runs": s.runs,
-                    "name": s.name,
-                })).collect::<Vec<_>>(),
-            })
+        .map(|c| TaskCandidateRow {
+            key: c.key.clone(),
+            runs: c.runs,
+            sessions: c.sessions,
+            agents: c.agents.clone(),
+            first_seen_ms: c.first_seen_ms,
+            last_seen_ms: c.last_seen_ms,
+            spellings: c
+                .spellings
+                .iter()
+                .map(|s| TaskSpellingRow {
+                    text: s.text.chars().take(400).collect::<String>(),
+                    runs: s.runs,
+                    name: s.name.clone(),
+                    now: s.now.clone(),
+                })
+                .collect(),
+            saved_as: c.saved_as.clone(),
+            saved_lines: c.saved_lines,
         })
         .collect();
     let mut doc = serde_json::json!({
@@ -112544,32 +112709,555 @@ fn task_report_json(
         "ms": ms as u64,
     });
     if all {
-        doc["excludedSteps"] = serde_json::Value::Array(
-            report
-                .excluded_steps
-                .iter()
-                .map(|(t, b, n)| {
-                    serde_json::json!({
-                        "text": t.chars().take(400).collect::<String>(),
-                        "bucket": b,
-                        "runs": n,
-                    })
-                })
-                .collect(),
-        );
+        let rows: Vec<TaskExcludedStepRow> = report
+            .excluded_steps
+            .iter()
+            .map(|(t, b, n)| TaskExcludedStepRow {
+                text: t.chars().take(400).collect::<String>(),
+                bucket: b.to_string(),
+                runs: *n,
+            })
+            .collect();
+        doc["excludedSteps"] = serde_json::to_value(rows).unwrap_or_default();
     }
     doc
 }
 
-// Runner files and their parseable targets. Never shells out.
-fn task_runner_state(root: &Path) -> serde_json::Value {
-    let mut files: Vec<&str> = Vec::new();
-    let mut targets: Vec<String> = Vec::new();
-    let mut push = |t: String| {
-        if !targets.contains(&t) {
-            targets.push(t);
+// --- issue-483-save-as-task: the root Makefile, read back ------------------
+//
+// A save writes a target plus a comment block recording how the agent sorted
+// the cluster's spellings (the host can't recover that from the recipe):
+//
+//   # Saved by Bram from the agents' `cargo test` runs. Replaces:
+//   #   cargo test pty_menu_tests  ->  make rust-tests-module M=pty_menu_tests
+//   # Not a task: cargo test | grep "test result" (reads the output)
+//   .PHONY: rust-tests-module
+//
+// Parsing is tolerant: unknown comment lines are ignored.
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MakeTargetDef {
+    name: String,
+    // Recipe lines as written, minus the tab and `@`/`-`/`+` prefixes.
+    body: Vec<String>,
+    // The same lines with `$(…)`/`${…}` removed, split into steps: what a
+    // candidate's key is matched against.
+    match_steps: Vec<String>,
+    // 1-based physical lines: the rule's head, and its last recipe line.
+    line: usize,
+    end_line: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MakeSavedBlock {
+    // The cluster key named in the header's backticks ("" when absent).
+    key: String,
+    // (spelling, invocation) per `->` line.
+    replaces: Vec<(String, String)>,
+    // (spelling, why) per `Not a task:` line.
+    not_tasks: Vec<(String, String)>,
+    // 1-based physical line of the `# Saved by Bram` header.
+    line: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ParsedMakefile {
+    targets: Vec<MakeTargetDef>,
+    blocks: Vec<MakeSavedBlock>,
+}
+
+// Drop `$(…)` and `${…}` (balanced) and un-double `$$`.
+fn task_strip_make_vars(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '$' {
+            match chars.get(i + 1) {
+                Some('$') => {
+                    out.push('$');
+                    i += 2;
+                    continue;
+                }
+                Some(&open) if open == '(' || open == '{' => {
+                    let close = if open == '(' { ')' } else { '}' };
+                    let mut depth = 0usize;
+                    let mut j = i + 1;
+                    while j < chars.len() {
+                        if chars[j] == open {
+                            depth += 1;
+                        } else if chars[j] == close {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                _ => {}
+            }
         }
+        out.push(ch);
+        i += 1;
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// The targets a `make` step names, or None when the step isn't `make` on the
+// root Makefile (`-C <other>` or `-f <other>`). An empty list is a bare
+// `make`: the default goal. `VAR=value` arguments and flags are skipped.
+// `make -n` and its spellings, before any output plumbing.
+fn task_make_dry_run(step: &str) -> bool {
+    let toks = task_tokens(step);
+    let Some(first) = toks.first() else {
+        return false;
     };
+    let base = first.rsplit('/').next().unwrap_or(first);
+    if base != "make" && base != "gmake" {
+        return false;
+    }
+    toks.iter()
+        .skip(1)
+        .take_while(|t| !t.starts_with('|') && !t.starts_with('&') && !t.contains('>'))
+        .any(|t| {
+            matches!(*t, "--dry-run" | "--just-print" | "--recon")
+                || (t.starts_with('-')
+                    && !t.starts_with("--")
+                    && t.len() > 1
+                    && t[1..].chars().all(|c| c.is_ascii_alphabetic())
+                    && t.contains('n'))
+        })
+}
+
+fn task_make_invocation(step: &str) -> Option<Vec<String>> {
+    let toks = task_tokens(step);
+    let first = toks.first().copied()?;
+    let base = first.rsplit('/').next().unwrap_or(first);
+    if base != "make" && base != "gmake" {
+        return None;
+    }
+    let root_dir = |d: &str| matches!(d, "." | "./");
+    let root_file = |f: &str| matches!(f, "Makefile" | "./Makefile" | "makefile" | "GNUmakefile");
+    let mut targets = Vec::new();
+    let mut i = 1usize;
+    while i < toks.len() {
+        let t = toks[i];
+        i += 1;
+        // Output plumbing ends the make arguments.
+        let digits_gt = t.trim_start_matches(|c: char| c.is_ascii_digit());
+        if t.starts_with('|')
+            || t.starts_with('&')
+            || digits_gt.starts_with('>')
+            || t.starts_with('<')
+        {
+            break;
+        }
+        if t == "-C" || t == "--directory" {
+            let d = toks.get(i).copied().unwrap_or("");
+            i += 1;
+            if !root_dir(d) {
+                return None;
+            }
+            continue;
+        }
+        if let Some(d) = t
+            .strip_prefix("--directory=")
+            .or_else(|| t.strip_prefix("-C"))
+        {
+            if !root_dir(d) {
+                return None;
+            }
+            continue;
+        }
+        if t == "-f" || t == "--file" || t == "--makefile" {
+            let f = toks.get(i).copied().unwrap_or("");
+            i += 1;
+            if !root_file(f) {
+                return None;
+            }
+            continue;
+        }
+        if let Some(f) = t
+            .strip_prefix("--file=")
+            .or_else(|| t.strip_prefix("--makefile="))
+        {
+            if !root_file(f) {
+                return None;
+            }
+            continue;
+        }
+        if matches!(
+            t,
+            "-I" | "-o" | "-W" | "--include-dir" | "--old-file" | "--what-if"
+        ) {
+            i += 1;
+            continue;
+        }
+        if matches!(t, "-j" | "-l") {
+            if toks
+                .get(i)
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+            {
+                i += 1;
+            }
+            continue;
+        }
+        if t.starts_with('-') || t.contains('=') {
+            continue;
+        }
+        targets.push(t.to_string());
+    }
+    Some(targets)
+}
+
+// `#   <spelling>  ->  <invocation>`: two or more spaces either side of `->`.
+fn task_parse_mapping_line(rest: &str) -> Option<(String, String)> {
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut from = 0usize;
+    while let Some(off) = rest[from..].find("->") {
+        let p = from + off;
+        if rest[..p].ends_with("  ") && rest[p + 2..].starts_with("  ") {
+            let spelling = rest[..p].trim();
+            let invocation = rest[p + 2..].trim();
+            if !spelling.is_empty() && !invocation.is_empty() {
+                return Some((spelling.to_string(), invocation.to_string()));
+            }
+        }
+        from = p + 2;
+    }
+    None
+}
+
+// `# Not a task: <spelling> (<why>)`; the why is the final balanced group.
+fn task_parse_not_task_line(rest: &str) -> Option<(String, String)> {
+    let body = rest.trim().strip_prefix("Not a task:")?.trim();
+    if body.is_empty() {
+        return None;
+    }
+    if body.ends_with(')') {
+        let mut depth = 0i32;
+        for (idx, c) in body.char_indices().rev() {
+            if c == ')' {
+                depth += 1;
+            } else if c == '(' {
+                depth -= 1;
+                if depth == 0 {
+                    let spelling = body[..idx].trim();
+                    if spelling.is_empty() {
+                        break;
+                    }
+                    let why = &body[idx + 1..body.len() - 1];
+                    return Some((spelling.to_string(), why.trim().to_string()));
+                }
+            }
+        }
+    }
+    Some((body.to_string(), String::new()))
+}
+
+fn task_push_recipe(parsed: &mut ParsedMakefile, current: &[usize], recipe: &str) {
+    let recipe = recipe.trim().trim_start_matches(['@', '-', '+']).trim();
+    if recipe.is_empty() || recipe.starts_with('#') {
+        return;
+    }
+    let steps = task_split_steps(&task_strip_make_vars(recipe));
+    for &ti in current {
+        let t = &mut parsed.targets[ti];
+        t.body.push(recipe.to_string());
+        t.match_steps.extend(steps.iter().cloned());
+    }
+}
+
+fn task_parse_makefile(text: &str) -> ParsedMakefile {
+    let mut parsed = ParsedMakefile::default();
+    // Backslash continuations joined into one logical line, with the
+    // 1-based physical lines it spans.
+    let mut lines: Vec<(String, usize, usize)> = Vec::new();
+    let mut pending = String::new();
+    let mut pending_start = 0usize;
+    let mut last_no = 0usize;
+    for (i, raw) in text.replace("\r\n", "\n").lines().enumerate() {
+        let no = i + 1;
+        last_no = no;
+        if pending.is_empty() {
+            pending_start = no;
+        }
+        if let Some(s) = raw.strip_suffix('\\') {
+            pending.push_str(s);
+            pending.push(' ');
+            continue;
+        }
+        pending.push_str(raw);
+        lines.push((std::mem::take(&mut pending), pending_start, no));
+    }
+    if !pending.is_empty() {
+        lines.push((pending, pending_start, last_no));
+    }
+    let mut current: Vec<usize> = Vec::new();
+    let mut block: Option<MakeSavedBlock> = None;
+    let mut in_define = false;
+    for (line, l_start, l_end) in &lines {
+        let (l_start, l_end) = (*l_start, *l_end);
+        let trimmed = line.trim();
+        if in_define {
+            if trimmed == "endef" {
+                in_define = false;
+            }
+            continue;
+        }
+        if line.starts_with('\t') {
+            if !current.is_empty() {
+                task_push_recipe(&mut parsed, &current, trimmed);
+                for &ti in &current {
+                    parsed.targets[ti].end_line = l_end;
+                }
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            if rest.trim_start().starts_with("Saved by Bram") {
+                if let Some(b) = block.take() {
+                    parsed.blocks.push(b);
+                }
+                let key = rest
+                    .split('`')
+                    .nth(1)
+                    .map(|k| k.trim().to_string())
+                    .unwrap_or_default();
+                block = Some(MakeSavedBlock {
+                    key,
+                    line: l_start,
+                    ..Default::default()
+                });
+            } else if let Some(b) = block.as_mut() {
+                if let Some(m) = task_parse_mapping_line(rest) {
+                    b.replaces.push(m);
+                } else if let Some(n) = task_parse_not_task_line(rest) {
+                    b.not_tasks.push(n);
+                }
+            }
+            continue;
+        }
+        // Any other line ends a comment block and a recipe.
+        if let Some(b) = block.take() {
+            parsed.blocks.push(b);
+        }
+        current.clear();
+        if trimmed == "define" || trimmed.starts_with("define ") {
+            in_define = true;
+            continue;
+        }
+        let Some((head, tail)) = line.split_once(':') else {
+            continue;
+        };
+        let tail = match tail.strip_prefix(':') {
+            Some(t) if t.starts_with('=') => continue, // `::=`
+            Some(t) => t,                              // double-colon rule
+            None if tail.starts_with('=') => continue, // `:=`
+            None => tail,
+        };
+        if head.contains('=') || head.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let (deps, inline) = match tail.split_once(';') {
+            Some((d, r)) => (d, Some(r)),
+            None => (tail, None),
+        };
+        if deps.contains('=') {
+            continue; // target-specific variable
+        }
+        for name in head.split_whitespace() {
+            if name.starts_with('.')
+                || name.contains('%')
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/'))
+            {
+                continue;
+            }
+            let ti = match parsed.targets.iter().position(|t| t.name == name) {
+                Some(ti) => ti,
+                None => {
+                    parsed.targets.push(MakeTargetDef {
+                        name: name.to_string(),
+                        line: l_start,
+                        ..Default::default()
+                    });
+                    parsed.targets.len() - 1
+                }
+            };
+            parsed.targets[ti].end_line = parsed.targets[ti].end_line.max(l_end);
+            current.push(ti);
+        }
+        if let Some(r) = inline {
+            task_push_recipe(&mut parsed, &current, r);
+        }
+    }
+    if let Some(b) = block.take() {
+        parsed.blocks.push(b);
+    }
+    parsed
+}
+
+fn task_push_unique(v: &mut Vec<String>, s: &str) {
+    if !v.iter().any(|x| x == s) {
+        v.push(s.to_string());
+    }
+}
+
+// Match candidates to the Makefile and fill each target's usage. Pure.
+// Returns the Makefile's runner targets, in file order.
+fn task_apply_makefile(
+    report: &mut TaskCandidatesReport,
+    mk: &ParsedMakefile,
+    root: &str,
+) -> Vec<TaskRunnerTarget> {
+    let defined = |n: &str| mk.targets.iter().any(|t| t.name == n);
+    // Running a saved task by name isn't a candidate for saving: those runs
+    // are counted on the target and shown as "Run by name" (Jon, 2026-11-12).
+    report
+        .candidates
+        .retain(|c| !(c.key == "make" || c.key.strip_prefix("make ").is_some_and(|n| defined(n))));
+    let mapped_targets = |invocation: &str| -> Vec<String> {
+        let named = match task_make_invocation(invocation) {
+            Some(ts) if ts.is_empty() => {
+                mk.targets.iter().take(1).map(|t| t.name.clone()).collect()
+            }
+            Some(ts) => ts,
+            None => Vec::new(),
+        };
+        named.into_iter().filter(|n| defined(n)).collect()
+    };
+    // Normalized spelling -> (invocation, targets).
+    let mut replaces: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    let mut not_tasks: HashSet<String> = HashSet::new();
+    for b in &mk.blocks {
+        for (spelling, invocation) in &b.replaces {
+            replaces
+                .entry(task_normalize_step(spelling, root))
+                .or_insert_with(|| (invocation.clone(), mapped_targets(invocation)));
+        }
+        for (spelling, _) in &b.not_tasks {
+            not_tasks.insert(task_normalize_step(spelling, root));
+        }
+    }
+    for c in report.candidates.iter_mut() {
+        let mut saved: Vec<String> = Vec::new();
+        for sp in c.spellings.iter_mut() {
+            if let Some((invocation, targets)) = replaces.get(&sp.text) {
+                sp.now = Some(invocation.clone());
+                for t in targets {
+                    task_push_unique(&mut saved, t);
+                }
+            } else if not_tasks.contains(&sp.text) {
+                sp.now = Some("not a task".to_string());
+            }
+        }
+        // A block saved from this cluster covers it even when the mapped
+        // spellings fell outside the top eight shown.
+        for b in mk
+            .blocks
+            .iter()
+            .filter(|b| !b.key.is_empty() && b.key == c.key)
+        {
+            for (_, invocation) in &b.replaces {
+                for t in mapped_targets(invocation) {
+                    task_push_unique(&mut saved, &t);
+                }
+            }
+        }
+        // `make <target>` typed by an agent is running the saved task.
+        if let Some(name) = c.key.strip_prefix("make ") {
+            if defined(name) {
+                task_push_unique(&mut saved, name);
+            }
+        }
+        // Fallback, for targets with no Bram comment: a recipe step whose
+        // head is this candidate's key.
+        if saved.is_empty() {
+            for t in &mk.targets {
+                if t.match_steps
+                    .iter()
+                    .any(|s| task_recipe_key(&task_normalize_step(s, root)) == c.key)
+                {
+                    task_push_unique(&mut saved, &t.name);
+                }
+            }
+        }
+        // The lines a View opens: the Bram comment that recorded this save
+        // (when there is one) through the last saved target's recipe.
+        let tgt: Vec<&MakeTargetDef> = mk
+            .targets
+            .iter()
+            .filter(|t| saved.iter().any(|n| n == &t.name))
+            .collect();
+        c.saved_lines = if tgt.is_empty() {
+            None
+        } else {
+            let spells: HashSet<&String> = c.spellings.iter().map(|sp| &sp.text).collect();
+            let block_line = mk
+                .blocks
+                .iter()
+                .filter(|b| {
+                    (!b.key.is_empty() && b.key == c.key)
+                        || b.replaces
+                            .iter()
+                            .any(|(sp, _)| spells.contains(&task_normalize_step(sp, root)))
+                })
+                .map(|b| b.line)
+                .min();
+            let first = tgt.iter().map(|t| t.line).min().unwrap_or(1);
+            let start = block_line.map_or(first, |b| b.min(first)).max(1);
+            let end = tgt
+                .iter()
+                .map(|t| t.end_line.max(t.line))
+                .max()
+                .unwrap_or(start);
+            Some([start, end])
+        };
+        c.saved_as = saved;
+    }
+    let default_goal = mk.targets.first().map(|t| t.name.as_str());
+    mk.targets
+        .iter()
+        .map(|t| {
+            let mut runs = 0usize;
+            let mut sessions: BTreeSet<String> = BTreeSet::new();
+            let mut keys = vec![t.name.as_str()];
+            if Some(t.name.as_str()) == default_goal {
+                keys.push(""); // a bare `make`
+            }
+            for k in keys {
+                if let Some((n, s)) = report.make_runs.get(k) {
+                    runs += n;
+                    sessions.extend(s.iter().cloned());
+                }
+            }
+            TaskRunnerTarget {
+                name: t.name.clone(),
+                file: "Makefile".to_string(),
+                body: t.body.clone(),
+                runs: Some(runs),
+                sessions: Some(sessions.len()),
+            }
+        })
+        .collect()
+}
+
+// Runner files and their parseable targets. Never shells out. The root
+// Makefile comes back parsed, for matching once the report is built.
+fn task_runner_state(root: &Path) -> (TaskRunnerState, Option<ParsedMakefile>) {
+    let mut state = TaskRunnerState::default();
+    let mut makefile: Option<ParsedMakefile> = None;
     for name in [
         "Makefile",
         "justfile",
@@ -112582,29 +113270,14 @@ fn task_runner_state(root: &Path) -> serde_json::Value {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut names: Vec<String> = Vec::new();
         match name {
             "Makefile" => {
-                files.push(name);
-                for line in text.lines() {
-                    let Some((head, tail)) = line.split_once(':') else {
-                        continue;
-                    };
-                    if tail.starts_with('=') || head.is_empty() {
-                        continue;
-                    }
-                    if head.starts_with('.') || head.starts_with('\t') || head.starts_with(' ') {
-                        continue;
-                    }
-                    if head
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
-                    {
-                        push(head.to_string());
-                    }
-                }
+                state.files.push(name.to_string());
+                makefile = Some(task_parse_makefile(&text));
             }
             "justfile" => {
-                files.push(name);
+                state.files.push(name.to_string());
                 for line in text.lines() {
                     let Some((head, tail)) = line.split_once(':') else {
                         continue;
@@ -112620,24 +113293,31 @@ fn task_runner_state(root: &Path) -> serde_json::Value {
                             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
                         && !head.starts_with(' ')
                     {
-                        push(name_part.to_string());
+                        task_push_unique(&mut names, name_part);
                     }
                 }
             }
             "package.json" => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                     if let Some(scripts) = v.get("scripts").and_then(|s| s.as_object()) {
-                        files.push(name);
+                        state.files.push(name.to_string());
                         for k in scripts.keys() {
-                            push(k.clone());
+                            task_push_unique(&mut names, k);
                         }
                     }
                 }
             }
-            _ => files.push(name),
+            _ => state.files.push(name.to_string()),
+        }
+        for n in names {
+            state.targets.push(TaskRunnerTarget {
+                name: n,
+                file: name.to_string(),
+                ..Default::default()
+            });
         }
     }
-    serde_json::json!({ "files": files, "targets": targets })
+    (state, makefile)
 }
 
 #[derive(Clone, Debug)]
@@ -112756,12 +113436,23 @@ fn task_steps_from_session(file: &TaskSessionFile) -> Vec<TaskStep> {
     out
 }
 
-// Returns the JSON document plus (sessions, commands, clusters, excluded).
+// What the `[tasks] op=candidates` trace line reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct TaskRunStats {
+    sessions: usize,
+    commands: usize,
+    clusters: usize,
+    excluded: usize,
+    targets: usize,
+    saved: usize,
+}
+
+// Returns the JSON document plus the trace line's counts.
 fn task_candidates_run(
     root: &Path,
     extra: Vec<TaskSessionFile>,
     all: bool,
-) -> (serde_json::Value, [usize; 4]) {
+) -> (serde_json::Value, TaskRunStats) {
     let started = std::time::Instant::now();
     let mut files = task_session_files_for_root(root);
     for f in extra {
@@ -112779,18 +113470,27 @@ fn task_candidates_run(
         .unwrap_or_else(|_| root.to_string_lossy().to_string());
     let mut report = task_candidates_core(&root_str, &steps);
     report.sessions = files.len();
+    let (mut runner, makefile) = task_runner_state(root);
+    if let Some(mk) = makefile {
+        let mut targets = task_apply_makefile(&mut report, &mk, &root_str);
+        targets.append(&mut runner.targets);
+        runner.targets = targets;
+    }
     let ms = started.elapsed().as_millis();
-    let doc = task_report_json(&root_str, &report, task_runner_state(root), all, ms);
-    let excluded_total: usize = report.excluded.iter().sum();
-    (
-        doc,
-        [
-            report.sessions,
-            report.commands,
-            report.candidates.len(),
-            excluded_total,
-        ],
-    )
+    let doc = task_report_json(&root_str, &report, &runner, all, ms);
+    let stats = TaskRunStats {
+        sessions: report.sessions,
+        commands: report.commands,
+        clusters: report.candidates.len(),
+        excluded: report.excluded.iter().sum(),
+        targets: runner.targets.len(),
+        saved: report
+            .candidates
+            .iter()
+            .filter(|c| !c.saved_as.is_empty())
+            .count(),
+    };
+    (doc, stats)
 }
 
 fn task_candidates_for_cli(root: &Path) -> serde_json::Value {
@@ -112823,11 +113523,13 @@ fn task_candidates_route<R: tauri::Runtime>(app: &AppHandle<R>, all: bool) -> Ve
             app,
             "tasks",
             &format!(
-                "op=candidates sessions={} commands={} clusters={} excluded={} ms={}",
-                stats[0],
-                stats[1],
-                stats[2],
-                stats[3],
+                "op=candidates sessions={} commands={} clusters={} excluded={} targets={} saved={} ms={}",
+                stats.sessions,
+                stats.commands,
+                stats.clusters,
+                stats.excluded,
+                stats.targets,
+                stats.saved,
                 started.elapsed().as_millis()
             ),
         );
@@ -113114,7 +113816,7 @@ mod task_candidates_tests {
     #[test]
     fn duplicate_names_get_suffixes() {
         let steps: Vec<TaskStep> = [
-            "make deploy -n",
+            "make deploy -k",
             "make deploy -v",
             "make deploy -x",
             "make deploy -y",
@@ -113136,6 +113838,245 @@ mod task_candidates_tests {
                 "make-deploy-3",
                 "make-deploy-4"
             ]
+        );
+    }
+
+    // issue-483-save-as-task: the comment block a save writes.
+    const SAVED_MAKEFILE: &str = "\
+# Saved by Bram from the agents' `cargo test` runs. Replaces:
+#   cargo test  ->  make rust-tests-all
+#   cargo test --manifest-path src-tauri/Cargo.toml  ->  make rust-tests-all
+#   cargo test pty_menu_tests  ->  make rust-tests-module M=pty_menu_tests
+#   cargo test send_ledger    ->  make rust-tests-module M=send_ledger
+# Not a task: cargo test 2>&1 | grep \"test result\" | head -1 (reads the output)
+# An unknown line the parser ignores.
+.PHONY: rust-tests-all rust-tests-module
+rust-tests-all:
+\t@cargo test --manifest-path src-tauri/Cargo.toml
+
+rust-tests-module:
+\tcargo test --manifest-path src-tauri/Cargo.toml $(M)
+
+build:
+\t-cargo build --manifest-path src-tauri/Cargo.toml
+";
+
+    #[test]
+    fn parses_makefile_comment_block() {
+        let mk = task_parse_makefile(SAVED_MAKEFILE);
+        let names: Vec<&str> = mk.targets.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["rust-tests-all", "rust-tests-module", "build"]);
+        assert_eq!(
+            mk.targets[1].body,
+            vec!["cargo test --manifest-path src-tauri/Cargo.toml $(M)"]
+        );
+        assert_eq!(
+            mk.targets[1].match_steps,
+            vec!["cargo test --manifest-path src-tauri/Cargo.toml"]
+        );
+        assert_eq!(
+            mk.targets[2].body,
+            vec!["cargo build --manifest-path src-tauri/Cargo.toml"]
+        );
+        assert_eq!(mk.blocks.len(), 1);
+        let b = &mk.blocks[0];
+        assert_eq!(b.key, "cargo test");
+        assert_eq!(b.replaces.len(), 4);
+        assert_eq!(
+            b.replaces[2],
+            (
+                "cargo test pty_menu_tests".to_string(),
+                "make rust-tests-module M=pty_menu_tests".to_string()
+            )
+        );
+        assert_eq!(
+            b.not_tasks,
+            vec![(
+                "cargo test 2>&1 | grep \"test result\" | head -1".to_string(),
+                "reads the output".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn make_invocation_targets() {
+        assert_eq!(
+            task_make_invocation("make rust-tests-module M=x"),
+            Some(vec!["rust-tests-module".to_string()])
+        );
+        assert_eq!(
+            task_make_invocation("make -C . build 2>&1 | tail -5"),
+            Some(vec!["build".to_string()])
+        );
+        assert_eq!(task_make_invocation("make"), Some(vec![]));
+        assert_eq!(task_make_invocation("make -C sub build"), None);
+        assert_eq!(task_make_invocation("cargo test"), None);
+    }
+
+    fn saved_report() -> (TaskCandidatesReport, Vec<TaskRunnerTarget>) {
+        let steps: Vec<TaskStep> = vec![
+            step("cargo test", "a"),
+            step("cargo test pty_menu_tests", "a"),
+            step("cargo test pty_menu_tests", "b"),
+            step("cargo test 2>&1 | grep \"test result\" | head -1", "b"),
+            step("cargo test --lib odd_new_spelling", "c"),
+            step("cargo build --manifest-path src-tauri/Cargo.toml", "a"),
+            step("cargo build --manifest-path src-tauri/Cargo.toml", "b"),
+            step("cargo build", "c"),
+            step("make rust-tests-module M=x", "a"),
+            step("make rust-tests-module M=y", "c"),
+            step("make -C . rust-tests-all", "b"),
+            step("make", "c"),
+        ];
+        let mut r = task_candidates_core("/r", &steps);
+        let mk = task_parse_makefile(SAVED_MAKEFILE);
+        let targets = task_apply_makefile(&mut r, &mk, "/r");
+        (r, targets)
+    }
+
+    #[test]
+    fn saved_as_and_now_from_comment_block() {
+        let (r, _) = saved_report();
+        let c = r.candidates.iter().find(|c| c.key == "cargo test").unwrap();
+        assert_eq!(c.saved_as, vec!["rust-tests-module", "rust-tests-all"]);
+        // The View range: the Bram comment (line 1) through rust-tests-module's
+        // recipe (line 13).
+        assert_eq!(c.saved_lines, Some([1, 13]));
+        let now = |text: &str| {
+            c.spellings
+                .iter()
+                .find(|s| s.text == text)
+                .and_then(|s| s.now.clone())
+        };
+        assert_eq!(
+            now("cargo test pty_menu_tests").as_deref(),
+            Some("make rust-tests-module M=pty_menu_tests")
+        );
+        assert_eq!(now("cargo test").as_deref(), Some("make rust-tests-all"));
+        assert_eq!(
+            now("cargo test 2>&1 | grep \"test result\" | head -1").as_deref(),
+            Some("not a task")
+        );
+        assert_eq!(now("cargo test --lib odd_new_spelling"), None);
+        // `build` carries no Bram comment: matched by its recipe instead.
+        let b = r
+            .candidates
+            .iter()
+            .find(|c| c.key == "cargo build")
+            .unwrap();
+        assert_eq!(b.saved_as, vec!["build"]);
+    }
+
+    #[test]
+    fn counts_make_runs_per_target() {
+        let (_, targets) = saved_report();
+        let get = |n: &str| targets.iter().find(|t| t.name == n).unwrap().clone();
+        let m = get("rust-tests-module");
+        assert_eq!((m.runs, m.sessions), (Some(2), Some(2)));
+        assert_eq!(m.file, "Makefile");
+        // `make -C . rust-tests-all` plus a bare `make` (the default goal).
+        let a = get("rust-tests-all");
+        assert_eq!((a.runs, a.sessions), (Some(2), Some(2)));
+        let b = get("build");
+        assert_eq!((b.runs, b.sessions), (Some(0), Some(0)));
+    }
+
+    #[test]
+    fn windows_shell_chores_are_not_candidates() {
+        // A Windows report (2026-11-12) listed PowerShell cmdlets as tasks.
+        for c in [
+            "Get-Content src-tauri\\src\\lib.rs",
+            "Get-ChildItem -Recurse",
+            "gci .bram",
+            "Select-String -Pattern foo lib.rs",
+            "C:\\Windows\\System32\\findstr.exe /s foo *",
+        ] {
+            assert_eq!(task_bucket(c), Some(3), "{c}");
+        }
+        assert_eq!(task_bucket("C:\\Git\\cmd\\git.exe status"), Some(2));
+        assert_eq!(task_bucket("cargo test"), None);
+    }
+
+    #[test]
+    fn dry_runs_and_saved_task_runs_are_not_candidates() {
+        // Jon, 2026-11-12: `make rust-tests-module` showed up as its own
+        // saved row, and a `make -n` counted as a run.
+        assert!(task_make_dry_run("make -n rust-tests-module M=x"));
+        assert!(task_make_dry_run("make --dry-run build"));
+        assert!(!task_make_dry_run(
+            "make rust-tests-module M=x 2>&1 | grep -n ok"
+        ));
+        let steps: Vec<TaskStep> = vec![
+            step("make -n rust-tests-module M=x", "a"),
+            step("make rust-tests-module M=x", "a"),
+            step("make rust-tests-module M=y", "b"),
+            step("make rust-tests-module M=z", "c"),
+        ];
+        let mut r = task_candidates_core("/r", &steps);
+        let mk = task_parse_makefile(SAVED_MAKEFILE);
+        let targets = task_apply_makefile(&mut r, &mk, "/r");
+        let m = targets
+            .iter()
+            .find(|t| t.name == "rust-tests-module")
+            .unwrap();
+        assert_eq!((m.runs, m.sessions), (Some(3), Some(3)));
+        assert!(r.candidates.iter().all(|c| !c.key.starts_with("make")));
+    }
+
+    #[test]
+    fn makefile_without_bram_comments_matches_by_body() {
+        let text = "test:\n\tcargo test --manifest-path src-tauri/Cargo.toml $(FILTER)\n\
+                    check: ; @cd src-tauri && cargo check\n";
+        let mk = task_parse_makefile(text);
+        assert!(mk.blocks.is_empty());
+        let steps: Vec<TaskStep> = ["cargo test", "cargo test x", "cargo test y"]
+            .iter()
+            .map(|c| step(c, "s"))
+            .chain(
+                ["cargo check", "cargo check", "cargo check"]
+                    .iter()
+                    .map(|c| step(c, "t")),
+            )
+            .collect();
+        let mut r = task_candidates_core("/r", &steps);
+        task_apply_makefile(&mut r, &mk, "/r");
+        let saved = |k: &str| {
+            r.candidates
+                .iter()
+                .find(|c| c.key == k)
+                .unwrap()
+                .saved_as
+                .clone()
+        };
+        assert_eq!(saved("cargo test"), vec!["test"]);
+        assert_eq!(saved("cargo check"), vec!["check"]);
+        let c = r.candidates.iter().find(|c| c.key == "cargo test").unwrap();
+        assert!(c.spellings.iter().all(|s| s.now.is_none()));
+    }
+
+    #[test]
+    fn candidate_row_wire_shape() {
+        let mut r = task_candidates_core("/r", &vec![step("cargo test", "s"); 3]);
+        r.candidates[0].spellings[0].now = Some("make t".into());
+        r.candidates[0].saved_as = vec!["t".into()];
+        let runner = TaskRunnerState {
+            files: vec!["Makefile".into()],
+            targets: vec![TaskRunnerTarget {
+                name: "t".into(),
+                file: "Makefile".into(),
+                body: vec!["cargo test".into()],
+                runs: Some(0),
+                sessions: Some(0),
+            }],
+        };
+        let doc = task_report_json("/r", &r, &runner, false, 7);
+        assert_eq!(
+            serde_json::to_string(&doc["candidates"][0]).unwrap(),
+            r#"{"agents":["claude"],"firstSeenMs":1000,"key":"cargo test","lastSeenMs":1000,"runs":3,"savedAs":["t"],"sessions":1,"spellings":[{"name":"cargo-test","now":"make t","runs":3,"text":"cargo test"}]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&doc["runner"]).unwrap(),
+            r#"{"files":["Makefile"],"targets":[{"body":["cargo test"],"file":"Makefile","name":"t","runs":0,"sessions":0}]}"#
         );
     }
 }

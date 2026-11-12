@@ -833,3 +833,4 @@ instead of a fix; for a plain change, just make it. Log-line shape →
 - **Running a multi-worker browser test suite** → read `.claude/bram-reference/environment.md` (§Resource-heavy test suites).
 - **Windows refuses Bram or its hooks fail** → read `.claude/bram-reference/environment.md` (§Windows: Smart App Control).
 - **A `voice-setup:` turn arrives, or the user says voice input won't start** → offer to repair it: read `.claude/bram-reference/environment.md` (§Voice input setup).
+- **A `save-task:` turn arrives, or the project has a `Makefile`** → read `.claude/bram-reference/environment.md` (§Saving a task).

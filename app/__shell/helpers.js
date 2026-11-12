@@ -12386,7 +12386,8 @@ window.__bramLocalLinkPreviewMeta = function (preview) {
   if (preview.error) return preview.displayPath || preview.href || "";
   var bits = [];
   if (preview.displayPath) bits.push(preview.displayPath);
-  if (preview.line) bits.push("line " + preview.line);
+  if (preview.line && preview.endLine) bits.push("lines " + preview.line + "\u2013" + preview.endLine);
+  else if (preview.line) bits.push("line " + preview.line);
   if (preview.truncated) bits.push("truncated");
   return bits.join(" · ");
 };
@@ -12659,6 +12660,15 @@ window.__bramOpenLocalLinkPreview = function (request) {
           error: payload.error || "",
         });
       } catch (e) {}
+      // A range request (Tasks' View on a saved row) shows only those lines.
+      if (request.line && request.endLine && payload.ok && typeof payload.content === "string") {
+        var all = payload.content.split("\n");
+        var a = Math.max(1, Number(request.line)), b = Math.min(all.length, Number(request.endLine));
+        if (b >= a) {
+          payload.content = all.slice(a - 1, b).join("\n");
+          payload.endLine = b;
+        }
+      }
       window.__bramSetLocalLinkPreview(payload);
     })
     .catch(function (e) {
@@ -18473,10 +18483,17 @@ window.__bramToggleInArray = function (arr, id) {
 // fewer than 5 such rows), capped at 10; the rest fold under one line.
 // In the 2026-11-09 runs this took xmlui from 33 rows to 8 and bram-studio
 // from 54 to 8; Bram's 159 rows (62 in 3+ sessions) hit the cap.
+window.__bramTaskIsSaved = function (c) {
+  return c && c.savedAs && c.savedAs.length > 0 ? 1 : 0;
+};
 window.__bramTaskRanked = function (report) {
   var rows = (report && report.candidates) || [];
   return rows.slice().sort(function (a, b) {
-    return (b.sessions - a.sessions)
+    // issue-483-save-as-task: a saved row (non-empty savedAs) sorts above
+    // every unsaved one (Jon, 2026-11-12: "put saved items at the top");
+    // an older host sends no savedAs, so all are unsaved.
+    return (window.__bramTaskIsSaved(b) - window.__bramTaskIsSaved(a))
+      || (b.sessions - a.sessions)
       || ((b.spellings || []).length - (a.spellings || []).length)
       || (b.runs - a.runs)
       || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
@@ -18491,7 +18508,10 @@ window.__bramTaskRows = function (report, showAll) {
     picked = ranked.filter(function (c) { return (c.sessions || 0) >= min; });
     if (picked.length >= MIN_ROWS) break;
   }
-  return picked.slice(0, CAP);
+  // Saved rows come first and don't count against the cap.
+  var open = picked.filter(function (c) { return !window.__bramTaskIsSaved(c); });
+  var saved = picked.filter(function (c) { return window.__bramTaskIsSaved(c); });
+  return saved.concat(open.slice(0, CAP));
 };
 window.__bramTaskHidden = function (report, showAll) {
   var all = (report && report.candidates) || [];
@@ -18510,6 +18530,131 @@ window.__bramTaskHeadline = function (report) {
   var pct = Math.round(share * 100 / total);
   return "Five commands account for " + pct + "% of the repeated runs: "
     + top.map(function (c) { return c.key; }).join(", ") + ".";
+};
+// Save as task (issue-483-save-as-task): one turn carrying the cluster; the
+// agent sorts the spellings into jobs and proposes a Worklist item.
+// The save-task turn, written for the person reading the Transcript (Jon,
+// 2026-11-12: "make this human-friendly"), and plain enough for the agent:
+// the command, its counts, and each way typed as a code line with its runs.
+// The host's placeholder names are left out, as the page left them out.
+window.__bramSaveTaskTurn = function (row) {
+  if (!row) return;
+  var plural = function (n, one, many) { return n + " " + (n === 1 ? one : many); };
+  var lines = ["save-task: Save `" + row.key + "` as a task. It ran " +
+    plural(row.runs || 0, "time", "times") + " in " + plural(row.sessions || 0, "session", "sessions") +
+    ", typed these ways:", ""];
+  (row.spellings || []).forEach(function (sp) {
+    lines.push("- `" + String(sp.text).replace(/`/g, "'") + "` (" + plural(sp.runs || 0, "run", "runs") + ")");
+  });
+  try { window.__bramIframeTrace("tasks-save-click", { key: row.key }); } catch (e) {}
+  window.toTurn(lines.join("\n"));
+  // The agent answers in the Transcript: go there, as the gate buttons do
+  // (Jon, 2026-11-12: "that's where you need to be looking next").
+  window.__bramGateGoTranscript();
+};
+window.__bramTaskSavedLine = function (row) {
+  return "saved as " + ((row && row.savedAs) || []).join(", ");
+};
+// What a spelling maps to today on a saved row (host field `now`).
+window.__bramTaskSpellings = function (row) {
+  return ((row && row.spellings) || []).map(function (sp) {
+    return Object.assign({}, sp, { nowLine: window.__bramTaskNowLine(row, sp) });
+  });
+};
+window.__bramTaskNowLine = function (row, sp) {
+  if (!window.__bramTaskIsSaved(row)) return "";
+  if (sp && sp.now === "not a task") return "not a task";
+  if (sp && sp.now) return "\u2192 " + sp.now;
+  return "typed by hand, not one of the saved tasks";
+};
+// The expanded row's note (issue-483-save-as-task, Jon 2026-11-12): a saved
+// row names what it was saved as; an unsaved row says what saving does.
+window.__bramTaskRowNote = function (row, report) {
+  var saved = (row && row.savedAs) || [];
+  if (saved.length) {
+    var names = saved.length === 1 ? saved[0] : saved.slice(0, -1).join(", ") + " and " + saved[saved.length - 1];
+    return "Saved in the Makefile as " + names + ". Runs by name are in the table; the list below it is how often each way was typed by hand.";
+  }
+  return "Some of these are one job typed differently, some are different jobs with the same tool. Click Save as task and the agent sorts them out and proposes saved tasks as a Worklist item.";
+};
+// Tasks' View on a saved row: the Makefile, cut to the saved rules' lines.
+window.__bramTaskViewSaved = function (row) {
+  var r = row && row.savedLines;
+  try { window.__bramIframeTrace("tasks-view-click", { key: row && row.key, lines: r || null }); } catch (e) {}
+  window.__bramOpenLocalLinkPreview({ path: "Makefile", line: r ? r[0] : null, endLine: r ? r[1] : null });
+};
+// While a row is open, the page shows only that row, the way the Worklist's
+// files table narrows to an open diff (Jon, 2026-11-12: "hide the other
+// stuff when expanded").
+window.__bramTaskVisibleRows = function (report, showAll, expanded) {
+  var rows = window.__bramTaskRows(report, showAll);
+  var open = (expanded || []).filter(function (k) { return rows.some(function (r) { return r.key === k; }); });
+  if (!open.length) return rows;
+  return rows.filter(function (r) { return open.indexOf(r.key) >= 0; });
+};
+window.__bramTaskAnyOpen = function (report, showAll, expanded) {
+  return window.__bramTaskVisibleRows(report, showAll, expanded).length < window.__bramTaskRows(report, showAll).length;
+};
+// The disclosure glyph, full size like the Worklist files table's.
+window.__bramTaskChevron = function (expanded, key) {
+  return (expanded || []).indexOf(key) >= 0 ? "\u25BC" : "\u25B6";
+};
+// A saved row's by-name counts, one row per saved task, for a small table.
+window.__bramTaskByNameRows = function (row, report) {
+  var saved = (row && row.savedAs) || [];
+  return ((report && report.runner && report.runner.targets) || []).filter(function (t) {
+    return t && typeof t === "object" && saved.indexOf(t.name) >= 0 && typeof t.runs === "number";
+  }).map(function (t) {
+    return { name: t.name, runs: t.runs, sessions: t.sessions || 0 };
+  });
+};
+// Tasks header ⓘ (Jon, 2026-11-12: "explain whatever additional detail is
+// useful"). The Command and Saved entries carry what the page used to show
+// as two summary lines.
+window.__bramTaskInfoTitle = function (key) {
+  return { command: "Command", runs: "Runs", sessions: "Sessions", agents: "Agents", ways: "Ways typed", saved: "Saved" }[key] || "";
+};
+window.__bramTaskInfoText = function (key, report) {
+  var r = report || {};
+  var x = r.excluded || {};
+  if (key === "command") {
+    return "Each row is a command the agents ran in this project's sessions, from every agent, " +
+      "counted from " + (r.commands || 0) + " shell commands in " + (r.sessions || 0) + " sessions. " +
+      "A compound line is split into its steps first.\n\n" +
+      "Left out, because a saved task wouldn't help:\n\n" +
+      "- " + (x.bramProtocol || 0) + " steps that talk to Bram\n" +
+      "- " + (x.shell || 0) + " that look around or tidy up (`ls`, `cat`, `grep`, `rm` and the like)\n" +
+      "- " + (x.git || 0) + " git\n" +
+      "- " + (x.forge || 0) + " GitHub or GitLab\n\n" +
+      "Rows seen in the most sessions come first; the rest fold under **Show all**.";
+  }
+  if (key === "runs") return "How many times the command ran, every way it was typed added together. On a saved row, runs by name are in the row's own table.";
+  if (key === "sessions") return "How many sessions it ran in. Repetition across sessions is what a saved task fixes; a command run many times in one session is usually one afternoon's loop.";
+  if (key === "agents") return "Which agents ran it: Claude, Codex, OpenCode or Antigravity.";
+  if (key === "ways") return "How many different ways the command was typed. Some are one job typed differently (output trimmed, a different folder); some are different jobs with the same tool. Open a row to see them. Sorting them is the agent's work when you click **Save as task**.";
+  if (key === "saved") {
+    var targets = ((r.runner && r.runner.targets) || []).filter(function (t) { return t && typeof t === "object"; });
+    if (!targets.length) return "Nothing is saved yet. **Save as task** on a row asks the agent to propose saved tasks for it, in the project's `Makefile`, as a Worklist item.";
+    return "Saved tasks in the `Makefile`, with how often agents ran each by name:\n\n" + targets.map(function (t) {
+      if (t.runs === null || t.runs === undefined) return "- `" + t.name + "`";
+      return "- `" + t.name + "`: " + (t.runs ? t.runs + (t.runs === 1 ? " run" : " runs") + " in " + (t.sessions || 0) + (t.sessions === 1 ? " session" : " sessions") : "not run yet");
+    }).join("\n");
+  }
+  return "";
+};
+// The saved-file line; targets are [{name,file,body,runs,sessions}] (older
+// hosts send plain names).
+window.__bramTaskFileLine = function (runner) {
+  var files = (runner && runner.files) || [];
+  if (!files.length) return "";
+  var parts = ((runner && runner.targets) || []).map(function (t) {
+    if (typeof t === "string") return t;
+    // runs null: a runner file the host doesn't count (only the Makefile is).
+    if (t.runs === null || t.runs === undefined) return t.name;
+    var r = t.runs || 0;
+    return t.name + ", " + (r ? "run " + r + (r === 1 ? " time" : " times") + " in " + (t.sessions || 0) + (t.sessions === 1 ? " session" : " sessions") : "never run");
+  });
+  return "Saved tasks, in " + files.join(", ") + ": " + parts.join("; ");
 };
 window.__bramTaskFoldLine = function (report, showAll) {
   var hidden = window.__bramTaskHidden(report, showAll);

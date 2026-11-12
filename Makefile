@@ -59,7 +59,16 @@ endif
 #   scripts/demo-instance.sh launch 2>&1 | tail -5  ->  make demo-launch
 #   scripts/demo-instance.sh launch 2>&1 | tail -4  ->  make demo-launch
 #   scripts/demo-instance.sh reset 2>&1 | tail -1  ->  make demo-reset
-.PHONY: demo-launch demo-stop demo-reset
+# Saved by Bram from the agents' `scripts/demo-instance.ps1` runs. Replaces:
+#   powershell -NoProfile -File scripts/demo-instance.ps1 stop 2>&1 | tail -1  ->  make demo-stop
+#   powershell -NoProfile -File scripts/demo-instance.ps1 launch 2>&1 | tail -1  ->  make demo-launch
+#   powershell -NoProfile -File scripts/demo-instance.ps1 launch 2>&1 | tail -2  ->  make demo-launch
+#   powershell -NoProfile -File scripts/demo-instance.ps1 launch 2>&1 | tail -10  ->  make demo-launch
+#   powershell -NoProfile -File scripts/demo-instance.ps1 reset 2>&1 | tail -1  ->  make demo-reset
+#   powershell -NoProfile -File scripts/demo-instance.ps1 use gate-check --legacy-layout 2>&1 | tail -1  ->  make demo-use S=gate-check LEGACY=1
+#   powershell -NoProfile -File scripts/demo-instance.ps1 use gate-check --legacy-layout 2>&1 | tail -4  ->  make demo-use S=gate-check LEGACY=1
+# Not a task: powershell -NoProfile -File scripts/demo-instance.ps1 status 2>&1 | grep -E 'pid' (reads the demo's PID)
+.PHONY: demo-launch demo-stop demo-reset demo-use
 
 # Launch the default demo instance.
 ifeq ($(OS),Windows_NT)
@@ -86,6 +95,16 @@ demo-reset:
 else
 demo-reset:
 	scripts/demo-instance.sh reset
+endif
+
+# Put the demo on a saved scenario. Usage: make demo-use S=<scenario> [LEGACY=1]
+# LEGACY=1 hydrates the old resources/ layout, to exercise the startup move.
+ifeq ($(OS),Windows_NT)
+demo-use:
+	powershell -NoProfile -File scripts\demo-instance.ps1 use $(S) $(if $(LEGACY),--legacy-layout)
+else
+demo-use:
+	scripts/demo-instance.sh use $(S) $(if $(LEGACY),--legacy-layout)
 endif
 
 # Saved by Bram from the agents' `cargo fmt` runs. Replaces:

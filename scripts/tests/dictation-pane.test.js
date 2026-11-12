@@ -289,7 +289,8 @@ test("a caret the user placed after selecting cancels the selection", () => {
   assert.strictEqual(real.__bramVoiceCaptureSelection("message-agent"), null);
   const sk = seen().pop();
   assert.strictEqual(sk.reason, "at-end");
-  assert.ok(Array.isArray(sk.ring) && sk.ring.length > 0, "the skip carries the event ring");
+  assert.ok(typeof sk.ring === "string" && sk.ring.length > 0, "the skip carries the event ring (one string, so the trace keeps it whole)");
+  assert.ok(/TA\[/.test(sk.mem), "the skip names the remembered textarea");
   assert.strictEqual(sk.baseLen, el.value.length);
 });
 

@@ -11376,6 +11376,17 @@ window.__bramLastTextSel = null;
 // selection-skipped trace: when a selection never reaches the mic click, the
 // ring says what happened to it (judell/bram: voice-over-selection duplicates).
 window.__bramSelRing = [];
+// Names a textarea in a trace line: tag, then its aria-label, placeholder or
+// class (first 24 chars), then its text length. The pane has more than one
+// (the message box, the draft editor, hidden sizing textareas), and a
+// selection read from the wrong one looks like an empty box.
+window.__bramSelElTag = function (el) {
+  if (!el) return "none";
+  if (el.tagName !== "TEXTAREA") return el.tagName;
+  var attr = function (k) { try { return el.getAttribute ? el.getAttribute(k) : null; } catch (e) { return null; } };
+  var name = attr("aria-label") || attr("placeholder") || el.className || el.id || "";
+  return "TA[" + String(name).replace(/\s+/g, "_").slice(0, 24) + "|" + String(el.value || "").length + "]";
+};
 (function () {
   // A non-empty range is remembered from any event; a collapsed caret only
   // from a user gesture (mouseup, keyup, select), since a restored or
@@ -11391,7 +11402,7 @@ window.__bramSelRing = [];
       var el = document.activeElement;
       try {
         var ring = window.__bramSelRing;
-        ring.push([ev ? ev.type : "?", el ? el.tagName : "none", el && typeof el.selectionStart === "number" ? el.selectionStart : -1, el && typeof el.selectionEnd === "number" ? el.selectionEnd : -1, Date.now() % 1000000]);
+        ring.push((ev ? ev.type : "?") + ":" + window.__bramSelElTag(el) + ":" + (el && typeof el.selectionStart === "number" ? el.selectionStart + "-" + el.selectionEnd : "-") + "@" + (Date.now() % 100000));
         if (ring.length > 8) ring.shift();
       } catch (e) {}
       if (!el || el.tagName !== "TEXTAREA") return;
@@ -11431,10 +11442,12 @@ window.__bramVoiceCaptureSelection = function (target) {
       var a = document.activeElement;
       var t = (a && a.tagName === "TEXTAREA") ? a : (m && m.el);
       d.memAge = m ? Date.now() - m.at : -1;
-      d.mem = m ? [m.start, m.end, m.gesture ? 1 : 0, m.range ? 1 : 0] : null;
-      d.elSel = t && typeof t.selectionStart === "number" ? [t.selectionStart, t.selectionEnd] : null;
+      d.mem = m ? m.start + "-" + m.end + (m.gesture ? ",gesture" : "") + (m.range ? ",range" : "") + ",el=" + window.__bramSelElTag(m.el) : "none";
+      d.active = window.__bramSelElTag(a);
+      d.textareas = Array.prototype.map.call(document.querySelectorAll("textarea"), function (x) { return window.__bramSelElTag(x); }).join(" ");
+      d.elSel = t && typeof t.selectionStart === "number" ? t.selectionStart + "-" + t.selectionEnd : "none";
       d.baseLen = t ? String(t.value || "").length : -1;
-      d.ring = window.__bramSelRing.slice();
+      d.ring = window.__bramSelRing.join(" ");
     } catch (e) {}
     return d;
   };

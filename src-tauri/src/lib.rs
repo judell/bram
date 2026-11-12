@@ -31196,17 +31196,29 @@ fn bram_port_serves_project(port: u16, proj: &Path) -> Result<bool, String> {
 }
 
 // The port this project's port files record (the plain file, else the
-// metadata's), or None. The owner the publisher and the startup mover's
-// live-owner check (startup_live_owner) probe.
+// metadata's), or None. The owner the publisher probes. The startup mover's
+// live-owner check reads the folder on disk instead (startup_recorded_port).
 fn recorded_bram_port(proj: &Path) -> Option<u16> {
-    let port_path = resource_relative_path(proj, ".bram-port");
-    std::fs::read_to_string(&port_path)
+    recorded_bram_port_at(&resource_relative_path(proj, ".bram-port"))
+}
+
+// The `port` field of a `.bram-port.json` metadata file.
+#[derive(serde::Deserialize)]
+struct BramPortMeta {
+    #[serde(default)]
+    port: u64,
+}
+
+// The port recorded at one `.bram-port` path: the plain file, else its
+// metadata's, or None.
+fn recorded_bram_port_at(port_path: &Path) -> Option<u16> {
+    std::fs::read_to_string(port_path)
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
         .or_else(|| {
-            let raw = std::fs::read(bram_port_metadata_path(&port_path)).ok()?;
-            let meta: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-            u16::try_from(meta.get("port")?.as_u64()?).ok()
+            let raw = std::fs::read(bram_port_metadata_path(port_path)).ok()?;
+            let meta: BramPortMeta = serde_json::from_slice(&raw).ok()?;
+            u16::try_from(meta.port).ok()
         })
         .filter(|p| *p != 0)
 }
@@ -65505,12 +65517,20 @@ fn startup_live_owner_with(
     }
 }
 
+// The port recorded in the state folder as it is on disk now: before the
+// move that's resources/, where an older or held Bram on this project wrote
+// it. resource_relative_path would name .bram/, which doesn't exist yet, so
+// the owner check never probed (issue-469-owner-check-reads-old-port).
+fn startup_recorded_port(root: &Path) -> Option<u16> {
+    recorded_bram_port_at(&root.join(state_dir_on_disk_name(root)).join(".bram-port"))
+}
+
 // (live, probes, whether the recorded owner was the relaunching parent).
 fn startup_live_owner(root: &Path) -> (bool, u32, bool) {
     let parent = std::env::var(RELAUNCH_PARENT_PORT_ENV)
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok());
-    let recorded = recorded_bram_port(root);
+    let recorded = startup_recorded_port(root);
     let (live, probes) = startup_live_owner_with(
         recorded,
         parent,
@@ -99805,6 +99825,26 @@ mod worklist_authorization_tests {
             &|| panic!("no claim, so no owner probe"),
         );
         assert!(matches!(outcome, super::StateMigrateOutcome::Moved { .. }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn startup_owner_check_reads_the_port_from_the_folder_on_disk() {
+        // issue-469-owner-check-reads-old-port: before the move, the owner a
+        // live-claim check must probe recorded its port in resources/. The
+        // publisher's reader names .bram/ and finds nothing there.
+        let root = state_migrate_root();
+        assert_eq!(super::startup_recorded_port(&root), Some(61455));
+        assert_eq!(super::recorded_bram_port(&root), None);
+        // Once Bram's .bram/ exists, its port file is the one read.
+        let new = root.join(super::BRAM_STATE_DIR_NEW);
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join(super::STATE_MIGRATED_FROM_REL), "resources test").unwrap();
+        std::fs::write(new.join(".bram-port"), "61456").unwrap();
+        assert_eq!(super::startup_recorded_port(&root), Some(61456));
+        // No port file in the folder on disk: nothing to probe.
+        std::fs::remove_file(new.join(".bram-port")).unwrap();
+        assert_eq!(super::startup_recorded_port(&root), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

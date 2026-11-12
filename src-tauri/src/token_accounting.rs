@@ -113,6 +113,10 @@ pub struct CallReading {
 /// One model call as a reader found it, before attribution.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct RawCall {
+    /// The provider's id for the call, unique within its source: Claude's
+    /// message id, Codex's record ordinal, OpenCode's message id. The ledger's
+    /// idempotency key.
+    pub key: String,
     pub at_ms: i64,
     pub model: String,
     pub context: u64,
@@ -121,9 +125,12 @@ pub struct RawCall {
     pub cache_creation: u64,
     pub output: u64,
     pub reasoning: Option<u64>,
+    /// Stamped by the ledger when the call was stored; None reads attribute
+    /// from the claim windows at report time.
+    pub attribution: Option<Attribution>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
     pub used_percent: Option<f64>,
@@ -131,7 +138,7 @@ pub struct QuotaWindow {
     pub resets_at: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Quota {
     pub primary: Option<QuotaWindow>,
@@ -141,6 +148,8 @@ pub struct Quota {
 /// A file credited with bytes read into context.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadEvent {
+    /// `<tool call id>#<n>`: unique within its source; the ledger's key.
+    pub key: String,
     pub path: String,
     pub bytes: u64,
     pub via_shell: bool,
@@ -460,7 +469,7 @@ struct OpenCodeData {
 // --- tool results: bytes read into context --------------------------------
 
 /// What a pending tool call will credit when its result arrives.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum PendingTool {
     Read { path: String },
     GrepContent { default_path: Option<String> },
@@ -600,6 +609,13 @@ pub fn shell_named_files(cmd: &str) -> Vec<String> {
     out
 }
 
+/// Name the reads one tool result produced `<tool call id>#<n>`.
+fn key_reads(reads: &mut [ReadEvent], tool_call_id: &str) {
+    for (i, r) in reads.iter_mut().enumerate() {
+        r.key = format!("{tool_call_id}#{i}");
+    }
+}
+
 fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<ReadEvent>) {
     match pending {
         PendingTool::Read { path } => {
@@ -609,6 +625,7 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
                 Vec::new()
             };
             out.push(ReadEvent {
+                key: String::new(),
                 path: path.clone(),
                 bytes: text.len() as u64,
                 via_shell: false,
@@ -619,6 +636,7 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
         PendingTool::GrepContent { default_path } => {
             for (path, bytes, lines) in grep_content_by_file(text, default_path.as_deref()) {
                 out.push(ReadEvent {
+                    key: String::new(),
                     path,
                     bytes,
                     via_shell: false,
@@ -638,6 +656,7 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
                     continue;
                 }
                 out.push(ReadEvent {
+                    key: String::new(),
                     path: l.to_string(),
                     bytes: (line.len() + 1) as u64,
                     via_shell: false,
@@ -655,6 +674,7 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
             let extra = text.len() as u64 - each * n;
             for (i, f) in files.iter().enumerate() {
                 out.push(ReadEvent {
+                    key: String::new(),
                     path: f.clone(),
                     bytes: each + if i == 0 { extra } else { 0 },
                     via_shell: true,
@@ -664,6 +684,26 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
             }
         }
     }
+}
+
+/// What a parser must remember between two passes over one growing file.
+/// Stored as JSON in the ledger's `sources` row; every field is optional on
+/// read so an older row still loads.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceState {
+    pending: HashMap<String, PendingTool>,
+    unreadable: usize,
+    compactions: usize,
+    quota: Option<Quota>,
+    session_id: Option<String>,
+    parent_id: Option<String>,
+    is_subagent: bool,
+    nickname: Option<String>,
+    start_ordinal: Option<u64>,
+    last_total: Option<u64>,
+    model: String,
+    line_no: u64,
 }
 
 // --- Claude reader --------------------------------------------------------
@@ -682,6 +722,8 @@ pub struct ClaudeParser {
     /// (index of the first call, timestamp) of the turn the last real user
     /// message started.
     pub turn_start: (usize, i64),
+    /// Byte offset of the line being fed; names a call that has no id.
+    pub cur_offset: u64,
 }
 
 impl ClaudeParser {
@@ -745,6 +787,10 @@ impl ClaudeParser {
         let cache_read = u.cache_read_input_tokens.unwrap_or(0);
         let cache_creation = u.cache_creation_input_tokens.unwrap_or(0);
         let call = RawCall {
+            key: msg
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("@{}", self.cur_offset)),
             at_ms,
             model: msg.model.unwrap_or_default(),
             context: input + cache_read + cache_creation,
@@ -753,6 +799,7 @@ impl ClaudeParser {
             cache_creation,
             output: u.output_tokens.unwrap_or(0),
             reasoning: None,
+            attribution: None,
         };
         // A streamed message repeats its usage under one message.id, one
         // record per content block: one call, the last record's numbers, the
@@ -827,7 +874,9 @@ impl ClaudeParser {
                         };
                         if let Some(p) = self.pending.remove(id) {
                             let text = b.content.as_ref().map(|c| c.text()).unwrap_or_default();
+                            let before = self.reads.len();
                             credit_result(&p, &text, at_ms, &mut self.reads);
+                            key_reads(&mut self.reads[before..], id);
                         }
                     }
                 }
@@ -837,6 +886,27 @@ impl ClaudeParser {
             }
             Some(Content::Text(_)) => self.turn_start = (self.calls.len(), at_ms),
             _ => {}
+        }
+    }
+
+    /// A parser that carries on from a stored pass (tool calls still waiting
+    /// for their result, the counters), so a file can be read in pieces.
+    pub fn from_state(st: &SourceState) -> Self {
+        ClaudeParser {
+            collect_reads: true,
+            pending: st.pending.clone(),
+            unreadable: st.unreadable,
+            compactions: st.compactions,
+            ..Default::default()
+        }
+    }
+
+    pub fn state(&self) -> SourceState {
+        SourceState {
+            pending: self.pending.clone(),
+            unreadable: self.unreadable,
+            compactions: self.compactions,
+            ..Default::default()
         }
     }
 
@@ -1004,6 +1074,7 @@ impl CodexParser {
         let cache_read = u.cached_input_tokens.unwrap_or(0);
         let cache_creation = u.cache_write_input_tokens.unwrap_or(0);
         self.calls.push(RawCall {
+            key: ordinal.to_string(),
             at_ms,
             model: self.model.clone(),
             context,
@@ -1012,6 +1083,7 @@ impl CodexParser {
             cache_creation,
             output: u.output_tokens.unwrap_or(0),
             reasoning: u.reasoning_output_tokens,
+            attribution: None,
         });
     }
 
@@ -1039,23 +1111,67 @@ impl CodexParser {
             Some("function_call_output") | Some("custom_tool_call_output") => {
                 if let Some(pend) = self.pending.remove(&id) {
                     let text = p.output.as_ref().map(|c| c.text()).unwrap_or_default();
+                    let before = self.reads.len();
                     credit_result(&pend, &text, at_ms, &mut self.reads);
+                    key_reads(&mut self.reads[before..], &id);
                 }
             }
             _ => {}
         }
     }
 
-    pub fn into_parsed(self, fallback_id: &str) -> ParsedFile {
+    /// A parser that carries on from a stored pass.
+    pub fn from_state(st: &SourceState) -> Self {
+        CodexParser {
+            collect_reads: true,
+            pending: st.pending.clone(),
+            unreadable: st.unreadable,
+            compactions: st.compactions,
+            quota: st.quota.clone(),
+            session_id: st.session_id.clone(),
+            parent_id: st.parent_id.clone(),
+            is_subagent: st.is_subagent,
+            nickname: st.nickname.clone(),
+            start_ordinal: st.start_ordinal,
+            last_total: st.last_total,
+            model: st.model.clone(),
+            line_no: st.line_no,
+            ..Default::default()
+        }
+    }
+
+    pub fn state(&self) -> SourceState {
+        SourceState {
+            pending: self.pending.clone(),
+            unreadable: self.unreadable,
+            compactions: self.compactions,
+            quota: self.quota.clone(),
+            session_id: self.session_id.clone(),
+            parent_id: self.parent_id.clone(),
+            is_subagent: self.is_subagent,
+            nickname: self.nickname.clone(),
+            start_ordinal: self.start_ordinal,
+            last_total: self.last_total,
+            model: self.model.clone(),
+            line_no: self.line_no,
+        }
+    }
+
+    /// (session, thread, agent) this rollout reports under.
+    pub fn identity(&self, fallback_id: &str) -> (String, Thread, Option<String>) {
         let own = self
             .session_id
             .clone()
             .unwrap_or_else(|| fallback_id.to_string());
-        let (session, thread, agent) = match (self.is_subagent, &self.parent_id) {
+        match (self.is_subagent, &self.parent_id) {
             (true, Some(parent)) => (parent.clone(), Thread::Subagent, Some(own)),
             (true, None) => (own.clone(), Thread::Subagent, Some(own)),
             _ => (own, Thread::Main, None),
-        };
+        }
+    }
+
+    pub fn into_parsed(self, fallback_id: &str) -> ParsedFile {
+        let (session, thread, agent) = self.identity(fallback_id);
         ParsedFile {
             provider: "codex",
             session_id: session,
@@ -1091,6 +1207,7 @@ pub fn opencode_call(data: &str, created_fallback: i64) -> Result<Option<RawCall
     let cache_read = cache.read.unwrap_or(0);
     let cache_creation = cache.write.unwrap_or(0);
     Ok(Some(RawCall {
+        key: String::new(),
         at_ms: d.time.and_then(|t| t.created).unwrap_or(created_fallback),
         model: d.model.and_then(|m| m.id).unwrap_or_default(),
         context: input + cache_read + cache_creation,
@@ -1099,11 +1216,12 @@ pub fn opencode_call(data: &str, created_fallback: i64) -> Result<Option<RawCall
         cache_creation,
         output: t.output.unwrap_or(0),
         reasoning: t.reasoning,
+        attribution: None,
     }))
 }
 
-/// This project's OpenCode sessions (children as subagents of their parent).
-pub fn opencode_parse(conn: &rusqlite::Connection, root: &Path) -> Vec<ParsedFile> {
+/// (id, parent id) of this project's OpenCode sessions.
+fn opencode_sessions(conn: &rusqlite::Connection, root: &Path) -> Vec<(String, Option<String>)> {
     let canonical = crate::canonical_path_string(root);
     let raw = root.to_string_lossy().into_owned();
     let dirs = crate::opencode_directory_spellings(&canonical, &raw);
@@ -1117,7 +1235,12 @@ pub fn opencode_parse(conn: &rusqlite::Connection, root: &Path) -> Vec<ParsedFil
     }) else {
         return Vec::new();
     };
-    let sessions: Vec<(String, Option<String>)> = rows.flatten().collect();
+    rows.flatten().collect()
+}
+
+/// This project's OpenCode sessions (children as subagents of their parent).
+pub fn opencode_parse(conn: &rusqlite::Connection, root: &Path) -> Vec<ParsedFile> {
+    let sessions = opencode_sessions(conn, root);
     let mut out = Vec::new();
     for (sid, parent) in sessions {
         let Ok(mut stmt) = conn.prepare(
@@ -1806,6 +1929,7 @@ pub fn build_report(
     let mut file_sessions: HashMap<String, HashMap<(String, String), u64>> = HashMap::new();
     let mut range: Option<CallRange> = None;
     let mut model_acc: HashMap<(String, String), ModelAcc> = HashMap::new();
+    let mut stored_attribution = false;
 
     for pf in &input.files {
         let Some(thread) = pf.thread else { continue };
@@ -1909,10 +2033,13 @@ pub fn build_report(
             if !c.model.is_empty() && !row.models.contains(&c.model) {
                 row.models.push(c.model.clone());
             }
-            let attribution = if input.windows.is_some() {
-                attribute(&windows, c.at_ms)
-            } else {
-                Attribution::Chat
+            let attribution = match &c.attribution {
+                Some(a) => {
+                    stored_attribution = true;
+                    a.clone()
+                }
+                None if input.windows.is_some() => attribute(&windows, c.at_ms),
+                None => Attribution::Chat,
             };
             match &attribution {
                 Attribution::Items(ids) => {
@@ -2032,6 +2159,8 @@ pub fn build_report(
         attribution: Attribution_ {
             source: if input.windows.is_some() {
                 "state-mirror"
+            } else if stored_attribution {
+                "ledger"
             } else {
                 "unavailable"
             }
@@ -2418,6 +2547,806 @@ pub fn conventions_bytes(root: &Path) -> BTreeMap<String, u64> {
     out
 }
 
+// --- the ledger -------------------------------------------------------------
+//
+// issue token-accounting-ledger-in-sqlite: the providers' own files are only
+// as durable as their cleanup policies (Claude deletes transcripts after 60
+// days, OpenCode's store was recreated). The ledger keeps every call and read
+// once seen, in `<app_local_data_dir>/token-ledger/<project key>.db`, beside
+// the search index (durable stores leave the cache directory). The report is
+// built from the ledger after ingesting whatever is new on disk, so a call
+// stays counted when its source is gone.
+//
+// - `calls` / `reads` are keyed `(source_key, call_key | read_key)`; re-reading
+//   a stretch is harmless. A streamed Claude message is revised in place (the
+//   last record's usage wins, the first record's time stays).
+// - `sources` records how far each file was read (`read_to`, a byte offset;
+//   OpenCode: the last `time_updated`) with its size, mtime and inode, plus the
+//   parser state a later pass resumes from. A file that shrank or changed
+//   identity is re-read from the start.
+// - Item attribution is stamped at insert from the claim ledger, but only once
+//   a call is `ATTRIBUTION_SETTLE_MS` old: a claim window still open has not
+//   been closed, and a call stamped `chat` against it would stay wrong. Younger
+//   calls stay NULL and attribute from the windows at report time until a later
+//   pass stamps them.
+
+pub const LEDGER_VERSION: i64 = 1;
+const ATTRIBUTION_SETTLE_MS: i64 = 10 * 60 * 1000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Provider {
+    Claude,
+    Codex,
+    OpenCode,
+}
+
+impl Provider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+            Provider::OpenCode => "opencode",
+        }
+    }
+    fn parse(s: &str) -> Option<Provider> {
+        match s {
+            "claude" => Some(Provider::Claude),
+            "codex" => Some(Provider::Codex),
+            "opencode" => Some(Provider::OpenCode),
+            _ => None,
+        }
+    }
+}
+
+impl Thread {
+    fn as_str(self) -> &'static str {
+        match self {
+            Thread::Main => "main",
+            Thread::Subagent => "subagent",
+        }
+    }
+    fn parse(s: &str) -> Option<Thread> {
+        match s {
+            "main" => Some(Thread::Main),
+            "subagent" => Some(Thread::Subagent),
+            _ => None,
+        }
+    }
+}
+
+fn attribution_to_db(a: &Attribution) -> String {
+    match a {
+        Attribution::Chat => "chat".to_string(),
+        Attribution::Items(ids) => serde_json::to_string(ids).unwrap_or_else(|_| "chat".into()),
+    }
+}
+
+fn attribution_from_db(s: &str) -> Option<Attribution> {
+    if s == "chat" {
+        return Some(Attribution::Chat);
+    }
+    serde_json::from_str::<Vec<String>>(s)
+        .ok()
+        .map(Attribution::Items)
+}
+
+/// Who a source file's records belong to.
+#[derive(Clone, Debug)]
+struct Ident {
+    provider: Provider,
+    session: String,
+    thread: Thread,
+    agent_id: Option<String>,
+    label: Option<String>,
+}
+
+/// One source read this pass, ready to store.
+struct Fetched {
+    key: String,
+    path: Option<String>,
+    ident: Ident,
+    size: i64,
+    mtime_ms: i64,
+    inode: i64,
+    read_to: i64,
+    state: SourceState,
+    quota: Option<Quota>,
+    calls: Vec<RawCall>,
+    reads: Vec<ReadEvent>,
+}
+
+/// What a source's row said last time.
+struct StoredSource {
+    size: i64,
+    mtime_ms: i64,
+    inode: i64,
+    read_to: i64,
+    state: SourceState,
+}
+
+/// One ingest pass. `inserted` counts rows written or revised.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IngestStats {
+    pub calls_inserted: usize,
+    pub reads_inserted: usize,
+    /// Rows read again and found already stored.
+    pub skipped: usize,
+    /// Sources actually read this pass.
+    pub sources: usize,
+    /// Sources whose size and mtime had not moved.
+    pub unchanged: usize,
+    pub ms: u128,
+}
+
+impl IngestStats {
+    pub fn inserted(&self) -> usize {
+        self.calls_inserted + self.reads_inserted
+    }
+    pub fn merge(&mut self, o: &IngestStats) {
+        self.calls_inserted += o.calls_inserted;
+        self.reads_inserted += o.reads_inserted;
+        self.skipped += o.skipped;
+        self.sources += o.sources;
+        self.unchanged += o.unchanged;
+        self.ms += o.ms;
+    }
+    pub fn trace_fields(&self) -> String {
+        format!(
+            "op=ledger inserted={} skipped={} sources={} ms={} calls={} unchanged={}",
+            self.inserted(),
+            self.skipped,
+            self.sources,
+            self.ms,
+            self.calls_inserted,
+            self.unchanged
+        )
+    }
+}
+
+/// Two passes at once would only fight over the file's write lock.
+static INGEST_LOCK: Mutex<()> = Mutex::new(());
+
+pub struct Ledger {
+    conn: rusqlite::Connection,
+}
+
+/// `<data dir>/token-ledger/<project key>.db`; the key is the search index's.
+pub fn ledger_db_path_in(data_dir: &Path, root: &Path) -> PathBuf {
+    let canonical = root
+        .canonicalize()
+        .map(crate::strip_unc_prefix)
+        .unwrap_or_else(|_| root.to_path_buf());
+    data_dir.join("token-ledger").join(format!(
+        "{}.db",
+        crate::encode_path_for_filename(&canonical)
+    ))
+}
+
+/// The app-local data dir without an AppHandle (the CLI): what Tauri's
+/// `app_local_data_dir` resolves to for the bundle identifier.
+pub fn local_data_dir() -> Option<PathBuf> {
+    let home = crate::home_dir()?;
+    let base = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local").join("share"))
+    };
+    Some(base.join("org.xmlui.bram"))
+}
+
+fn file_inode(path: &Path) -> i64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).map(|m| m.ino() as i64).unwrap_or(0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0
+    }
+}
+
+impl Ledger {
+    pub fn open(path: &Path) -> Option<Ledger> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).ok()?;
+        }
+        let conn = rusqlite::Connection::open(path).ok()?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .ok()?;
+        if version > LEDGER_VERSION {
+            // Written by a newer Bram: leave it alone.
+            return None;
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sources (
+                source_key TEXT PRIMARY KEY,
+                provider TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,
+                agent_id TEXT, label TEXT, path TEXT,
+                size INTEGER NOT NULL DEFAULT 0, mtime_ms INTEGER NOT NULL DEFAULT 0,
+                inode INTEGER NOT NULL DEFAULT 0, read_to INTEGER NOT NULL DEFAULT 0,
+                unreadable INTEGER NOT NULL DEFAULT 0, compactions INTEGER NOT NULL DEFAULT 0,
+                quota TEXT, state TEXT, updated_ms INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS calls (
+                id INTEGER PRIMARY KEY,
+                source_key TEXT NOT NULL, call_key TEXT NOT NULL,
+                provider TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,
+                agent_id TEXT, model TEXT NOT NULL, at_ms INTEGER NOT NULL,
+                context INTEGER NOT NULL, input INTEGER NOT NULL,
+                cache_read INTEGER NOT NULL, cache_creation INTEGER NOT NULL,
+                output INTEGER NOT NULL, reasoning INTEGER,
+                attribution TEXT,
+                UNIQUE (source_key, call_key)
+             );
+             CREATE INDEX IF NOT EXISTS calls_at ON calls (at_ms);
+             CREATE INDEX IF NOT EXISTS calls_unstamped ON calls (attribution) WHERE attribution IS NULL;
+             CREATE TABLE IF NOT EXISTS reads (
+                id INTEGER PRIMARY KEY,
+                source_key TEXT NOT NULL, read_key TEXT NOT NULL,
+                provider TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,
+                path TEXT NOT NULL, at_ms INTEGER NOT NULL, bytes INTEGER NOT NULL,
+                via_shell INTEGER NOT NULL, lines TEXT,
+                UNIQUE (source_key, read_key)
+             );",
+        )
+        .ok()?;
+        if version < LEDGER_VERSION {
+            let _ = conn.pragma_update(None, "user_version", LEDGER_VERSION);
+        }
+        Some(Ledger { conn })
+    }
+
+    fn stored_source(&self, key: &str) -> Option<StoredSource> {
+        self.conn
+            .query_row(
+                "SELECT size, mtime_ms, inode, read_to, state FROM sources WHERE source_key = ?1",
+                [key],
+                |r| {
+                    let state: Option<String> = r.get(4)?;
+                    Ok(StoredSource {
+                        size: r.get(0)?,
+                        mtime_ms: r.get(1)?,
+                        inode: r.get(2)?,
+                        read_to: r.get(3)?,
+                        state: state
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default(),
+                    })
+                },
+            )
+            .ok()
+    }
+
+    /// Read what is new in each transcript and store it.
+    pub fn ingest_sources(
+        &mut self,
+        sources: &[Source],
+        windows_conn: Option<&rusqlite::Connection>,
+    ) -> IngestStats {
+        let _guard = INGEST_LOCK.lock();
+        let started = std::time::Instant::now();
+        let now_ms = now_epoch_ms();
+        let mut stats = IngestStats::default();
+        for src in sources {
+            let path = src.path();
+            let Some((mtime_ms, size)) = file_key(path) else {
+                continue;
+            };
+            let key = path.to_string_lossy().into_owned();
+            let stored = self.stored_source(&key);
+            let inode = file_inode(path);
+            if let Some(s) = &stored {
+                if s.size == size as i64 && s.mtime_ms == mtime_ms && s.inode == inode {
+                    stats.unchanged += 1;
+                    continue;
+                }
+            }
+            // Resume only a file that still holds what was read: not shrunk,
+            // not replaced.
+            let resume = stored
+                .as_ref()
+                .filter(|s| s.inode == inode && s.read_to as u64 <= size);
+            let (offset, state) = match resume {
+                Some(s) => (s.read_to as u64, s.state.clone()),
+                None => (0, SourceState::default()),
+            };
+            let Some((chunk, read_to, _)) = read_tail(path, offset) else {
+                continue;
+            };
+            let mut fetched = match src {
+                Source::ClaudeMain { id, .. } => fetch_claude(
+                    &chunk,
+                    offset,
+                    &state,
+                    Ident {
+                        provider: Provider::Claude,
+                        session: id.clone(),
+                        thread: Thread::Main,
+                        agent_id: None,
+                        label: None,
+                    },
+                ),
+                Source::ClaudeSubagent { id, agent, .. } => fetch_claude(
+                    &chunk,
+                    offset,
+                    &state,
+                    Ident {
+                        provider: Provider::Claude,
+                        session: id.clone(),
+                        thread: Thread::Subagent,
+                        agent_id: Some(agent.clone()),
+                        label: None,
+                    },
+                ),
+                Source::Codex { id, .. } => fetch_codex(&chunk, offset, &state, id),
+            };
+            fetched.key = key;
+            fetched.path = Some(key_path(path));
+            fetched.size = size as i64;
+            fetched.mtime_ms = mtime_ms;
+            fetched.inode = inode;
+            fetched.read_to = read_to as i64;
+            stamp_attribution(&mut fetched.calls, windows_conn, now_ms);
+            stats.sources += 1;
+            self.store(fetched, now_ms, &mut stats);
+        }
+        stats.ms = started.elapsed().as_millis();
+        stats
+    }
+
+    /// Read OpenCode messages written or revised since the last pass. With
+    /// `only`, just that session (the turn-end sampler's).
+    pub fn ingest_opencode(
+        &mut self,
+        conn: &rusqlite::Connection,
+        root: &Path,
+        only: Option<&str>,
+        windows_conn: Option<&rusqlite::Connection>,
+    ) -> IngestStats {
+        let _guard = INGEST_LOCK.lock();
+        let started = std::time::Instant::now();
+        let now_ms = now_epoch_ms();
+        let mut stats = IngestStats::default();
+        for (sid, parent) in opencode_sessions(conn, root) {
+            if only.is_some_and(|o| o != sid && Some(o) != parent.as_deref()) {
+                continue;
+            }
+            let key = format!("opencode:{sid}");
+            let stored = self.stored_source(&key);
+            let after = stored.as_ref().map(|s| s.read_to).unwrap_or(0);
+            let mut state = stored.map(|s| s.state).unwrap_or_default();
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT id, data, time_created, time_updated FROM session_message \
+                 WHERE session_id = ?1 AND type = 'assistant' AND time_updated > ?2 ORDER BY seq",
+            ) else {
+                continue;
+            };
+            let Ok(rows) = stmt.query_map(rusqlite::params![sid, after], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            }) else {
+                continue;
+            };
+            let mut calls = Vec::new();
+            let mut last = after;
+            for (id, data, created, updated) in rows.flatten() {
+                last = last.max(updated);
+                match opencode_call(&data, created) {
+                    Ok(Some(mut c)) => {
+                        c.key = id;
+                        calls.push(c);
+                    }
+                    Ok(None) => {}
+                    Err(()) => state.unreadable += 1,
+                }
+            }
+            if calls.is_empty() && state.unreadable == 0 {
+                stats.unchanged += 1;
+                continue;
+            }
+            stamp_attribution(&mut calls, windows_conn, now_ms);
+            stats.sources += 1;
+            let ident = Ident {
+                provider: Provider::OpenCode,
+                session: parent.clone().unwrap_or_else(|| sid.clone()),
+                thread: if parent.is_some() {
+                    Thread::Subagent
+                } else {
+                    Thread::Main
+                },
+                agent_id: parent.as_ref().map(|_| sid.clone()),
+                label: None,
+            };
+            self.store(
+                Fetched {
+                    key,
+                    path: None,
+                    ident,
+                    size: 0,
+                    mtime_ms: 0,
+                    inode: 0,
+                    read_to: last,
+                    quota: None,
+                    state,
+                    calls,
+                    reads: Vec::new(),
+                },
+                now_ms,
+                &mut stats,
+            );
+        }
+        stats.ms = started.elapsed().as_millis();
+        stats
+    }
+
+    fn store(&mut self, f: Fetched, now_ms: i64, stats: &mut IngestStats) {
+        let Ok(tx) = self.conn.transaction() else {
+            return;
+        };
+        let ident = &f.ident;
+        let _ = tx.execute(
+            "INSERT INTO sources (source_key, provider, session, thread, agent_id, label, path, \
+               size, mtime_ms, inode, read_to, unreadable, compactions, quota, state, updated_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) \
+             ON CONFLICT(source_key) DO UPDATE SET provider=excluded.provider, \
+               session=excluded.session, thread=excluded.thread, agent_id=excluded.agent_id, \
+               label=excluded.label, path=excluded.path, size=excluded.size, \
+               mtime_ms=excluded.mtime_ms, inode=excluded.inode, read_to=excluded.read_to, \
+               unreadable=excluded.unreadable, compactions=excluded.compactions, \
+               quota=excluded.quota, state=excluded.state, updated_ms=excluded.updated_ms",
+            rusqlite::params![
+                f.key,
+                ident.provider.as_str(),
+                ident.session,
+                ident.thread.as_str(),
+                ident.agent_id,
+                ident.label,
+                f.path,
+                f.size,
+                f.mtime_ms,
+                f.inode,
+                f.read_to,
+                f.state.unreadable as i64,
+                f.state.compactions as i64,
+                f.quota.as_ref().and_then(|q| serde_json::to_string(q).ok()),
+                serde_json::to_string(&f.state).ok(),
+                now_ms,
+            ],
+        );
+        {
+            let Ok(mut ins) = tx.prepare_cached(
+                "INSERT INTO calls (source_key, call_key, provider, session, thread, agent_id, \
+                   model, at_ms, context, input, cache_read, cache_creation, output, reasoning, \
+                   attribution) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) \
+                 ON CONFLICT(source_key, call_key) DO UPDATE SET model=excluded.model, \
+                   context=excluded.context, input=excluded.input, cache_read=excluded.cache_read, \
+                   cache_creation=excluded.cache_creation, output=excluded.output, \
+                   reasoning=excluded.reasoning \
+                 WHERE calls.model IS NOT excluded.model OR calls.context IS NOT excluded.context \
+                   OR calls.input IS NOT excluded.input OR calls.cache_read IS NOT excluded.cache_read \
+                   OR calls.cache_creation IS NOT excluded.cache_creation \
+                   OR calls.output IS NOT excluded.output OR calls.reasoning IS NOT excluded.reasoning",
+            ) else {
+                return;
+            };
+            for c in &f.calls {
+                let n = ins
+                    .execute(rusqlite::params![
+                        f.key,
+                        c.key,
+                        ident.provider.as_str(),
+                        ident.session,
+                        ident.thread.as_str(),
+                        ident.agent_id,
+                        c.model,
+                        c.at_ms,
+                        c.context as i64,
+                        c.input as i64,
+                        c.cache_read as i64,
+                        c.cache_creation as i64,
+                        c.output as i64,
+                        c.reasoning.map(|r| r as i64),
+                        c.attribution.as_ref().map(attribution_to_db),
+                    ])
+                    .unwrap_or(0);
+                stats.calls_inserted += n;
+                stats.skipped += 1 - n;
+            }
+        }
+        {
+            let Ok(mut ins) = tx.prepare_cached(
+                "INSERT OR IGNORE INTO reads (source_key, read_key, provider, session, thread, \
+                   path, at_ms, bytes, via_shell, lines) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            ) else {
+                return;
+            };
+            for r in &f.reads {
+                let lines = (!r.lines.is_empty())
+                    .then(|| serde_json::to_string(&r.lines).ok())
+                    .flatten();
+                let n = ins
+                    .execute(rusqlite::params![
+                        f.key,
+                        r.key,
+                        ident.provider.as_str(),
+                        ident.session,
+                        ident.thread.as_str(),
+                        r.path,
+                        r.at_ms,
+                        r.bytes as i64,
+                        r.via_shell as i64,
+                        lines,
+                    ])
+                    .unwrap_or(0);
+                stats.reads_inserted += n;
+                stats.skipped += 1 - n;
+            }
+        }
+        let _ = tx.commit();
+    }
+
+    /// Stamp the calls that were too young to stamp when stored. A no-op
+    /// without the claim ledger.
+    pub fn stamp_pending(&mut self, windows_conn: Option<&rusqlite::Connection>) {
+        let Some(wc) = windows_conn else { return };
+        let _guard = INGEST_LOCK.lock();
+        let cutoff = now_epoch_ms() - ATTRIBUTION_SETTLE_MS;
+        let rows: Vec<(i64, i64)> = {
+            let Ok(mut stmt) = self
+                .conn
+                .prepare("SELECT id, at_ms FROM calls WHERE attribution IS NULL AND at_ms <= ?1")
+            else {
+                return;
+            };
+            let Ok(it) = stmt.query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?))) else {
+                return;
+            };
+            it.flatten().collect()
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let from = rows.iter().map(|r| r.1).min().unwrap_or(0);
+        let to = rows.iter().map(|r| r.1).max().unwrap_or(0);
+        let Ok(mut windows) = claims_overlapping(wc, from, to) else {
+            return;
+        };
+        windows.sort_by_key(|w| w.from_ms);
+        let Ok(tx) = self.conn.transaction() else {
+            return;
+        };
+        {
+            let Ok(mut upd) = tx.prepare_cached("UPDATE calls SET attribution = ?2 WHERE id = ?1")
+            else {
+                return;
+            };
+            for (id, at) in rows {
+                let _ = upd.execute(rusqlite::params![
+                    id,
+                    attribution_to_db(&attribute(&windows, at))
+                ]);
+            }
+        }
+        let _ = tx.commit();
+    }
+
+    /// Every stored source as a `ParsedFile`, calls and reads in the order
+    /// they were first stored.
+    pub fn load(&self, session_filter: Option<&(String, String)>) -> Vec<Arc<ParsedFile>> {
+        let mut by_key: BTreeMap<String, ParsedFile> = BTreeMap::new();
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT source_key, provider, session, thread, agent_id, label, unreadable, \
+               compactions, quota FROM sources ORDER BY source_key",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                ))
+            }) {
+                for (key, prov, session, thread, agent, label, unread, compact, quota) in
+                    rows.flatten()
+                {
+                    let Some(provider) = Provider::parse(&prov) else {
+                        continue;
+                    };
+                    if let Some((p, id)) = session_filter {
+                        if p != provider.as_str() || *id != session {
+                            continue;
+                        }
+                    }
+                    by_key.insert(
+                        key,
+                        ParsedFile {
+                            provider: provider.as_str(),
+                            session_id: session,
+                            thread: Thread::parse(&thread),
+                            agent_id: agent,
+                            label,
+                            unreadable: unread.max(0) as usize,
+                            compactions: compact.max(0) as usize,
+                            quota: quota.and_then(|q| serde_json::from_str(&q).ok()),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT source_key, call_key, model, at_ms, context, input, cache_read, \
+               cache_creation, output, reasoning, attribution FROM calls ORDER BY id",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    RawCall {
+                        key: r.get(1)?,
+                        model: r.get(2)?,
+                        at_ms: r.get(3)?,
+                        context: r.get::<_, i64>(4)? as u64,
+                        input: r.get::<_, i64>(5)? as u64,
+                        cache_read: r.get::<_, i64>(6)? as u64,
+                        cache_creation: r.get::<_, i64>(7)? as u64,
+                        output: r.get::<_, i64>(8)? as u64,
+                        reasoning: r.get::<_, Option<i64>>(9)?.map(|x| x as u64),
+                        attribution: r
+                            .get::<_, Option<String>>(10)?
+                            .and_then(|a| attribution_from_db(&a)),
+                    },
+                ))
+            }) {
+                for (key, call) in rows.flatten() {
+                    if let Some(pf) = by_key.get_mut(&key) {
+                        pf.calls.push(call);
+                    }
+                }
+            }
+        }
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT source_key, read_key, path, at_ms, bytes, via_shell, lines \
+             FROM reads ORDER BY id",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let lines: Option<String> = r.get(6)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    ReadEvent {
+                        key: r.get(1)?,
+                        path: r.get(2)?,
+                        at_ms: r.get(3)?,
+                        bytes: r.get::<_, i64>(4)? as u64,
+                        via_shell: r.get::<_, i64>(5)? != 0,
+                        lines: lines
+                            .and_then(|l| serde_json::from_str(&l).ok())
+                            .unwrap_or_default(),
+                    },
+                ))
+            }) {
+                for (key, read) in rows.flatten() {
+                    if let Some(pf) = by_key.get_mut(&key) {
+                        pf.reads.push(read);
+                    }
+                }
+            }
+        }
+        by_key.into_values().map(Arc::new).collect()
+    }
+}
+
+fn key_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Stamp the settled calls from the claim ledger; the rest stay unstamped.
+fn stamp_attribution(
+    calls: &mut [RawCall],
+    windows_conn: Option<&rusqlite::Connection>,
+    now_ms: i64,
+) {
+    let Some(wc) = windows_conn else { return };
+    let cutoff = now_ms - ATTRIBUTION_SETTLE_MS;
+    let (from, to) = calls
+        .iter()
+        .filter(|c| c.at_ms <= cutoff)
+        .fold((i64::MAX, i64::MIN), |(lo, hi), c| {
+            (lo.min(c.at_ms), hi.max(c.at_ms))
+        });
+    if from > to {
+        return;
+    }
+    let Ok(mut windows) = claims_overlapping(wc, from, to) else {
+        return;
+    };
+    windows.sort_by_key(|w| w.from_ms);
+    for c in calls.iter_mut().filter(|c| c.at_ms <= cutoff) {
+        c.attribution = Some(attribute(&windows, c.at_ms));
+    }
+}
+
+fn feed_lines(chunk: &str, start: u64, mut feed: impl FnMut(&str, u64)) {
+    let mut pos = 0u64;
+    for line in chunk.split_inclusive('\n') {
+        feed(line.trim_end_matches(['\n', '\r']), start + pos);
+        pos += line.len() as u64;
+    }
+}
+
+fn fetch_claude(chunk: &str, start: u64, state: &SourceState, ident: Ident) -> Fetched {
+    let mut p = ClaudeParser::from_state(state);
+    feed_lines(chunk, start, |line, off| {
+        p.cur_offset = off;
+        p.feed_line(line);
+    });
+    Fetched {
+        key: String::new(),
+        path: None,
+        ident,
+        size: 0,
+        mtime_ms: 0,
+        inode: 0,
+        read_to: 0,
+        state: p.state(),
+        quota: None,
+        calls: p.calls,
+        reads: p.reads,
+    }
+}
+
+fn fetch_codex(chunk: &str, start: u64, state: &SourceState, fallback_id: &str) -> Fetched {
+    let mut p = CodexParser::from_state(state);
+    feed_lines(chunk, start, |line, _| p.feed_line(line));
+    let (session, thread, agent_id) = p.identity(fallback_id);
+    Fetched {
+        key: String::new(),
+        path: None,
+        ident: Ident {
+            provider: Provider::Codex,
+            session,
+            thread,
+            agent_id,
+            label: p.nickname.clone(),
+        },
+        size: 0,
+        mtime_ms: 0,
+        inode: 0,
+        read_to: 0,
+        state: p.state(),
+        quota: p.quota.clone(),
+        calls: std::mem::take(&mut p.calls),
+        reads: std::mem::take(&mut p.reads),
+    }
+}
+
 // --- entry points -----------------------------------------------------------
 
 fn lib_rs_now(root: &Path) -> Option<LibRsNow> {
@@ -2474,13 +3403,32 @@ pub fn run(
     session_filter: Option<(String, String)>,
     include_calls: bool,
     windows_conn: Option<&rusqlite::Connection>,
-) -> (Report, usize) {
+    ledger_path: Option<&Path>,
+) -> (Report, usize, Option<IngestStats>) {
     let started = std::time::Instant::now();
     let sources = discover(root);
-    let mut files: Vec<Arc<ParsedFile>> = sources.iter().filter_map(parse_source).collect();
-    if let Some(conn) = crate::opencode_open_db() {
-        files.extend(opencode_parse(&conn, root).into_iter().map(Arc::new));
-    }
+    let opencode = crate::opencode_open_db();
+    let mut stats = None;
+    let mut ledger = ledger_path.and_then(Ledger::open);
+    let files: Vec<Arc<ParsedFile>> = match ledger.as_mut() {
+        Some(l) => {
+            let mut st = l.ingest_sources(&sources, windows_conn);
+            if let Some(conn) = &opencode {
+                st.merge(&l.ingest_opencode(conn, root, None, windows_conn));
+            }
+            l.stamp_pending(windows_conn);
+            stats = Some(st);
+            l.load(session_filter.as_ref())
+        }
+        None => {
+            // No ledger (no data dir, or a newer one): read the files, as before.
+            let mut files: Vec<Arc<ParsedFile>> = sources.iter().filter_map(parse_source).collect();
+            if let Some(conn) = &opencode {
+                files.extend(opencode_parse(conn, root).into_iter().map(Arc::new));
+            }
+            files
+        }
+    };
     let (from, to) = files
         .iter()
         .flat_map(|f| f.calls.iter().map(|c| c.at_ms))
@@ -2513,7 +3461,7 @@ pub fn run(
         lib_rs_now(root),
     );
     report.ms = started.elapsed().as_millis();
-    (report, n_files)
+    (report, n_files, stats)
 }
 
 fn report_json(report: &Report) -> serde_json::Value {
@@ -2524,8 +3472,25 @@ fn report_json(report: &Report) -> serde_json::Value {
 pub fn run_cli(root: &Path, since: Option<&str>, include_calls: bool) -> serde_json::Value {
     let since_ms = since.and_then(crate::parse_iso_to_epoch_ms);
     let conn = open_state_db_read_only(root);
-    let (report, _) = run(root, since_ms, None, include_calls, conn.as_ref());
+    let ledger = local_data_dir().map(|d| ledger_db_path_in(&d, root));
+    let (report, _, _) = run(
+        root,
+        since_ms,
+        None,
+        include_calls,
+        conn.as_ref(),
+        ledger.as_deref(),
+    );
     report_json(&report)
+}
+
+fn ledger_path_for_app<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    root: &Path,
+) -> Option<PathBuf> {
+    use tauri::Manager;
+    let data = app.path().app_local_data_dir().ok()?;
+    Some(ledger_db_path_in(&data, root))
 }
 
 fn query_param(query: &str, key: &str) -> Option<String> {
@@ -2547,14 +3512,19 @@ pub fn route<R: tauri::Runtime>(app: &tauri::AppHandle<R>, query: &str) -> Vec<u
     });
     let include_calls = query.split('&').any(|p| p == "calls=1");
     let conn = crate::worklist_state_open(app);
-    let (report, n_files) = run(
+    let ledger = ledger_path_for_app(app, &root);
+    let (report, n_files, stats) = run(
         &root,
         since_ms,
         session_filter,
         include_calls,
         conn.as_ref(),
+        ledger.as_deref(),
     );
     if crate::bram_trace_enabled() {
+        if let Some(st) = &stats {
+            crate::append_bram_trace_line(app, "token-accounting", &st.trace_fields());
+        }
         let calls: usize = report.sessions.iter().map(|s| s.calls).sum();
         crate::append_bram_trace_line(
             app,
@@ -2808,11 +3778,12 @@ fn claude_subagent_sample(path: &Path, session: &str, since_ms: i64) -> Option<S
 /// Called where the host decides a main-thread turn has ended (Claude and
 /// Codex). Reads only the live session file's tail since the last sample.
 pub fn sample_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>, provider: &str, path: &Path) {
-    if !crate::bram_trace_enabled() {
-        return;
-    }
     let base = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if base.starts_with("agent-") {
+        return;
+    }
+    ledger_session_turn_end(app, provider, path);
+    if !crate::bram_trace_enabled() {
         return;
     }
     for s in sample_live(path, provider) {
@@ -2820,15 +3791,90 @@ pub fn sample_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>, provider: &
     }
 }
 
+/// Write the session's new calls (and its subagents') into the ledger.
+fn ledger_session_turn_end<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    provider: &str,
+    path: &Path,
+) {
+    let Some(root) = crate::project_root(Some(app)) else {
+        return;
+    };
+    let Some(mut ledger) = ledger_path_for_app(app, &root)
+        .as_deref()
+        .and_then(Ledger::open)
+    else {
+        return;
+    };
+    let conn = crate::worklist_state_open(app);
+    let stats = ledger.ingest_sources(&session_sources(provider, path), conn.as_ref());
+    if crate::bram_trace_enabled() {
+        crate::append_bram_trace_line(app, "token-accounting", &stats.trace_fields());
+    }
+}
+
+/// The ledger sources for one live session file: a Claude transcript with the
+/// subagent files beside it, or a Codex rollout.
+pub fn session_sources(provider: &str, path: &Path) -> Vec<Source> {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    if provider == "codex" {
+        let id = match crate::codex_session_meta(path) {
+            Ok(Some((id, _))) => id,
+            _ => stem,
+        };
+        return vec![Source::Codex {
+            id,
+            path: path.to_path_buf(),
+        }];
+    }
+    let mut out = Vec::new();
+    if let Ok(subs) = std::fs::read_dir(path.with_extension("").join("subagents")) {
+        for sub in subs.flatten() {
+            let sp = sub.path();
+            let name = sp.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if sp.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                && name.starts_with("agent-")
+            {
+                out.push(Source::ClaudeSubagent {
+                    id: stem.clone(),
+                    agent: name.trim_start_matches("agent-").to_string(),
+                    path: sp,
+                });
+            }
+        }
+    }
+    out.push(Source::ClaudeMain {
+        id: stem,
+        path: path.to_path_buf(),
+    });
+    out
+}
+
 /// OpenCode's turn end: the latest assistant message's tokens, the session's
 /// cache reads so far, and the calls since the last user message.
 pub fn sample_opencode_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>, sid: &str) {
-    if !crate::bram_trace_enabled() {
-        return;
-    }
     let Some(conn) = crate::opencode_open_db() else {
         return;
     };
+    if let Some(root) = crate::project_root(Some(app)) {
+        if let Some(mut ledger) = ledger_path_for_app(app, &root)
+            .as_deref()
+            .and_then(Ledger::open)
+        {
+            let wc = crate::worklist_state_open(app);
+            let stats = ledger.ingest_opencode(&conn, &root, Some(sid), wc.as_ref());
+            if crate::bram_trace_enabled() {
+                crate::append_bram_trace_line(app, "token-accounting", &stats.trace_fields());
+            }
+        }
+    }
+    if !crate::bram_trace_enabled() {
+        return;
+    }
     let Ok(mut stmt) = conn.prepare(
         "SELECT type, data, time_created FROM session_message \
          WHERE session_id = ?1 AND type IN ('assistant', 'user') ORDER BY seq",

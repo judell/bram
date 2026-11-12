@@ -261,6 +261,7 @@ fn a_real_user_message_starts_the_turn() {
 
 fn raw(at: i64, model: &str, context: u64, cache_read: u64, output: u64) -> RawCall {
     RawCall {
+        key: format!("k{at}"),
         at_ms: at,
         model: model.into(),
         context,
@@ -269,6 +270,7 @@ fn raw(at: i64, model: &str, context: u64, cache_read: u64, output: u64) -> RawC
         cache_creation: 0,
         output,
         reasoning: None,
+        attribution: None,
     }
 }
 
@@ -482,6 +484,7 @@ fn lib_rs_reads_report_test_lines_and_bytes_and_shell_reads_stay_apart() {
         calls: vec![raw(1, "m", 1, 0, 1)],
         reads: vec![
             ReadEvent {
+                key: String::new(),
                 path: "/r/src-tauri/src/lib.rs".into(),
                 bytes: 300,
                 via_shell: false,
@@ -489,6 +492,7 @@ fn lib_rs_reads_report_test_lines_and_bytes_and_shell_reads_stay_apart() {
                 lines: vec![(5, 100), (8, 100), (20, 100)],
             },
             ReadEvent {
+                key: String::new(),
                 path: "/r/src-tauri/src/lib.rs".into(),
                 bytes: 50,
                 via_shell: true,
@@ -583,6 +587,7 @@ fn report_for(root: &str, path: &str) -> Report {
         session_id: "s".into(),
         thread: Some(Thread::Main),
         reads: vec![ReadEvent {
+            key: String::new(),
             path: path.into(),
             bytes: 5,
             via_shell: false,
@@ -626,6 +631,7 @@ fn a_files_row_serializes_size_bytes_and_null_when_missing() {
 
 fn read_event(path: &str, bytes: u64) -> ReadEvent {
     ReadEvent {
+        key: String::new(),
         path: path.into(),
         bytes,
         via_shell: false,
@@ -797,4 +803,395 @@ fn the_bram_marker_block_is_the_text_between_the_markers() {
         Some("<!-- bram:start -->\nabc\n<!-- bram:end -->")
     );
     assert_eq!(bram_marker_block("no markers"), None);
+}
+
+// --- the ledger -------------------------------------------------------------
+
+fn ledger_dir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("bram-ledger-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn tool_use(id: &str, ts: &str, tool_id: &str, file: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","model":"claude-opus-5-5","content":[{{"type":"tool_use","id":"{tool_id}","name":"Read","input":{{"file_path":"{file}"}}}}],"usage":{{"input_tokens":1,"cache_read_input_tokens":10,"cache_creation_input_tokens":0,"output_tokens":5}}}}}}"#
+    )
+}
+
+fn tool_result(ts: &str, tool_id: &str, text: &str) -> String {
+    format!(
+        r#"{{"type":"user","timestamp":"{ts}","message":{{"content":[{{"type":"tool_result","tool_use_id":"{tool_id}","content":"{text}"}}]}}}}"#
+    )
+}
+
+fn append(path: &Path, lines: &[String]) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    for l in lines {
+        writeln!(f, "{l}").unwrap();
+    }
+}
+
+fn claude_source(dir: &Path) -> Source {
+    Source::ClaudeMain {
+        id: "sess1".into(),
+        path: dir.join("sess1.jsonl"),
+    }
+}
+
+fn report_from(ledger: &Ledger) -> Report {
+    build_report(
+        ReportInput {
+            root: "/r",
+            files: ledger.load(None),
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    )
+}
+
+fn count(ledger: &Ledger, table: &str) -> i64 {
+    ledger
+        .conn
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_call_ingested_twice_is_stored_once() {
+    let dir = ledger_dir("twice");
+    let src = claude_source(&dir);
+    append(
+        src.path(),
+        &[
+            assistant("msg_1", "2026-11-01T10:00:00.000Z", 2, 100, 50, 10),
+            assistant("msg_2", "2026-11-01T10:00:09.000Z", 3, 200, 0, 7),
+        ],
+    );
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    let first = ledger.ingest_sources(&[src.clone()], None);
+    assert_eq!((first.calls_inserted, first.sources), (2, 1));
+    // Forget how far the file was read: every record is seen again.
+    ledger.conn.execute("DELETE FROM sources", []).unwrap();
+    let again = ledger.ingest_sources(&[src.clone()], None);
+    assert_eq!((again.calls_inserted, again.skipped), (0, 2));
+    assert_eq!(count(&ledger, "calls"), 2);
+    // Untouched file: not even read.
+    let third = ledger.ingest_sources(&[src], None);
+    assert_eq!((third.sources, third.unchanged), (0, 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_source_deleted_after_ingest_still_counts_in_the_report() {
+    let dir = ledger_dir("deleted");
+    let src = claude_source(&dir);
+    append(
+        src.path(),
+        &[
+            tool_use("msg_1", "2026-11-01T10:00:00.000Z", "tu1", "/r/a.txt"),
+            tool_result("2026-11-01T10:00:01.000Z", "tu1", "hello"),
+            assistant("msg_2", "2026-11-01T10:00:09.000Z", 3, 200, 0, 7),
+        ],
+    );
+    let db = dir.join("l.db");
+    let before = {
+        let mut ledger = Ledger::open(&db).unwrap();
+        ledger.ingest_sources(&[src.clone()], None);
+        serde_json::to_value(report_from(&ledger)).unwrap()
+    };
+    std::fs::remove_file(src.path()).unwrap();
+    // A later pass finds nothing on disk and changes nothing.
+    let mut ledger = Ledger::open(&db).unwrap();
+    let st = ledger.ingest_sources(&[], None);
+    assert_eq!(st.inserted(), 0);
+    let after = serde_json::to_value(report_from(&ledger)).unwrap();
+    assert_eq!(after["sessions"][0]["calls"], 2);
+    assert_eq!(after["files"][0]["path"], "a.txt");
+    let strip = |mut v: serde_json::Value| {
+        v.as_object_mut().unwrap().remove("ms");
+        v
+    };
+    assert_eq!(strip(before), strip(after));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_incremental_pass_inserts_only_the_new_lines_and_resumes_a_pending_read() {
+    let dir = ledger_dir("incr");
+    let src = claude_source(&dir);
+    append(
+        src.path(),
+        &[
+            assistant("msg_1", "2026-11-01T10:00:00.000Z", 2, 100, 50, 10),
+            // A read whose result has not been written yet.
+            tool_use("msg_2", "2026-11-01T10:00:05.000Z", "tu1", "/r/a.txt"),
+        ],
+    );
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    let first = ledger.ingest_sources(&[src.clone()], None);
+    assert_eq!((first.calls_inserted, first.reads_inserted), (2, 0));
+    append(
+        src.path(),
+        &[
+            tool_result("2026-11-01T10:00:06.000Z", "tu1", "hello"),
+            assistant("msg_3", "2026-11-01T10:00:09.000Z", 3, 200, 0, 7),
+        ],
+    );
+    let second = ledger.ingest_sources(&[src], None);
+    assert_eq!(
+        (second.calls_inserted, second.reads_inserted, second.skipped),
+        (1, 1, 0),
+        "only the appended lines are read"
+    );
+    assert_eq!(count(&ledger, "calls"), 3);
+    assert_eq!(count(&ledger, "reads"), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_streamed_message_split_across_passes_keeps_the_last_usage_and_first_time() {
+    let dir = ledger_dir("stream");
+    let src = claude_source(&dir);
+    append(
+        src.path(),
+        &[assistant(
+            "msg_1",
+            "2026-11-01T10:00:00.000Z",
+            2,
+            100,
+            50,
+            10,
+        )],
+    );
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src.clone()], None);
+    append(
+        src.path(),
+        &[assistant(
+            "msg_1",
+            "2026-11-01T10:00:01.000Z",
+            2,
+            100,
+            50,
+            430,
+        )],
+    );
+    ledger.ingest_sources(&[src], None);
+    let pf = ledger.load(None);
+    assert_eq!(pf[0].calls.len(), 1);
+    assert_eq!(pf[0].calls[0].output, 430);
+    assert_eq!(pf[0].calls[0].at_ms, t("2026-11-01T10:00:00.000Z"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_that_shrank_is_read_again_from_the_start() {
+    let dir = ledger_dir("shrunk");
+    let src = claude_source(&dir);
+    append(
+        src.path(),
+        &[
+            assistant("msg_1", "2026-11-01T10:00:00.000Z", 2, 100, 50, 10),
+            assistant("msg_2", "2026-11-01T10:00:09.000Z", 3, 200, 0, 7),
+        ],
+    );
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src.clone()], None);
+    std::fs::write(
+        src.path(),
+        assistant("msg_9", "2026-11-02T10:00:00.000Z", 1, 1, 1, 1) + "\n",
+    )
+    .unwrap();
+    let st = ledger.ingest_sources(&[src], None);
+    assert_eq!(
+        st.calls_inserted, 1,
+        "msg_9 is new; the old two stay stored"
+    );
+    assert_eq!(count(&ledger, "calls"), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_report_from_the_ledger_equals_the_report_from_the_file() {
+    let dir = ledger_dir("same");
+    let src = claude_source(&dir);
+    let lines = [
+        assistant("msg_1", "2026-11-01T10:00:00.000Z", 2, 100, 50, 10),
+        tool_use(
+            "msg_2",
+            "2026-11-01T10:00:05.000Z",
+            "tu1",
+            "/r/src-tauri/src/lib.rs",
+        ),
+        tool_result(
+            "2026-11-01T10:00:06.000Z",
+            "tu1",
+            "     1\\tfn a() {}\\n     2\\tfn b() {}",
+        ),
+        assistant("msg_3", "2026-11-01T10:00:09.000Z", 3, 200, 0, 7),
+    ];
+    append(src.path(), &lines);
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src.clone()], None);
+    let from_ledger = serde_json::to_value(report_from(&ledger)).unwrap();
+    let text = std::fs::read_to_string(src.path()).unwrap();
+    let direct = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![Arc::new(parse_claude_text(
+                &text,
+                "sess1",
+                Thread::Main,
+                None,
+            ))],
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    let mut direct = serde_json::to_value(direct).unwrap();
+    let mut from_ledger = from_ledger;
+    for v in [&mut direct, &mut from_ledger] {
+        v.as_object_mut().unwrap().remove("ms");
+    }
+    assert_eq!(direct, from_ledger);
+    // The wire shape: the same top-level fields as before the ledger.
+    let mut keys: Vec<&str> = from_ledger
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "attribution",
+            "constrained",
+            "files",
+            "filesTotal",
+            "providers",
+            "range",
+            "root",
+            "sessions"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_codex_rollout_read_in_two_passes_matches_one_pass() {
+    let dir = ledger_dir("codex");
+    let path = dir.join("rollout-x.jsonl");
+    let meta =
+        r#"{"type":"session_meta","timestamp":"2026-11-09T14:59:00.000Z","payload":{"id":"cx1"}}"#;
+    let ctx = r#"{"type":"turn_context","timestamp":"2026-11-09T14:59:01.000Z","payload":{"model":"gpt-5.5"}}"#;
+    let first = [
+        meta.to_string(),
+        ctx.to_string(),
+        codex_count("2026-11-09T15:00:05.000Z", 2, 1000, 900, 800, 100),
+    ];
+    let second = [
+        codex_count("2026-11-09T15:00:05.500Z", 3, 1000, 900, 800, 100),
+        codex_count("2026-11-09T15:00:09.000Z", 4, 2400, 1300, 1200, 100),
+    ];
+    append(&path, &first);
+    let src = Source::Codex {
+        id: "fallback".into(),
+        path: path.clone(),
+    };
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src.clone()], None);
+    append(&path, &second);
+    ledger.ingest_sources(&[src], None);
+    let whole = parse_codex_text(&std::fs::read_to_string(&path).unwrap(), "fallback");
+    let got = ledger.load(None);
+    assert_eq!(got[0].session_id, whole.session_id);
+    assert_eq!(got[0].calls.len(), whole.calls.len());
+    assert_eq!(got[0].calls[1].model, "gpt-5.5");
+    assert_eq!(
+        got[0].calls.iter().map(|c| c.context).collect::<Vec<_>>(),
+        whole.calls.iter().map(|c| c.context).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn old_calls_are_stamped_from_the_claims_and_young_ones_are_left_to_report_time() {
+    let dir = ledger_dir("stamp");
+    let src = claude_source(&dir);
+    let now = now_epoch_ms();
+    let old = chrono_like(now - 3_600_000);
+    let young = chrono_like(now - 1_000);
+    append(
+        src.path(),
+        &[
+            assistant("msg_old", &old, 1, 1, 0, 1),
+            assistant("msg_new", &young, 1, 1, 0, 1),
+        ],
+    );
+    let claims = rusqlite::Connection::open_in_memory().unwrap();
+    claims
+        .execute_batch(
+            "CREATE TABLE claims (written_at_ms INTEGER, cleared_at_ms INTEGER, kind TEXT, ids TEXT);",
+        )
+        .unwrap();
+    claims
+        .execute(
+            "INSERT INTO claims VALUES (?1, ?2, 'approved', '[\"item-a\"]')",
+            rusqlite::params![now - 4_000_000, now + 10],
+        )
+        .unwrap();
+    let mut ledger = Ledger::open(&dir.join("l.db")).unwrap();
+    ledger.ingest_sources(&[src], Some(&claims));
+    let pf = ledger.load(None);
+    let by = |k: &str| {
+        pf[0]
+            .calls
+            .iter()
+            .find(|c| c.key == k)
+            .unwrap()
+            .attribution
+            .clone()
+    };
+    assert_eq!(
+        by("msg_old"),
+        Some(Attribution::Items(vec!["item-a".into()]))
+    );
+    assert_eq!(by("msg_new"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn chrono_like(ms: i64) -> String {
+    // "YYYY-MM-DDTHH:MM:SS.mmmZ" for an epoch ms, via the days-from-civil inverse.
+    let secs = ms.div_euclid(1000);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60,
+        ms.rem_euclid(1000)
+    )
 }

@@ -91585,6 +91585,11 @@ fn guard_selftest_fixture() -> Result<PathBuf, String> {
         }
         std::fs::write(&p, body).map_err(|e| e.to_string())
     };
+    // guard-selftest-fixture-marks-state-folder: mark the state folder the
+    // way a new project's is (`ensure_new_state_dir`), or the guard reads it
+    // as someone else's `.bram/` (#469, is_bram_state_dir) and allows every
+    // uncovered write, failing the deny cases.
+    w(&bram_state_rel(&dir, ".gitignore"), "*\n")?;
     w(
         &bram_state_rel(&dir, "worklist.json"),
         r#"{"version":1,"items":[{"id":"selftest-covered","status":"proposed","files":["src/covered.txt"]}]}"#,
@@ -92153,6 +92158,19 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
 #[cfg(test)]
 mod guard_selftest_tests {
     use super::*;
+
+    // guard-selftest-fixture-marks-state-folder: the fixture's state folder
+    // must read as Bram's to the guard, or every uncovered-write case passes
+    // as allow (the 0.8.7 Status false alarm, after 4abe1c83).
+    #[test]
+    fn fixture_state_folder_reads_as_brams() {
+        let dir = guard_selftest_fixture().expect("fixture");
+        assert!(
+            guard_policy::is_bram_state_dir(&dir),
+            "fixture .bram/ lacks Bram's marker"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // A guard that can't be run must read as an error, never as a decision:
     // a dead chain has to fail the self-test, not pass it as "allow".

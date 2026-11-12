@@ -26,6 +26,19 @@ rust-tests-module:
 #   scripts/build.sh 2>&1 | tail -5  ->  make build-debug
 #   scripts/build.sh 2>&1 | tail -1 | cut -c1-80  ->  make build-debug
 # Not a task: bash -n scripts/build.sh (checks the script's own syntax)
+# Saved by Bram from the agents' `cargo build` runs. Replaces:
+#   cargo build  ->  make build-debug
+#   cargo build --manifest-path src-tauri/Cargo.toml  ->  make build-debug
+#   cargo build --manifest-path src-tauriCargo.toml --target x86_64-pc-windows-msvc  ->  make build-debug
+#   cargo build --manifest-path src-tauri\Cargo.toml --target x86_64-pc-windows-msvc --offline  ->  make build-debug
+#   cargo build --manifest-path src-tauri\Cargo.toml --target x86_64-pc-windows-msvc --target-dir "$targetDir"  ->  make build-debug
+# Not a task: cargo build --manifest-path src-tauri/Cargo.toml --lib (compiles the library alone, a one-off check)
+# Not a task: cargo build --manifest-path C:\Users\jon\AppData\Local\Temp\bram-clear-probe-project\Cargo.toml --target x86_64-pc-windows-msvc --target-dir .\src-tauri\target --offline (a throwaway probe project)
+# Saved by Bram from the agents' `scripts/build.ps1` runs. Replaces:
+#   powershell -NoProfile -File scripts/build.ps1 2>&1 | tail -4  ->  make build-debug
+#   powershell -NoProfile -File scripts/build.ps1 2>&1 | tail -15  ->  make build-debug
+#   powershell -NoProfile -File scripts/build.ps1 2>&1 | tail -3  ->  make build-debug
+#   powershell -NoProfile -File scripts/build.ps1 2>&1 | tail -6  ->  make build-debug
 .PHONY: build-debug
 
 # The debug build, logged to build-log.jsonl (never --release).

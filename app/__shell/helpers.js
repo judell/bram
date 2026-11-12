@@ -18393,6 +18393,14 @@ window.__bramLogExpandedTrace = function (expanded) {
 };
 // The expanded detail's line for a demo entry: which saved demo board it ran.
 window.__bramStoryScenarioLine = function (item) {
+  // log-collapses-demo-runs: a folded row lists its runs in one line.
+  if (item && item.runs && item.runs.length) {
+    var scen = [];
+    item.runs.forEach(function (r) { if (r.scenario && scen.indexOf(r.scenario) < 0) scen.push(r.scenario); });
+    return "Runs: " + item.runs.map(function (r) {
+      return r.at + " " + String(r.text).replace(/^(A|The) demo instance /, "").replace(/\.$/, "");
+    }).join(" \u00b7 ") + (scen.length ? ". Scenarios: " + scen.join(", ") : "");
+  }
   return item && item.scenario ? "Scenario: " + item.scenario + " (a saved demo board)" : "";
 };
 window.__bramToggleInArray = function (arr, id) {
@@ -22264,7 +22272,7 @@ window.__bramStoryTell = (function () {
     out.forEach(function (o) {
       if (o.kind === "queue-add" && o.queueId && STORY_SHOW.indexOf("queue-add") >= 0) shownAdds[o.queueId] = true;
     });
-    return out
+    return foldDemoRuns(out
       .filter(function (o) { return STORY_SHOW.indexOf(o.kind) >= 0; })
       .map(function (o) {
         var draft = o.queueId && payload.queueDrafts && payload.queueDrafts[o.queueId];
@@ -22314,7 +22322,42 @@ window.__bramStoryTell = (function () {
           context: window.__bramQueueDraftContext(draft || null),
           images: (draft && Array.isArray(draft.images)) ? draft.images : [],
         };
+      }));
+  }
+
+  // log-collapses-demo-runs (Jon, 2026-11-11: "collapse repetition of this
+  // pattern"). Rows are newest-first; a run of 2+ adjacent demo rows (as
+  // shown, so any other shown entry splits it) becomes one row with the
+  // newest row's id, time and t. A restart counts as one start and one stop.
+  // Its `runs` (oldest-first) feed the expanded detail's line.
+  function foldDemoRuns(rows) {
+    var res = [], i = 0;
+    while (i < rows.length) {
+      if (rows[i].kind !== "demo") { res.push(rows[i++]); continue; }
+      var j = i;
+      while (j < rows.length && rows[j].kind === "demo") j++;
+      if (j - i < 2) { res.push(rows[i++]); continue; }
+      var run = rows.slice(i, j).reverse(), starts = 0, stops = 0, scen = [];
+      run.forEach(function (r) {
+        if (/started|restarted/.test(r.text)) starts++;
+        if (/stopped|restarted/.test(r.text)) stops++;
+        if (r.scenario && scen.indexOf(r.scenario) < 0) scen.push(r.scenario);
       });
+      var times = function (n) { return n === 1 ? "once" : n + " times"; };
+      var parts = [];
+      if (starts) parts.push("started " + times(starts));
+      if (stops) parts.push("stopped " + times(stops));
+      var top = rows[i];
+      var folded = {};
+      Object.keys(top).forEach(function (k) { folded[k] = top[k]; });
+      folded.text = (starts && stops ? "The" : "A") + " demo instance " + parts.join(" and ") +
+        ", " + run[0].at + "\u2013" + top.at + ".";
+      folded.scenario = scen.join(", ") || "(unnamed)";
+      folded.runs = run.map(function (r) { return { at: r.at, text: r.text, scenario: r.scenario || null }; });
+      res.push(folded);
+      i = j;
+    }
+    return res;
   }
 
   // What the Log shows, opt-in (Jon, 2026-11-05: "show nothing until I ask

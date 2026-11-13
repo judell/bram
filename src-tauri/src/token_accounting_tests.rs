@@ -1604,8 +1604,14 @@ fn agy_conversation_summaries_match_the_root_and_mark_subagents() {
         )
         .unwrap();
     };
-    ins("main1", &format!(r#"["file://{root}"]"#), None);
-    ins("sub1", &format!(r#"["file://{root}"]"#), Some("main1"));
+    // agy writes `file:///C:/Users/...` on Windows, not `file://C:\...`.
+    let uri = if root.starts_with('/') {
+        format!("file://{root}")
+    } else {
+        format!("file:///{}", root.replace('\\', "/"))
+    };
+    ins("main1", &format!(r#"["{uri}"]"#), None);
+    ins("sub1", &format!(r#"["{uri}"]"#), Some("main1"));
     ins("other", r#"["file:///somewhere/else"]"#, None);
     let got = agy_conversations(&conn, &dir);
     assert_eq!(
@@ -1889,6 +1895,42 @@ fn the_spellings_of_one_file_collapse_and_other_worktrees_do_not() {
     // No folder recorded: taken from the root, and said so.
     let (r, unknown) = resolve_read_path("src-tauri/src/lib.rs", None, root, home);
     assert_eq!((r, unknown), (mine, true));
+}
+
+#[test]
+fn windows_spellings_of_one_file_collapse_and_other_places_are_elsewhere() {
+    let root = r"C:\Users\jon\bram";
+    let home = Some(r"C:\Users\jon");
+    let p = |raw: &str, cwd: Option<&str>| resolve_read_path(raw, cwd, root, home).0;
+    let mine = Resolved::Project("src-tauri/src/lib.rs".into());
+    assert_eq!(p(r"C:\Users\jon\bram\src-tauri\src\lib.rs", None), mine);
+    assert_eq!(p(r"c:\users\jon\bram\src-tauri\src\lib.rs", None), mine);
+    assert_eq!(p("C:/Users/jon/bram/src-tauri/src/lib.rs", None), mine);
+    assert_eq!(p("/c/Users/jon/bram/src-tauri/src/lib.rs", None), mine);
+    assert_eq!(p(r"src-tauri\src\lib.rs", Some(r"C:\Users\jon\bram")), mine);
+    assert_eq!(p("lib.rs", Some(r"C:\Users\jon\bram\src-tauri\src")), mine);
+    assert_eq!(
+        p(r"..\src-tauri\src\lib.rs", Some(r"C:\Users\jon\bram\app")),
+        mine
+    );
+    assert_eq!(p(r"~\bram\src-tauri\src\lib.rs", None), mine);
+    assert_eq!(p("~/bram/src-tauri/src/lib.rs", None), mine);
+    // Out of the root.
+    assert_eq!(
+        p(r"C:\Users\jon\AppData\Local\Temp\prev.md", None),
+        Resolved::Elsewhere
+    );
+    assert_eq!(
+        p(r"C:\Users\jon\bram-453\src-tauri\src\lib.rs", None),
+        Resolved::Elsewhere
+    );
+    assert_eq!(p(r"D:\bram\x.rs", None), Resolved::Elsewhere);
+    assert_eq!(
+        p(r"src-tauri\src\lib.rs", Some(r"C:\Users\jon\bram-pr468")),
+        Resolved::Elsewhere
+    );
+    // `..` never pops the drive.
+    assert_eq!(p(r"C:\..\..\x.rs", None), Resolved::Elsewhere);
 }
 
 struct FixedView(Arc<CommitView>);

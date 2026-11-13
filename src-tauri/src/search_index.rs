@@ -629,10 +629,10 @@ pub fn session_paths_for_tools(conn: &Connection, tool_ids: &[String]) -> Result
 
 /// Reconcile the index against the filesystem: note which file-backed sources
 /// are gone, WITHOUT forgetting them. Only `indexed_files.path` values that are
-/// absolute filesystem paths (start with '/') are file-backed -- session
-/// transcripts and Bram's exports of other providers' sessions. Synthetic keys
-/// (`commit:<sha>`, `issue:<n>`, `history:<ts>`) never start with '/' and are
-/// always exempt.
+/// absolute filesystem paths (start with '/', or a Windows drive like `C:\`)
+/// are file-backed -- session transcripts and Bram's exports of other
+/// providers' sessions. Synthetic keys (`commit:<sha>`, `issue:<n>`,
+/// `history:<ts>`) are never absolute paths and are always exempt.
 ///
 /// The index is where history lives. Upstream deletes sources (Claude Code's
 /// `cleanupPeriodDays` sweep, a recreated `~/.local/share/opencode` or
@@ -642,13 +642,16 @@ pub fn session_paths_for_tools(conn: &Connection, tool_ids: &[String]) -> Result
 /// the mark; this covers a file back unchanged). `session_tools` rows stay:
 /// they map tool ids to the session. Returns (newly marked, cleared).
 pub fn mark_missing_sources(conn: &Connection) -> Result<(usize, usize)> {
-    let mut stmt =
-        conn.prepare("SELECT path, source_gone_at FROM indexed_files WHERE path LIKE '/%'")?;
+    let mut stmt = conn.prepare("SELECT path, source_gone_at FROM indexed_files")?;
+    // Filesystem paths only: a leading '/' or, on Windows, a drive (`C:\...`).
     let candidates = stmt
         .query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
         })?
-        .collect::<Result<Vec<(String, Option<i64>)>>>()?;
+        .collect::<Result<Vec<(String, Option<i64>)>>>()?
+        .into_iter()
+        .filter(|(p, _)| p.starts_with('/') || std::path::Path::new(p).is_absolute())
+        .collect::<Vec<_>>();
     drop(stmt);
     let mut marked = 0usize;
     let mut cleared = 0usize;

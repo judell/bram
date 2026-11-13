@@ -3357,8 +3357,12 @@ fn normalize_path(path: &str, root: &str) -> String {
     p.strip_prefix("./").unwrap_or(p).to_string()
 }
 
-/// `a/./b/../c` as `a/c`; the leading `/` is kept.
+/// `a/./b/../c` as `a/c`; the leading `/` is kept, and so is a drive (`..`
+/// never pops it).
 fn clean_path(p: &str) -> String {
+    if has_drive(p) {
+        return format!("{}{}", &p[..2], clean_path(&p[2..]));
+    }
     let mut out: Vec<&str> = Vec::new();
     for seg in p.split('/') {
         match seg {
@@ -3394,36 +3398,64 @@ fn resolve_read_path(
     root: &str,
     home: Option<&str>,
 ) -> (Resolved, bool) {
-    if raw.contains('\\') || root.contains('\\') {
-        return (Resolved::Project(normalize_path(raw, root)), false);
-    }
-    let mut p = raw.to_string();
-    if let Some(h) = home {
+    // Windows spellings are folded to `/` first, so one path logic serves both.
+    let root_s = root.replace('\\', "/");
+    let cwd_s = cwd.map(|c| c.replace('\\', "/"));
+    let home_s = home.map(|h| h.replace('\\', "/"));
+    let mut p = raw.replace('\\', "/");
+    // A drive on the root means a Windows filesystem: case-insensitive, and
+    // Git Bash may spell `C:/x` as `/c/x`.
+    let win = has_drive(&root_s);
+    if let Some(h) = &home_s {
         if p == "~" || p.starts_with("~/") {
             p = format!("{}{}", h.trim_end_matches('/'), &p[1..]);
         }
     }
+    if win && p.starts_with('/') {
+        let b = p.as_bytes();
+        if b.len() >= 2 && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
+            p = format!("{}:{}", b[1] as char, &p[2..]);
+        }
+    }
     let mut unknown = false;
-    if !p.starts_with('/') {
+    if !p.starts_with('/') && !has_drive(&p) {
         let first = p.split('/').next().unwrap_or("");
         if matches!(first, "a" | "b") && p.contains('/') && !Path::new(root).join(first).exists() {
             return (Resolved::Elsewhere, false);
         }
-        p = match cwd {
+        p = match &cwd_s {
             Some(c) => format!("{}/{}", c.trim_end_matches('/'), p),
             None => {
                 unknown = true;
-                format!("{}/{}", root.trim_end_matches('/'), p)
+                format!("{}/{}", root_s.trim_end_matches('/'), p)
             }
         };
     }
     let p = clean_path(&p);
-    let root = clean_path(root);
-    let prefix = format!("{}/", root.trim_end_matches('/'));
-    match p.strip_prefix(&prefix) {
+    let root_c = clean_path(&root_s);
+    let prefix = format!("{}/", root_c.trim_end_matches('/'));
+    let rel = if win {
+        // ASCII lowering keeps byte offsets, so the slice below stays valid.
+        if p.to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase())
+        {
+            Some(&p[prefix.len()..])
+        } else {
+            None
+        }
+    } else {
+        p.strip_prefix(&prefix)
+    };
+    match rel {
         Some(rel) if !rel.is_empty() => (Resolved::Project(rel.to_string()), unknown),
         _ => (Resolved::Elsewhere, false),
     }
+}
+
+/// Starts with a drive letter and colon (`C:` or `C:/...`).
+fn has_drive(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || b[2] == b'/')
 }
 
 /// Stretch a range to take in `t`.

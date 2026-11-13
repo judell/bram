@@ -189,17 +189,20 @@
            In the header row, so it costs no vertical space. Same assignment
            as the row boxes; disabled when they are. Driven by click, not
            didChange: initialValue moves when rows are ticked by hand, and a
-           programmatic flip must never clear the selection.
+           programmatic flip must never clear the selection. No `label`: a
+           labelled Checkbox stretched across the header and pushed the
+           title to the far right, so "All" is a plain Text beside it.
            https://www.xmlui.org/docs/reference/components/Checkbox -->
       <Checkbox
         when="{!!(worklist.value &amp;&amp; worklist.value.items &amp;&amp; worklist.value.items.length)}"
-        label="All"
-        labelPosition="end"
         tooltip="Select every item"
         initialValue="{window.__bramW2AllSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
         indeterminate="{window.__bramW2SomeSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
         enabled="{window.__bramWorklist2RowSelectable(inflightClaim.value)}"
         onClick="worklist2Selected = window.__bramW2SelectAll(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)" />
+      <Text
+        when="{!!(worklist.value &amp;&amp; worklist.value.items &amp;&amp; worklist.value.items.length)}"
+        value="All" />
       <H2>Worklist</H2>
       <!-- Parity: + New item. Inline ask (the old tab's dialog distilled):
            items are proposed by the agent; this composes that ask. -->

@@ -330,7 +330,6 @@
   </HStack>
   <HStack
     when="{!!gateQueue.value}"
-    wrapContent="true"
     horizontalAlignment="center"
     verticalAlignment="center"
     gap="$space-2"

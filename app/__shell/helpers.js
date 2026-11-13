@@ -22852,13 +22852,19 @@ window.__bramTokenInfoText = function (key, report) {
 // (which sections the user is looking at), so sessionStorage, scoped by
 // project; null key means the project is unknown, so neither read nor write.
 // Default is all closed.
+// The folds open before the user has chosen any this session: Token
+// accounting's Models table (Jon, 2026-11-12). Once anything is toggled, the
+// saved list wins, including Models closed.
+window.__bramStatusOpenDefault = ["tokens-models"];
 window.__bramStatusOpenLoad = function () {
   try {
     var k = window.__bramProjectScopedKey("bram.statusOpen");
-    if (!k) return [];
-    var v = JSON.parse(window.sessionStorage.getItem(k) || "[]");
-    return Array.isArray(v) ? v : [];
-  } catch (e) { return []; }
+    if (!k) return window.__bramStatusOpenDefault.slice();
+    var raw = window.sessionStorage.getItem(k);
+    if (raw === null) return window.__bramStatusOpenDefault.slice();
+    var v = JSON.parse(raw);
+    return Array.isArray(v) ? v : window.__bramStatusOpenDefault.slice();
+  } catch (e) { return window.__bramStatusOpenDefault.slice(); }
 };
 window.__bramStatusOpenSave = function (list) {
   try {

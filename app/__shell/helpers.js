@@ -7595,6 +7595,10 @@ window.__bramTranscriptUnmount = function (atBottom, total, agentId) {
 // cause=stream-switch traces in the field, ever).
 window.__bramMountFollow = function (state, agentId) {
   var follow = true;
+  // transcript-scroll-jump-watch: every Transcript mount runs this, so attach
+  // the scroll watch here (it retries until the List's scroller exists).
+  window.__bramScrollJumpWatch.agentId = String(agentId || "") || "main";
+  setTimeout(function () { window.__bramScrollJumpAttach(0); }, 0);
   if (state && String(state.stream || "") !== String(agentId || "")) {
     window.__bramIframeTrace("follow-state", {
       op: "stream-switch-mount",
@@ -13215,6 +13219,8 @@ window.__bramAnnotatePrecedingIntent = function (turns) {
 
 window.__bramBroadcastProjectedTurns = function (payload, reason) {
   var __bcastT0 = Date.now();
+  // transcript-scroll-jump-watch: when content last changed, for sinceContentMs.
+  window.__bramLastContentMs = __bcastT0;
   if (payload && payload.turns) window.__bramAnnotatePrecedingIntent(payload.turns);
   var prev = __projectedTurnsValue;
   if (payload && prev && prev.sid === payload.sid) {
@@ -14892,6 +14898,78 @@ window.__bramPointerHeld = false;
     }, { passive: true, capture: true });
   } catch (e) { /* classifier falls back to echo windows alone */ }
 })();
+// transcript-scroll-jump-watch: instrumentation only, no behavior change.
+// The classifier credits any scroll within 400ms of input to the user, so a
+// machine scroll during a wheel gesture reads as "user-scroll-bottom" and the
+// trace can't tell a yank from the reader's own scroll. This records the
+// wheel's direction and watches the Transcript's scroller natively (the
+// List's onScroll is user-driven only, so it misses machine scrolls), logging
+// follow-state op=scroll-jump for large moves and arrivals at the bottom.
+// wheelDir=up with a downward landing is a yank; inputAgeMs > 400 with no
+// pointer held is a machine scroll.
+window.__bramLastWheelDy = 0;
+window.__bramLastWheelMs = 0;
+try {
+  window.addEventListener("wheel", function (ev) {
+    window.__bramLastWheelDy = ev && ev.deltaY ? ev.deltaY : 0;
+    window.__bramLastWheelMs = Date.now();
+  }, { passive: true, capture: true });
+} catch (e) { /* ignore */ }
+window.__bramScrollJumpWatch = { el: null, last: 0, lines: [] };
+window.__bramScrollJumpOnScroll = function () {
+  try {
+    var w = window.__bramScrollJumpWatch;
+    var el = w.el;
+    if (!el) return;
+    var from = w.last;
+    var to = el.scrollTop;
+    w.last = to;
+    var delta = to - from;
+    var gapAfter = el.scrollHeight - to - el.clientHeight;
+    var gapBefore = el.scrollHeight - from - el.clientHeight;
+    var arrived = gapAfter <= 4 && gapBefore > 200;
+    if (Math.abs(delta) <= 200 && !arrived) return;
+    var now = Date.now();
+    w.lines = w.lines.filter(function (t) { return now - t < 10000; });
+    if (w.lines.length >= 20) return;
+    w.lines.push(now);
+    var dy = window.__bramLastWheelDy || 0;
+    window.__bramIframeTrace("follow-state", {
+      op: "scroll-jump",
+      from: Math.round(from), to: Math.round(to), delta: Math.round(delta),
+      scrollHeight: el.scrollHeight, clientHeight: el.clientHeight,
+      gapAfter: Math.round(gapAfter),
+      inputAgeMs: window.__bramLastUserInputMs ? now - window.__bramLastUserInputMs : -1,
+      pointerHeld: !!window.__bramPointerHeld,
+      wheelDir: window.__bramLastWheelMs ? (dy < 0 ? "up" : (dy > 0 ? "down" : "none")) : "none",
+      wheelAgeMs: window.__bramLastWheelMs ? now - window.__bramLastWheelMs : -1,
+      follow: window.__bramFollowAtBottom !== false,
+      total: window.__bramFollowLastTotal || 0,
+      sinceContentMs: window.__bramLastContentMs ? now - window.__bramLastContentMs : -1,
+      agentId: w.agentId || "main",
+    });
+  } catch (e) { /* ignore */ }
+};
+// Attach to the Transcript's current scroller; idempotent, and moves to a new
+// element when the List remounts. The scroller can lag the mount, so retry
+// a few times.
+window.__bramScrollJumpAttach = function (attempt) {
+  try {
+    var w = window.__bramScrollJumpWatch;
+    var el = __bramTranscriptScroller();
+    if (!el) {
+      if ((attempt || 0) < 8) {
+        setTimeout(function () { window.__bramScrollJumpAttach((attempt || 0) + 1); }, 250);
+      }
+      return;
+    }
+    if (w.el === el) return;
+    if (w.el) w.el.removeEventListener("scroll", window.__bramScrollJumpOnScroll);
+    w.el = el;
+    w.last = el.scrollTop;
+    el.addEventListener("scroll", window.__bramScrollJumpOnScroll, { passive: true });
+  } catch (e) { /* ignore */ }
+};
 // follow-state-source-of-truth: consumers were reading stale copies of
 // follow state — the repin ChangeListener fired 240ms into READING off a
 // pre-assignment xs var (2026-08-01 04:40:01 live capture) and the verify

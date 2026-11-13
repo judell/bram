@@ -8881,6 +8881,40 @@ window.__bramWorklist2BatchIterate = function (ids, text) {
   });
 };
 
+// worklist-select-all-checkbox: the header's All box, on click. Clears the
+// selection when every item is already selected, otherwise selects every
+// item; traced like a row tick.
+window.__bramW2SelectAll = function (items, sel) {
+  var on = !window.__bramW2AllSelected(items, sel);
+  var next = on
+    ? (items || []).map(function (it) { return it && it.id; }).filter(Boolean)
+    : [];
+  window.__bramIframeTrace("w2-selection", { op: "select-all", on: !!on, count: next.length });
+  return next;
+};
+
+// The All box reads ticked when every item on the board is selected.
+window.__bramW2AllSelected = function (items, sel) {
+  var list = items || [];
+  var chosen = sel || [];
+  if (!list.length) return false;
+  for (var i = 0; i < list.length; i++) {
+    if (!list[i] || chosen.indexOf(list[i].id) === -1) return false;
+  }
+  return true;
+};
+
+// Some, but not all, items selected: the All box shows the dash.
+window.__bramW2SomeSelected = function (items, sel) {
+  var list = items || [];
+  var chosen = sel || [];
+  var n = 0;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && chosen.indexOf(list[i].id) !== -1) n++;
+  }
+  return n > 0 && n < list.length;
+};
+
 // Selection state helpers for the row tickboxes and the plural action bar.
 window.__bramToggleRowSelection = function (sel, id, on) {
   var next = (sel || []).filter(function (x) {

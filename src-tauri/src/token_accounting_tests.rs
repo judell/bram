@@ -2164,8 +2164,67 @@ fn a_v2_ledger_gains_the_new_columns_and_reads_every_transcript_again() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, LEDGER_VERSION);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_v3_ledger_reads_every_transcript_again() {
+    let dir = ledger_dir("v3to4");
+    let db = dir.join("l.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sources (source_key TEXT PRIMARY KEY, provider TEXT NOT NULL,
+               session TEXT NOT NULL, thread TEXT NOT NULL, agent_id TEXT, label TEXT, path TEXT,
+               size INTEGER NOT NULL DEFAULT 0, mtime_ms INTEGER NOT NULL DEFAULT 0,
+               inode INTEGER NOT NULL DEFAULT 0, read_to INTEGER NOT NULL DEFAULT 0,
+               unreadable INTEGER NOT NULL DEFAULT 0, compactions INTEGER NOT NULL DEFAULT 0,
+               quota TEXT, state TEXT, updated_ms INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO sources (source_key, provider, session, thread, size, mtime_ms,
+               read_to, unreadable, compactions, state)
+               VALUES ('a', 'claude', 's', 'main', 100, 5, 100, 3, 2, '{}'),
+                      ('b', 'opencode', 'o', 'main', 0, 0, 77, 1, 0, '{}');
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    }
+    let ledger = Ledger::open(&db).unwrap();
+    let a: (i64, i64) = ledger
+        .conn
+        .query_row(
+            "SELECT read_to, mtime_ms FROM sources WHERE source_key = 'a'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(a, (0, -1));
+    let oc: i64 = ledger
+        .conn
+        .query_row(
+            "SELECT read_to FROM sources WHERE source_key = 'b'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(oc, 77);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn is_lib_rs_accepts_both_slash_spellings() {
+    assert!(is_lib_rs("src-tauri/src/lib.rs"));
+    assert!(is_lib_rs(r"C:\Users\jon\bram\src-tauri\src\lib.rs"));
+    assert!(is_lib_rs(r"src-tauri\src\lib.rs"));
+    assert!(!is_lib_rs("src-tauri/src/libx.rs"));
+    assert!(!is_lib_rs("lib.rs.bak"));
+}
+
+#[test]
+fn grep_content_keeps_line_numbers_for_a_backslash_lib_rs_path() {
+    let by = grep_content_by_file(r"src-tauri\src\lib.rs:120:fn x()", None);
+    assert_eq!(by.len(), 1);
+    assert_eq!(by[0].2.iter().map(|l| l.0).collect::<Vec<_>>(), vec![120]);
 }
 
 #[test]

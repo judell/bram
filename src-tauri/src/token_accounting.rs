@@ -523,7 +523,8 @@ enum PendingTool {
 }
 
 fn is_lib_rs(path: &str) -> bool {
-    path.ends_with("src/lib.rs")
+    // Windows paths use backslashes.
+    path.replace('\\', "/").ends_with("src/lib.rs")
 }
 
 /// `cat -n` output: each line is spaces, the line number, a tab, the text.
@@ -4493,7 +4494,9 @@ pub fn conventions_bytes(root: &Path) -> BTreeMap<String, u64> {
 //   them (see `stamp_cutoff`).
 
 /// 2: Codex call keys became `<ordinal>:<at_ms>`; `open` rewrites v1 rows.
-pub const LEDGER_VERSION: i64 = 3;
+/// 4: Windows reads of lib.rs were stored without their lines (backslash
+/// paths); `open` re-reads every transcript so the reads gain them.
+pub const LEDGER_VERSION: i64 = 4;
 const ATTRIBUTION_SETTLE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4767,17 +4770,20 @@ impl Ledger {
                 );
             }
             if version < 3 {
+                let _ = conn.execute("ALTER TABLE reads ADD COLUMN cwd TEXT", []);
+                let _ = conn.execute("ALTER TABLE reads ADD COLUMN shell_lines TEXT", []);
+            }
+            if version < 4 {
                 // v3 stores where each read ran (to resolve a relative path)
-                // and which lines a shell read returned. Rows already stored
-                // lack both, and the transcripts still hold them, so read
-                // every Claude and Codex transcript again from the start, once:
+                // and which lines a shell read returned; v4 fixes the lines of
+                // Windows lib.rs reads. Rows already stored lack them, and the
+                // transcripts still hold them, so read every Claude and Codex
+                // transcript again from the start, once:
                 // reads are upserted on their keys, calls are unchanged, and
                 // the counters (unreadable lines, compactions) are recounted by
                 // the full pass. A transcript that is gone keeps its rows as
                 // they were: relative paths with no folder read as the
                 // project's.
-                let _ = conn.execute("ALTER TABLE reads ADD COLUMN cwd TEXT", []);
-                let _ = conn.execute("ALTER TABLE reads ADD COLUMN shell_lines TEXT", []);
                 let _ = conn.execute(
                     "UPDATE sources SET read_to = 0, mtime_ms = -1, state = NULL, \
                        unreadable = 0, compactions = 0 \
@@ -5111,9 +5117,10 @@ impl Ledger {
                    path, at_ms, bytes, via_shell, lines, cwd, shell_lines) \
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
                  ON CONFLICT(source_key, read_key) DO UPDATE SET cwd=excluded.cwd, \
-                   shell_lines=excluded.shell_lines \
+                   shell_lines=excluded.shell_lines, lines=excluded.lines \
                  WHERE reads.cwd IS NOT excluded.cwd \
-                   OR reads.shell_lines IS NOT excluded.shell_lines",
+                   OR reads.shell_lines IS NOT excluded.shell_lines \
+                   OR reads.lines IS NOT excluded.lines",
             ) else {
                 return;
             };

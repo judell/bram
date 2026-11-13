@@ -3576,7 +3576,7 @@ fn bram_trace_date_stamp_local() -> String {
     }
     #[cfg(windows)]
     {
-        if let Ok(out) = std::process::Command::new("powershell")
+        if let Ok(out) = hidden_command("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
@@ -5669,7 +5669,7 @@ fn project_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf
 
 fn git_run<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Result<String, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(&root)
         .args(args)
         .output()
@@ -5687,7 +5687,7 @@ fn git_run<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Result<Strin
 // non-zero exit, returning stdout regardless.
 fn git_run_allow_exit<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Option<String> {
     let root = project_root(Some(app))?;
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(&root)
         .args(args)
         .output()
@@ -17422,7 +17422,7 @@ fn fetch_app_info() -> AppInfo {
 
     // curl ships on macOS / Linux / Windows 10+; avoids pulling in an HTTP
     // dependency for a single, tolerant-of-failure fetch.
-    let output = std::process::Command::new("curl")
+    let output = hidden_command("curl")
         .args([
             "-sf",
             "-m",
@@ -17654,7 +17654,7 @@ fn run_self_update<R: tauri::Runtime>(app: &AppHandle<R>, tag: &str) {
     }
     let script_path = tmp.join(script_name);
     let script_url = format!("{}/{}", base, script_name);
-    let fetched = std::process::Command::new("curl")
+    let fetched = hidden_command("curl")
         .args(["-fsSL", "-m", "30", &script_url, "-o"])
         .arg(&script_path)
         .output();
@@ -17681,7 +17681,7 @@ fn run_self_update<R: tauri::Runtime>(app: &AppHandle<R>, tag: &str) {
     #[cfg(windows)]
     let staging = tmp.join("staged");
     #[cfg(windows)]
-    let output = std::process::Command::new("powershell")
+    let output = hidden_command("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script_path)
         .args(["-Version", tag, "-BaseUrl", &base, "-InstallDir"])
@@ -18068,7 +18068,7 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
             project_root(Some(app))
                 .filter(|_| project_forge(app) == Forge::GitHub)
                 .and_then(|root| {
-                    std::process::Command::new("gh")
+                    hidden_command("gh")
                         .current_dir(&root)
                         .args(&["api", "/user", "--jq", ".login"])
                         .output()
@@ -20141,7 +20141,7 @@ fn glab_issue_to_gh_shape(v: &serde_json::Value) -> serde_json::Value {
 }
 
 fn glab_run(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = std::process::Command::new("glab")
+    let out = hidden_command("glab")
         .current_dir(root)
         .args(args)
         .output()
@@ -20342,7 +20342,7 @@ trait ForgeAdapter: Sync {
         // refs contain the commit — forge-independent, no network.
         // Forges with a stronger origin-truth API check override.
         let _ = repo_slug;
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(root)
             .args(["branch", "-r", "--contains", full_sha])
             .output()
@@ -20432,7 +20432,7 @@ fn forge_adapter<R: tauri::Runtime>(app: &AppHandle<R>) -> &'static dyn ForgeAda
 }
 
 fn gh_json_out(root: &Path, args: &[&str], context: &str) -> Result<Vec<u8>, String> {
-    let out = std::process::Command::new("gh")
+    let out = hidden_command("gh")
         .current_dir(root)
         .args(args)
         .output()
@@ -20460,7 +20460,7 @@ impl ForgeAdapter for GitHubForge {
     // issue-257: authoritative default-branch name, used only when
     // origin/HEAD is missing and `git remote set-head` could not repair it.
     fn default_branch(&self, root: &Path) -> Option<String> {
-        let out = std::process::Command::new("gh")
+        let out = hidden_command("gh")
             .current_dir(root)
             .args([
                 "repo",
@@ -20553,7 +20553,7 @@ impl ForgeAdapter for GitHubForge {
             "repos/{{owner}}/{{repo}}/issues?since={}&state=all&sort=updated&direction=desc&per_page=100",
             since
         );
-        let mut cmd = std::process::Command::new("gh");
+        let mut cmd = hidden_command("gh");
         cmd.current_dir(root).args(["api", "-i"]);
         if let Some(tag) = etag {
             cmd.args(["-H", &format!("If-None-Match: {}", tag)]);
@@ -20671,7 +20671,7 @@ impl ForgeAdapter for GitHubForge {
 
     fn commit_visible(&self, root: &Path, repo_slug: &str, full_sha: &str) -> Result<bool, String> {
         let path = format!("repos/{}/commits/{}", repo_slug, full_sha);
-        let out = std::process::Command::new("gh")
+        let out = hidden_command("gh")
             .current_dir(root)
             .args(["api", &path])
             .output()
@@ -20721,7 +20721,7 @@ impl ForgeAdapter for GitLabForge {
     // `rev-parse --verify` rejects, which yields None and defers the close
     // rather than firing it.
     fn default_branch(&self, root: &Path) -> Option<String> {
-        let out = std::process::Command::new("glab")
+        let out = hidden_command("glab")
             .current_dir(root)
             .args(["api", "projects/:id", "--method", "GET"])
             .output()
@@ -20874,7 +20874,7 @@ fn gh_issue_closed_event_actor<R: tauri::Runtime>(
 ) -> Option<(String, String)> {
     let root = project_root(Some(app))?;
     let path = format!("repos/{}/issues/{}/events", repo_slug, number);
-    let out = std::process::Command::new("gh")
+    let out = hidden_command("gh")
         .current_dir(&root)
         .args(["api", &path])
         .output()
@@ -31714,6 +31714,20 @@ fn spawn_project_server(
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+// A Command for a console program (git, gh, glab, powershell, curl, cmd,
+// cargo) that opens no window on Windows. A release Bram is GUI-subsystem,
+// so it has no console for the child to inherit: an unflagged child gets a
+// new, visible one (79 windows in 90 s on Indigo, 2026-11-13, before this).
+pub(crate) fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 // issue-341 (windows): terminate a pid and everything below it. `force` picks
 // the graceful (WM_CLOSE / CTRL) or the /F form. Status is deliberately
 // ignored, exactly as the unix path ignores libc::kill's return: a pid that is
@@ -33099,11 +33113,7 @@ fn git_run_capture_both<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) ->
             exit_code: None,
         };
     };
-    let out = match std::process::Command::new("git")
-        .current_dir(&root)
-        .args(args)
-        .output()
-    {
+    let out = match hidden_command("git").current_dir(&root).args(args).output() {
         Ok(o) => o,
         Err(e) => {
             return GitPushOutput {
@@ -33639,7 +33649,7 @@ fn repo_has_origin<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
 // first non-empty stderr line. Pull and Push keep their own blocking fetches.
 fn status_fetch(root: &std::path::Path, timeout: std::time::Duration) -> Result<(), String> {
     use std::io::Read;
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = hidden_command("git");
     cmd.current_dir(root)
         .args(["fetch", "origin"])
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -33653,11 +33663,6 @@ fn status_fetch(root: &std::path::Path, timeout: std::time::Duration) -> Result<
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     // Drain stderr on a thread so a chatty fetch can't block on a full pipe.
@@ -40758,7 +40763,7 @@ fn git_show_patch_stream<R: tauri::Runtime>(
 ) -> Result<Vec<(String, (String, usize, usize))>, String> {
     use std::io::Read;
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = hidden_command("git");
     cmd.current_dir(&root)
         .args(["show", "--format=%x1e%H%x1f", "--patch", "--no-color", "-M"])
         .args(shas)
@@ -42587,7 +42592,7 @@ fn trace_git_toplevel_above_root<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(root) = project_root(Some(app)) else {
         return;
     };
-    let toplevel = std::process::Command::new("git")
+    let toplevel = hidden_command("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(&root)
         .output()
@@ -61703,7 +61708,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // layouts make "cwd is not the git toplevel" legitimately common, and a
     // warning that fires on normal setups trains the dismiss reflex.
     let git_toplevel = root.as_ref().and_then(|p| {
-        std::process::Command::new("git")
+        hidden_command("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(p)
             .output()
@@ -61963,7 +61968,7 @@ fn project_folder_verdict(
 }
 
 fn git_toplevel_of(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--show-toplevel"])
@@ -62687,7 +62692,7 @@ impl SelfIgnoreOutcome {
 // `git ls-files -- <folder>` from the root. Not a repo, or no git, reads as
 // nothing tracked: there is no index for an ignore file to disturb.
 fn folder_has_tracked_files(root: &Path, folder: &str) -> bool {
-    std::process::Command::new("git")
+    hidden_command("git")
         .current_dir(root)
         .args(["ls-files", "--", folder])
         .output()
@@ -63347,7 +63352,7 @@ fn windows_unquoted_hook_path(link: &Path) -> String {
     if !long.contains(' ') {
         return long;
     }
-    let out = std::process::Command::new("cmd")
+    let out = hidden_command("cmd")
         .args([
             "/d",
             "/c",
@@ -65199,7 +65204,7 @@ fn state_dir_plan_core(root: &Path, now_ms: i64) -> StateDirPlan {
             }
         }
     }
-    let tracked: Option<Vec<String>> = std::process::Command::new("git")
+    let tracked: Option<Vec<String>> = hidden_command("git")
         .current_dir(root)
         .args(["ls-files", "-z", "--", state_name])
         .stderr(std::process::Stdio::null())
@@ -65236,7 +65241,7 @@ fn state_dir_root_settings(root: &Path) -> serde_json::Value {
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| v.as_object().map(|m| m.keys().cloned().collect()));
-    let tracked = std::process::Command::new("git")
+    let tracked = hidden_command("git")
         .current_dir(root)
         .args(["ls-files", "--error-unmatch", "--", ".bram.json"])
         .stdout(std::process::Stdio::null())
@@ -65272,7 +65277,7 @@ Bram keeps personal settings in .bram/settings.json and never writes the root fi
 // The personal (non-team) top-level keys in HEAD's .bram.json; None when
 // HEAD's copy can't be read or parsed.
 fn head_settings_personal_keys(root: &Path) -> Option<Vec<String>> {
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(root)
         .args(["show", "HEAD:.bram.json"])
         .stderr(std::process::Stdio::null())
@@ -65332,7 +65337,7 @@ recommend Drop), otherwise remove them in a commit.",
 // HEAD, else None (untracked, clean, absent, or git unavailable).
 fn root_settings_signature(root: &Path) -> Option<String> {
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
+        hidden_command("git")
             .current_dir(root)
             .args(args)
             .stderr(std::process::Stdio::null())
@@ -65365,7 +65370,7 @@ fn fold_untracked_root_settings(root: &Path) -> Option<String> {
         return None;
     }
     let git_code = |args: &[&str]| {
-        std::process::Command::new("git")
+        hidden_command("git")
             .current_dir(root)
             .args(args)
             .stdout(std::process::Stdio::null())
@@ -66999,7 +67004,7 @@ fn capture_claim_tree(root: &Path, untracked_scope: &[String]) -> Option<ClaimCa
     let list = idx.with_extension("untracked");
     let _ = std::fs::remove_file(&idx);
     let run = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(root)
             .env("GIT_INDEX_FILE", &idx)
             .args(args)
@@ -67041,7 +67046,7 @@ fn capture_claim_tree(root: &Path, untracked_scope: &[String]) -> Option<ClaimCa
         // prefixes), then add exactly that list.
         let mut args: Vec<&str> = vec!["ls-files", "--others", "--exclude-standard", "-z", "--"];
         args.extend(untracked_scope.iter().map(|s| s.as_str()));
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(root)
             .env("GIT_INDEX_FILE", &idx)
             .args(&args)
@@ -67128,7 +67133,7 @@ fn record_claim_interval<R: tauri::Runtime>(
     );
     let tree = capture.tree;
     let refname = format!("refs/bram/claims/{}", at_ms);
-    let refd = std::process::Command::new("git")
+    let refd = hidden_command("git")
         .current_dir(&root)
         .args(["update-ref", &refname, &tree])
         .output()
@@ -67547,7 +67552,7 @@ fn claim_interval_diff<R: tauri::Runtime>(
         args.push("--");
         args.push(path);
         spawns += 1;
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(&root)
             .args(&args)
             .output();
@@ -67980,7 +67985,7 @@ fn reanchor_verified_blob<R: tauri::Runtime>(
         return Err("patch-write-failed".to_string());
     }
     let git_idx = |args: &[&str]| -> Result<String, String> {
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(&root)
             .env("GIT_INDEX_FILE", &idx)
             .args(args)
@@ -68271,7 +68276,7 @@ fn interval_commit_precheck<R: tauri::Runtime>(
     ));
     let pfile = idx.with_extension("patch");
     let git_idx = |args: &[&str]| -> Result<String, String> {
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(&root)
             .env("GIT_INDEX_FILE", &idx)
             .args(args)
@@ -68332,7 +68337,7 @@ fn interval_stage_commit<R: tauri::Runtime>(
     let pfile = idx.with_extension("patch");
     let _ = std::fs::remove_file(&idx);
     let git_idx = |args: &[&str]| -> Result<String, String> {
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(&root)
             .env("GIT_INDEX_FILE", &idx)
             .args(args)
@@ -68595,7 +68600,7 @@ fn untracked_declared_paths(root: &std::path::Path, declared: &[String]) -> Vec<
     if declared.is_empty() {
         return Vec::new();
     }
-    let output = match std::process::Command::new("git")
+    let output = match hidden_command("git")
         .current_dir(root)
         .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
         .args(declared)
@@ -69219,7 +69224,7 @@ fn membership_diff_u0(
     ];
     args.extend(paths.iter().map(|s| s.as_str()));
     spawns.set(spawns.get() + 1);
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(root)
         .args(&args)
         .output()
@@ -69447,7 +69452,7 @@ fn membership_universe(
 ) -> std::collections::BTreeMap<String, (usize, usize)> {
     let git = |args: &[&str]| -> Option<String> {
         spawns.set(spawns.get() + 1);
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(root)
             .args(args)
             .output()
@@ -69554,7 +69559,7 @@ fn membership_seed_now_index(
 ) -> Result<(), String> {
     let run = |args: &[&str]| -> Result<(), String> {
         spawns.set(spawns.get() + 1);
-        match std::process::Command::new("git")
+        match hidden_command("git")
             .current_dir(root)
             .env("GIT_INDEX_FILE", idx)
             .args(args)
@@ -69709,7 +69714,7 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
         begun_files.iter().map(|(id, _)| id.clone()).collect();
     let git = |args: &[&str]| -> Option<String> {
         spawns.set(spawns.get() + 1);
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(&root)
             .args(args)
             .output()
@@ -69895,7 +69900,7 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
     // history. Empty on failure, which fails the engine open below.
     let now_tree = {
         spawns.set(spawns.get() + 1);
-        std::process::Command::new("git")
+        hidden_command("git")
             .current_dir(&root)
             .env("GIT_INDEX_FILE", &idx_now)
             .args(["write-tree"])
@@ -72110,7 +72115,7 @@ fn claim_interval_independence<R: tauri::Runtime>(
     let spawns = std::cell::Cell::new(0usize);
     let git_out = |args: &[&str], env_idx: Option<&Path>| -> Option<std::process::Output> {
         spawns.set(spawns.get() + 1);
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = hidden_command("git");
         cmd.current_dir(&root).args(args);
         if let Some(idx) = env_idx {
             cmd.env("GIT_INDEX_FILE", idx);
@@ -72334,7 +72339,7 @@ fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
     let removed = retire.len();
     for r in &retire {
-        let _ = std::process::Command::new("git")
+        let _ = hidden_command("git")
             .current_dir(&root)
             .args(["update-ref", "-d", r])
             .output();
@@ -77082,7 +77087,7 @@ fn worklist_item_files(item: &serde_json::Value) -> Vec<String> {
 }
 
 fn git_changed_files(root: &Path) -> HashSet<String> {
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .args(["status", "--porcelain=v1"])
         .current_dir(root)
         .output();
@@ -77970,7 +77975,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     let untracked_row = {
         let untracked: Vec<String> = project_root(Some(app))
             .and_then(|root| {
-                std::process::Command::new("git")
+                hidden_command("git")
                     .current_dir(root)
                     .args([
                         "ls-files",
@@ -81257,7 +81262,7 @@ fn needs_you_forge_login<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String
             project_root(Some(app))
                 .filter(|_| project_forge(app) == Forge::GitHub)
                 .and_then(|root| {
-                    std::process::Command::new("gh")
+                    hidden_command("gh")
                         .current_dir(&root)
                         .args(["api", "/user", "--jq", ".login"])
                         .output()
@@ -85873,7 +85878,7 @@ fn worklist_history_commit_status<R: tauri::Runtime>(app: &AppHandle<R>, raw_url
     let Some(root) = project_root(Some(app)) else {
         return String::new();
     };
-    match std::process::Command::new("git")
+    match hidden_command("git")
         .current_dir(&root)
         .args(["merge-base", "--is-ancestor", &sha, "HEAD"])
         .status()
@@ -86258,7 +86263,7 @@ fn issue_close_containing_remote_branches<R: tauri::Runtime>(
         return Vec::new();
     };
     let default_ref = origin_default_ref(app, &root);
-    let out = match std::process::Command::new("git")
+    let out = match hidden_command("git")
         .current_dir(&root)
         .args([
             "branch",
@@ -86296,7 +86301,7 @@ fn issue_close_queue_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathB
 // Stable patch-id for a commit: `git show <sha> | git patch-id --stable`.
 // Content-derived, so it survives the SHA rewrite of a rebase.
 fn git_commit_patch_id(root: &Path, sha: &str) -> Option<String> {
-    let show = std::process::Command::new("git")
+    let show = hidden_command("git")
         .current_dir(root)
         .args(["show", sha])
         .output()
@@ -86304,7 +86309,7 @@ fn git_commit_patch_id(root: &Path, sha: &str) -> Option<String> {
     if !show.status.success() {
         return None;
     }
-    let mut child = std::process::Command::new("git")
+    let mut child = hidden_command("git")
         .current_dir(root)
         .args(["patch-id", "--stable"])
         .stdin(std::process::Stdio::piped())
@@ -86337,7 +86342,7 @@ fn find_origin_commit_by_patch_id(
     limit: usize,
 ) -> Option<String> {
     let range = format!("origin/{}", branch);
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(root)
         .args(["log", &range, &format!("-n{}", limit), "--format=%H"])
         .output()
@@ -86897,7 +86902,7 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
 // falling back to any-ref visibility.
 fn origin_default_ref<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> Option<String> {
     let symbolic = |root: &Path| -> Option<String> {
-        let out = std::process::Command::new("git")
+        let out = hidden_command("git")
             .current_dir(root)
             .args(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
             .output()
@@ -86912,7 +86917,7 @@ fn origin_default_ref<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> Opt
         return Some(r);
     }
     // repair the missing local ref once, then retry
-    let _ = std::process::Command::new("git")
+    let _ = hidden_command("git")
         .current_dir(root)
         .args(["remote", "set-head", "origin", "--auto"])
         .output();
@@ -86922,7 +86927,7 @@ fn origin_default_ref<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> Opt
     // last resort: ask the forge
     let name = forge_adapter(app).default_branch(root)?;
     let candidate = format!("refs/remotes/origin/{}", name);
-    let ok = std::process::Command::new("git")
+    let ok = hidden_command("git")
         .current_dir(root)
         .args(["rev-parse", "--verify", "--quiet", &candidate])
         .output()
@@ -86933,7 +86938,7 @@ fn origin_default_ref<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> Opt
 fn commit_on_origin_default<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Option<bool> {
     let root = project_root(Some(app))?;
     let default_ref = origin_default_ref(app, &root)?;
-    let anc = std::process::Command::new("git")
+    let anc = hidden_command("git")
         .current_dir(&root)
         .args(["merge-base", "--is-ancestor", sha, &default_ref])
         .status()
@@ -86970,7 +86975,7 @@ fn gh_merged_pr_for_commit<R: tauri::Runtime>(
 ) -> Option<(u64, String)> {
     let root = project_root(Some(app))?;
     let path = format!("repos/{}/commits/{}/pulls", repo_slug, sha);
-    let out = std::process::Command::new("gh")
+    let out = hidden_command("gh")
         .current_dir(&root)
         .args(["api", &path])
         .output()
@@ -92282,12 +92287,7 @@ fn guard_selftest_fixture() -> Result<PathBuf, String> {
     )?;
     w("src/covered.txt", "x\n")?;
     std::fs::create_dir_all(dir.join(".agents")).map_err(|e| e.to_string())?;
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .current_dir(&dir)
-            .args(args)
-            .output()
-    };
+    let git = |args: &[&str]| hidden_command("git").current_dir(&dir).args(args).output();
     git(&["init", "-q"]).map_err(|e| format!("git init: {}", e))?;
     git(&[
         "remote",
@@ -95248,7 +95248,7 @@ fn worklist_ignored_declared(
     candidates: &[String],
 ) -> std::collections::HashSet<String> {
     use std::io::Write;
-    let mut child = match std::process::Command::new("git")
+    let mut child = match hidden_command("git")
         .current_dir(root)
         .args(["check-ignore", "-z", "--stdin"])
         .stdin(std::process::Stdio::piped())
@@ -95313,7 +95313,7 @@ fn worklist_ignored_entry_with_limits(
     if !target.starts_with(&root_canon) {
         return None;
     }
-    let mut child = std::process::Command::new("git")
+    let mut child = hidden_command("git")
         .current_dir(root)
         .args([
             "ls-files",
@@ -95600,7 +95600,7 @@ fn git_staged_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<String>
     // drops the old path and the deletion half of the rename strands in
     // the index (Worklist2 -> Worklist rename, 2026-08-20: 7b0b79b added
     // the new file, e331fc4 had to hand-commit the stranded deletion).
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(&root)
         .args([
             "diff",
@@ -95625,7 +95625,7 @@ fn git_staged_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<String>
 
 fn git_run_owned<R: tauri::Runtime>(app: &AppHandle<R>, args: &[String]) -> Result<String, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(&root)
         .args(args)
         .output()
@@ -97388,7 +97388,7 @@ fn gate_worktree_snapshot<R: tauri::Runtime>(
 }
 
 fn gate_git(root: &std::path::Path, args: &[String]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = hidden_command("git")
         .current_dir(root)
         .args(args)
         .output()
@@ -97898,7 +97898,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         let is_source = root.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
         let touches_rust = files.iter().any(|f| f.ends_with(".rs"));
         if is_source && touches_rust {
-            let unformatted = std::process::Command::new("cargo")
+            let unformatted = hidden_command("cargo")
                 .current_dir(root.join("src-tauri"))
                 .args(["fmt", "--check"])
                 .output()
@@ -115791,5 +115791,65 @@ mod self_update_path_tests {
             None
         );
         assert_eq!(path_without_self_update_staging(""), None);
+    }
+}
+
+#[cfg(test)]
+mod hidden_spawn_tests {
+    // Line numbers of `git`/`gh`/`glab` spawns outside `#[cfg(test)]` items.
+    // A bare Command::new of these opens a console window on Windows when
+    // Bram is GUI-subsystem; hidden_command is the only sanctioned way.
+    fn unhidden_spawns(src: &str) -> Vec<usize> {
+        let needles: Vec<String> = ["git", "gh", "glab"]
+            .iter()
+            .map(|p| format!("Command::new({:?})", p))
+            .collect();
+        let lines: Vec<&str> = src.lines().collect();
+        let mut found = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].trim() == "#[cfg(test)]" {
+                let indent = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
+                let mut j = i + 1;
+                while lines[j].trim_start().starts_with("#[") {
+                    j += 1;
+                }
+                let opens = lines[j].matches('{').count();
+                let closes = lines[j].matches('}').count();
+                if lines[j].trim_end().ends_with(';') || (opens > 0 && opens == closes) {
+                    i = j + 1;
+                    continue;
+                }
+                let end = format!("{indent}}}");
+                let mut k = j + 1;
+                while k < lines.len()
+                    && !(lines[k].starts_with(&end)
+                        && matches!(lines[k][end.len()..].trim(), "" | ";"))
+                {
+                    k += 1;
+                }
+                i = k + 1;
+                continue;
+            }
+            if needles.iter().any(|n| lines[i].contains(n.as_str())) {
+                found.push(i + 1);
+            }
+            i += 1;
+        }
+        found
+    }
+
+    #[test]
+    fn git_gh_glab_spawns_go_through_hidden_command() {
+        for (file, src) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("token_accounting.rs", include_str!("token_accounting.rs")),
+        ] {
+            let bad = unhidden_spawns(src);
+            assert!(
+                bad.is_empty(),
+                "{file}: use hidden_command(..) for git/gh/glab, not Command::new, at line(s) {bad:?}"
+            );
+        }
     }
 }

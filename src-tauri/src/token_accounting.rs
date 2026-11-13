@@ -2643,7 +2643,7 @@ pub struct GitSpans {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = std::process::Command::new("git")
+    let out = crate::hidden_command("git")
         .current_dir(root)
         .args(args)
         .output()

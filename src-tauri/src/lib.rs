@@ -84435,10 +84435,10 @@ fn stranded_approval_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::V
             serde_json::json!({
                 "signal": "Stranded approval",
                 "level": "warn",
-                "action": "Tell the agent to proceed with the item, or Refine it with a note",
+                "action": "Tell the agent to proceed, or select the item and send it a message",
                 "state": format!("{} approved, agent not notified", sorted.join(", ")),
                 "detail": format!(
-                    "An approved authorization ({}s old) has no inflight claim and no agent activity since it was issued — the gate click's turn never reached the agent (#350). Recovery: tell the agent to proceed with the item, or Refine it with a note; the authorization is still valid.",
+                    "An approved authorization ({}s old) has no inflight claim and no agent activity since it was issued — the click's turn never reached the agent. Tell the agent to proceed, or select the item and send it a message; the approval is still valid.",
                     age_ms / 1000
                 ),
                 "seen": "",
@@ -97978,7 +97978,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         release_claim_on_commit_refusal(
             app,
             &ids,
-            "Bram couldn't tell which lines belong to which item",
+            "Bram couldn't check this commit; try Commit again, and if it's refused again, ask the agent why",
         );
         return worklist_json_error(
             409,
@@ -98046,9 +98046,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                     app,
                     &ids,
                     &format!(
-                        "it shares a joint change with {}; commit them together, or Drop {}",
-                        partners.join(" and "),
-                        if partners.len() == 1 { "it" } else { "them" }
+                        "it was started together with {}; commit them together",
+                        partners.join(" and ")
                     ),
                 );
                 // avoid-futile-joint-commit: name the joint ids and the honest
@@ -98136,7 +98135,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 release_claim_on_commit_refusal(
                     app,
                     &ids,
-                    "nothing of its own to stage on its shared files",
+                    "its changes can't be separated from another item's; commit them together",
                 );
                 return worklist_json_error(
                     409,
@@ -98164,7 +98163,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 release_claim_on_commit_refusal(
                     app,
                     &ids,
-                    "its change depends on another item's uncommitted lines; commit them together",
+                    "it builds on another item's uncommitted changes; commit that item first, or both together",
                 );
                 return worklist_json_error(409, e);
             }
@@ -98334,7 +98333,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             release_claim_on_commit_refusal(
                 app,
                 &ids,
-                "files changed while the commit was being prepared",
+                "files changed while the commit was being prepared; try Commit again",
             );
             return worklist_json_error(
                 409,

@@ -23049,8 +23049,13 @@ window.__bramStatusOpenSave = function (list) {
   } catch (e) {}
 };
 // Toggle a key in the open list and persist; returns the new list.
+// Opening Token accounting also opens its Models fold, whatever the saved
+// list said (Jon, 2026-11-12); Models can still be closed by hand after.
 window.__bramStatusToggle = function (list, key) {
   var next = window.__bramToggleInArray(list, key);
+  if (key === "tokens" && next.indexOf("tokens") >= 0 && next.indexOf("tokens-models") < 0) {
+    next = next.concat(["tokens-models"]);
+  }
   window.__bramStatusOpenSave(next);
   return next;
 };

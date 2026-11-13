@@ -8,7 +8,6 @@
   var.statusOpen="{window.__bramStatusOpenLoad()}">
 
   <DataSource id="status" url="/__coordination-status?t={refreshTick}" />
-  <DataSource id="sessionSize" url="/__session-size?t={refreshTick}" pollIntervalInSeconds="30" />
   <!-- issue-415: live guard self-test. Runs the installed guard chain
        against a throwaway project when the tab opens and on Refresh; no
        polling (docs/developing-bram.md, Push over polling). -->
@@ -38,7 +37,7 @@
       <Button
         label="Refresh"
         size="sm"
-        onClick="refreshTick = refreshTick + 1; status.refetch(); sessionSize.refetch(); guardSelftest.refetch(); stateDirPlan.refetch();" />
+        onClick="refreshTick = refreshTick + 1; status.refetch(); guardSelftest.refetch(); stateDirPlan.refetch();" />
     </HStack>
 
     <!-- issue-415: whether the worklist guard actually runs and decides as
@@ -52,6 +51,7 @@
         onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'guard')">
         <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'guard')}" />
         <Heading level="h3">Guard</Heading>
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Guard')}" />
         <Text
           fontWeight="$fontWeight-bold"
           color="{guardSelftest.value.ok ? '$color-success-700' : '$color-danger-700'}"
@@ -90,6 +90,7 @@
         onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'state-folder')">
         <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'state-folder')}" />
         <Heading level="h3">State folder</Heading>
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('State folder')}" />
       </HStack>
       <VStack when="{statusOpen.includes('state-folder')}" gap="$space-2">
       <!-- issue-469-leftover-folder-reported: state still in resources/, why,
@@ -144,25 +145,6 @@
         <Text fontSize="$fontSize-sm" value="{window.__bramStateDirPlanRow($item)}" />
       </Items>
       </VStack>
-    </VStack>
-
-    <VStack when="{sessionSize.value &amp;&amp; sessionSize.value.humanBytes}" gap="$space-2">
-      <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
-        onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'session-size')">
-        <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'session-size')}" />
-        <Heading level="h3">Session size</Heading>
-        <Text fontWeight="$fontWeight-bold" value="{sessionSize.value.humanBytes}" />
-        <Text
-          when="{sessionSize.value.provider}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="{'(' + sessionSize.value.provider + ')'}" />
-      </HStack>
-      <Text
-        when="{statusOpen.includes('session-size') &amp;&amp; sessionSize.value.guidance}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        value="{sessionSize.value.guidance}" />
     </VStack>
 
     <Text
@@ -258,6 +240,7 @@
           onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens')">
           <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens')}" />
           <Heading level="h3">Token accounting</Heading>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Token accounting')}" />
         </HStack>
         <Button
           label="{tokensNonce > 0 ? 'Reload' : 'Load'}"
@@ -290,6 +273,7 @@
           onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-models')">
           <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-models')}" />
           <Heading level="h4">Models</Heading>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Models')}" />
         </HStack>
         <HStack when="{statusOpen.includes('tokens-models')}" gap="$space-1" verticalAlignment="center" wrapContent="true">
           <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About the columns:" />
@@ -319,6 +303,7 @@
           onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-files')">
           <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-files')}" />
           <Heading level="h4">Files</Heading>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Files')}" />
         </HStack>
         <Text when="{statusOpen.includes('tokens-files')}" fontSize="$fontSize-sm" color="$textColor-secondary"
           value="{window.__bramTokenFilesLead(tokens.value)}" />
@@ -356,6 +341,7 @@
             onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-coverage')">
             <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-coverage')}" />
             <Heading level="h4">Which lines of lib.rs get read</Heading>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Which lines of lib.rs get read')}" />
           </HStack>
           <Text when="{statusOpen.includes('tokens-coverage')}" fontSize="$fontSize-sm" color="$textColor-secondary"
             value="{window.__bramTokenCoverageLead(tokens.value)}" />

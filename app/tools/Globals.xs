@@ -142,6 +142,16 @@ function blobHistoryRows(list) {
 
 function statusSectionSubhead(title) {
   const descriptions = {
+    'Guard': 'whether the edit guard runs and decides as expected',
+    'State folder': "where Bram keeps this project's state",
+    'Session': 'size of the current agent session',
+    'Send Ledger': 'messages the pane sent to the agent',
+    'State Mirror': "the database copy of the Worklist's state",
+    'Source repo': 'instruction files this repo seeds into other projects',
+    'Token accounting': "what the agents' model calls used",
+    'Models': 'context per call, by model',
+    'Files': 'which files the agents read, and how much',
+    'Which lines of lib.rs get read': 'how much of lib.rs reaches the agents',
     'Startup Run': 'first-minute load',
     'Worklist': 'item lifecycle health',
     'Inflight Sentinel': 'agent action claims',
@@ -149,7 +159,7 @@ function statusSectionSubhead(title) {
     'Agent Coordination': 'Setup-managed file health',
     'Authorization': 'approval record flow',
     'Guards, Staleness, Interrupts, Traces': 'safety signal trail',
-    'Search indexer': 'FTS index contents',
+    'Search indexer': 'what search has indexed',
   };
   return descriptions[title] || '';
 }

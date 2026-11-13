@@ -17727,6 +17727,15 @@ fn run_self_update<R: tauri::Runtime>(app: &AppHandle<R>, tag: &str) {
             Err(e) => return fail(app, "swap", e, tail),
         }
     };
+    // The install script just put its staging folder on the user PATH.
+    #[cfg(windows)]
+    if let Some(n) = remove_self_update_staging_from_user_path() {
+        append_bram_trace_line(
+            app,
+            "self-update",
+            &format!("op=path-cleaned removed={} when=update", n),
+        );
+    }
     let _ = std::fs::remove_dir_all(&tmp);
     self_update_mutate(app, |s| {
         s.state = "done".to_string();
@@ -17811,6 +17820,106 @@ fn cleanup_self_update_leftovers() {
 
 #[cfg(not(windows))]
 fn cleanup_self_update_leftovers() {}
+
+// self-update-staging-left-on-path: install.ps1 adds its InstallDir to the
+// user PATH, and Windows self-update runs it with InstallDir =
+// %TEMP%\bram-self-update-<pid>\staged, so every update left one entry
+// (10 on Jon's machine, 2026-11-12). The script comes from the target
+// release, so it can't be told to skip that step without breaking updates
+// to releases that predate the flag. Bram removes the entries afterwards.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_self_update_staging_dir(entry: &str) -> bool {
+    let e = entry
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase();
+    let Some(parent) = e
+        .strip_suffix("\\staged")
+        .or_else(|| e.strip_suffix("/staged"))
+    else {
+        return false;
+    };
+    let name = parent.rsplit(['\\', '/']).next().unwrap_or("");
+    name.strip_prefix("bram-self-update-")
+        .is_some_and(|pid| !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()))
+}
+
+// The PATH value with every self-update staging entry removed, and how many
+// went; None when there are none.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn path_without_self_update_staging(path: &str) -> Option<(String, usize)> {
+    let parts: Vec<&str> = path.split(';').collect();
+    let keep: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|p| !is_self_update_staging_dir(p))
+        .collect();
+    let removed = parts.len() - keep.len();
+    (removed > 0).then(|| (keep.join(";"), removed))
+}
+
+// Rewrites the user PATH without the staging entries, the way install.ps1
+// writes it ([Environment]::SetEnvironmentVariable, which also tells running
+// programs). Returns how many were removed. Refuses to write anything it
+// couldn't read cleanly.
+#[cfg(windows)]
+fn remove_self_update_staging_from_user_path() -> Option<usize> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Environment]::GetEnvironmentVariable('Path','User')",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let current = String::from_utf8(out.stdout).ok()?;
+    let current = current.trim_end_matches(['\r', '\n']);
+    if current.is_empty() || current.contains('\u{FFFD}') {
+        return None;
+    }
+    let (new_path, removed) = path_without_self_update_staging(current)?;
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Environment]::SetEnvironmentVariable('Path', $env:BRAM_NEW_USER_PATH, 'User')",
+        ])
+        .env("BRAM_NEW_USER_PATH", &new_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .ok()?;
+    status.success().then_some(removed)
+}
+
+// At launch: only when this process's PATH shows a staging entry, and off
+// the startup thread (it starts PowerShell twice).
+#[cfg(windows)]
+fn cleanup_self_update_path_entries<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    if path_without_self_update_staging(&inherited).is_none() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Some(n) = remove_self_update_staging_from_user_path() {
+            append_bram_trace_line(
+                &app,
+                "self-update",
+                &format!("op=path-cleaned removed={} when=startup", n),
+            );
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn cleanup_self_update_path_entries<R: tauri::Runtime>(_app: &AppHandle<R>) {}
 
 // Relaunch into the freshly installed binary: spawn it against the current
 // project root, then exit this process. For an installed user the spawned
@@ -107830,6 +107939,7 @@ pub fn run() {
             // Windows self-update leaves renamed-aside *.exe.old files
             // (clickable-update-from-banner); delete them best-effort.
             cleanup_self_update_leftovers();
+            cleanup_self_update_path_entries(app.handle());
             // warn-when-git-toplevel-above-root: name the enclosing-repo
             // condition once at startup, at the cause (the same family as
             // nestedUnder / strayHomeScaffold). The pane banner keys off
@@ -115447,5 +115557,60 @@ mod iterate_delegation_note_tests {
             iterate_turn_with_delegation_note("iterate: {oops", &b),
             None
         );
+    }
+}
+
+// self-update-staging-left-on-path: the PATH filter, from Jon's Windows
+// user PATH (2026-11-12, 10 staging entries).
+#[cfg(test)]
+mod self_update_path_tests {
+    use super::*;
+
+    #[test]
+    fn staging_entries_are_recognized_and_only_they() {
+        assert!(is_self_update_staging_dir(
+            r"C:\Users\jon\AppData\Local\Temp\bram-self-update-30076\staged"
+        ));
+        assert!(is_self_update_staging_dir(
+            r"C:\Users\jon\AppData\Local\Temp\bram-self-update-30076\staged\"
+        ));
+        assert!(is_self_update_staging_dir(
+            "/tmp/bram-self-update-22376/staged"
+        ));
+        assert!(is_self_update_staging_dir(
+            r"C:\TEMP\Bram-Self-Update-1\Staged"
+        ));
+        // Not staging folders.
+        assert!(!is_self_update_staging_dir(r"C:\Users\jon\bin"));
+        assert!(!is_self_update_staging_dir(
+            r"C:\Temp\bram-self-update-30076"
+        ));
+        assert!(!is_self_update_staging_dir(
+            r"C:\Temp\bram-self-update-\staged"
+        ));
+        assert!(!is_self_update_staging_dir(
+            r"C:\Temp\bram-self-update-12ab\staged"
+        ));
+        assert!(!is_self_update_staging_dir(
+            r"C:\Temp\my-bram-self-update-1-staged"
+        ));
+        assert!(!is_self_update_staging_dir(""));
+    }
+
+    #[test]
+    fn path_loses_only_the_staging_entries_in_order() {
+        let path = r"C:\Users\jon\bin;C:\Temp\bram-self-update-1\staged;C:\Program Files\nodejs;C:\Temp\bram-self-update-22\staged\;C:\Users\jon\.cargo\bin";
+        assert_eq!(
+            path_without_self_update_staging(path),
+            Some((
+                r"C:\Users\jon\bin;C:\Program Files\nodejs;C:\Users\jon\.cargo\bin".to_string(),
+                2
+            ))
+        );
+        assert_eq!(
+            path_without_self_update_staging(r"C:\Users\jon\bin;C:\x"),
+            None
+        );
+        assert_eq!(path_without_self_update_staging(""), None);
     }
 }

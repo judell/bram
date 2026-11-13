@@ -167,7 +167,12 @@ For policy, enforcement limits, and decision history, see
 [authorization.md](authorization.md). This section describes the wire and
 handler behavior. The pane records gate actions through Tauri
 `record_worklist_action_authorization` before delivering an agent turn;
-turn text alone does not create that grant.
+turn text alone does not create that grant. For a `to apply` or
+`apply-and-commit` gate the command first checks whether any requested item's
+`files` overlap those of an item a live subagent is bound to (a directory entry
+covers everything under it). If so it returns an error naming the shared files
+and the busy item (`op=refuse-shared-files-busy`), writes no record, and traces
+`[delegated] op=refuse-shared-files-busy ids= busy= files=`.
 
 Served item data can include a `hash`, but approval no longer compares
 content hashes or produces `rejected_stale` for a mismatch. Worklist

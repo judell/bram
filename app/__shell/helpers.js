@@ -4685,6 +4685,74 @@ window.__bramDelegatedWhy = function (claim, sel) {
     "; it unlocks when the subagent stops.";
 };
 
+// start-waits-while-a-subagent-holds-shared-files: Start and Start & commit
+// on an item that shares files with one a live subagent is bound to. Mirrors
+// the host's shared_files_busy_conflicts: a directory entry covers everything
+// under it. Returns {id, busy, files} for the first such selected item, or null.
+window.__bramDeclaredFiles = function (item) {
+  if (!item) return [];
+  var f = item.files;
+  if (f && f.length) return Array.prototype.slice.call(f).filter(Boolean);
+  return item.file ? [item.file] : [];
+};
+window.__bramDeclaredCovers = function (declared, path) {
+  var d = String(declared).replace(/\/+$/, "");
+  return path === d || String(path).indexOf(d + "/") === 0;
+};
+window.__bramSharedFilesBlock = function (claim, sel, items) {
+  var chosen = sel || [];
+  var list = items || [];
+  var bound = [];
+  window.__bramDelegatedBindings(claim).forEach(function (b) {
+    (b.ids || []).forEach(function (id) {
+      if (bound.indexOf(id) === -1) bound.push(id);
+    });
+  });
+  if (!bound.length || !chosen.length) return null;
+  function filesOf(id) {
+    return window.__bramDeclaredFiles(list.filter(function (x) { return x.id === id; })[0]);
+  }
+  for (var i = 0; i < chosen.length; i++) {
+    if (bound.indexOf(chosen[i]) !== -1) continue;
+    var mine = filesOf(chosen[i]);
+    if (!mine.length) continue;
+    for (var j = 0; j < bound.length; j++) {
+      var theirs = filesOf(bound[j]);
+      var shared = [];
+      mine.forEach(function (x) {
+        theirs.forEach(function (y) {
+          var hit = window.__bramDeclaredCovers(x, y) ? y : (window.__bramDeclaredCovers(y, x) ? x : "");
+          if (hit && shared.indexOf(hit) === -1) shared.push(hit);
+        });
+      });
+      if (shared.length) return { id: chosen[i], busy: bound[j], files: shared.sort() };
+    }
+  }
+  return null;
+};
+window.__bramSharedFilesBlocker = function (claim, sel, items) {
+  var b = window.__bramSharedFilesBlock(claim, sel, items);
+  return b ? b.id : "";
+};
+window.__bramSharedFilesWhy = function (claim, sel, items) {
+  var b = window.__bramSharedFilesBlock(claim, sel, items);
+  if (!b) return "";
+  return b.id + " shares " + b.files.join(", ") + " with " + b.busy +
+    ", which a subagent is still working on. Start it after " + b.busy + " is committed.";
+};
+
+// The gate-bar line: the same-item reason first, else the shared-files one.
+window.__bramGateDelegatedLine = function (claim, sel, items) {
+  return window.__bramDelegatedWhy(claim, sel) || window.__bramSharedFilesWhy(claim, sel, items);
+};
+
+// Release applies only where a binding covers the selection. For the
+// shared-files case it is hidden: releasing the busy item's subagent is done
+// by selecting that item, and releasing it from here would act on nothing.
+window.__bramDelegatedReleasable = function (claim, sel) {
+  return window.__bramDelegatedBindingsFor(claim, sel).length > 0;
+};
+
 // The binding that covers one item (for the row strip), or null.
 window.__bramDelegatedForItem = function (claim, itemId) {
   var bs = window.__bramDelegatedBindingsFor(claim, [itemId]);
@@ -7307,6 +7375,10 @@ window.__bramGateScopeTooltip = function (sel, kind, branch, claim, items) {
   // a selected item.
   var delegatedWhy = window.__bramDelegatedWhy(claim, ids);
   if (delegatedWhy) lines.push("**Why it's off:** " + delegatedWhy);
+  if (!delegatedWhy && (kind === "start" || kind === "start-commit")) {
+    var sharedWhy = window.__bramSharedFilesWhy(claim, ids, items);
+    if (sharedWhy) lines.push("**Why it's off:** " + sharedWhy);
+  }
   // strip-says-when-declared-file-has-uncredited-changes: the strip's
   // sentence, on the two buttons that act on it. Only for a selection of
   // not-begun items (__bramSelectionUncreditedPaths returns [] otherwise).

@@ -360,7 +360,7 @@
        https://www.xmlui.org/docs/howto/know-when-to-use-fit-content
        https://www.xmlui.org/docs/howto/center-content-on-the-page -->
   <VStack
-    when="{!!window.__bramDelegatedBlocker(gateClaim.value, gateSel.value)}"
+    when="{!!window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) || !!window.__bramSharedFilesBlocker(gateClaim.value, gateSel.value, gateWorklist.value.items)}"
     horizontalAlignment="center"
     gap="$space-1"
     paddingHorizontal="$space-2"
@@ -370,13 +370,13 @@
       textAlign="left"
       fontSize="$fontSize-sm"
       color="$color-warn-700"
-      value="{window.__bramDelegatedWhy(gateClaim.value, gateSel.value)}" />
+      value="{window.__bramGateDelegatedLine(gateClaim.value, gateSel.value, gateWorklist.value.items)}" />
     <!-- delegated-release-warns-while-subagent-runs: while the roster says
          the bound subagent is still running, Release asks first, inline (no
          browser dialog). gateReleaseAsk holds the agent ids asked about.
          https://www.xmlui.org/docs/howto/communicate-between-sibling-components -->
     <Button
-      when="{!window.__bramDelegatedReleaseAskLive(gateReleaseAsk, gateClaim.value, gateSel.value, gateAgents.value)}"
+      when="{window.__bramDelegatedReleasable(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramDelegatedReleaseAskLive(gateReleaseAsk, gateClaim.value, gateSel.value, gateAgents.value)}"
       size="xs"
       variant="outlined"
       label="Release"
@@ -568,7 +568,7 @@
       <Button
         label="{window.__bramGateQueuedLabel('start', window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value), gateQueue.value)}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSharedFilesBlocker(gateClaim.value, gateSel.value, gateWorklist.value.items) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
         onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     </Tooltip>
     <!-- gate-one-way-to-continue-one-to-finish: dimmed whenever Commit can be
@@ -581,7 +581,7 @@
       <Button
         label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSharedFilesBlocker(gateClaim.value, gateSel.value, gateWorklist.value.items) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
         onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     </Tooltip>
     <Tooltip>

@@ -437,6 +437,10 @@ Parallelize the *work*; serialize the *gates*.
   lines, and you can advance and commit once the subagent has returned.
   Other providers don't bind yet, so for them the old advice stands:
   commit delegated items together.
+- **Start also refuses on shared files.** The gate refuses Start and
+  Start & commit on an item whose `files` overlap those of an item a
+  running subagent holds (`refuse-shared-files-busy`); start it after the
+  busy item is committed.
 - **The pane's view.** Running subagents appear as buttons; the user
   activates one to follow its transcript. The roster reads running /
   waiting / finished, and a resumed subagent reads running again

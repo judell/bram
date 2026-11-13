@@ -75072,6 +75072,116 @@ fn delegated_refusal_response<R: tauri::Runtime>(
     ))
 }
 
+// start-waits-while-a-subagent-holds-shared-files: the files two items'
+// declarations share. A declared directory covers everything under it, as at
+// the commit gate (declared_covers); the more specific of the two entries
+// names the overlap.
+fn declared_shared_paths(a: &[String], b: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for x in a {
+        for y in b {
+            let hit = if declared_covers(x, y) {
+                Some(y)
+            } else if declared_covers(y, x) {
+                Some(x)
+            } else {
+                None
+            };
+            if let Some(p) = hit {
+                if !out.contains(p) {
+                    out.push(p.clone());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+// Pure decision: for each requested item that is not itself bound, the first
+// bound item whose files overlap its own, with the shared paths. The
+// same-item case is delegated_refusal_response's job. Returns
+// (requested id, busy id, shared paths).
+fn shared_files_busy_conflicts(
+    requested: &[String],
+    bound_ids: &[String],
+    items: &[serde_json::Value],
+) -> Vec<(String, String, Vec<String>)> {
+    let files_of = |id: &str| -> Vec<String> {
+        items
+            .iter()
+            .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id))
+            .map(worklist_item_declared_paths)
+            .unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    for id in requested {
+        if bound_ids.contains(id) {
+            continue;
+        }
+        let mine = files_of(id);
+        if mine.is_empty() {
+            continue;
+        }
+        for busy in bound_ids {
+            let shared = declared_shared_paths(&mine, &files_of(busy));
+            if !shared.is_empty() {
+                out.push((id.clone(), busy.clone(), shared));
+                break;
+            }
+        }
+    }
+    out
+}
+
+// The refusal message for Start / Start & commit on an item sharing files
+// with one a live subagent holds, or None. Traces under [delegated].
+fn shared_files_busy_refusal<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    requested: &[String],
+) -> Option<(String, serde_json::Value)> {
+    let bound = read_delegated_bindings(app).union_ids();
+    if bound.is_empty() {
+        return None;
+    }
+    let items: Vec<serde_json::Value> = worklist_file(app)
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|doc| doc.get("items").and_then(|v| v.as_array().cloned()))
+        .unwrap_or_default();
+    let conflicts = shared_files_busy_conflicts(requested, &bound, &items);
+    let (id, busy, files) = conflicts.into_iter().next()?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "delegated",
+            &format!(
+                "op=refuse-shared-files-busy ids={} busy={} files={}",
+                ids_json_str(&[id.clone()]),
+                ids_json_str(&[busy.clone()]),
+                ids_json_str(&files)
+            ),
+        );
+    }
+    let message = format!(
+        "{} shares {} with {}, which a subagent is still working on. Start it after {} is committed.",
+        id,
+        files.join(", "),
+        busy,
+        busy
+    );
+    Some((
+        message.clone(),
+        serde_json::json!({
+            "error": message,
+            "op": "refuse-shared-files-busy",
+            "ids": [id],
+            "busy": [busy],
+            "files": files,
+        }),
+    ))
+}
+
 // The agent exited to the shell: the session that spawned the bindings is
 // gone, and nothing will send their SubagentStop.
 // Called from the PTY read path, so the common case (no bindings) is one
@@ -75995,6 +76105,52 @@ mod delegated_binding_tests {
             &path,
             &DelegatedBindings::default()
         ));
+    }
+
+    #[test]
+    fn shared_files_busy_refuses_overlap_and_accepts_disjoint() {
+        let items = vec![
+            serde_json::json!({"id": "busy", "files": ["a.js", "docs/apis.md"]}),
+            serde_json::json!({"id": "over", "files": ["docs/apis.md", "z.rs"]}),
+            serde_json::json!({"id": "free", "files": ["other.rs"]}),
+            serde_json::json!({"id": "legacy", "file": "a.js"}),
+        ];
+        let bound = s(&["busy"]);
+        let got = shared_files_busy_conflicts(&s(&["over"]), &bound, &items);
+        assert_eq!(
+            got,
+            vec![("over".to_string(), "busy".to_string(), s(&["docs/apis.md"]))]
+        );
+        assert!(shared_files_busy_conflicts(&s(&["free"]), &bound, &items).is_empty());
+        assert_eq!(
+            shared_files_busy_conflicts(&s(&["legacy"]), &bound, &items).len(),
+            1
+        );
+        // the bound item itself is the same-item refusal's job
+        assert!(shared_files_busy_conflicts(&s(&["busy"]), &bound, &items).is_empty());
+        assert!(shared_files_busy_conflicts(&s(&["over"]), &[], &items).is_empty());
+    }
+
+    #[test]
+    fn shared_files_busy_directory_entry_covers_a_file_under_it() {
+        let items = vec![
+            serde_json::json!({"id": "busy", "files": ["app/tools/"]}),
+            serde_json::json!({"id": "a", "files": ["app/tools/x.xmlui"]}),
+            serde_json::json!({"id": "b", "files": ["app/toolsmith/x.xmlui"]}),
+        ];
+        let bound = s(&["busy"]);
+        let got = shared_files_busy_conflicts(&s(&["a"]), &bound, &items);
+        assert_eq!(got[0].2, s(&["app/tools/x.xmlui"]));
+        assert!(shared_files_busy_conflicts(&s(&["b"]), &bound, &items).is_empty());
+    }
+
+    #[test]
+    fn start_gate_ids_only_for_start_gates() {
+        let p = serde_json::json!({"kind":"approved","items":[
+            {"id":"a","gate":"to apply"},{"id":"b","gate":"to commit"},{"id":"c","gate":"apply-and-commit"}]});
+        assert_eq!(worklist_start_gate_ids(&p), s(&["a", "c"]));
+        let d = serde_json::json!({"kind":"drop","items":[{"id":"a","gate":"to apply"}]});
+        assert!(worklist_start_gate_ids(&d).is_empty());
     }
 
     #[test]
@@ -83902,6 +84058,29 @@ fn stamp_worklist_items_begun<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[Stri
     }
 }
 
+// Ids in an approval payload whose gate is Start or Start & commit.
+fn worklist_start_gate_ids(payload: &serde_json::Value) -> Vec<String> {
+    if payload.get("kind").and_then(|v| v.as_str()) != Some("approved") {
+        return Vec::new();
+    }
+    payload
+        .get("items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|it| {
+                    matches!(
+                        it.get("gate").and_then(|v| v.as_str()),
+                        Some("to apply") | Some("apply-and-commit")
+                    )
+                })
+                .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // issue-395-claim-capture-timed: off the main thread. A non-async command
 // runs ON the main thread (https://v2.tauri.app/develop/calling-rust/ --
 // "Commands without the async keyword are executed on the main thread unless
@@ -83917,6 +84096,14 @@ fn record_worklist_action_authorization<R: tauri::Runtime>(
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let parsed = parse_worklist_authorization_payload(&payload)?;
+    // start-waits-while-a-subagent-holds-shared-files: refuse before anything
+    // is written, so the running item's approval isn't displaced.
+    let start_ids = worklist_start_gate_ids(&payload);
+    if !start_ids.is_empty() {
+        if let Some((message, _)) = shared_files_busy_refusal(&app, &start_ids) {
+            return Err(message);
+        }
+    }
     let record = write_worklist_authorization_record(&app, parsed, "worklist-action-command")?;
     if !record.ids.is_empty() {
         write_inflight_claim_sentinel(&app, &record.ids, &record.kind);

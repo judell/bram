@@ -4718,6 +4718,62 @@ window.__bramDelegatedRelease = function (claim, sel) {
     });
 };
 
+// delegated-release-warns-while-subagent-runs: the agent ids among the
+// selection's bindings that the roster (/__agents) reports as running. An
+// agent the roster doesn't list, or lists as waiting or finished, isn't
+// counted: that is the stop-never-arrived case Release exists for.
+window.__bramDelegatedRunningIds = function (claim, sel, roster) {
+  var agents = (roster && roster.agents) || [];
+  var out = [];
+  window.__bramDelegatedBindingsFor(claim, sel).forEach(function (b) {
+    for (var i = 0; i < agents.length; i++) {
+      var a = agents[i];
+      if (a && a.agentId === b.agentId && __bramAgentState(a) === "running" &&
+          out.indexOf(b.agentId) === -1) {
+        out.push(b.agentId);
+      }
+    }
+  });
+  return out;
+};
+
+// Release's click. Returns the gate bar's new `gateReleaseAsk`: the running
+// agent ids when the confirmation should open, else [] after releasing at once.
+window.__bramDelegatedReleaseClick = function (claim, sel, roster) {
+  var running = window.__bramDelegatedRunningIds(claim, sel, roster);
+  if (running.length) {
+    window.__bramIframeTrace("delegated-release", { op: "confirm-shown", agentIds: running, ids: (sel || []).slice() });
+    return running;
+  }
+  window.__bramDelegatedRelease(claim, sel);
+  return [];
+};
+
+// The confirmation is live only while one of the agents it asked about is
+// still running and bound to the selection, so a stale ask can't reopen for a
+// later subagent, and the line falls back to plain Release when the subagent
+// stops while the question is open.
+window.__bramDelegatedReleaseAskLive = function (ask, claim, sel, roster) {
+  var asked = ask || [];
+  if (!asked.length) return false;
+  var running = window.__bramDelegatedRunningIds(claim, sel, roster);
+  for (var i = 0; i < asked.length; i++) {
+    if (running.indexOf(asked[i]) !== -1) return true;
+  }
+  return false;
+};
+
+window.__bramDelegatedReleaseConfirmed = function (claim, sel) {
+  window.__bramIframeTrace("delegated-release", { op: "confirmed", ids: (sel || []).slice() });
+  window.__bramDelegatedRelease(claim, sel);
+  return [];
+};
+
+window.__bramDelegatedReleaseKept = function (sel) {
+  window.__bramIframeTrace("delegated-release", { op: "kept", ids: (sel || []).slice() });
+  return [];
+};
+
 // strip-label-tense-for-applied-items: the Worklist2 summary strip's
 // four-state priority, as one pure function so the binding stays a single
 // call. (1) A live claim covering the item reports the claim verb — the

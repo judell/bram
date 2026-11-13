@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateLastSessionTick="{0}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateLastSessionTick="{0}" var.gateReleaseAsk="{[]}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -10,6 +10,18 @@
   <DataSource id="gateWorklist" url="/__worklist" transformResult="{(d) => window.__bramWorklistAccept(d)}" />
   <DataSource id="gateConfig" url="/__worklist-config" />
   <DataSource id="gateClaim" url="/__inflight" />
+  <!-- delegated-release-warns-while-subagent-runs: the subagent roster, so
+       Release can tell a running subagent from one whose stop never arrived.
+       Same request as the footer's chips, so one cached fetch.
+       https://www.xmlui.org/docs/howto/share-one-datasource-fetch-across-components -->
+  <DataSource id="gateAgents" url="/__agents" onError="() => null" />
+  <PushSource
+    id="gateAgentsEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('subagents-changed')}" />
+  <ChangeListener
+    listenTo="{gateAgentsEvt.value &amp;&amp; gateAgentsEvt.value.tick}"
+    onDidChange="() => gateAgents.refetch()" />
   <!-- issue-404-serial-gate-bar-first-cut: the current branch, for
        Commit's hover ("where does this land"), refetched on the same host
        event the Commits tab uses. -->
@@ -359,12 +371,39 @@
       fontSize="$fontSize-sm"
       color="$color-warn-700"
       value="{window.__bramDelegatedWhy(gateClaim.value, gateSel.value)}" />
+    <!-- delegated-release-warns-while-subagent-runs: while the roster says
+         the bound subagent is still running, Release asks first, inline (no
+         browser dialog). gateReleaseAsk holds the agent ids asked about.
+         https://www.xmlui.org/docs/howto/communicate-between-sibling-components -->
     <Button
+      when="{!window.__bramDelegatedReleaseAskLive(gateReleaseAsk, gateClaim.value, gateSel.value, gateAgents.value)}"
       size="xs"
       variant="outlined"
       label="Release"
-      tooltip="Release the subagent's hold, e.g. if it was cancelled and never reported stopping"
-      onClick="window.__bramDelegatedRelease(gateClaim.value, gateSel.value)" />
+      tooltip="Use when the subagent was cancelled or has finished but its stop never arrived. Releasing while it's still working leaves its later edits with no item."
+      onClick="gateReleaseAsk = window.__bramDelegatedReleaseClick(gateClaim.value, gateSel.value, gateAgents.value)" />
+    <VStack
+      when="{window.__bramDelegatedReleaseAskLive(gateReleaseAsk, gateClaim.value, gateSel.value, gateAgents.value)}"
+      horizontalAlignment="center"
+      gap="$space-1">
+      <Text
+        width="fit-content"
+        textAlign="left"
+        fontSize="$fontSize-sm"
+        value="The subagent is still working. Anything it writes after you release belongs to no item and will ride along with the next commit that takes those files." />
+      <HStack gap="$space-2">
+        <Button
+          size="xs"
+          variant="outlined"
+          label="Release anyway"
+          onClick="gateReleaseAsk = window.__bramDelegatedReleaseConfirmed(gateClaim.value, gateSel.value)" />
+        <Button
+          size="xs"
+          variant="outlined"
+          label="Keep waiting"
+          onClick="gateReleaseAsk = window.__bramDelegatedReleaseKept(gateSel.value)" />
+      </HStack>
+    </VStack>
   </VStack>
   <!-- locked-board-names-its-own-exit: the escape, stated where the dead
        buttons are. Deliberately NOT gated on a selection, unlike the button

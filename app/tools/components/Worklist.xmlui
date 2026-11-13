@@ -184,6 +184,22 @@
        other surfaces could subscribe to. -->
   <VStack padding="$space-4" gap="$space-3">
     <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
+      <!-- worklist-select-all-checkbox: one click selects every row, so
+           Do recommended lights without ticking each one (Jon, 2026-11-12).
+           In the header row, so it costs no vertical space. Same assignment
+           as the row boxes; disabled when they are. Driven by click, not
+           didChange: initialValue moves when rows are ticked by hand, and a
+           programmatic flip must never clear the selection.
+           https://www.xmlui.org/docs/reference/components/Checkbox -->
+      <Checkbox
+        when="{!!(worklist.value &amp;&amp; worklist.value.items &amp;&amp; worklist.value.items.length)}"
+        label="All"
+        labelPosition="end"
+        tooltip="Select every item"
+        initialValue="{window.__bramW2AllSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
+        indeterminate="{window.__bramW2SomeSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
+        enabled="{window.__bramWorklist2RowSelectable(inflightClaim.value)}"
+        onClick="worklist2Selected = window.__bramW2SelectAll(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)" />
       <H2>Worklist</H2>
       <!-- Parity: + New item. Inline ask (the old tab's dialog distilled):
            items are proposed by the agent; this composes that ask. -->
@@ -198,21 +214,6 @@
         size="xs"
         tooltip="Open the Worklist history: what landed and why (also under More in the nav)"
         onClick="navigate('/history')" />
-      <!-- worklist-select-all-checkbox: one click selects every row, so
-           Do recommended lights without ticking each one (Jon, 2026-11-12).
-           In the header row, so it costs no vertical space. Same assignment
-           as the row boxes; disabled when they are. Driven by click, not
-           didChange: initialValue moves when rows are ticked by hand, and a
-           programmatic flip must never clear the selection.
-           https://www.xmlui.org/docs/reference/components/Checkbox -->
-      <Checkbox
-        when="{!!(worklist.value &amp;&amp; worklist.value.items &amp;&amp; worklist.value.items.length)}"
-        label="All"
-        tooltip="Select every item"
-        initialValue="{window.__bramW2AllSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
-        indeterminate="{window.__bramW2SomeSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
-        enabled="{window.__bramWorklist2RowSelectable(inflightClaim.value)}"
-        onClick="worklist2Selected = window.__bramW2SelectAll(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)" />
       <!-- issue-278 rung 1: the board states its own overlap total, so a
            reader knows the per-row marks are exhaustive without reading every
            row. Says "no shared files" when there are none - the absence is

@@ -212,12 +212,6 @@
               <Text value="{$item.signal}" overflowMode="flow" breakMode="word" />
             </HStack>
           </Column>
-          <Column header="level" width="80px">
-            <Text
-              fontWeight="$fontWeight-bold"
-              color="{$item.level === 'error' ? '$color-danger-700' : ($item.level === 'warn' ? '$color-warn-700' : ($item.level === 'ok' ? '$color-success-700' : '$textColor-secondary'))}"
-              value="{$item.level || 'n/a'}" />
-          </Column>
           <!-- status-dual-source-visibility: rows cross-checked against the
                mirror db carry a `sources` object; the ⇄ marker identifies
                them at a glance and hover reports both sides verbatim

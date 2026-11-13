@@ -49840,6 +49840,131 @@ fn st_subagent_state_str(parent_finished: bool, updated_at_ms: i64, now_ms: i64)
     }
 }
 
+// A subagent whose last stop had pending background work gets no final
+// notice when that work ends, and no hook fires. A stop newer than the latest
+// start, then this much silence, is the end the host can see. Long enough
+// that an agent waiting on a slow background task isn't called finished early.
+const SUBAGENT_STOPPED_IDLE_MS: i64 = 30 * 60_000;
+
+// st_subagent_state_str plus the stop rule: finished when unbound, stopped
+// after its latest start, and quiet (transcript and stop) for the idle window.
+// A resume fires SubagentStart, which undoes this on its own.
+fn st_subagent_state_with_stop(
+    parent_finished: bool,
+    bound: bool,
+    last_start_ms: Option<i64>,
+    last_stop_ms: Option<i64>,
+    updated_at_ms: i64,
+    now_ms: i64,
+) -> &'static str {
+    if parent_finished {
+        return "finished";
+    }
+    if !bound {
+        if let Some(stop) = last_stop_ms {
+            if stop > last_start_ms.unwrap_or(0)
+                && now_ms.saturating_sub(updated_at_ms.max(stop)) >= SUBAGENT_STOPPED_IDLE_MS
+            {
+                return "finished";
+            }
+        }
+    }
+    st_subagent_state_str(false, updated_at_ms, now_ms)
+}
+
+#[cfg(test)]
+mod subagent_stop_rule_tests {
+    use super::{
+        read_subagent_starts_at, record_subagent_start_at, record_subagent_stop_at,
+        st_subagent_state_with_stop, SUBAGENT_STOPPED_IDLE_MS,
+    };
+
+    const NOW: i64 = 10_000_000_000;
+    const IDLE: i64 = SUBAGENT_STOPPED_IDLE_MS;
+
+    #[test]
+    fn unbound_stop_after_start_idle_is_finished() {
+        let stop = NOW - IDLE - 5;
+        let s = st_subagent_state_with_stop(
+            false,
+            false,
+            Some(stop - 1000),
+            Some(stop),
+            stop - 10,
+            NOW,
+        );
+        assert_eq!(s, "finished");
+    }
+
+    #[test]
+    fn bound_agent_is_not_finished() {
+        let stop = NOW - IDLE - 5;
+        let s = st_subagent_state_with_stop(false, true, Some(stop - 1000), Some(stop), stop, NOW);
+        assert_eq!(s, "waiting");
+    }
+
+    #[test]
+    fn resumed_after_stop_reads_by_recency() {
+        let stop = NOW - IDLE - 5;
+        let start = stop + 10;
+        let running =
+            st_subagent_state_with_stop(false, false, Some(start), Some(stop), NOW - 1000, NOW);
+        assert_eq!(running, "running");
+        let waiting =
+            st_subagent_state_with_stop(false, false, Some(start), Some(stop), start, NOW);
+        assert_eq!(waiting, "waiting");
+    }
+
+    #[test]
+    fn idle_under_window_is_waiting() {
+        let stop = NOW - IDLE + 60_000;
+        let s = st_subagent_state_with_stop(false, false, Some(stop - 1000), Some(stop), stop, NOW);
+        assert_eq!(s, "waiting");
+    }
+
+    #[test]
+    fn recent_transcript_activity_defers_finished() {
+        let stop = NOW - IDLE - 5;
+        let s = st_subagent_state_with_stop(false, false, None, Some(stop), NOW - 60_000, NOW);
+        assert_eq!(s, "running");
+    }
+
+    #[test]
+    fn notice_finished_wins() {
+        assert_eq!(
+            st_subagent_state_with_stop(true, false, None, None, NOW, NOW),
+            "finished"
+        );
+    }
+
+    #[test]
+    fn start_then_stop_round_trips_and_old_files_read() {
+        let dir = std::env::temp_dir().join(format!("bram-sub-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".subagent-starts.json");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(record_subagent_start_at(&path, "a1", NOW), Some(1));
+        assert!(record_subagent_stop_at(&path, "a1", NOW + 5).is_some());
+        assert!(record_subagent_stop_at(&path, "a2", NOW + 6).is_some());
+        let map = read_subagent_starts_at(&path);
+        assert_eq!(map["a1"].starts, 1);
+        assert_eq!(map["a1"].last_start_ms, NOW);
+        assert_eq!(map["a1"].last_stop_ms, NOW + 5);
+        assert_eq!(map["a2"].starts, 0);
+        assert_eq!(map["a2"].last_stop_ms, NOW + 6);
+
+        std::fs::write(
+            &path,
+            "{\"version\":1,\"agents\":{\"old\":{\"starts\":2,\"lastStartMs\":42}}}",
+        )
+        .unwrap();
+        let map = read_subagent_starts_at(&path);
+        assert_eq!(map["old"].starts, 2);
+        assert_eq!(map["old"].last_stop_ms, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod subagent_state_tests {
     use super::{
@@ -50431,7 +50556,14 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
                 start_rec.map(|r| r.last_start_ms),
             ),
         );
-        let state = st_subagent_state_str(parent_finished, updated_at_ms, now_ms);
+        let state = st_subagent_state_with_stop(
+            parent_finished,
+            bindings.bindings.contains_key(&sf.agent_id),
+            start_rec.map(|r| r.last_start_ms),
+            start_rec.map(|r| r.last_stop_ms).filter(|&s| s > 0),
+            updated_at_ms,
+            now_ms,
+        );
         agents.push(serde_json::json!({
             "agentId": sf.agent_id,
             "agentType": meta.get("agentType").and_then(|v| v.as_str()).unwrap_or(""),
@@ -75417,6 +75549,9 @@ struct SubagentStartRecord {
     starts: u64,
     #[serde(rename = "lastStartMs", default)]
     last_start_ms: i64,
+    // Latest SubagentStop, deferred or not. Old files lack it (reads as 0).
+    #[serde(rename = "lastStopMs", default)]
+    last_stop_ms: i64,
 }
 
 fn read_subagent_starts_at(path: &Path) -> std::collections::BTreeMap<String, SubagentStartRecord> {
@@ -75436,24 +75571,64 @@ fn read_subagent_starts<R: tauri::Runtime>(
         .unwrap_or_default()
 }
 
-fn record_subagent_start_at(path: &Path, agent: &str, now_ms: i64) -> Option<u64> {
+// One lock for start and stop writes, so the two can't race on the file.
+fn subagent_starts_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _g = LOCK
-        .get_or_init(|| Mutex::new(()))
+    LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut map = read_subagent_starts_at(path);
-    let rec = map.entry(agent.to_string()).or_default();
-    rec.starts += 1;
-    rec.last_start_ms = now_ms;
-    let count = rec.starts;
-    map.retain(|_, r| now_ms.saturating_sub(r.last_start_ms) < SUBAGENT_STARTS_KEEP_MS);
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+// Prune on the newer of start and stop, so a stop-only entry isn't dropped.
+fn write_subagent_starts_at(
+    path: &Path,
+    mut map: std::collections::BTreeMap<String, SubagentStartRecord>,
+    now_ms: i64,
+) -> Option<()> {
+    map.retain(|_, r| {
+        now_ms.saturating_sub(r.last_start_ms.max(r.last_stop_ms)) < SUBAGENT_STARTS_KEEP_MS
+    });
     let body =
         serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "agents": map })).ok()?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, format!("{}\n", body)).ok()?;
     std::fs::rename(&tmp, path).ok()?;
+    Some(())
+}
+
+fn record_subagent_start_at(path: &Path, agent: &str, now_ms: i64) -> Option<u64> {
+    let _g = subagent_starts_lock();
+    let mut map = read_subagent_starts_at(path);
+    let rec = map.entry(agent.to_string()).or_default();
+    rec.starts += 1;
+    rec.last_start_ms = now_ms;
+    let count = rec.starts;
+    write_subagent_starts_at(path, map, now_ms)?;
     Some(count)
+}
+
+// Starts are left unchanged; an absent entry is created with starts 0.
+fn record_subagent_stop_at(path: &Path, agent: &str, now_ms: i64) -> Option<()> {
+    let _g = subagent_starts_lock();
+    let mut map = read_subagent_starts_at(path);
+    map.entry(agent.to_string()).or_default().last_stop_ms = now_ms;
+    write_subagent_starts_at(path, map, now_ms)
+}
+
+fn record_subagent_stop<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str, deferred: bool) {
+    let Some(path) = project_resource_path(app, SUBAGENT_STARTS_REL) else {
+        return;
+    };
+    match record_subagent_stop_at(&path, agent, unix_now_ms()) {
+        Some(()) => app.trace(
+            "delegated",
+            &format!("op=subagent-stop agent={} deferred={}", agent, deferred),
+        ),
+        None => app.trace(
+            "delegated",
+            &format!("op=subagent-stop-write-failed agent={}", agent),
+        ),
+    }
 }
 
 fn record_subagent_start<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str) {
@@ -75544,6 +75719,10 @@ fn handle_agent_subagent<R: tauri::Runtime>(
             };
             let (pending_any, pending, seen) =
                 pending_own_background_tasks(tasks, transcript.as_deref());
+            // Recorded for every stop, deferred or not: the roster reads a
+            // stop newer than the latest start, then silence, as the end.
+            // `deferred` is the decision below: the subagent's own tasks.
+            record_subagent_stop(app, &agent, pending > 0);
             if bram_trace_enabled() && !seen.is_empty() {
                 append_bram_trace_line(
                     app,

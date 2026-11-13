@@ -31719,6 +31719,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 // so it has no console for the child to inherit: an unflagged child gets a
 // new, visible one (79 windows in 90 s on Indigo, 2026-11-13, before this).
 pub(crate) fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    // `mut` is used only by the Windows block below.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut c = std::process::Command::new(program);
     #[cfg(windows)]
     {

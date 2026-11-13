@@ -144,7 +144,6 @@ function statusSectionSubhead(title) {
   const descriptions = {
     'Guard': 'whether the edit guard runs and decides as expected',
     'State folder': "where Bram keeps this project's state",
-    'Session': 'size of the current agent session',
     'Send Ledger': 'messages the pane sent to the agent',
     'State Mirror': "the database copy of the Worklist's state",
     'Source repo': 'instruction files this repo seeds into other projects',

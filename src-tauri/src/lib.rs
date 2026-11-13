@@ -50421,40 +50421,6 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
-fn session_size_status_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
-    let body = read_session_size(app)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let state = body
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let human_bytes = body
-        .get("humanBytes")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let provider = body
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let guidance = body.get("guidance").and_then(|v| v.as_str()).unwrap_or("");
-    serde_json::json!({
-        "signal": "Session size",
-        "level": match state {
-            "unknown" => "none",
-            _ => "ok",
-        },
-        "state": human_bytes,
-        "detail": if guidance.is_empty() {
-            format!("Active {} session is {}", provider, human_bytes)
-        } else {
-            guidance.to_string()
-        },
-        "seen": format_iso_utc_ms(unix_now_ms()),
-    })
-}
-
 // (delete-phase tranche 1, #214: /__session-turns and its dedicated
 // mtime cache were deleted — zero app/ callers; every turn-display
 // surface consumes /__turns.)
@@ -78195,12 +78161,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             },
         },
         "sections": [
-            {
-                "title": "Session",
-                "rows": [
-                    session_size_status_row(app)
-                ]
-            },
             {
                 "title": "Send Ledger",
                 "rows": send_ledger_status_rows()

@@ -312,6 +312,40 @@ extracting five fields that one derived struct and an enum replace. On
 an untyped `Value`, against 16 parsed to a struct. The audit is on
 [#487](https://github.com/judell/bram/issues/487).
 
+## Paths: write for Windows too
+
+Bram runs on Windows, and path code that only the Mac's `cargo test` has
+seen fails there.
+
+- **Recognize an absolute path by `starts_with('/')` or
+  `Path::is_absolute()`, never by a leading `/` alone.** `C:\…` is absolute
+  on Windows. `/no/such` is not `is_absolute()` there, so keep the `/` test
+  too wherever Unix-shaped strings can appear (fixtures, ledgers written on
+  a Mac).
+- **Compare paths after folding `\` to `/`, and treat a drive-letter root
+  (`C:`) as case-insensitive,** as Windows filesystems are. Where an agent's
+  shell command can supply the path, accept the Git Bash spelling
+  `/c/Users/…` as `C:/Users/…`.
+- **Build fixture paths and URIs the way the real producer writes them on
+  each platform.** Antigravity writes `file:///C:/Users/jon/bram` on
+  Windows, not `file://C:\Users\…` formatted around a Windows path.
+- **A pure function over path strings gets tests with Windows spellings
+  that run on every platform:** plain strings, no `#[cfg(windows)]`. Then
+  the Mac's `cargo test` catches what only a Windows run would find.
+
+The receipts are the v0.8.8 Windows burndown
+([#491](https://github.com/judell/bram/issues/491), fixed in `30a6ef39`).
+Each passed on the Mac and failed only on Windows:
+
+- `token_accounting::resolve_read_path` gave up on any backslash and matched
+  only a `<root>/` prefix, so no Windows read was made relative: 20 files
+  appeared twice in the Files table, and `lib.rs` coverage counted 1 read of
+  about 130.
+- `search_index::mark_missing_sources` selected only `path LIKE '/%'`, so on
+  Windows a session whose transcript was gone was never marked gone.
+- The Antigravity summaries test built `file://{root}`, a shape agy never
+  writes on Windows.
+
 ## Client storage: decision vs. focus
 
 The pane's browser storage splits into two classes, and picking the wrong

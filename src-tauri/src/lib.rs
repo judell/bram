@@ -91836,7 +91836,7 @@ fn guard_selftest_fixture() -> Result<PathBuf, String> {
     // way a new project's is (`ensure_new_state_dir`), or the guard reads it
     // as someone else's `.bram/` (#469, is_bram_state_dir) and allows every
     // uncovered write, failing the deny cases.
-    w(&bram_state_rel(&dir, ".gitignore"), "*\n")?;
+    w(&bram_state_rel(&dir, ".gitignore"), "*\n")?; // owned-entries: not state (the folder's ownership marker in a throwaway fixture, as ensure_new_state_dir writes it)
     w(
         &bram_state_rel(&dir, "worklist.json"),
         r#"{"version":1,"items":[{"id":"selftest-covered","status":"proposed","files":["src/covered.txt"]}]}"#,

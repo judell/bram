@@ -196,7 +196,11 @@
          Save as task as the list above. Hidden when empty. -->
     <VStack when="{cands.loaded &amp;&amp; window.__bramTaskHasRoutes(cands.value)}" gap="$space-2">
       <Heading level="h3">Bram's own routes</Heading>
-      <Text color="$textColor-secondary">Calls the agents make to Bram itself. Save one to give it a name.</Text>
+      <!-- tasks-bram-routes-not-saveable (2026-11-12): wrapped in make, a
+           route call would hide its route from the guard's lifecycle check
+           (WORKLIST_LIFECYCLE_ROUTES, guard_policy.rs) and need `make *`
+           allowed. Dimmed, not hidden, so the choice stays visible. -->
+      <Text color="$textColor-secondary">Calls the agents make to Bram itself. These aren't saved as tasks: wrapped in make, a call would hide its route from Bram's guard.</Text>
       <Items data="{window.__bramTaskRouteRows(cands.value, expanded)}">
         <VStack gap="$space-1">
           <HStack testId="task-route-row" gap="$space-3" verticalAlignment="center"
@@ -216,7 +220,7 @@
             <Text width="6rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{($item.spellings || []).length}" />
             <HStack width="9rem" verticalAlignment="center">
               <Button when="{!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" size="xs" variant="outlined"
-                label="Save as task" onClick="window.__bramSaveTaskTurn($item)" />
+                label="Save as task" enabled="false" />
               <Button when="{!!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" size="xs" variant="ghost"
                 label="View" tooltip="Open the Makefile at these saved tasks"
                 onClick="window.__bramTaskViewSaved($item)" />

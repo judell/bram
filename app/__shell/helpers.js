@@ -22634,13 +22634,37 @@ window.__bramTokenDate = function (ms) {
   if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "";
   return new Date(ms).toISOString().slice(0, 10);
 };
+// token-accounting-files-one-row-per-file: the columns cover different
+// periods by provider (only Claude has a Read tool; Codex's reading is all
+// shell), so the lead says each one's dates, from the report's providerRanges.
+window.__bramTokenProviderName = function (key) {
+  return { claude: "Claude", codex: "Codex", opencode: "OpenCode", antigravity: "Antigravity" }[key] || key;
+};
 window.__bramTokenFilesLead = function (report) {
-  var r = report && report.range;
-  var span = r && r.fromMs ? "every session from " + window.__bramTokenDate(r.fromMs) + " to " +
-    window.__bramTokenDate(r.toMs) : "every session the history holds";
-  return "Which files the agents pull into their context, and how: " + span +
-    ", main threads and subagents together. The figures show how much a read returns compared with the file, " +
+  var pr = (report && report.providerRanges) || {};
+  var D = window.__bramTokenDate;
+  var N = window.__bramTokenProviderName;
+  var tool = [];
+  var shell = [];
+  Object.keys(pr).forEach(function (k) {
+    if (pr[k].readTool) tool.push(N(k) + ", from " + D(pr[k].readTool.fromMs) + " to " + D(pr[k].readTool.toMs));
+    if (pr[k].shell) shell.push(N(k) + " from " + D(pr[k].shell.fromMs));
+  });
+  return "Which files the agents pull into their context, and how, main threads and subagents together. " +
+    "Read tool: " + (tool.length ? tool.join("; ") : "none") + ". " +
+    "Shell: " + (shell.length ? shell.join(", ") : "none") + ". " +
+    "One row per file in this project; reads of other checkouts of it are counted apart, below the table. " +
+    "The figures show how much a read returns compared with the file, " +
     "which is the evidence for whether splitting a big file such as lib.rs would change what they read.";
+};
+window.__bramTokenElsewhere = function (report) {
+  var e = report && report.elsewhere;
+  if (!e || (!e.reads && !e.shellReads)) return "";
+  var I = window.__bramTokenInt;
+  return "Elsewhere, not in the rows above: " + I(e.reads) + " reads and " + I(e.shellReads) +
+    " shell commands on " + I(e.paths) + " paths that are not in this project's folder (other worktrees and checkouts, " +
+    "files outside it, and spellings that can't be resolved). Their bytes: " +
+    window.__bramTokenBytes(e.bytes) + " read, " + window.__bramTokenBytes(e.viaShellBytes) + " via shell.";
 };
 window.__bramTokenBytes = function (n) {
   if (typeof n !== "number" || !isFinite(n)) return "—";
@@ -22657,6 +22681,10 @@ window.__bramTokenFileSize = function (row) {
   if (!row || typeof row.sizeBytes !== "number") return "—";
   return window.__bramTokenBytes(row.sizeBytes);
 };
+window.__bramTokenShellCell = function (row) {
+  if (!row || !row.viaShellBytes) return "—";
+  return window.__bramTokenInt(row.shellReads || 0) + " · " + window.__bramTokenBytes(row.viaShellBytes);
+};
 window.__bramTokenTests = function (row) {
   if (!row || typeof row.testBytes !== "number" || !row.bytes) return "—";
   return window.__bramTokenPct(row.testBytes / row.bytes);
@@ -22664,12 +22692,83 @@ window.__bramTokenTests = function (row) {
 window.__bramTokenFileRows = function (report) {
   return ((report && report.files) || []).slice(0, 15);
 };
+// Coverage of lib.rs by line, mapped onto the file at HEAD (token-accounting-
+// files-one-row-per-file). Rows for a Table: measure, share of the file, and
+// what it covers (providers and dates).
+window.__bramTokenCoverageOf = function (report) {
+  var c = report && report.coverage;
+  return c && c.length ? c[0] : null;
+};
+window.__bramTokenShare = function (x) {
+  if (!x || typeof x.share !== "number") return "—";
+  var p = x.share * 100;
+  return (p >= 10 ? p.toFixed(0) : p.toFixed(1)) + "%";
+};
+window.__bramTokenCoverageLead = function (report) {
+  var c = window.__bramTokenCoverageOf(report);
+  if (!c) return "";
+  return "How much of " + c.path + " the agents ever read, by line. Each line a read returned is placed in today's " +
+    "file (as committed at HEAD, " + window.__bramTokenInt(c.fileLines) + " lines) through the changes made since, " +
+    "so a line pushed down by later edits still counts as the same code. A line the changes deleted or rewrote " +
+    "counts as since changed. Edits not yet committed when a read happened can't be seen.";
+};
+window.__bramTokenCoverageRows = function (report) {
+  var c = window.__bramTokenCoverageOf(report);
+  if (!c) return [];
+  var I = window.__bramTokenInt;
+  var S = window.__bramTokenShare;
+  var D = window.__bramTokenDate;
+  var N = window.__bramTokenProviderName;
+  var pr = (report && report.providerRanges) || {};
+  var rt = c.readTool || {};
+  var toolWho = rt.range ? "Claude " + D(rt.range.fromMs) + " to " + D(rt.range.toMs) : "";
+  var shellRanges = (c.shell && c.shell.ranges) || {};
+  var shellWho = Object.keys(shellRanges).map(function (k) {
+    return N(k) + " " + D(shellRanges[k].fromMs) + " to " + D(shellRanges[k].toMs);
+  }).join("; ");
+  var sh = c.shell || {};
+  return [
+    { measure: "Through the Read tool", share: S(rt.distinct),
+      detail: I(rt.distinct && rt.distinct.lines) + " lines in " + I(rt.reads) + " reads. " + (toolWho || "no reads") + "." },
+    { measure: "Through the shell", share: S(sh.distinct),
+      detail: I(sh.distinct && sh.distinct.lines) + " lines. " + I(sh.placed) + " of " + I(sh.reads) +
+        " commands say which lines they return (sed, head, tail, cat, grep -n); " + I(sh.unplaced) + " don't (" +
+        window.__bramTokenBytes(sh.unplacedBytes) + " returned, not placed). " + (shellWho || "no commands") + "." },
+    { measure: "Either way", share: S(c.combined),
+      detail: I(c.combined && c.combined.lines) + " of " + I(c.fileLines) + " lines were read at least once." },
+    { measure: "Both ways", share: S(c.both),
+      detail: I(c.both && c.both.lines) + " lines were read through the tool and through the shell." },
+    { measure: "Reads per line", share: typeof c.readsPerLine === "number" ? c.readsPerLine.toFixed(1) : "—",
+      detail: "The average line that was read, read that many times. " + I(c.read3Plus) + " lines were read three or more times." },
+    { measure: "Test code", share: S(c.test),
+      detail: I(c.test && c.test.lines) + " of " + I(c.test && c.test.of) + " lines inside test modules." },
+    { measure: "Other code", share: S(c.nonTest),
+      detail: I(c.nonTest && c.nonTest.lines) + " of " + I(c.nonTest && c.nonTest.of) + " lines outside test modules." },
+    { measure: "Since changed", share: "—",
+      detail: I(c.sinceChangedLineReads) + " line readings were of lines later deleted or rewritten; they are in none of the shares above." }
+  ];
+};
+window.__bramTokenRegionRows = function (report) {
+  var c = window.__bramTokenCoverageOf(report);
+  if (!c) return [];
+  return (c.regions || []).map(function (r) {
+    var fns = (r.topFns || []).map(function (f) { return f.name; }).join(", ");
+    return {
+      lines: window.__bramTokenInt(r.fromLine) + "–" + window.__bramTokenInt(r.toLine),
+      lineReads: window.__bramTokenInt(r.lineReads),
+      distinct: window.__bramTokenInt(r.distinctLines) + " of " + (r.toLine - r.fromLine + 1),
+      where: (fns || "no function") + (r.module ? " (in " + r.module + ")" : "")
+    };
+  });
+};
 window.__bramTokenInfoTitle = function (key) {
   return {
+    covRead: "Through the Read tool", covShell: "Through the shell", covReads: "Reads per line",
+    covChanged: "Since changed", covRegions: "Busiest stretches",
     provider: "Provider", calls: "Calls", context: "Context", fit: "Fit",
     floor: "Floor", cache: "Cache hit", reads: "Reads", main: "Main",
     subagents: "Subagents", sessions: "Sessions", mostSession: "Most in one session", perRead: "Per read",
-    total: "Read in total", shell: "Via shell", tests: "Tests"
+    total: "All sessions' reads", shell: "Via shell", tests: "Tests"
   }[key] || "";
 };
 window.__bramTokenProviderText = function (report) {
@@ -22686,6 +22785,17 @@ window.__bramTokenProviderText = function (report) {
     return "- **" + name + "**: not read. " + (s.reason || "No reason was given.");
   });
   return lines.length ? "\n\n" + lines.join("\n") : "";
+};
+// "All sessions' reads" column: the arithmetic, from the table's own top row.
+window.__bramTokenTotalText = function (report) {
+  var f = ((report && report.files) || [])[0];
+  var base = "Everything the Read and Grep tools returned for the file, added up over every session and date in the line above the table. " +
+    "It is Reads times Per read. It is not the file's size and not one session's cost: it adds up reads from many sessions, so it can be many times the file's size. " +
+    "For one session, compare Most in one session with File size.";
+  if (!f || !f.reads) return base;
+  return base + "\n\nFor example, " + f.path + ": " + window.__bramTokenInt(f.reads) + " reads, each about " +
+    window.__bramTokenBytes(f.bytes / f.reads) + ", come to " + window.__bramTokenBytes(f.bytes) + " over " +
+    window.__bramTokenInt(f.sessions) + " sessions. The file itself is " + window.__bramTokenFileSize(f) + ".";
 };
 window.__bramTokenInfoText = function (key, report) {
   if (key === "provider") {
@@ -22721,14 +22831,19 @@ window.__bramTokenInfoText = function (key, report) {
       "Most of each call repeats the one before it, so this is usually very high. " +
       "A server with no such cache would have to process all of the context on every call.";
   }
-  if (key === "reads") return "How many times an agent's Read or Grep tool pulled text out of this file, across every session in the dates above, main threads and subagents together. A repeated record of the same tool call counts once. Shell commands are counted separately, under Via shell.";
+  if (key === "reads") return "How many times an agent's Read or Grep tool pulled text out of this file, across the sessions and dates in the line above the table, main threads and subagents together. Only Claude has these tools, so these counts are Claude's alone; Codex reads files only through the shell, and its reads are counted under Via shell. A repeated record of the same tool call counts once.";
   if (key === "main") return "Of the reads, how many were made by the agent you talk to, in its own conversation.";
   if (key === "subagents") return "Of the reads, how many were made by helper agents the main agent started for a piece of work. Each helper starts with an empty context, so it reads a file again even when the main agent already has.";
   if (key === "sessions") return "How many separate sessions read this file. A helper counts toward the session that started it.";
   if (key === "mostSession") return "The most any one session read of this file, its own reads and its helpers' together. This is the figure to compare with the file's size.";
   if (key === "perRead") return "The average amount returned by one read (Read in total divided by Reads). Agents take pieces of a file rather than the whole thing, so this is usually far smaller than the file itself.";
-  if (key === "total") return "The sum of everything those reads returned, over every session in the dates above. This is not the file's size and not one session's cost: it adds up reads from many sessions, so it can be many times the file's size. For one session, see Most in one session.";
-  if (key === "shell") return "Bytes that came back from shell commands naming this file, such as `sed -n` or `grep -n`. This is approximate: a command naming several files has its output split evenly between them, and the output can include other text.";
+  if (key === "total") return window.__bramTokenTotalText(report);
+  if (key === "shell") return "Shell commands that name this file, such as `sed -n` or `grep -n`: how many, then the bytes they returned. Claude's go back to its first transcript and Codex's to its first, as the line above the table says. This is approximate: a command naming several files has its output split evenly between them, and the output can include other text. Which lines a command returned is worked out separately, in the coverage table.";
+  if (key === "covRead") return "Of today's file, the share of lines that at least one Read or content Grep result returned. Each line number is carried through the changes made after the read, up to HEAD, so the same code counts once even when edits moved it. Only Claude has this tool.";
+  if (key === "covShell") return "The same count for lines that shell commands returned. Only commands that say which lines count: `sed -n 'a,bp'` (several ranges too), `head -n`, `tail -n`, `cat` of the whole file, and `grep -n` or `rg -n` (the line number before each match, with at most `head`, `tail`, `sort` or `uniq` after it). Piped filters, `awk`, `grep` without `-n`, and results cut short count their bytes but no lines; they are the commands that don't say, in the detail. Both Claude and Codex run these.";
+  if (key === "covReads") return "Line readings are each time a line came back in a result. Divide by the lines read at all and you get reads per line. A line read three or more times is one the agents keep coming back to.";
+  if (key === "covChanged") return "A line read at an older commit that the changes since deleted or rewrote has no place in today's file. These are counted apart. lib.rs was reformatted in one sweep and has grown from about 85,000 to 115,000 lines, so many early readings are of code that no longer exists as it was.";
+  if (key === "covRegions") return "The ten busiest stretches of 200 lines by how many times their lines were read, none overlapping, each with the functions that took most of the reading. A split of the file helps where readings gather; stretches the agents never read are not worth moving.";
   if (key === "tests") return "The share of what Read returned that fell inside test code. It is only worked out for `src-tauri/src/lib.rs`; other files show a dash.";
   return "";
 };

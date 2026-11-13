@@ -490,6 +490,7 @@ fn lib_rs_reads_report_test_lines_and_bytes_and_shell_reads_stay_apart() {
                 via_shell: false,
                 at_ms: 1,
                 lines: vec![(5, 100), (8, 100), (20, 100)],
+                ..Default::default()
             },
             ReadEvent {
                 key: String::new(),
@@ -498,6 +499,7 @@ fn lib_rs_reads_report_test_lines_and_bytes_and_shell_reads_stay_apart() {
                 via_shell: true,
                 at_ms: 1,
                 lines: vec![],
+                ..Default::default()
             },
         ],
         ..Default::default()
@@ -593,6 +595,7 @@ fn report_for(root: &str, path: &str) -> Report {
             via_shell: false,
             at_ms: 1,
             lines: vec![],
+            ..Default::default()
         }],
         ..Default::default()
     });
@@ -637,6 +640,7 @@ fn read_event(path: &str, bytes: u64) -> ReadEvent {
         via_shell: false,
         at_ms: 5,
         lines: vec![],
+        ..Default::default()
     }
 }
 
@@ -1067,7 +1071,7 @@ fn the_report_from_the_ledger_equals_the_report_from_the_file() {
         v.as_object_mut().unwrap().remove("ms");
     }
     assert_eq!(direct, from_ledger);
-    // The wire shape: the same top-level fields as before the ledger.
+    // The wire shape: the pre-ledger fields, plus the coverage fields (token-accounting-files-one-row-per-file).
     let mut keys: Vec<&str> = from_ledger
         .as_object()
         .unwrap()
@@ -1080,8 +1084,12 @@ fn the_report_from_the_ledger_equals_the_report_from_the_file() {
         [
             "attribution",
             "constrained",
+            "coverage",
+            "cwdUnknownReads",
+            "elsewhere",
             "files",
             "filesTotal",
+            "providerRanges",
             "providers",
             "range",
             "root",
@@ -1659,4 +1667,513 @@ fn agy_step_takes_the_last_selection_at_or_before_it() {
     let pf = parse_antigravity_text(text, "c1", None, &sels);
     assert_eq!(pf.calls.len(), 1);
     assert_eq!(pf.calls[0].model, "B");
+}
+
+// --- token-accounting-files-one-row-per-file: shell line sets, paths, coverage
+
+fn spec(cmd: &str, target: &str, out: &str) -> Option<LineSpec> {
+    shell_line_spec(&[cmd.to_string()], target, out)
+}
+
+const LIB: &str = "src-tauri/src/lib.rs";
+
+#[test]
+fn each_shell_form_yields_its_line_set() {
+    let r = |v: Vec<(u32, u32)>| Some(LineSpec::Ranges(v));
+    assert_eq!(
+        spec("sed -n '100,200p' src-tauri/src/lib.rs", LIB, ""),
+        r(vec![(100, 200)])
+    );
+    assert_eq!(
+        spec("sed -n \"5p\" src-tauri/src/lib.rs", LIB, ""),
+        r(vec![(5, 5)])
+    );
+    assert_eq!(
+        spec("sed -n '10,20p;40,50p' src-tauri/src/lib.rs", LIB, ""),
+        r(vec![(10, 20), (40, 50)])
+    );
+    assert_eq!(
+        spec("sed -n -e '1,3p' -e '9,12p' src-tauri/src/lib.rs", LIB, ""),
+        r(vec![(1, 3), (9, 12)])
+    );
+    assert_eq!(
+        spec("sed -n '30,+4p' src-tauri/src/lib.rs", LIB, ""),
+        r(vec![(30, 34)])
+    );
+    assert_eq!(
+        spec("sed -n '900,$p' src-tauri/src/lib.rs", LIB, ""),
+        r(vec![(900, u32::MAX)])
+    );
+    assert_eq!(
+        spec("head -n 40 src-tauri/src/lib.rs", LIB, ""),
+        Some(LineSpec::Head(40))
+    );
+    assert_eq!(
+        spec("head -25 src-tauri/src/lib.rs", LIB, ""),
+        Some(LineSpec::Head(25))
+    );
+    assert_eq!(
+        spec("tail -n 15 src-tauri/src/lib.rs", LIB, ""),
+        Some(LineSpec::Tail(15))
+    );
+    assert_eq!(
+        spec("tail -n +700 src-tauri/src/lib.rs", LIB, ""),
+        r(vec![(700, u32::MAX)])
+    );
+    assert_eq!(
+        spec("cat src-tauri/src/lib.rs", LIB, ""),
+        Some(LineSpec::All)
+    );
+    assert_eq!(
+        spec("cd /r && cat ./src-tauri/src/lib.rs", LIB, ""),
+        Some(LineSpec::All)
+    );
+    // grep -n and rg -n: the numbers before each match.
+    let out = "12:fn a()\n40:fn b()\n41-    ctx\n";
+    assert_eq!(
+        spec("rg -n 'fn ' src-tauri/src/lib.rs", LIB, out),
+        r(vec![(12, 12), (40, 41)]
+            .into_iter()
+            .flat_map(|(a, b)| (a..=b).map(|n| (n, n)))
+            .collect())
+    );
+    let multi = "src-tauri/src/lib.rs:7:x\nsrc-tauri/src/guard.rs:9:y\nsrc-tauri/src/lib.rs:8:z\n";
+    assert_eq!(
+        spec(
+            "grep -n foo src-tauri/src/lib.rs src-tauri/src/guard.rs",
+            LIB,
+            multi
+        ),
+        r(vec![(7, 7), (8, 8)])
+    );
+    // A filter that only chooses among a numbered grep's lines changes nothing.
+    assert_eq!(
+        spec(
+            "grep -n foo src-tauri/src/lib.rs | head -3",
+            LIB,
+            "7:a\n9:b\n"
+        ),
+        r(vec![(7, 7), (9, 9)])
+    );
+    // A grep that matches nothing is placed, with no lines.
+    assert_eq!(spec("grep -n zzz src-tauri/src/lib.rs", LIB, ""), r(vec![]));
+}
+
+#[test]
+fn a_command_that_cannot_say_its_lines_yields_none() {
+    assert_eq!(spec("awk 'NR<5' src-tauri/src/lib.rs", LIB, ""), None);
+    assert_eq!(spec("grep foo src-tauri/src/lib.rs", LIB, "foo"), None);
+    assert_eq!(
+        spec("sed -n '1,5p' src-tauri/src/lib.rs | head -2", LIB, ""),
+        None
+    );
+    assert_eq!(spec("cat src-tauri/src/lib.rs | grep fn", LIB, ""), None);
+    assert_eq!(
+        spec("sed -n '/fn a/,/^}/p' src-tauri/src/lib.rs", LIB, ""),
+        None
+    );
+    assert_eq!(spec("sed 's/a/b/' src-tauri/src/lib.rs", LIB, ""), None);
+    assert_eq!(
+        spec(
+            "head -n 3 src-tauri/src/lib.rs src-tauri/src/guard.rs",
+            LIB,
+            ""
+        ),
+        None
+    );
+    // One unplaceable command spoils the call.
+    assert_eq!(
+        spec(
+            "sed -n '1,5p' src-tauri/src/lib.rs; awk 1 src-tauri/src/lib.rs",
+            LIB,
+            ""
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_codex_exec_call_with_several_commands_adds_up_their_lines() {
+    let raw = r#"const rs=await Promise.allSettled([
+tools.exec_command({cmd:"sed -n '10,20p' src-tauri/src/lib.rs",max_output_tokens:9000}),
+tools.exec_command({cmd:"git rev-parse HEAD; sed -n '50,60p' src-tauri/src/lib.rs",max_output_tokens:9000}),
+]);"#;
+    let (cmds, _) = shell_call(raw);
+    assert_eq!(cmds.len(), 2);
+    let sp = shell_line_spec(&cmds, LIB, "").unwrap();
+    assert_eq!(sp.ranges(Some(1000)), vec![(10, 20), (50, 60)]);
+    // A function_call's JSON arguments.
+    let (cmds, wd) = shell_call(r#"{"cmd":"head -n 5 src-tauri/src/lib.rs","workdir":"/w"}"#);
+    assert_eq!(cmds, vec!["head -n 5 src-tauri/src/lib.rs"]);
+    assert_eq!(wd.as_deref(), Some("/w"));
+    let (cmds, _) = shell_call(r#"{"command":["bash","-lc","tail -n 3 src-tauri/src/lib.rs"]}"#);
+    assert_eq!(cmds, vec!["tail -n 3 src-tauri/src/lib.rs"]);
+}
+
+#[test]
+fn head_tail_and_cat_use_the_files_length() {
+    assert_eq!(LineSpec::Head(40).ranges(Some(10)), vec![(1, 10)]);
+    assert_eq!(LineSpec::Head(40).ranges(None), vec![(1, 40)]);
+    assert_eq!(LineSpec::Tail(15).ranges(Some(100)), vec![(86, 100)]);
+    assert!(LineSpec::Tail(15).ranges(None).is_empty());
+    assert_eq!(LineSpec::All.ranges(Some(7)), vec![(1, 7)]);
+    assert_eq!(
+        LineSpec::Ranges(vec![(900, u32::MAX)]).ranges(Some(950)),
+        vec![(900, 950)]
+    );
+    assert!(LineSpec::Ranges(vec![(900, 910)])
+        .ranges(Some(100))
+        .is_empty());
+}
+
+#[test]
+fn the_parsers_keep_the_folder_and_the_lines_of_a_shell_read() {
+    let lines = [
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:00.000Z","cwd":"/r/sub","message":{"role":"user","content":"hello"}}"#,
+        r#"{"type":"assistant","timestamp":"2026-11-01T10:00:01.000Z","cwd":"/r/sub","message":{"id":"m1","model":"m","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"sed -n '10,12p;20p' ../src-tauri/src/lib.rs"}}],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:02.000Z","cwd":"/r/sub","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"abc"}]}}"#,
+    ]
+    .join("\n");
+    let pf = parse_claude_text(&lines, "s", Thread::Main, None);
+    assert_eq!(pf.reads.len(), 1);
+    assert_eq!(pf.reads[0].cwd.as_deref(), Some("/r/sub"));
+    assert_eq!(
+        pf.reads[0].shell_lines,
+        Some(LineSpec::Ranges(vec![(10, 12), (20, 20)]))
+    );
+    let codex = [
+        r#"{"timestamp":"2026-11-01T10:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"c1","cwd":"/r"}}"#,
+        r#"{"timestamp":"2026-11-01T10:00:01.000Z","ordinal":1,"type":"response_item","payload":{"type":"function_call","name":"shell_command","call_id":"k1","arguments":"{\"command\":\"cat src-tauri/src/lib.rs\",\"workdir\":\"/r/wt\"}"}}"#,
+        r#"{"timestamp":"2026-11-01T10:00:02.000Z","ordinal":2,"type":"response_item","payload":{"type":"function_call_output","call_id":"k1","output":"xyz"}}"#,
+    ]
+    .join("\n");
+    let pf = parse_codex_text(&codex, "c1");
+    assert_eq!(pf.reads[0].cwd.as_deref(), Some("/r/wt"));
+    assert_eq!(pf.reads[0].shell_lines, Some(LineSpec::All));
+}
+
+#[test]
+fn the_spellings_of_one_file_collapse_and_other_worktrees_do_not() {
+    let root = "/Users/me/bram";
+    let home = Some("/Users/me");
+    let p = |raw: &str, cwd: Option<&str>| resolve_read_path(raw, cwd, root, home).0;
+    let mine = Resolved::Project("src-tauri/src/lib.rs".into());
+    assert_eq!(p("/Users/me/bram/src-tauri/src/lib.rs", None), mine);
+    assert_eq!(p("src-tauri/src/lib.rs", Some("/Users/me/bram")), mine);
+    assert_eq!(p("~/bram/src-tauri/src/lib.rs", None), mine);
+    assert_eq!(p("bram/src-tauri/src/lib.rs", Some("/Users/me")), mine);
+    assert_eq!(
+        p("../src-tauri/src/lib.rs", Some("/Users/me/bram/app")),
+        mine
+    );
+    assert_eq!(p("lib.rs", Some("/Users/me/bram/src-tauri/src")), mine);
+    assert_eq!(p("./src-tauri/src/lib.rs", Some("/Users/me/bram")), mine);
+    // Not this checkout.
+    assert_eq!(
+        p("/Users/me/bram-453/src-tauri/src/lib.rs", None),
+        Resolved::Elsewhere
+    );
+    assert_eq!(
+        p("src-tauri/src/lib.rs", Some("/Users/me/bram-pr468")),
+        Resolved::Elsewhere
+    );
+    assert_eq!(
+        p("/tmp/scratch/wt-origin/src-tauri/src/lib.rs", None),
+        Resolved::Elsewhere
+    );
+    // A diff prefix is not guessed at.
+    assert_eq!(
+        p("a/src-tauri/src/lib.rs", Some("/Users/me/bram")),
+        Resolved::Elsewhere
+    );
+    // No folder recorded: taken from the root, and said so.
+    let (r, unknown) = resolve_read_path("src-tauri/src/lib.rs", None, root, home);
+    assert_eq!((r, unknown), (mine, true));
+}
+
+struct FixedView(Arc<CommitView>);
+impl SpanSource for FixedView {
+    fn spans_at(&mut self, _: i64) -> Option<Arc<Vec<(u32, u32)>>> {
+        None
+    }
+    fn view_at(&mut self, _: i64) -> Option<Arc<CommitView>> {
+        Some(self.0.clone())
+    }
+}
+
+#[test]
+fn a_line_read_before_an_insertion_maps_to_its_present_number_and_a_rewritten_line_is_changed() {
+    // 5 lines inserted after old line 10; old lines 30-32 became 4 lines;
+    // old lines 50-51 deleted.
+    let diff = "@@ -10,0 +11,5 @@\n+a\n@@ -30,3 +35,4 @@\n-x\n@@ -50,2 +54,0 @@\n-y\n";
+    let v = CommitView::from_diff(100, diff);
+    assert_eq!(v.map(5), Some(5));
+    assert_eq!(v.map(10), Some(10));
+    assert_eq!(v.map(11), Some(16));
+    assert_eq!(v.map(20), Some(25));
+    assert_eq!(v.map(29), Some(34));
+    assert_eq!(v.map(30), None);
+    assert_eq!(v.map(32), None);
+    assert_eq!(v.map(33), Some(39));
+    assert_eq!(v.map(50), None);
+    assert_eq!(v.map(51), None);
+    assert_eq!(v.map(52), Some(56));
+    // The sweep agrees with the single lookup.
+    let mut swept = Vec::new();
+    v.map_range(1, 100, |m| swept.push(m));
+    let single: Vec<Option<u32>> = (1..=100).map(|l| v.map(l)).collect();
+    assert_eq!(swept, single);
+    let mut part = Vec::new();
+    v.map_range(28, 53, |m| part.push(m));
+    assert_eq!(part, single[27..53].to_vec());
+}
+
+fn lib_event(at: i64, via_shell: bool, numbers: Vec<u32>, spec: Option<LineSpec>) -> ReadEvent {
+    let lines = numbers.iter().map(|n| (*n, 10)).collect();
+    ReadEvent {
+        path: "/r/src-tauri/src/lib.rs".into(),
+        bytes: 100,
+        via_shell,
+        at_ms: at,
+        lines,
+        shell_lines: spec,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn coverage_on_a_small_fixed_file() {
+    // Today's file: 30 lines; fn `hot` at 3-8, a test module at 21-30.
+    let mut src = String::new();
+    for i in 1..=30 {
+        src.push_str(match i {
+            3 => "fn hot() {\n",
+            8 => "}\n",
+            21 => "#[cfg(test)]\n",
+            22 => "mod tests {\n",
+            30 => "}\n",
+            _ => "    x;\n",
+        });
+    }
+    let now = LibRsNow {
+        lines: 30,
+        test_lines: 10,
+        test_spans: 1,
+        source: Some(Arc::new(src)),
+    };
+    // At read time the file had 5 more lines at the top (diff: +5 after 0)
+    // and old line 12 was rewritten (old 12 -> 1 line).
+    let view = CommitView::from_diff(25, "@@ -0,0 +1,5 @@\n+n\n@@ -12 +17 @@\n-o\n+n\n");
+    let pf = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s".into(),
+        thread: Some(Thread::Main),
+        reads: vec![
+            // Read: old lines 1-4 are 6-9 now (3-8 is `hot`: 6,7,8 hot).
+            lib_event(1, false, vec![1, 2, 3, 4], None),
+            // Read again: old 2-3 (7-8 now), and the rewritten 12.
+            lib_event(2, false, vec![2, 3, 12], None),
+            // Shell: sed old 3-6 (8-11 now).
+            lib_event(3, true, vec![], Some(LineSpec::Ranges(vec![(3, 6)]))),
+            // Shell the diff can't place, and a cat of the whole file.
+            lib_event(4, true, vec![], None),
+            lib_event(5, true, vec![], Some(LineSpec::All)),
+        ],
+        ..Default::default()
+    });
+    let report = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![pf],
+            ..Default::default()
+        },
+        &mut FixedView(Arc::new(view)),
+        Some(now),
+    );
+    let c = &report.coverage[0];
+    assert_eq!(c.path, LIB);
+    assert_eq!(c.file_lines, 30);
+    // Read: old 1-4 -> 6-9; old 2,3 -> 7,8; old 12 changed.
+    assert_eq!(c.read_tool.reads, 2);
+    assert_eq!(c.read_tool.distinct.lines, 4);
+    // Shell: old 3-6 -> 8-11, and the cat: old 1-25 -> 6-30, minus old 12.
+    assert_eq!(c.shell.reads, 3);
+    assert_eq!(c.shell.placed, 2);
+    assert_eq!(c.shell.unplaced, 1);
+    assert_eq!(c.shell.unplaced_bytes, 100);
+    assert_eq!(c.shell.distinct.lines, 24);
+    // since changed: Read's old 12, the cat's old 12.
+    assert_eq!(c.since_changed_line_reads, 2);
+    // Lines 7, 8 and 9 were read three or more times.
+    assert_eq!(c.read_3_plus, 3);
+    // Lines 1-5 of today's file, and 17, were never read.
+    assert_eq!(c.combined.lines, 24);
+    assert_eq!(c.both.lines, 4);
+    assert_eq!(c.combined.share, 0.8);
+    assert_eq!(c.test.of, 10);
+    assert_eq!(c.test.lines, 10);
+    assert_eq!(c.non_test.of, 20);
+    assert_eq!(c.non_test.lines, 14);
+    // The busiest stretch is the whole file, and `hot` leads it.
+    assert_eq!(c.regions[0].top_fns[0].name, "hot");
+    // The test module holds only a minority of this stretch's readings, so
+    // the stretch isn't labelled as inside it.
+    assert_eq!(c.regions[0].module.as_deref(), None);
+}
+
+#[test]
+fn the_files_row_sums_the_resolved_reads_and_names_the_elsewhere_count() {
+    let mk = |path: &str, cwd: Option<&str>, via_shell: bool| ReadEvent {
+        path: path.into(),
+        bytes: 10,
+        via_shell,
+        at_ms: 5,
+        cwd: cwd.map(String::from),
+        ..Default::default()
+    };
+    let pf = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s".into(),
+        thread: Some(Thread::Main),
+        reads: vec![
+            mk("/Users/me/bram/src-tauri/src/lib.rs", None, false),
+            mk("src-tauri/src/lib.rs", Some("/Users/me/bram"), true),
+            mk("~/bram/src-tauri/src/lib.rs", None, true),
+            mk("/Users/me/bram-453/src-tauri/src/lib.rs", None, false),
+            mk("src-tauri/src/lib.rs", Some("/Users/me/bram-pr468"), true),
+        ],
+        ..Default::default()
+    });
+    let report = build_report(
+        ReportInput {
+            root: "/Users/me/bram",
+            files: vec![pf],
+            home: Some("/Users/me".into()),
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    assert_eq!(report.files.len(), 1);
+    let f = &report.files[0];
+    assert_eq!(f.path, LIB);
+    assert_eq!((f.reads, f.shell_reads, f.via_shell_bytes), (1, 2, 20));
+    assert_eq!(report.elsewhere.reads, 1);
+    assert_eq!(report.elsewhere.shell_reads, 1);
+    assert_eq!(report.elsewhere.paths, 2);
+}
+
+#[test]
+fn a_v2_ledger_gains_the_new_columns_and_reads_every_transcript_again() {
+    let dir = ledger_dir("v2to3");
+    let db = dir.join("l.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sources (source_key TEXT PRIMARY KEY, provider TEXT NOT NULL,
+               session TEXT NOT NULL, thread TEXT NOT NULL, agent_id TEXT, label TEXT, path TEXT,
+               size INTEGER NOT NULL DEFAULT 0, mtime_ms INTEGER NOT NULL DEFAULT 0,
+               inode INTEGER NOT NULL DEFAULT 0, read_to INTEGER NOT NULL DEFAULT 0,
+               unreadable INTEGER NOT NULL DEFAULT 0, compactions INTEGER NOT NULL DEFAULT 0,
+               quota TEXT, state TEXT, updated_ms INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE reads (id INTEGER PRIMARY KEY, source_key TEXT NOT NULL,
+               read_key TEXT NOT NULL, provider TEXT NOT NULL, session TEXT NOT NULL,
+               thread TEXT NOT NULL, path TEXT NOT NULL, at_ms INTEGER NOT NULL,
+               bytes INTEGER NOT NULL, via_shell INTEGER NOT NULL, lines TEXT,
+               UNIQUE (source_key, read_key));
+             INSERT INTO sources (source_key, provider, session, thread, size, mtime_ms,
+               read_to, unreadable, compactions, state)
+               VALUES ('a', 'claude', 's', 'main', 100, 5, 100, 3, 2, '{}'),
+                      ('b', 'opencode', 'o', 'main', 0, 0, 77, 1, 0, '{}');
+             INSERT INTO reads (source_key, read_key, provider, session, thread, path, at_ms,
+               bytes, via_shell) VALUES ('a', 'k#0', 'claude', 's', 'main', 'x.rs', 1, 5, 1);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+    let ledger = Ledger::open(&db).unwrap();
+    let (read_to, mtime, unread): (i64, i64, i64) = ledger
+        .conn
+        .query_row(
+            "SELECT read_to, mtime_ms, unreadable FROM sources WHERE source_key = 'a'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((read_to, mtime, unread), (0, -1, 0));
+    // OpenCode is not a transcript file: left as it was.
+    let oc: i64 = ledger
+        .conn
+        .query_row(
+            "SELECT read_to FROM sources WHERE source_key = 'b'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(oc, 77);
+    let (cwd, lines): (Option<String>, Option<String>) = ledger
+        .conn
+        .query_row("SELECT cwd, shell_lines FROM reads", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((cwd, lines), (None, None));
+    let v: i64 = ledger
+        .conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_read_stored_without_its_folder_gains_it_when_the_transcript_is_read_again() {
+    let dir = ledger_dir("cwdfill");
+    let path = dir.join("s1.jsonl");
+    let lines = [
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:00.000Z","cwd":"/r/sub","message":{"role":"user","content":"hello"}}"#,
+        r#"{"type":"assistant","timestamp":"2026-11-01T10:00:01.000Z","cwd":"/r/sub","message":{"id":"m1","model":"m","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"head -n 4 ../src-tauri/src/lib.rs"}}],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:02.000Z","cwd":"/r/sub","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"abc"}]}}"#,
+    ];
+    let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    append(&path, &lines);
+    let src = Source::ClaudeMain {
+        id: "s1".into(),
+        path: path.clone(),
+    };
+    let db = dir.join("l.db");
+    let mut ledger = Ledger::open(&db).unwrap();
+    ledger.ingest_sources(&[src.clone()], None);
+    // Back to what v2 stored.
+    ledger
+        .conn
+        .execute("UPDATE reads SET cwd = NULL, shell_lines = NULL", [])
+        .unwrap();
+    ledger
+        .conn
+        .execute(
+            "UPDATE sources SET read_to = 0, mtime_ms = -1, state = NULL, unreadable = 0, compactions = 0",
+            [],
+        )
+        .unwrap();
+    let st = ledger.ingest_sources(&[src], None);
+    assert_eq!(st.calls_inserted, 0);
+    assert_eq!(count(&ledger, "reads"), 1);
+    let loaded = ledger.load(None);
+    let r = &loaded[0].reads[0];
+    assert_eq!(r.cwd.as_deref(), Some("/r/sub"));
+    assert_eq!(r.shell_lines, Some(LineSpec::Head(4)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// token-accounting-files-one-row-per-file (region labels): a bodiless
+// `mod name;` declares a file module elsewhere and encloses nothing, so it
+// must not become a region's module; a module with a body still does.
+#[test]
+fn a_bodiless_mod_declaration_is_not_a_module() {
+    let src = "mod search_index;\nfn serve() {\n    x();\n}\n#[cfg(test)]\nmod tests {\n    fn a() {}\n}\n";
+    let (fns, mods) = code_items(src);
+    let mod_names: Vec<&str> = mods.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(mod_names, vec!["tests"]);
+    assert!(fns.iter().any(|f| f.name == "serve"));
 }

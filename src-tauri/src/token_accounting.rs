@@ -153,8 +153,21 @@ pub struct Quota {
     pub secondary: Option<QuotaWindow>,
 }
 
+/// Which lines of a file a shell command returned, when the command says.
+/// `Head`, `Tail` and `All` wait for the file's length at the time; a range
+/// ending at `u32::MAX` runs to the end of the file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum LineSpec {
+    Ranges(Vec<(u32, u32)>),
+    Head(u32),
+    Tail(u32),
+    All,
+    /// Several commands in one call, each naming the file.
+    Many(Vec<LineSpec>),
+}
+
 /// A file credited with bytes read into context.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct ReadEvent {
     /// `<tool call id>#<n>`: unique within its source; the ledger's key.
     pub key: String,
@@ -164,6 +177,12 @@ pub struct ReadEvent {
     pub at_ms: i64,
     /// (line number, bytes) of each line returned; kept only for `lib.rs`.
     pub lines: Vec<(u32, u32)>,
+    /// The session's working directory when the read happened, to resolve a
+    /// relative `path` at report time.
+    pub cwd: Option<String>,
+    /// For a shell read of a `lib.rs`: the lines the command returned, or
+    /// None when it can't be told.
+    pub shell_lines: Option<LineSpec>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -337,6 +356,8 @@ struct ClaudeRecord {
     timestamp: Option<String>,
     #[serde(default)]
     message: Option<ClaudeMessage>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 /// Just the folder a Claude session ran in.
@@ -418,6 +439,8 @@ struct CodexPayload {
     input: Option<Content>,
     #[serde(default)]
     output: Option<Content>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -479,10 +502,24 @@ struct OpenCodeData {
 /// What a pending tool call will credit when its result arrives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum PendingTool {
-    Read { path: String },
-    GrepContent { default_path: Option<String> },
+    Read {
+        path: String,
+    },
+    GrepContent {
+        default_path: Option<String>,
+    },
     GrepFiles,
-    Shell { files: Vec<String> },
+    Shell {
+        files: Vec<String>,
+        /// The command lines, kept only when one names a `lib.rs` (its line
+        /// numbers are worked out when the result arrives).
+        #[serde(default)]
+        cmds: Vec<String>,
+        /// The folder the command ran in when it says so (`cd /abs && ...`,
+        /// Codex's `workdir`).
+        #[serde(default)]
+        dir: Option<String>,
+    },
 }
 
 fn is_lib_rs(path: &str) -> bool {
@@ -624,7 +661,26 @@ fn key_reads(reads: &mut [ReadEvent], tool_call_id: &str) {
     }
 }
 
-fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<ReadEvent>) {
+/// A shell call waiting for its result. The command lines are kept only when
+/// one names a `lib.rs`, whose line numbers the result will place.
+fn shell_pending(files: Vec<String>, cmds: Vec<String>, workdir: Option<String>) -> PendingTool {
+    let dir = shell_dir(&cmds, workdir);
+    let cmds = if cmds.iter().any(|c| c.contains("lib.rs")) {
+        cmds
+    } else {
+        Vec::new()
+    };
+    PendingTool::Shell { files, cmds, dir }
+}
+
+fn credit_result(
+    pending: &PendingTool,
+    text: &str,
+    at_ms: i64,
+    cwd: Option<&str>,
+    out: &mut Vec<ReadEvent>,
+) {
+    let cwd = cwd.map(str::to_string);
     match pending {
         PendingTool::Read { path } => {
             let lines = if is_lib_rs(path) {
@@ -633,23 +689,23 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
                 Vec::new()
             };
             out.push(ReadEvent {
-                key: String::new(),
                 path: path.clone(),
                 bytes: text.len() as u64,
-                via_shell: false,
                 at_ms,
                 lines,
+                cwd,
+                ..Default::default()
             });
         }
         PendingTool::GrepContent { default_path } => {
             for (path, bytes, lines) in grep_content_by_file(text, default_path.as_deref()) {
                 out.push(ReadEvent {
-                    key: String::new(),
                     path,
                     bytes,
-                    via_shell: false,
                     at_ms,
                     lines,
+                    cwd: cwd.clone(),
+                    ..Default::default()
                 });
             }
         }
@@ -664,16 +720,15 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
                     continue;
                 }
                 out.push(ReadEvent {
-                    key: String::new(),
                     path: l.to_string(),
                     bytes: (line.len() + 1) as u64,
-                    via_shell: false,
                     at_ms,
-                    lines: Vec::new(),
+                    cwd: cwd.clone(),
+                    ..Default::default()
                 });
             }
         }
-        PendingTool::Shell { files } => {
+        PendingTool::Shell { files, cmds, dir } => {
             if files.is_empty() {
                 return;
             }
@@ -681,15 +736,483 @@ fn credit_result(pending: &PendingTool, text: &str, at_ms: i64, out: &mut Vec<Re
             let each = text.len() as u64 / n;
             let extra = text.len() as u64 - each * n;
             for (i, f) in files.iter().enumerate() {
+                // A truncated result lost lines the command asked for.
+                let truncated =
+                    text.contains("lines truncated]") || text.contains("tokens truncated");
+                let shell_lines = if f.ends_with("lib.rs") && !cmds.is_empty() && !truncated {
+                    shell_line_spec(cmds, f, text)
+                } else {
+                    None
+                };
                 out.push(ReadEvent {
-                    key: String::new(),
                     path: f.clone(),
                     bytes: each + if i == 0 { extra } else { 0 },
                     via_shell: true,
                     at_ms,
-                    lines: Vec::new(),
+                    cwd: dir.clone().or_else(|| cwd.clone()),
+                    shell_lines,
+                    ..Default::default()
                 });
             }
+        }
+    }
+}
+
+// --- which lines a shell command returned -----------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+struct ShellArgs {
+    #[serde(default)]
+    cmd: Option<String>,
+    #[serde(default)]
+    command: Option<ShellCommand>,
+    #[serde(default)]
+    workdir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ShellCommand {
+    One(String),
+    Argv(Vec<String>),
+}
+
+/// The command lines of one Codex shell call and its `workdir`. The call is
+/// JSON arguments (`{"cmd": ...}`, `{"command": ["bash","-lc",...]}`), or the
+/// JavaScript of an `exec` call that runs `tools.exec_command({cmd: "..."})`
+/// one or several times; anything else is taken as the command itself.
+pub fn shell_call(raw: &str) -> (Vec<String>, Option<String>) {
+    if let Ok(a) = serde_json::from_str::<ShellArgs>(raw) {
+        let cmd = match (a.cmd, a.command) {
+            (Some(c), _) => Some(c),
+            (None, Some(ShellCommand::One(c))) => Some(c),
+            (None, Some(ShellCommand::Argv(v))) => match v.first().map(String::as_str) {
+                Some("bash") | Some("sh") | Some("zsh") if v.len() >= 3 => v.last().cloned(),
+                _ => Some(v.join(" ")),
+            },
+            _ => None,
+        };
+        if let Some(c) = cmd {
+            return (vec![c], a.workdir);
+        }
+    }
+    let mut cmds = Vec::new();
+    let mut rest = raw;
+    while let Some(i) = rest.find("cmd:") {
+        rest = &rest[i + 4..];
+        let t = rest.trim_start();
+        let Some(q) = t.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) else {
+            continue;
+        };
+        let mut lit = String::new();
+        let mut chars = t[1..].chars();
+        let mut used = 1;
+        while let Some(c) = chars.next() {
+            used += c.len_utf8();
+            match c {
+                '\\' => match chars.next() {
+                    Some('n') => {
+                        used += 1;
+                        lit.push('\n');
+                    }
+                    Some(e) => {
+                        used += e.len_utf8();
+                        lit.push(e);
+                    }
+                    None => break,
+                },
+                c if c == q => break,
+                c => lit.push(c),
+            }
+        }
+        rest = &t[used.min(t.len())..];
+        cmds.push(lit);
+    }
+    if cmds.is_empty() {
+        cmds.push(raw.to_string());
+    }
+    (cmds, None)
+}
+
+/// The command line split into statements (`;`, `&&`, `||`, newline), each
+/// into pipeline stages (`|`), each into words with quotes resolved.
+/// Redirections are dropped.
+#[allow(unused_assignments)]
+fn shell_stages(cmd: &str) -> Vec<Vec<Vec<String>>> {
+    let mut stmts: Vec<Vec<Vec<String>>> = Vec::new();
+    let mut stages: Vec<Vec<String>> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    macro_rules! end_word {
+        () => {
+            if in_word {
+                words.push(std::mem::take(&mut cur));
+                in_word = false;
+            }
+        };
+    }
+    macro_rules! end_stage {
+        () => {
+            end_word!();
+            if !words.is_empty() {
+                stages.push(std::mem::take(&mut words));
+            }
+        };
+    }
+    macro_rules! end_stmt {
+        () => {
+            end_stage!();
+            if !stages.is_empty() {
+                stmts.push(std::mem::take(&mut stages));
+            }
+        };
+    }
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' => {
+                in_word = true;
+                i += 1;
+                while i < chars.len() && chars[i] != '\'' {
+                    cur.push(chars[i]);
+                    i += 1;
+                }
+            }
+            '"' => {
+                in_word = true;
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                    }
+                    cur.push(chars[i]);
+                    i += 1;
+                }
+            }
+            '\\' => {
+                if i + 1 < chars.len() && chars[i + 1] != '\n' {
+                    in_word = true;
+                    cur.push(chars[i + 1]);
+                }
+                i += 1;
+            }
+            ';' | '\n' => {
+                end_stmt!();
+            }
+            '&' if chars.get(i + 1) == Some(&'&') => {
+                end_stmt!();
+                i += 1;
+            }
+            '&' if cur.ends_with('>') => cur.push('&'),
+            '&' => {
+                end_stmt!();
+            }
+            '|' if chars.get(i + 1) == Some(&'|') => {
+                end_stmt!();
+                i += 1;
+            }
+            '|' => {
+                end_stage!();
+            }
+            '(' | ')' => {
+                end_word!();
+            }
+            c if c.is_whitespace() => {
+                end_word!();
+            }
+            c => {
+                in_word = true;
+                cur.push(c);
+            }
+        }
+        i += 1;
+    }
+    end_stmt!();
+    for stmt in stmts.iter_mut() {
+        for st in stmt.iter_mut() {
+            *st = strip_redirects(std::mem::take(st));
+        }
+        stmt.retain(|st| !st.is_empty());
+    }
+    stmts.retain(|s| !s.is_empty());
+    stmts
+}
+
+fn strip_redirects(words: Vec<String>) -> Vec<String> {
+    let redirect = |w: &str| {
+        let t = w.trim_start_matches(|c: char| c.is_ascii_digit());
+        t.starts_with('>') || t.starts_with('<')
+    };
+    let mut out = Vec::new();
+    let mut it = words.into_iter();
+    while let Some(w) = it.next() {
+        if redirect(&w) {
+            // `>` alone takes the next word as its file.
+            if w.trim_start_matches(|c: char| c.is_ascii_digit()).len() <= 2 && !w.contains('&') {
+                let t = w.trim_start_matches(|c: char| c.is_ascii_digit());
+                if t == ">" || t == ">>" || t == "<" {
+                    it.next();
+                }
+            }
+            continue;
+        }
+        out.push(w);
+    }
+    out
+}
+
+fn same_file(word: &str, target: &str) -> bool {
+    word.strip_prefix("./").unwrap_or(word) == target.strip_prefix("./").unwrap_or(target)
+}
+
+/// Lines a `sed -n` script prints: `A,Bp`, `Ap`, `A,$p`, `A,+Np`, joined by
+/// `;` or newlines. Anything else (a substitution, a regex address) is None.
+fn sed_ranges(script: &str) -> Option<Vec<(u32, u32)>> {
+    let mut out = Vec::new();
+    for part in script.split([';', '\n']) {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let body = p.strip_suffix('p')?.trim();
+        let (a, b) = match body.split_once(',') {
+            Some((a, b)) => (a.trim(), Some(b.trim())),
+            None => (body, None),
+        };
+        let a: u32 = a.parse().ok()?;
+        let end = match b {
+            None => a,
+            Some("$") => u32::MAX,
+            Some(b) => match b.strip_prefix('+') {
+                Some(n) => a.checked_add(n.parse::<u32>().ok()?)?,
+                None => b.parse().ok()?,
+            },
+        };
+        if a == 0 || end < a {
+            return None;
+        }
+        out.push((a, end));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// A count flag as `head` and `tail` take it: `-n N`, `-nN`, `-N`,
+/// `--lines=N`. Returns (value text, files).
+fn count_flag(args: &[String]) -> Option<(Option<String>, Vec<String>)> {
+    let mut n: Option<String> = None;
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "-n" || a == "--lines" {
+            n = Some(args.get(i + 1)?.clone());
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--lines=") {
+            n = Some(v.to_string());
+        } else if let Some(v) = a.strip_prefix("-n") {
+            n = Some(v.to_string());
+        } else if a.len() > 1 && a.starts_with('-') && a[1..].bytes().all(|b| b.is_ascii_digit()) {
+            n = Some(a[1..].to_string());
+        } else if a.starts_with('-') && a.len() > 1 {
+            return None;
+        } else {
+            files.push(a.to_string());
+        }
+        i += 1;
+    }
+    Some((n, files))
+}
+
+/// What one pipeline stage that names `target` returned. `output` is the
+/// call's whole result, which only a numbered grep needs.
+fn stage_spec(argv: &[String], target: &str, output: &str) -> Option<LineSpec> {
+    let name = argv.first()?.rsplit('/').next()?.to_string();
+    let args = &argv[1..];
+    match name.as_str() {
+        "sed" => {
+            let (mut quiet, mut scripted) = (false, false);
+            let mut scripts: Vec<String> = Vec::new();
+            let mut positional: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < args.len() {
+                let a = args[i].as_str();
+                if a == "--quiet" || a == "--silent" {
+                    quiet = true;
+                } else if let Some(e) = a.strip_prefix("--expression=") {
+                    scripted = true;
+                    scripts.push(e.to_string());
+                } else if a.starts_with("--") {
+                    if a.starts_with("--in-place") || a.starts_with("--file") {
+                        return None;
+                    }
+                } else if a.len() > 1 && a.starts_with('-') {
+                    let cluster = &a[1..];
+                    for (k, ch) in cluster.char_indices() {
+                        match ch {
+                            'n' => quiet = true,
+                            's' | 'E' | 'r' | 'u' | 'z' => {}
+                            'e' => {
+                                scripted = true;
+                                let rest = &cluster[k + 1..];
+                                if rest.is_empty() {
+                                    scripts.push(args.get(i + 1)?.clone());
+                                    i += 1;
+                                } else {
+                                    scripts.push(rest.to_string());
+                                }
+                                break;
+                            }
+                            _ => return None,
+                        }
+                    }
+                } else {
+                    positional.push(a.to_string());
+                }
+                i += 1;
+            }
+            if !scripted {
+                if positional.is_empty() {
+                    return None;
+                }
+                scripts.push(positional.remove(0));
+            }
+            if !quiet || positional.len() != 1 || !same_file(&positional[0], target) {
+                return None;
+            }
+            sed_ranges(&scripts.join("\n")).map(LineSpec::Ranges)
+        }
+        "head" | "tail" => {
+            let (n, files) = count_flag(args)?;
+            if files.len() != 1 || !same_file(&files[0], target) {
+                return None;
+            }
+            let n = n.unwrap_or_else(|| "10".to_string());
+            if name == "head" {
+                n.parse().ok().map(LineSpec::Head)
+            } else if let Some(from) = n.strip_prefix('+') {
+                let from: u32 = from.parse().ok()?;
+                (from > 0).then(|| LineSpec::Ranges(vec![(from, u32::MAX)]))
+            } else {
+                n.parse().ok().map(LineSpec::Tail)
+            }
+        }
+        "cat" => {
+            let files: Vec<&String> = args.iter().filter(|a| a.as_str() != "-n").collect();
+            (files.len() == 1 && same_file(files[0], target)).then_some(LineSpec::All)
+        }
+        "grep" | "egrep" | "rg" => {
+            let numbered = args.iter().any(|a| {
+                a == "--line-number"
+                    || (a.len() > 1
+                        && a.starts_with('-')
+                        && !a.starts_with("--")
+                        && a[1..].bytes().all(|b| b.is_ascii_alphabetic())
+                        && a[1..].contains('n'))
+            });
+            if !numbered {
+                return None;
+            }
+            let mut lines: Vec<u32> = Vec::new();
+            for l in output.split('\n') {
+                if let Some((path, no)) = split_grep_line(l, Some(target)) {
+                    if path == target || path.ends_with("lib.rs") {
+                        lines.push(no);
+                    }
+                }
+            }
+            lines.sort_unstable();
+            lines.dedup();
+            Some(LineSpec::Ranges(
+                lines.into_iter().map(|n| (n, n)).collect(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The lines a shell call returned of `target` (the path as the command typed
+/// it), or None when the commands don't say: a piped filter, `awk`, a `grep`
+/// without `-n`. Several commands naming the target add up.
+pub fn shell_line_spec(cmds: &[String], target: &str, output: &str) -> Option<LineSpec> {
+    let mut specs: Vec<LineSpec> = Vec::new();
+    for cmd in cmds {
+        for stmt in shell_stages(cmd) {
+            let names = |st: &Vec<String>| st.iter().skip(1).any(|w| same_file(w, target));
+            if !stmt.iter().any(names) {
+                continue;
+            }
+            // A numbered grep keeps its meaning through filters that only
+            // choose among its lines.
+            let filtered = stmt.len() > 1
+                && stmt[0].iter().skip(1).any(|w| same_file(w, target))
+                && stmt[1..].iter().all(|st| {
+                    st.first()
+                        .and_then(|c| c.rsplit('/').next())
+                        .is_some_and(|c| matches!(c, "head" | "tail" | "sort" | "uniq"))
+                })
+                && !stmt[1..]
+                    .iter()
+                    .any(|st| st.iter().skip(1).any(|w| same_file(w, target)));
+            if stmt.len() > 1 && !filtered {
+                return None;
+            }
+            let grep = stmt[0]
+                .first()
+                .and_then(|c| c.rsplit('/').next())
+                .is_some_and(|c| matches!(c, "grep" | "egrep" | "rg"));
+            if filtered && !grep {
+                return None;
+            }
+            specs.push(stage_spec(&stmt[0], target, output)?);
+        }
+    }
+    match specs.len() {
+        0 => None,
+        1 => specs.pop(),
+        _ => Some(LineSpec::Many(specs)),
+    }
+}
+
+/// The absolute folder a command moved to (`cd /abs/dir && ...`).
+fn shell_dir(cmds: &[String], workdir: Option<String>) -> Option<String> {
+    let mut dir = workdir;
+    for cmd in cmds {
+        for stmt in shell_stages(cmd) {
+            if let [stage] = stmt.as_slice() {
+                if let [c, d] = stage.as_slice() {
+                    if c == "cd" && d.starts_with('/') {
+                        dir = Some(d.clone());
+                    }
+                }
+            }
+        }
+    }
+    dir
+}
+
+impl LineSpec {
+    /// The inclusive line ranges, given the file's length when it was read
+    /// (None when unknown: `Head` and `Tail` then can't be placed).
+    pub fn ranges(&self, len: Option<u32>) -> Vec<(u32, u32)> {
+        let clamp = |a: u32, b: u32| -> Option<(u32, u32)> {
+            let b = len.map_or(b, |l| b.min(l));
+            (a >= 1 && a <= b).then_some((a, b))
+        };
+        match self {
+            LineSpec::Ranges(r) => r.iter().filter_map(|&(a, b)| clamp(a, b)).collect(),
+            LineSpec::Head(n) => clamp(1, *n).into_iter().collect(),
+            LineSpec::Tail(n) => match len {
+                Some(l) if *n > 0 => clamp(l.saturating_sub(*n) + 1, l).into_iter().collect(),
+                _ => Vec::new(),
+            },
+            LineSpec::All => match len {
+                Some(l) => clamp(1, l).into_iter().collect(),
+                None => Vec::new(),
+            },
+            LineSpec::Many(v) => v.iter().flat_map(|s| s.ranges(len)).collect(),
         }
     }
 }
@@ -712,6 +1235,7 @@ pub struct SourceState {
     last_total: Option<u64>,
     model: String,
     line_no: u64,
+    cwd: Option<String>,
 }
 
 // --- Claude reader --------------------------------------------------------
@@ -732,6 +1256,8 @@ pub struct ClaudeParser {
     pub turn_start: (usize, i64),
     /// Byte offset of the line being fed; names a call that has no id.
     pub cur_offset: u64,
+    /// The folder the session last reported working in.
+    cwd: Option<String>,
 }
 
 impl ClaudeParser {
@@ -759,6 +1285,11 @@ impl ClaudeParser {
                 return;
             }
         };
+        if let Some(c) = &rec.cwd {
+            if self.cwd.as_deref() != Some(c.as_str()) {
+                self.cwd = Some(c.clone());
+            }
+        }
         match rec.kind.as_str() {
             "assistant" => self.assistant(rec),
             "user" => self.user(rec),
@@ -847,11 +1378,10 @@ impl ClaudeParser {
                 }),
                 _ => Some(PendingTool::GrepFiles),
             },
-            "Bash" => input
-                .and_then(|i| i.command.as_deref())
-                .map(shell_named_files)
-                .filter(|f| !f.is_empty())
-                .map(|files| PendingTool::Shell { files }),
+            "Bash" => input.and_then(|i| i.command.as_deref()).and_then(|cmd| {
+                let files = shell_named_files(cmd);
+                (!files.is_empty()).then(|| shell_pending(files, vec![cmd.to_string()], None))
+            }),
             _ => None,
         };
         if let Some(p) = pending {
@@ -883,7 +1413,7 @@ impl ClaudeParser {
                         if let Some(p) = self.pending.remove(id) {
                             let text = b.content.as_ref().map(|c| c.text()).unwrap_or_default();
                             let before = self.reads.len();
-                            credit_result(&p, &text, at_ms, &mut self.reads);
+                            credit_result(&p, &text, at_ms, self.cwd.as_deref(), &mut self.reads);
                             key_reads(&mut self.reads[before..], id);
                         }
                     }
@@ -905,6 +1435,7 @@ impl ClaudeParser {
             pending: st.pending.clone(),
             unreadable: st.unreadable,
             compactions: st.compactions,
+            cwd: st.cwd.clone(),
             ..Default::default()
         }
     }
@@ -914,6 +1445,7 @@ impl ClaudeParser {
             pending: self.pending.clone(),
             unreadable: self.unreadable,
             compactions: self.compactions,
+            cwd: self.cwd.clone(),
             ..Default::default()
         }
     }
@@ -965,6 +1497,7 @@ pub struct CodexParser {
     pending: HashMap<String, PendingTool>,
     collect_reads: bool,
     pub turn_start: (usize, i64),
+    cwd: Option<String>,
 }
 
 const CODEX_SHELL_TOOLS: [&str; 6] = [
@@ -1021,8 +1554,14 @@ impl CodexParser {
                     self.nickname = p.agent_nickname.clone();
                     self.start_ordinal = p.subagent_history_start_ordinal;
                 }
+                if self.cwd.is_none() {
+                    self.cwd = p.cwd.clone();
+                }
             }
             "turn_context" => {
+                if p.cwd.is_some() {
+                    self.cwd = p.cwd.clone();
+                }
                 if let Some(m) = p.model {
                     self.model = m;
                 }
@@ -1114,16 +1653,27 @@ impl CodexParser {
                     .or(p.arguments.as_ref())
                     .map(|c| c.text())
                     .unwrap_or_default();
-                let files = shell_named_files(&cmd);
+                // The raw text, and the commands decoded from it: a JSON
+                // `{"command": [...]}` or the quoted `cmd:` of an exec call
+                // hides its file names from a split on spaces.
+                let (cmds, workdir) = shell_call(&cmd);
+                let mut files = shell_named_files(&cmd);
+                for c in &cmds {
+                    for f in shell_named_files(c) {
+                        if !files.contains(&f) {
+                            files.push(f);
+                        }
+                    }
+                }
                 if !files.is_empty() {
-                    self.pending.insert(id, PendingTool::Shell { files });
+                    self.pending.insert(id, shell_pending(files, cmds, workdir));
                 }
             }
             Some("function_call_output") | Some("custom_tool_call_output") => {
                 if let Some(pend) = self.pending.remove(&id) {
                     let text = p.output.as_ref().map(|c| c.text()).unwrap_or_default();
                     let before = self.reads.len();
-                    credit_result(&pend, &text, at_ms, &mut self.reads);
+                    credit_result(&pend, &text, at_ms, self.cwd.as_deref(), &mut self.reads);
                     key_reads(&mut self.reads[before..], &id);
                 }
             }
@@ -1147,6 +1697,7 @@ impl CodexParser {
             last_total: st.last_total,
             model: st.model.clone(),
             line_no: st.line_no,
+            cwd: st.cwd.clone(),
             ..Default::default()
         }
     }
@@ -1165,6 +1716,7 @@ impl CodexParser {
             last_total: self.last_total,
             model: self.model.clone(),
             line_no: self.line_no,
+            cwd: self.cwd.clone(),
         }
     }
 
@@ -1877,17 +2429,269 @@ pub fn test_share(lines: &[(u32, u32)], spans: &[(u32, u32)]) -> (u64, u64) {
     (n, bytes)
 }
 
-/// Where the report gets lib.rs's test spans for a call's time.
+/// `src-tauri/src/lib.rs` as it stood at one commit, set against the file at
+/// HEAD.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CommitView {
+    /// Lines in the file at that commit.
+    pub len: u32,
+    hunks: Vec<Hunk>,
+}
+
+/// One `git diff -U0` hunk: `old_count` lines at `old_start` became `new_count`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Hunk {
+    old_start: u32,
+    old_count: u32,
+    new_count: u32,
+}
+
+impl Hunk {
+    /// The first old line the hunk's shift applies to.
+    fn after(&self) -> u32 {
+        if self.old_count > 0 {
+            self.old_start + self.old_count
+        } else {
+            self.old_start + 1
+        }
+    }
+}
+
+impl CommitView {
+    /// From the old file's length and the text of
+    /// `git diff -U0 <commit> HEAD -- <file>`.
+    pub fn from_diff(len: u32, diff: &str) -> Self {
+        let mut hunks = Vec::new();
+        for l in diff.lines() {
+            let Some(rest) = l.strip_prefix("@@ -") else {
+                continue;
+            };
+            let Some((old, rest)) = rest.split_once(" +") else {
+                continue;
+            };
+            let Some((new, _)) = rest.split_once(" @@") else {
+                continue;
+            };
+            let pair = |t: &str| -> Option<(u32, u32)> {
+                match t.split_once(',') {
+                    Some((a, b)) => Some((a.parse().ok()?, b.parse().ok()?)),
+                    None => Some((t.parse().ok()?, 1)),
+                }
+            };
+            if let (Some((os, oc)), Some((_, nc))) = (pair(old), pair(new)) {
+                hunks.push(Hunk {
+                    old_start: os,
+                    old_count: oc,
+                    new_count: nc,
+                });
+            }
+        }
+        hunks.sort_by_key(|h| h.old_start);
+        CommitView { len, hunks }
+    }
+
+    /// The hunks as 12 bytes each, for the map store.
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.hunks.len() * 12);
+        for h in &self.hunks {
+            for n in [h.old_start, h.old_count, h.new_count] {
+                out.extend_from_slice(&n.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    fn decode(len: u32, bytes: &[u8]) -> Option<Self> {
+        if bytes.len() % 12 != 0 {
+            return None;
+        }
+        let n = |c: &[u8]| u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        let hunks = bytes
+            .chunks_exact(12)
+            .map(|c| Hunk {
+                old_start: n(&c[0..4]),
+                old_count: n(&c[4..8]),
+                new_count: n(&c[8..12]),
+            })
+            .collect();
+        Some(CommitView { len, hunks })
+    }
+
+    /// Where old line `line` is in the file now: None when the diff deleted
+    /// or rewrote it.
+    #[cfg(test)]
+    pub fn map(&self, line: u32) -> Option<u32> {
+        let k = self.hunks.partition_point(|h| h.old_start <= line);
+        if k > 0 {
+            let h = self.hunks[k - 1];
+            if h.old_count > 0 && line < h.old_start + h.old_count {
+                return None;
+            }
+        }
+        let n = self.hunks.partition_point(|h| h.after() <= line);
+        let shift: i64 = self.hunks[..n]
+            .iter()
+            .map(|h| h.new_count as i64 - h.old_count as i64)
+            .sum();
+        u32::try_from(line as i64 + shift).ok().filter(|l| *l >= 1)
+    }
+
+    /// `map` over the inclusive range `a..=b`, in order, in one sweep.
+    pub fn map_range(&self, a: u32, b: u32, mut f: impl FnMut(Option<u32>)) {
+        let mut shift: i64 = 0;
+        let mut n = 0;
+        while n < self.hunks.len() && self.hunks[n].after() <= a {
+            shift += self.hunks[n].new_count as i64 - self.hunks[n].old_count as i64;
+            n += 1;
+        }
+        let mut k = self.hunks.partition_point(|h| h.old_start <= a);
+        for line in a..=b {
+            while k < self.hunks.len() && self.hunks[k].old_start <= line {
+                k += 1;
+            }
+            while n < self.hunks.len() && self.hunks[n].after() <= line {
+                shift += self.hunks[n].new_count as i64 - self.hunks[n].old_count as i64;
+                n += 1;
+            }
+            let inside = k > 0 && {
+                let h = self.hunks[k - 1];
+                h.old_count > 0 && line < h.old_start + h.old_count
+            };
+            f(if inside {
+                None
+            } else {
+                u32::try_from(line as i64 + shift).ok().filter(|l| *l >= 1)
+            });
+        }
+    }
+}
+
+/// Where the report gets lib.rs's test spans, and its lines, for a call's time.
 pub trait SpanSource {
     fn spans_at(&mut self, at_ms: i64) -> Option<Arc<Vec<(u32, u32)>>>;
+    /// The file at the commit current at `at_ms`, mapped onto the file at HEAD.
+    fn view_at(&mut self, _at_ms: i64) -> Option<Arc<CommitView>> {
+        None
+    }
+    /// Get ready for views at these times (the git calls run together).
+    fn warm(&mut self, _times: &[i64]) {}
+}
+
+/// Line maps kept between runs, in a small database beside the ledger. A row
+/// is one commit's file set against one HEAD blob; a new HEAD blob drops the
+/// old rows. Deleting the file costs only the time to compute them again.
+pub struct MapStore {
+    conn: rusqlite::Connection,
+}
+
+impl MapStore {
+    pub fn open(path: &Path) -> Option<MapStore> {
+        let conn = rusqlite::Connection::open(path).ok()?;
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS line_maps (
+                head_blob TEXT NOT NULL, sha TEXT NOT NULL,
+                len INTEGER NOT NULL, hunks BLOB NOT NULL,
+                PRIMARY KEY (head_blob, sha)
+             );",
+        )
+        .ok()?;
+        Some(MapStore { conn })
+    }
+
+    fn forget_other_heads(&self, head_blob: &str) {
+        let _ = self
+            .conn
+            .execute("DELETE FROM line_maps WHERE head_blob != ?1", [head_blob]);
+    }
+
+    fn get(&self, head_blob: &str, sha: &str) -> Option<CommitView> {
+        self.conn
+            .query_row(
+                "SELECT len, hunks FROM line_maps WHERE head_blob = ?1 AND sha = ?2",
+                [head_blob, sha],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .ok()
+            .and_then(|(len, b)| CommitView::decode(len as u32, &b))
+    }
+
+    fn put(&mut self, head_blob: &str, rows: &[(String, Arc<CommitView>)]) {
+        let Ok(tx) = self.conn.transaction() else {
+            return;
+        };
+        for (sha, v) in rows {
+            let _ = tx.execute(
+                "INSERT OR REPLACE INTO line_maps (head_blob, sha, len, hunks) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![head_blob, sha, v.len as i64, v.encode()],
+            );
+        }
+        let _ = tx.commit();
+    }
 }
 
 /// The spans of `src-tauri/src/lib.rs` at the last commit at or before the
-/// call, from git; spans are computed once per commit.
+/// call, and its lines against HEAD, from git; each is computed once per
+/// commit.
 pub struct GitSpans {
     root: PathBuf,
     commits: Option<Vec<(String, i64)>>,
-    cache: HashMap<String, Arc<Vec<(u32, u32)>>>,
+    views: HashMap<String, Option<Arc<CommitView>>>,
+    spans: HashMap<String, Option<Arc<Vec<(u32, u32)>>>>,
+    store: Option<MapStore>,
+    head_blob: Option<Option<String>>,
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// Lines in a file's bytes, as `str::lines` counts them.
+fn count_lines(b: &[u8]) -> u32 {
+    let nl = b.iter().filter(|c| **c == b'\n').count();
+    (nl + usize::from(!b.is_empty() && b.last() != Some(&b'\n'))) as u32
+}
+
+/// The file at `sha` against HEAD.
+fn commit_view(root: &Path, sha: &str) -> Option<CommitView> {
+    let blob = git_output(root, &["show", &format!("{sha}:{LIB_RS}")])?;
+    let diff = git_output(
+        root,
+        &[
+            "diff",
+            "-U0",
+            "--no-color",
+            "--no-ext-diff",
+            sha,
+            "HEAD",
+            "--",
+            LIB_RS,
+        ],
+    )
+    .unwrap_or_default();
+    Some(CommitView::from_diff(
+        count_lines(&blob),
+        &String::from_utf8_lossy(&diff),
+    ))
+}
+
+/// `src-tauri/src/lib.rs` as committed at HEAD, as the count the coverage is
+/// measured against.
+pub fn lib_rs_at_head(root: &Path) -> Option<LibRsNow> {
+    let blob = git_output(root, &["show", &format!("HEAD:{LIB_RS}")])?;
+    let text = String::from_utf8_lossy(&blob).into_owned();
+    let spans = test_spans(&text);
+    Some(LibRsNow {
+        lines: text.lines().count() as u64,
+        test_lines: spans.iter().map(|(s, e)| (e - s + 1) as u64).sum(),
+        test_spans: spans.len(),
+        source: Some(Arc::new(text)),
+    })
 }
 
 impl GitSpans {
@@ -1895,25 +2699,23 @@ impl GitSpans {
         GitSpans {
             root: root.to_path_buf(),
             commits: None,
-            cache: HashMap::new(),
+            views: HashMap::new(),
+            spans: HashMap::new(),
+            store: None,
+            head_blob: None,
         }
     }
 
-    fn git(&self, args: &[&str]) -> Option<Vec<u8>> {
-        let out = std::process::Command::new("git")
-            .current_dir(&self.root)
-            .args(args)
-            .output()
-            .ok()?;
-        out.status.success().then_some(out.stdout)
+    /// Keep line maps between runs in the database at `path`.
+    pub fn with_store(mut self, path: &Path) -> Self {
+        self.store = MapStore::open(path);
+        self
     }
-}
 
-impl SpanSource for GitSpans {
-    fn spans_at(&mut self, at_ms: i64) -> Option<Arc<Vec<(u32, u32)>>> {
+    /// The last commit touching lib.rs at or before the time.
+    fn sha_at(&mut self, at_ms: i64) -> Option<String> {
         if self.commits.is_none() {
-            let log = self
-                .git(&["log", "--format=%H %ct", "--", LIB_RS])
+            let log = git_output(&self.root, &["log", "--format=%H %ct", "--", LIB_RS])
                 .unwrap_or_default();
             let list = String::from_utf8_lossy(&log)
                 .lines()
@@ -1925,19 +2727,94 @@ impl SpanSource for GitSpans {
             self.commits = Some(list);
         }
         // Newest first: the first commit at or before the call.
-        let sha = self
-            .commits
+        self.commits
             .as_ref()?
             .iter()
             .find(|(_, ct)| ct * 1000 <= at_ms)
-            .map(|(s, _)| s.clone())?;
-        if let Some(s) = self.cache.get(&sha) {
-            return Some(s.clone());
+            .map(|(s, _)| s.clone())
+    }
+
+    fn head_blob(&mut self) -> Option<String> {
+        if self.head_blob.is_none() {
+            let id = git_output(&self.root, &["rev-parse", &format!("HEAD:{LIB_RS}")])
+                .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+                .filter(|s| !s.is_empty());
+            self.head_blob = Some(id);
         }
-        let blob = self.git(&["show", &format!("{sha}:{LIB_RS}")])?;
-        let spans = Arc::new(test_spans(&String::from_utf8_lossy(&blob)));
-        self.cache.insert(sha, spans.clone());
-        Some(spans)
+        self.head_blob.clone().flatten()
+    }
+}
+
+impl SpanSource for GitSpans {
+    fn spans_at(&mut self, at_ms: i64) -> Option<Arc<Vec<(u32, u32)>>> {
+        let sha = self.sha_at(at_ms)?;
+        if let Some(v) = self.spans.get(&sha) {
+            return v.clone();
+        }
+        let blob = git_output(&self.root, &["show", &format!("{sha}:{LIB_RS}")]);
+        let v = blob.map(|b| Arc::new(test_spans(&String::from_utf8_lossy(&b))));
+        self.spans.insert(sha, v.clone());
+        v
+    }
+
+    fn view_at(&mut self, at_ms: i64) -> Option<Arc<CommitView>> {
+        let sha = self.sha_at(at_ms)?;
+        if let Some(v) = self.views.get(&sha) {
+            return v.clone();
+        }
+        let v = commit_view(&self.root, &sha).map(Arc::new);
+        self.views.insert(sha, v.clone());
+        v
+    }
+
+    fn warm(&mut self, times: &[i64]) {
+        let mut shas: Vec<String> = times.iter().filter_map(|t| self.sha_at(*t)).collect();
+        shas.sort();
+        shas.dedup();
+        shas.retain(|s| !self.views.contains_key(s));
+        if shas.is_empty() {
+            return;
+        }
+        let head = self.head_blob();
+        if let (Some(store), Some(head)) = (self.store.as_ref(), head.as_ref()) {
+            store.forget_other_heads(head);
+            for sha in &shas {
+                if let Some(v) = store.get(head, sha) {
+                    self.views.insert(sha.clone(), Some(Arc::new(v)));
+                }
+            }
+            shas.retain(|s| !self.views.contains_key(s));
+        }
+        if shas.is_empty() {
+            return;
+        }
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 8);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let done: Mutex<Vec<(String, Option<Arc<CommitView>>)>> = Mutex::new(Vec::new());
+        std::thread::scope(|sc| {
+            for _ in 0..workers {
+                sc.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(sha) = shas.get(i) else { break };
+                    let v = commit_view(&self.root, sha).map(Arc::new);
+                    if let Ok(mut d) = done.lock() {
+                        d.push((sha.clone(), v));
+                    }
+                });
+            }
+        });
+        let done = done.into_inner().unwrap_or_default();
+        if let (Some(head), Some(store)) = (head.as_ref(), self.store.as_mut()) {
+            let rows: Vec<(String, Arc<CommitView>)> = done
+                .iter()
+                .filter_map(|(s, v)| v.clone().map(|v| (s.clone(), v)))
+                .collect();
+            store.put(head, &rows);
+        }
+        self.views.extend(done);
     }
 }
 
@@ -2260,6 +3137,8 @@ pub struct FileRow {
     pub sessions: u64,
     /// The most bytes any one session (main plus subagents) read of it.
     pub max_session_bytes: u64,
+    /// Shell commands that read the file (their bytes are `via_shell_bytes`).
+    pub shell_reads: u64,
 }
 
 /// First and last model call the report covers.
@@ -2283,6 +3162,116 @@ pub struct LibRsNow {
     pub lines: u64,
     pub test_lines: u64,
     pub test_spans: usize,
+    /// The file's text, for the coverage regions; not part of the JSON.
+    #[serde(skip)]
+    pub source: Option<Arc<String>>,
+}
+
+/// Reads whose file is not in this project's checkout: another worktree, a
+/// path outside the root, or a spelling that can't be resolved.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elsewhere {
+    pub reads: u64,
+    pub shell_reads: u64,
+    pub bytes: u64,
+    pub via_shell_bytes: u64,
+    pub paths: usize,
+}
+
+/// What a provider's reads and calls cover, so each figure can name its dates.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRange {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calls: Option<CallRange>,
+    /// The Read and Grep tools (Claude only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_tool: Option<CallRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<CallRange>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinesShare {
+    pub lines: u64,
+    pub of: u64,
+    pub share: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionFn {
+    pub name: String,
+    pub line_reads: u64,
+}
+
+/// One of the busiest 200-line stretches.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Region {
+    pub from_line: u32,
+    pub to_line: u32,
+    pub line_reads: u64,
+    pub distinct_lines: u64,
+    pub top_fns: Vec<RegionFn>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    pub test: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadToolCover {
+    /// Read and content-Grep results for the file.
+    pub reads: u64,
+    /// Of those, how many returned numbered lines.
+    pub with_lines: u64,
+    pub distinct: LinesShare,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<CallRange>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCover {
+    pub reads: u64,
+    /// Reads whose command says which lines it returned.
+    pub placed: u64,
+    pub unplaced: u64,
+    pub placed_bytes: u64,
+    pub unplaced_bytes: u64,
+    pub distinct: LinesShare,
+    /// First and last shell read, by provider.
+    pub ranges: BTreeMap<String, CallRange>,
+}
+
+/// How much of a file the agents ever read, by line number mapped onto the
+/// file now.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Coverage {
+    pub path: String,
+    pub file_lines: u64,
+    pub read_tool: ReadToolCover,
+    pub shell: ShellCover,
+    /// Read by either way.
+    pub combined: LinesShare,
+    /// Read both ways.
+    pub both: LinesShare,
+    /// Line readings that landed on a line of the file now.
+    pub line_reads: u64,
+    pub reads_per_line: f64,
+    /// Lines read three or more times.
+    pub read_3_plus: u64,
+    /// Line readings the diff to now deleted or rewrote.
+    pub since_changed_line_reads: u64,
+    /// Line readings with no commit to map from.
+    pub unmapped_line_reads: u64,
+    pub test: LinesShare,
+    pub non_test: LinesShare,
+    pub regions: Vec<Region>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2297,8 +3286,15 @@ pub struct Report {
     pub files_total: usize,
     /// First and last call covered; null when there were none.
     pub range: Option<CallRange>,
+    /// Per provider: the dates of its calls, Read-tool reads and shell reads.
+    pub provider_ranges: BTreeMap<String, ProviderRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lib_rs_now: Option<LibRsNow>,
+    pub coverage: Vec<Coverage>,
+    pub elsewhere: Elsewhere,
+    /// Relative paths read in a session with no recorded folder, taken as the
+    /// project's.
+    pub cwd_unknown_reads: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calls: Option<Vec<CallReading>>,
     pub ms: u128,
@@ -2318,6 +3314,11 @@ pub struct ReportInput<'a> {
     pub native_samples: Vec<NativeSample>,
     /// Bytes of Bram's seeded conventions the project loads, per provider.
     pub conventions_bytes: BTreeMap<String, u64>,
+    /// The user's home folder, to expand `~` in a read's path.
+    pub home: Option<String>,
+    /// `lib.rs` at HEAD, the file the coverage is measured against; without
+    /// it the `lib_rs_now` argument is used.
+    pub coverage_now: Option<LibRsNow>,
 }
 
 /// Nearest-rank percentile of an ascending slice: the value at rank
@@ -2356,6 +3357,387 @@ fn normalize_path(path: &str, root: &str) -> String {
     p.strip_prefix("./").unwrap_or(p).to_string()
 }
 
+/// `a/./b/../c` as `a/c`; the leading `/` is kept.
+fn clean_path(p: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    let joined = out.join("/");
+    if p.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Resolved {
+    Project(String),
+    Elsewhere,
+}
+
+/// A read's path as the project's relative path, or `Elsewhere`. `~` expands
+/// to `home`; a relative path is taken from the session's folder `cwd`. With
+/// no folder recorded it is taken from the root, and the second value says so.
+/// A diff-prefixed spelling (`a/src-tauri/...`) that isn't a folder here is
+/// not guessed at.
+fn resolve_read_path(
+    raw: &str,
+    cwd: Option<&str>,
+    root: &str,
+    home: Option<&str>,
+) -> (Resolved, bool) {
+    if raw.contains('\\') || root.contains('\\') {
+        return (Resolved::Project(normalize_path(raw, root)), false);
+    }
+    let mut p = raw.to_string();
+    if let Some(h) = home {
+        if p == "~" || p.starts_with("~/") {
+            p = format!("{}{}", h.trim_end_matches('/'), &p[1..]);
+        }
+    }
+    let mut unknown = false;
+    if !p.starts_with('/') {
+        let first = p.split('/').next().unwrap_or("");
+        if matches!(first, "a" | "b") && p.contains('/') && !Path::new(root).join(first).exists() {
+            return (Resolved::Elsewhere, false);
+        }
+        p = match cwd {
+            Some(c) => format!("{}/{}", c.trim_end_matches('/'), p),
+            None => {
+                unknown = true;
+                format!("{}/{}", root.trim_end_matches('/'), p)
+            }
+        };
+    }
+    let p = clean_path(&p);
+    let root = clean_path(root);
+    let prefix = format!("{}/", root.trim_end_matches('/'));
+    match p.strip_prefix(&prefix) {
+        Some(rel) if !rel.is_empty() => (Resolved::Project(rel.to_string()), unknown),
+        _ => (Resolved::Elsewhere, false),
+    }
+}
+
+/// Stretch a range to take in `t`.
+fn widen(slot: &mut Option<CallRange>, t: i64) {
+    *slot = Some(match slot.take() {
+        Some(r) => CallRange {
+            from_ms: r.from_ms.min(t),
+            to_ms: r.to_ms.max(t),
+        },
+        None => CallRange {
+            from_ms: t,
+            to_ms: t,
+        },
+    });
+}
+
+/// One read of `lib.rs`, kept for the coverage count.
+struct LibEvent {
+    at_ms: i64,
+    provider: &'static str,
+    via_shell: bool,
+    bytes: u64,
+    /// (line number, bytes) a Read or content Grep returned.
+    lines: Vec<(u32, u32)>,
+    /// What a shell command returned.
+    spec: Option<LineSpec>,
+}
+
+const REGION_LINES: usize = 200;
+const REGIONS: usize = 10;
+
+/// A `fn` or `mod` of the file now: name and the lines it spans.
+struct CodeItem {
+    name: String,
+    start: usize,
+    end: usize,
+}
+
+/// The name after `fn` or `mod` on a line that declares one.
+fn item_head(trimmed: &str) -> Option<(bool, String)> {
+    let mut words = trimmed.split_whitespace().peekable();
+    while let Some(w) = words.peek() {
+        let skip = matches!(
+            *w,
+            "pub" | "async" | "const" | "unsafe" | "extern" | "default"
+        ) || w.starts_with("pub(")
+            || w.starts_with('"');
+        if !skip {
+            break;
+        }
+        words.next();
+    }
+    let kw = words.next()?;
+    let is_fn = match kw {
+        "fn" => true,
+        "mod" => false,
+        _ => return None,
+    };
+    let name: String = words
+        .next()?
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some((is_fn, name))
+}
+
+/// The functions and modules of Rust source with the lines they span,
+/// found by indentation: an item ends at the first line that is a lone `}`
+/// at its own indent.
+fn code_items(src: &str) -> (Vec<CodeItem>, Vec<CodeItem>) {
+    let lines: Vec<&str> = src.lines().collect();
+    let (mut fns, mut mods) = (Vec::new(), Vec::new());
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim_start();
+        let Some((is_fn, name)) = item_head(t) else {
+            continue;
+        };
+        let indent = l.len() - t.len();
+        let mut end = None;
+        if t.ends_with(';') {
+            // A bodiless `mod name;` declares a file module elsewhere: it
+            // encloses nothing here, so it is not a region's module.
+            if !is_fn {
+                continue;
+            }
+            end = Some(i);
+        } else if t.ends_with('}') && t.contains('{') {
+            end = Some(i);
+        } else {
+            let cap = if is_fn { 6000 } else { lines.len() };
+            for (j, m) in lines.iter().enumerate().skip(i + 1).take(cap) {
+                let mt = m.trim_start();
+                if m.len() - mt.len() == indent && mt.starts_with('}') {
+                    end = Some(j);
+                    break;
+                }
+            }
+        }
+        let Some(end) = end else { continue };
+        let item = CodeItem {
+            name,
+            start: i + 1,
+            end: end + 1,
+        };
+        if is_fn {
+            fns.push(item);
+        } else {
+            mods.push(item);
+        }
+    }
+    (fns, mods)
+}
+
+/// Which item (index + 1, 0 for none) each line, 1-based, falls in; an inner
+/// item wins over the one around it.
+fn owners(items: &[CodeItem], lines: usize) -> Vec<u32> {
+    let mut own = vec![0u32; lines + 2];
+    for (k, it) in items.iter().enumerate() {
+        for l in it.start..=it.end.min(lines) {
+            own[l] = k as u32 + 1;
+        }
+    }
+    own
+}
+
+/// How much of today's `lib.rs` the agents read, by line.
+fn lib_coverage(
+    events: &[LibEvent],
+    spans: &mut dyn SpanSource,
+    now: &LibRsNow,
+) -> Option<Coverage> {
+    let n = now.lines as usize;
+    if n == 0 {
+        return None;
+    }
+    let times: Vec<i64> = events.iter().map(|e| e.at_ms).collect();
+    spans.warm(&times);
+    let mut hits = vec![0u32; n + 2];
+    let mut by_read = vec![false; n + 2];
+    let mut by_shell = vec![false; n + 2];
+    let mut out = Coverage {
+        path: LIB_RS.to_string(),
+        file_lines: now.lines,
+        ..Default::default()
+    };
+    for ev in events {
+        let view = spans.view_at(ev.at_ms);
+        let mut mark = |old: Option<u32>, hits: &mut Vec<u32>, flag: &mut Vec<bool>| match old {
+            Some(l) if (l as usize) <= n => {
+                hits[l as usize] = hits[l as usize].saturating_add(1);
+                flag[l as usize] = true;
+                out.line_reads += 1;
+            }
+            _ => out.since_changed_line_reads += 1,
+        };
+        // Line ranges (old numbering) this read returned.
+        let ranges: Vec<(u32, u32)> = if ev.via_shell {
+            out.shell.reads += 1;
+            match &ev.spec {
+                Some(spec) => {
+                    out.shell.placed += 1;
+                    out.shell.placed_bytes += ev.bytes;
+                    spec.ranges(view.as_ref().map(|v| v.len))
+                }
+                None => {
+                    out.shell.unplaced += 1;
+                    out.shell.unplaced_bytes += ev.bytes;
+                    Vec::new()
+                }
+            }
+        } else {
+            out.read_tool.reads += 1;
+            if !ev.lines.is_empty() {
+                out.read_tool.with_lines += 1;
+            }
+            ev.lines.iter().map(|&(l, _)| (l, l)).collect()
+        };
+        let slot = if ev.via_shell {
+            Some(
+                out.shell
+                    .ranges
+                    .entry(ev.provider.to_string())
+                    .or_insert(CallRange {
+                        from_ms: ev.at_ms,
+                        to_ms: ev.at_ms,
+                    }),
+            )
+        } else {
+            None
+        };
+        if let Some(r) = slot {
+            r.from_ms = r.from_ms.min(ev.at_ms);
+            r.to_ms = r.to_ms.max(ev.at_ms);
+        } else {
+            widen(&mut out.read_tool.range, ev.at_ms);
+        }
+        let flag = if ev.via_shell {
+            &mut by_shell
+        } else {
+            &mut by_read
+        };
+        for (a, b) in ranges {
+            match &view {
+                Some(v) => v.map_range(a, b, |m| mark(m, &mut hits, flag)),
+                // No commit to map from: the readings can't be placed.
+                None if b == u32::MAX => {}
+                None => out.unmapped_line_reads += (b - a + 1) as u64,
+            }
+        }
+    }
+    let share = |lines: u64| LinesShare {
+        lines,
+        of: now.lines,
+        share: round4(lines as f64 / now.lines as f64),
+    };
+    let count = |f: &dyn Fn(usize) -> bool| (1..=n).filter(|&l| f(l)).count() as u64;
+    out.read_tool.distinct = share(count(&|l| by_read[l]));
+    out.shell.distinct = share(count(&|l| by_shell[l]));
+    out.combined = share(count(&|l| by_read[l] || by_shell[l]));
+    out.both = share(count(&|l| by_read[l] && by_shell[l]));
+    out.read_3_plus = count(&|l| hits[l] >= 3);
+    out.reads_per_line = if out.combined.lines > 0 {
+        round4(out.line_reads as f64 / out.combined.lines as f64)
+    } else {
+        0.0
+    };
+    // Test code against the rest, by today's spans.
+    let text = now.source.as_deref().map(String::as_str).unwrap_or("");
+    let spans_now = test_spans(text);
+    let mut is_test = vec![false; n + 2];
+    for (s, e) in &spans_now {
+        for l in (*s as usize)..=(*e as usize).min(n) {
+            is_test[l] = true;
+        }
+    }
+    let test_total = count(&|l| is_test[l]);
+    let test_read = count(&|l| is_test[l] && (by_read[l] || by_shell[l]));
+    let non_total = now.lines.saturating_sub(test_total);
+    let non_read = out.combined.lines.saturating_sub(test_read);
+    out.test = LinesShare {
+        lines: test_read,
+        of: test_total,
+        share: round4(test_read as f64 / test_total.max(1) as f64),
+    };
+    out.non_test = LinesShare {
+        lines: non_read,
+        of: non_total,
+        share: round4(non_read as f64 / non_total.max(1) as f64),
+    };
+    // The busiest stretches, greedily, none overlapping.
+    let mut pre = vec![0u64; n + 2];
+    for l in 1..=n {
+        pre[l] = pre[l - 1] + hits[l] as u64;
+    }
+    let (fns, mods) = code_items(text);
+    let (fn_own, mod_own) = (owners(&fns, n), owners(&mods, n));
+    let width = REGION_LINES.min(n);
+    let mut taken = vec![false; n + 2];
+    for _ in 0..REGIONS {
+        let mut best: Option<(u64, usize)> = None;
+        for s in 1..=(n + 1 - width) {
+            let e = s + width - 1;
+            if taken[s] || taken[e] {
+                continue;
+            }
+            let sum = pre[e] - pre[s - 1];
+            if sum > 0 && best.map_or(true, |(b, _)| sum > b) {
+                best = Some((sum, s));
+            }
+        }
+        let Some((sum, s)) = best else { break };
+        let e = s + width - 1;
+        for t in s.saturating_sub(width - 1).max(1)..=e {
+            taken[t] = true;
+        }
+        let mut per_fn: HashMap<u32, u64> = HashMap::new();
+        let mut per_mod: HashMap<u32, u64> = HashMap::new();
+        for l in s..=e {
+            if fn_own[l] > 0 {
+                *per_fn.entry(fn_own[l]).or_default() += hits[l] as u64;
+            }
+            if mod_own[l] > 0 {
+                *per_mod.entry(mod_own[l]).or_default() += hits[l] as u64;
+            }
+        }
+        let mut top: Vec<(u32, u64)> = per_fn.into_iter().filter(|(_, h)| *h > 0).collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        // Name a module only when it holds most of the stretch's readings;
+        // a stretch that merely runs into one is not "in" it.
+        let module = per_mod
+            .into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+            .filter(|(_, h)| h * 2 > sum)
+            .map(|(k, _)| mods[k as usize - 1].name.clone());
+        out.regions.push(Region {
+            from_line: s as u32,
+            to_line: e as u32,
+            line_reads: sum,
+            distinct_lines: (s..=e).filter(|&l| hits[l] > 0).count() as u64,
+            top_fns: top
+                .into_iter()
+                .take(3)
+                .map(|(k, h)| RegionFn {
+                    name: fns[k as usize - 1].name.clone(),
+                    line_reads: h,
+                })
+                .collect(),
+            module,
+            test: is_test[s] && is_test[e],
+        });
+    }
+    Some(out)
+}
+
 pub fn build_report(
     input: ReportInput,
     spans: &mut dyn SpanSource,
@@ -2377,6 +3759,11 @@ pub fn build_report(
     let mut range: Option<CallRange> = None;
     let mut model_acc: HashMap<(String, String), ModelAcc> = HashMap::new();
     let mut stored_attribution = false;
+    let mut provider_ranges: BTreeMap<String, ProviderRange> = BTreeMap::new();
+    let mut elsewhere = Elsewhere::default();
+    let mut elsewhere_paths: std::collections::HashSet<String> = Default::default();
+    let mut cwd_unknown_reads = 0u64;
+    let mut lib_events: Vec<LibEvent> = Vec::new();
 
     for pf in &input.files {
         let Some(thread) = pf.thread else { continue };
@@ -2388,13 +3775,46 @@ pub fn build_report(
         let calls: Vec<&RawCall> = pf.calls.iter().filter(|c| c.at_ms >= since).collect();
         // Reads are credited whether or not the session made calls in range.
         for r in pf.reads.iter().filter(|r| r.at_ms >= since) {
-            let path = normalize_path(&r.path, input.root);
+            let pr = provider_ranges.entry(pf.provider.to_string()).or_default();
+            let slot = if r.via_shell {
+                &mut pr.shell
+            } else {
+                &mut pr.read_tool
+            };
+            widen(slot, r.at_ms);
+            let (resolved, unknown) =
+                resolve_read_path(&r.path, r.cwd.as_deref(), input.root, input.home.as_deref());
+            let Resolved::Project(path) = resolved else {
+                if r.via_shell {
+                    elsewhere.shell_reads += 1;
+                    elsewhere.via_shell_bytes += r.bytes;
+                } else {
+                    elsewhere.reads += 1;
+                    elsewhere.bytes += r.bytes;
+                }
+                elsewhere_paths.insert(r.path.clone());
+                continue;
+            };
+            if unknown {
+                cwd_unknown_reads += 1;
+            }
             let e = file_aggs.entry(path.clone()).or_insert_with(|| FileRow {
                 path: path.clone(),
                 ..Default::default()
             });
+            if path == LIB_RS {
+                lib_events.push(LibEvent {
+                    at_ms: r.at_ms,
+                    provider: pf.provider,
+                    via_shell: r.via_shell,
+                    bytes: r.bytes,
+                    lines: r.lines.clone(),
+                    spec: r.shell_lines.clone(),
+                });
+            }
             if r.via_shell {
                 e.via_shell_bytes += r.bytes;
+                e.shell_reads += 1;
             } else {
                 e.reads += 1;
                 e.bytes += r.bytes;
@@ -2426,6 +3846,20 @@ pub fn build_report(
         }
         let lo = calls.iter().map(|c| c.at_ms).min().unwrap_or(0);
         let hi = calls.iter().map(|c| c.at_ms).max().unwrap_or(0);
+        widen(
+            &mut provider_ranges
+                .entry(pf.provider.to_string())
+                .or_default()
+                .calls,
+            lo,
+        );
+        widen(
+            &mut provider_ranges
+                .entry(pf.provider.to_string())
+                .or_default()
+                .calls,
+            hi,
+        );
         range = Some(match range {
             Some(r) => CallRange {
                 from_ms: r.from_ms.min(lo),
@@ -2595,6 +4029,15 @@ pub fn build_report(
             .map(|m| m.len());
     }
 
+    elsewhere.paths = elsewhere_paths.len();
+    let coverage: Vec<Coverage> = input
+        .coverage_now
+        .as_ref()
+        .or(lib_rs_now.as_ref())
+        .and_then(|now| lib_coverage(&lib_events, spans, now))
+        .into_iter()
+        .collect();
+
     Report {
         root: input.root.to_string(),
         providers,
@@ -2617,7 +4060,11 @@ pub fn build_report(
         files,
         files_total,
         range,
+        provider_ranges,
         lib_rs_now,
+        coverage,
+        elsewhere,
+        cwd_unknown_reads,
         calls: input.include_calls.then_some(readings),
         ms: started.elapsed().as_millis(),
     }
@@ -3014,7 +4461,7 @@ pub fn conventions_bytes(root: &Path) -> BTreeMap<String, u64> {
 //   them (see `stamp_cutoff`).
 
 /// 2: Codex call keys became `<ordinal>:<at_ms>`; `open` rewrites v1 rows.
-pub const LEDGER_VERSION: i64 = 2;
+pub const LEDGER_VERSION: i64 = 3;
 const ATTRIBUTION_SETTLE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3271,6 +4718,7 @@ impl Ledger {
                 provider TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,
                 path TEXT NOT NULL, at_ms INTEGER NOT NULL, bytes INTEGER NOT NULL,
                 via_shell INTEGER NOT NULL, lines TEXT,
+                cwd TEXT, shell_lines TEXT,
                 UNIQUE (source_key, read_key)
              );",
         )
@@ -3283,6 +4731,25 @@ impl Ledger {
                 let _ = conn.execute(
                     "UPDATE calls SET call_key = call_key || ':' || at_ms \
                      WHERE provider = 'codex' AND instr(call_key, ':') = 0",
+                    [],
+                );
+            }
+            if version < 3 {
+                // v3 stores where each read ran (to resolve a relative path)
+                // and which lines a shell read returned. Rows already stored
+                // lack both, and the transcripts still hold them, so read
+                // every Claude and Codex transcript again from the start, once:
+                // reads are upserted on their keys, calls are unchanged, and
+                // the counters (unreadable lines, compactions) are recounted by
+                // the full pass. A transcript that is gone keeps its rows as
+                // they were: relative paths with no folder read as the
+                // project's.
+                let _ = conn.execute("ALTER TABLE reads ADD COLUMN cwd TEXT", []);
+                let _ = conn.execute("ALTER TABLE reads ADD COLUMN shell_lines TEXT", []);
+                let _ = conn.execute(
+                    "UPDATE sources SET read_to = 0, mtime_ms = -1, state = NULL, \
+                       unreadable = 0, compactions = 0 \
+                     WHERE provider IN ('claude', 'codex')",
                     [],
                 );
             }
@@ -3608,9 +5075,13 @@ impl Ledger {
         }
         {
             let Ok(mut ins) = tx.prepare_cached(
-                "INSERT OR IGNORE INTO reads (source_key, read_key, provider, session, thread, \
-                   path, at_ms, bytes, via_shell, lines) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                "INSERT INTO reads (source_key, read_key, provider, session, thread, \
+                   path, at_ms, bytes, via_shell, lines, cwd, shell_lines) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
+                 ON CONFLICT(source_key, read_key) DO UPDATE SET cwd=excluded.cwd, \
+                   shell_lines=excluded.shell_lines \
+                 WHERE reads.cwd IS NOT excluded.cwd \
+                   OR reads.shell_lines IS NOT excluded.shell_lines",
             ) else {
                 return;
             };
@@ -3630,6 +5101,10 @@ impl Ledger {
                         r.bytes as i64,
                         r.via_shell as i64,
                         lines,
+                        r.cwd,
+                        r.shell_lines
+                            .as_ref()
+                            .and_then(|l| serde_json::to_string(l).ok()),
                     ])
                     .unwrap_or(0);
                 stats.reads_inserted += n;
@@ -3766,11 +5241,12 @@ impl Ledger {
             }
         }
         if let Ok(mut stmt) = self.conn.prepare(
-            "SELECT source_key, read_key, path, at_ms, bytes, via_shell, lines \
-             FROM reads ORDER BY id",
+            "SELECT source_key, read_key, path, at_ms, bytes, via_shell, lines, cwd, \
+               shell_lines FROM reads ORDER BY id",
         ) {
             if let Ok(rows) = stmt.query_map([], |r| {
                 let lines: Option<String> = r.get(6)?;
+                let shell_lines: Option<String> = r.get(8)?;
                 Ok((
                     r.get::<_, String>(0)?,
                     ReadEvent {
@@ -3782,6 +5258,8 @@ impl Ledger {
                         lines: lines
                             .and_then(|l| serde_json::from_str(&l).ok())
                             .unwrap_or_default(),
+                        cwd: r.get(7)?,
+                        shell_lines: shell_lines.and_then(|l| serde_json::from_str(&l).ok()),
                     },
                 ))
             }) {
@@ -3919,6 +5397,7 @@ fn lib_rs_now(root: &Path) -> Option<LibRsNow> {
         lines: text.lines().count() as u64,
         test_lines,
         test_spans: spans.len(),
+        source: Some(Arc::new(text)),
     })
 }
 
@@ -4013,6 +5492,9 @@ pub fn run(
     let root_s = root.to_string_lossy().into_owned();
     let n_files = files.len();
     let mut spans = GitSpans::new(root);
+    if let Some(p) = ledger_path {
+        spans = spans.with_store(&p.with_extension("maps.db"));
+    }
     let mut report = build_report(
         ReportInput {
             root: &root_s,
@@ -4026,6 +5508,8 @@ pub fn run(
                 .map(|h| native_samples(&h))
                 .unwrap_or_default(),
             conventions_bytes: conventions_bytes(root),
+            home: crate::home_dir().map(|h| h.to_string_lossy().into_owned()),
+            coverage_now: lib_rs_at_head(root),
         },
         &mut spans,
         lib_rs_now(root),

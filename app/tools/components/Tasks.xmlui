@@ -189,6 +189,62 @@
       <Button size="xs" variant="outlined" label="{showAll ? 'Show fewer' : 'Show all'}"
         onClick="showAll = !showAll" />
     </HStack>
+
+    <!-- task-protocol-filter-sees-url-variables: the calls agents make to
+         Bram itself (search, advance an item, commit), clustered by route.
+         Same row, expansion (shared `expanded`, keys start with /__) and
+         Save as task as the list above. Hidden when empty. -->
+    <VStack when="{cands.loaded &amp;&amp; window.__bramTaskHasRoutes(cands.value)}" gap="$space-2">
+      <Heading level="h3">Bram's own routes</Heading>
+      <Text color="$textColor-secondary">Calls the agents make to Bram itself. Save one to give it a name.</Text>
+      <Items data="{window.__bramTaskRouteRows(cands.value, expanded)}">
+        <VStack gap="$space-1">
+          <HStack testId="task-route-row" gap="$space-3" verticalAlignment="center"
+            paddingHorizontal="$space-1">
+            <HStack width="*" gap="$space-2" verticalAlignment="center" cursor="pointer"
+              onClick="expanded = window.__bramToggleInArray(expanded, $item.key)">
+              <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(expanded, $item.key)}" />
+              <VStack width="*" gap="0">
+                <Text variant="code" breakMode="anywhere" value="{$item.key}" />
+                <Text when="{!!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" fontSize="$fontSize-sm"
+                  color="$textColor-secondary" breakMode="word" value="{window.__bramTaskSavedLine($item)}" />
+              </VStack>
+            </HStack>
+            <Text width="4rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{$item.runs}" />
+            <Text width="5rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{$item.sessions}" />
+            <Text width="9rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{($item.agents || []).join(', ')}" />
+            <Text width="6rem" cursor="pointer" onClick="expanded = window.__bramToggleInArray(expanded, $item.key)" value="{($item.spellings || []).length}" />
+            <HStack width="9rem" verticalAlignment="center">
+              <Button when="{!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" size="xs" variant="outlined"
+                label="Save as task" onClick="window.__bramSaveTaskTurn($item)" />
+              <Button when="{!!($item.savedAs &amp;&amp; $item.savedAs.length > 0)}" size="xs" variant="ghost"
+                label="View" tooltip="Open the Makefile at these saved tasks"
+                onClick="window.__bramTaskViewSaved($item)" />
+            </HStack>
+          </HStack>
+          <VStack when="{expanded.includes($item.key)}" paddingLeft="$space-5" gap="$space-1">
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+              value="{window.__bramTaskRowNote($item, cands.value)}" />
+            <Table when="{window.__bramTaskByNameRows($item, cands.value).length > 0}"
+              data="{window.__bramTaskByNameRows($item, cands.value)}" idKey="name">
+              <Column header="Saved task" width="2*">
+                <Text variant="code" fontSize="$fontSize-sm" value="{$item.name}" />
+              </Column>
+              <Column header="Runs by name" width="*" bindTo="runs" />
+              <Column header="Sessions" width="*" bindTo="sessions" />
+            </Table>
+            <Items data="{window.__bramTaskSpellings($item)}">
+              <HStack gap="$space-2" verticalAlignment="start">
+                <Text width="3.5rem" fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item.runs + '×'}" />
+                <Text width="*" variant="code" breakMode="anywhere" value="{$item.text}" />
+                <Text when="{!!$item.nowLine}" width="20rem" fontSize="$fontSize-sm"
+                  color="$textColor-secondary" breakMode="word" value="{$item.nowLine}" />
+              </HStack>
+            </Items>
+          </VStack>
+        </VStack>
+      </Items>
+    </VStack>
   </VStack>
   <Theme maxWidth-ModalDialog="50vw">
     <ModalDialog when="{!!infoKey}" title="{window.__bramTaskInfoTitle(infoKey)}" onClose="infoKey = ''">

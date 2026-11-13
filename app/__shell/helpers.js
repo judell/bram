@@ -18604,6 +18604,19 @@ window.__bramTaskVisibleRows = function (report, showAll, expanded) {
 window.__bramTaskAnyOpen = function (report, showAll, expanded) {
   return window.__bramTaskVisibleRows(report, showAll, expanded).length < window.__bramTaskRows(report, showAll).length;
 };
+// task-protocol-filter-sees-url-variables: the agents' calls to Bram's own
+// routes (report.bramRoutes, same row shape as candidates), ranked the same
+// way. All shown, no fold: the list is short. Like the candidate list, an
+// open row is shown alone.
+window.__bramTaskRouteRows = function (report, expanded) {
+  var rows = window.__bramTaskRanked({ candidates: (report && report.bramRoutes) || [] });
+  var open = (expanded || []).filter(function (k) { return rows.some(function (r) { return r.key === k; }); });
+  if (!open.length) return rows;
+  return rows.filter(function (r) { return open.indexOf(r.key) >= 0; });
+};
+window.__bramTaskHasRoutes = function (report) {
+  return !!(report && report.bramRoutes && report.bramRoutes.length > 0);
+};
 // The disclosure glyph, full size like the Worklist files table's.
 window.__bramTaskChevron = function (expanded, key) {
   return (expanded || []).indexOf(key) >= 0 ? "\u25BC" : "\u25B6";
@@ -18631,7 +18644,7 @@ window.__bramTaskInfoText = function (key, report) {
       "counted from " + (r.commands || 0) + " shell commands in " + (r.sessions || 0) + " sessions. " +
       "A compound line is split into its steps first.\n\n" +
       "Left out, because a saved task wouldn't help:\n\n" +
-      "- " + (x.bramProtocol || 0) + " steps that talk to Bram\n" +
+      "- " + (x.bramProtocol || 0) + " steps that read Bram's state files or build its requests (calls to Bram's routes are under **Bram's own routes**)\n" +
       "- " + (x.shell || 0) + " that look around or tidy up (`ls`, `cat`, `grep`, `rm` and the like)\n" +
       "- " + (x.git || 0) + " git\n" +
       "- " + (x.forge || 0) + " GitHub or GitLab\n" +

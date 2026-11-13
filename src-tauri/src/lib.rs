@@ -111963,6 +111963,9 @@ struct TaskCandidatesReport {
     sessions: usize,
     excluded: [usize; 5], // bramProtocol, forge, git, shell, notACommand
     candidates: Vec<TaskCandidate>,
+    // task-protocol-filter-sees-url-variables: the agents' calls to Bram's own
+    // routes, clustered by route (and op), ranked like `candidates`.
+    bram_routes: Vec<TaskCandidate>,
     excluded_steps: Vec<(String, &'static str, usize)>,
     // issue-483-save-as-task: `make <target>` steps in the walk, by target
     // name ("" for a bare `make`, the default goal): runs and sessions.
@@ -112204,6 +112207,179 @@ fn task_is_bram_protocol(step: &str) -> bool {
         return true;
     }
     false
+}
+
+// task-protocol-filter-sees-url-variables: whether the text just before a
+// `/__` makes it a Bram route: `127.0.0.1:<port>`, `localhost:<port>`, or a
+// shell variable (`$U`, `${U}`) standing for the base URL. A public host
+// (`example.org/__x`) is not.
+fn task_route_prefix_ok(before: &str) -> bool {
+    let digits = before.trim_end_matches(|c: char| c.is_ascii_digit());
+    if digits.len() < before.len() {
+        if let Some(h) = digits.strip_suffix(':') {
+            if h.ends_with("127.0.0.1") || h.ends_with("localhost") {
+                return true;
+            }
+        }
+    }
+    if let Some(h) = before.strip_suffix('}') {
+        if let Some(p) = h.rfind("${") {
+            let name = &h[p + 2..];
+            return !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        }
+        return false;
+    }
+    let head = before.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+    let name = &before[head.len()..];
+    head.ends_with('$') && !name.is_empty()
+}
+
+// The route a `curl` step calls on Bram, as `/__worklist/mutate` (at most two
+// path segments, query and quotes cut), or None when the step is no curl or
+// its URL isn't Bram's.
+fn task_bram_route(step: &str) -> Option<String> {
+    let curls = step.split_whitespace().any(|t| {
+        let t = t.trim_start_matches(|c| matches!(c, '$' | '(' | '`' | '"' | '\''));
+        t.rsplit('/').next() == Some("curl")
+    });
+    if !curls {
+        return None;
+    }
+    for (pos, _) in step.match_indices("/__") {
+        if !task_route_prefix_ok(&step[..pos]) {
+            continue;
+        }
+        let rest = &step[pos + 3..];
+        let end = rest
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '?' | '#' | '"' | '\'' | ')' | '\\' | ';' | '|' | '&' | '>' | '<'
+                    )
+            })
+            .unwrap_or(rest.len());
+        let mut segs: Vec<&str> = Vec::new();
+        for seg in rest[..end].split('/') {
+            if seg.is_empty() {
+                continue;
+            }
+            if !seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                || !seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            {
+                break;
+            }
+            segs.push(seg);
+            if segs.len() == 2 {
+                break;
+            }
+        }
+        if segs.is_empty() {
+            continue;
+        }
+        return Some(format!("/__{}", segs.join("/")));
+    }
+    None
+}
+
+fn task_basename(tok: &str) -> String {
+    let t = tok.trim_matches(|c| c == '"' || c == '\'');
+    t.rsplit('/').next().unwrap_or(t).to_string()
+}
+
+// The `op` a request body names: `"op":"advance"`, `\"op\":\"advance\"` or a
+// jq object `{op:"advance"}`.
+fn task_op_in(text: &str) -> Option<String> {
+    let s: String = text
+        .chars()
+        .filter(|c| *c != '\\' && !c.is_whitespace())
+        .collect();
+    for pat in ["\"op\":\"", "{op:\"", ",op:\""] {
+        if let Some(p) = s.find(pat) {
+            let op: String = s[p + pat.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                .collect();
+            if !op.is_empty() {
+                return Some(op);
+            }
+        }
+    }
+    None
+}
+
+// The file a step's `>` / `>>` writes (its last path component).
+fn task_redirect_file(text: &str) -> Option<String> {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        let rest = t.trim_start_matches(|c: char| c.is_ascii_digit());
+        let target = if rest == ">" || rest == ">>" {
+            toks.get(i + 1).copied()
+        } else {
+            rest.strip_prefix(">>").or_else(|| rest.strip_prefix('>'))
+        };
+        if let Some(f) = target.filter(|f| !f.is_empty() && !f.starts_with('&')) {
+            if f != "/dev/null" {
+                return Some(task_basename(f));
+            }
+        }
+    }
+    None
+}
+
+// The file a curl step sends as its body (`--data @…/body.json`).
+fn task_data_file(text: &str) -> Option<String> {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        if matches!(*t, "-d" | "--data" | "--data-binary" | "--data-raw") {
+            let n = toks.get(i + 1)?.trim_matches(|c| c == '"' || c == '\'');
+            if let Some(f) = n.strip_prefix('@') {
+                return Some(task_basename(f));
+            }
+        } else if let Some(f) = t.strip_prefix("--data=@") {
+            return Some(task_basename(f));
+        }
+    }
+    None
+}
+
+// A Bram route call's cluster key: the route, plus ` op=<op>` when the body
+// names one (inline, or from a body file this session wrote earlier).
+fn task_bram_route_key(
+    step: &str,
+    session: &str,
+    body_ops: &HashMap<(String, String), String>,
+) -> Option<String> {
+    let route = task_bram_route(step)?;
+    // A body file's op is trusted only for the route that takes one.
+    let op = task_op_in(step).or_else(|| {
+        if !route.ends_with("/mutate") {
+            return None;
+        }
+        task_data_file(step).and_then(|f| body_ops.get(&(session.to_string(), f)).cloned())
+    });
+    Some(match op {
+        Some(op) => format!("{} op={}", route, op),
+        None => route,
+    })
+}
+
+// The placeholder name for a route key: `bram-search`, `worklist-advance`.
+fn task_bram_route_name(key: &str) -> String {
+    let (route, op) = match key.split_once(" op=") {
+        Some((r, o)) => (r, Some(o)),
+        None => (key, None),
+    };
+    let route = route.trim_start_matches("/__");
+    match (route, op) {
+        ("search", _) => "bram-search".to_string(),
+        ("worklist/mutate", Some(op)) => task_slug(&format!("worklist-{}", op)),
+        ("worklist/commit", _) => "worklist-commit".to_string(),
+        (r, Some(op)) => task_slug(&format!("bram-{}-{}", r, op)),
+        (r, None) => task_slug(&format!("bram-{}", r)),
+    }
 }
 
 // A path under a temp or scratch directory, or under a shell variable that
@@ -112986,6 +113162,10 @@ fn task_candidates_core_with(
     let mut sessions: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut clusters: std::collections::HashMap<String, TaskCluster> =
         std::collections::HashMap::new();
+    let mut route_clusters: std::collections::HashMap<String, TaskCluster> =
+        std::collections::HashMap::new();
+    // (session, file name) -> the `op` a step in that session wrote into it.
+    let mut body_ops: HashMap<(String, String), String> = HashMap::new();
     let mut excluded: std::collections::HashMap<(String, usize), usize> =
         std::collections::HashMap::new();
     for rec in steps {
@@ -113014,21 +113194,55 @@ fn task_candidates_core_with(
                     e.1.insert(rec.session.clone());
                 }
             }
-            let bucket = forced.or_else(|| task_bucket(&text)).or_else(|| {
-                let toks = task_tokens(&text);
-                let first = toks.first().copied().unwrap_or("");
-                (task_step_is_data(&toks) || !runnable(first)).then_some(TASK_BUCKET_NOT_A_COMMAND)
-            });
+            // A request body written for a later `--data @file`.
+            if forced.is_none() {
+                if let Some(file) = task_redirect_file(&text) {
+                    let key = (rec.session.clone(), file);
+                    match task_op_in(&text) {
+                        Some(op) => {
+                            body_ops.insert(key, op);
+                        }
+                        // Rewritten with no op: the old one no longer applies.
+                        None => {
+                            body_ops.remove(&key);
+                        }
+                    }
+                }
+            }
+            let route_key = if forced.is_none() {
+                task_bram_route_key(&text, &rec.session, &body_ops)
+            } else {
+                None
+            };
+            let bucket = forced
+                .or_else(|| route_key.is_none().then(|| task_bucket(&text)).flatten())
+                .or_else(|| {
+                    if route_key.is_some() {
+                        return None;
+                    }
+                    let toks = task_tokens(&text);
+                    let first = toks.first().copied().unwrap_or("");
+                    (task_step_is_data(&toks) || !runnable(first))
+                        .then_some(TASK_BUCKET_NOT_A_COMMAND)
+                });
             if let Some(b) = bucket {
                 report.excluded[b] += 1;
                 *excluded.entry((text, b)).or_insert(0) += 1;
                 continue;
             }
-            let key = task_recipe_key(&text);
+            let key = match route_key {
+                Some(k) => k,
+                None => task_recipe_key(&text),
+            };
             if key.is_empty() {
                 continue;
             }
-            let c = clusters.entry(key).or_default();
+            let target = if key.starts_with("/__") {
+                &mut route_clusters
+            } else {
+                &mut clusters
+            };
+            let c = target.entry(key).or_default();
             c.runs += 1;
             c.sessions.insert(rec.session.clone());
             c.agents.insert(rec.agent.clone());
@@ -113044,6 +113258,25 @@ fn task_candidates_core_with(
         }
     }
     report.sessions = sessions.len();
+    report.candidates = task_finish_clusters(clusters, false);
+    report.bram_routes = task_finish_clusters(route_clusters, true);
+    let mut ex: Vec<(String, &'static str, usize)> = excluded
+        .into_iter()
+        .map(|((t, b), n)| (t, TASK_BUCKETS[b], n))
+        .collect();
+    ex.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    ex.truncate(TASK_EXCLUDED_STEPS_MAX);
+    report.excluded_steps = ex;
+    report
+}
+
+// Clusters of at least TASK_MIN_RUNS runs, as ranked rows. `routes` names
+// spellings by the route key instead of the command words.
+fn task_finish_clusters(
+    clusters: std::collections::HashMap<String, TaskCluster>,
+    routes: bool,
+) -> Vec<TaskCandidate> {
+    let mut out: Vec<TaskCandidate> = Vec::new();
     for (key, c) in clusters {
         if c.runs < TASK_MIN_RUNS {
             continue;
@@ -113052,7 +113285,11 @@ fn task_candidates_core_with(
             .spellings
             .into_iter()
             .map(|(text, runs)| TaskSpelling {
-                name: task_suggest_name(&key, &text),
+                name: if routes {
+                    task_bram_route_name(&key)
+                } else {
+                    task_suggest_name(&key, &text)
+                },
                 text,
                 runs,
                 now: None,
@@ -113069,7 +113306,7 @@ fn task_candidates_core_with(
                 sp.name = format!("{}-{}", sp.name, n);
             }
         }
-        report.candidates.push(TaskCandidate {
+        out.push(TaskCandidate {
             key,
             runs: c.runs,
             sessions: c.sessions.len(),
@@ -113081,8 +113318,7 @@ fn task_candidates_core_with(
             saved_lines: None,
         });
     }
-    report
-        .candidates
+    out
         // Ranked by breadth, not volume (tasks-page-prioritizes, 2026-11-09):
         // the command typed many ways in many sessions is the one a saved
         // command fixes; 21 runs of a one-afternoon loop in one session are
@@ -113094,15 +113330,8 @@ fn task_candidates_core_with(
                 .then_with(|| b.runs.cmp(&a.runs))
                 .then_with(|| a.key.cmp(&b.key))
         });
-    report.candidates.truncate(TASK_CANDIDATES_MAX);
-    let mut ex: Vec<(String, &'static str, usize)> = excluded
-        .into_iter()
-        .map(|((t, b), n)| (t, TASK_BUCKETS[b], n))
-        .collect();
-    ex.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-    ex.truncate(TASK_EXCLUDED_STEPS_MAX);
-    report.excluded_steps = ex;
-    report
+    out.truncate(TASK_CANDIDATES_MAX);
+    out
 }
 
 // Wire rows for `/__tasks/candidates`. The doc is assembled as a
@@ -113166,16 +113395,8 @@ struct TaskRunnerState {
     targets: Vec<TaskRunnerTarget>,
 }
 
-fn task_report_json(
-    root: &str,
-    report: &TaskCandidatesReport,
-    runner: &TaskRunnerState,
-    all: bool,
-    ms: u128,
-) -> serde_json::Value {
-    let candidates: Vec<TaskCandidateRow> = report
-        .candidates
-        .iter()
+fn task_candidate_rows(list: &[TaskCandidate]) -> Vec<TaskCandidateRow> {
+    list.iter()
         .map(|c| TaskCandidateRow {
             key: c.key.clone(),
             runs: c.runs,
@@ -113196,7 +113417,18 @@ fn task_report_json(
             saved_as: c.saved_as.clone(),
             saved_lines: c.saved_lines,
         })
-        .collect();
+        .collect()
+}
+
+fn task_report_json(
+    root: &str,
+    report: &TaskCandidatesReport,
+    runner: &TaskRunnerState,
+    all: bool,
+    ms: u128,
+) -> serde_json::Value {
+    let candidates = task_candidate_rows(&report.candidates);
+    let bram_routes = task_candidate_rows(&report.bram_routes);
     let mut doc = serde_json::json!({
         "root": root,
         "sessions": report.sessions,
@@ -113211,6 +113443,7 @@ fn task_report_json(
         },
         "runner": runner,
         "candidates": candidates,
+        "bramRoutes": bram_routes,
         "ms": ms as u64,
     });
     if all {
@@ -113655,7 +113888,11 @@ fn task_apply_makefile(
             not_tasks.insert(task_normalize_step(spelling, root));
         }
     }
-    for c in report.candidates.iter_mut() {
+    for c in report
+        .candidates
+        .iter_mut()
+        .chain(report.bram_routes.iter_mut())
+    {
         let mut saved: Vec<String> = Vec::new();
         for sp in c.spellings.iter_mut() {
             if let Some((invocation, targets)) = replaces.get(&sp.text) {
@@ -114349,6 +114586,78 @@ mod task_candidates_tests {
         task_bucket(&task_normalize_step(cmd, "/r")).map(|b| TASK_BUCKETS[b])
     }
 
+    fn route_report(cmds: &[&str]) -> TaskCandidatesReport {
+        let steps: Vec<TaskStep> = cmds.iter().map(|c| step(c, "s1")).collect();
+        task_candidates_core("/r", &steps)
+    }
+
+    #[test]
+    fn bram_route_keys() {
+        let none = HashMap::new();
+        let key = |c: &str| task_bram_route_key(&task_normalize_step(c, "/r"), "s", &none);
+        assert_eq!(
+            key("curl -4 -sS -X POST -H \"Content-Type: application/json\" --data @$T/p4.json \"$U/__worklist/plan\" >/dev/null"),
+            Some("/__worklist/plan".to_string())
+        );
+        assert_eq!(
+            key("curl -4 -sS \"$U/__app-info\" | jq -c '{cur:.current}'"),
+            Some("/__app-info".to_string())
+        );
+        assert_eq!(
+            key("curl -4 -sS \"http://127.0.0.1:61455/__search?q=foo&limit=20\""),
+            Some("/__search".to_string())
+        );
+        assert_eq!(
+            key("curl -4 -sS \"${U}/__sessions/list?x=1\""),
+            Some("/__sessions/list".to_string())
+        );
+        assert_eq!(
+            key("curl -4 -sS -X POST --data '{\"op\":\"advance\",\"ids\":[\"a\"]}' http://localhost:9/__worklist/mutate"),
+            Some("/__worklist/mutate op=advance".to_string())
+        );
+        assert_eq!(key("curl https://example.org/__x"), None);
+        assert_eq!(key("cat .bram/worklist.json"), None);
+    }
+
+    #[test]
+    fn bram_routes_cluster_apart_from_candidates() {
+        let mut cmds: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            cmds.push("jq -n '{op:\"advance\",ids:[1]}' > $T/body.json".into());
+            cmds.push("curl -4 -sS -X POST --data @$T/body.json \"$U/__worklist/mutate\"".into());
+            cmds.push("curl -4 -sS http://127.0.0.1:61455/__search?q=a".into());
+            cmds.push("curl https://example.org/__x".into());
+            cmds.push("cat .bram/worklist.json".into());
+        }
+        let refs: Vec<&str> = cmds.iter().map(|s| s.as_str()).collect();
+        let r = route_report(&refs);
+        let keys: Vec<&str> = r.bram_routes.iter().map(|c| c.key.as_str()).collect();
+        assert!(
+            keys.contains(&"/__worklist/mutate op=advance"),
+            "{:?}",
+            keys
+        );
+        assert!(keys.contains(&"/__search"), "{:?}", keys);
+        let adv = r
+            .bram_routes
+            .iter()
+            .find(|c| c.key.ends_with("op=advance"))
+            .unwrap();
+        assert_eq!(adv.runs, 3);
+        assert_eq!(adv.spellings[0].name, "worklist-advance");
+        let search = r.bram_routes.iter().find(|c| c.key == "/__search").unwrap();
+        assert_eq!(search.spellings[0].name, "bram-search");
+        // The public URL is an ordinary curl candidate; routes aren't.
+        let cands: Vec<&str> = r.candidates.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(cands, vec!["curl"]);
+        // State-folder reads stay excluded.
+        assert_eq!(r.excluded[0], 3);
+        // The wire field carries the same row shape.
+        let doc = task_report_json("/r", &r, &TaskRunnerState::default(), false, 1);
+        assert_eq!(doc["bramRoutes"].as_array().unwrap().len(), 2);
+        assert!(doc["bramRoutes"][0]["spellings"][0]["name"].is_string());
+    }
+
     #[test]
     fn exclusion_buckets() {
         assert_eq!(
@@ -114492,7 +114801,10 @@ mod task_candidates_tests {
         steps.push(step("curl http://127.0.0.1:1/__x", "s0"));
         let r = task_candidates_core("/r", &steps);
         assert_eq!(r.commands, 11);
-        assert_eq!(r.excluded, [1, 1, 1, 1, 0]);
+        // The Bram route call is no longer excluded: it is a route cluster
+        // (1 run, under the minimum, so not listed).
+        assert_eq!(r.excluded, [0, 1, 1, 1, 0]);
+        assert!(r.bram_routes.is_empty());
         assert_eq!(r.candidates.len(), 1);
         let c = &r.candidates[0];
         assert_eq!(c.key, "cargo test");

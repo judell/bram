@@ -700,6 +700,21 @@ sessions it took the list from 49 rows to 28 and removed every non-command.
 The answer depends on the machine running the report, which is the machine
 whose sessions it reads.
 
+**Calls to Bram's own routes are candidates too**
+(task-protocol-filter-sees-url-variables, 2026-11-12). They had been set
+aside whole as `bramProtocol`, so the commands agents repeat most never
+appeared, and the filter only saw a literal `127.0.0.1:` or `localhost:`,
+missing `curl "$U/__worklist/plan"`. Now a `curl` whose URL is loopback or a
+shell variable before `/__<route>` is clustered by route (and `op`, inline or
+from a body file the same session wrote earlier) into `bramRoutes`, shown on
+the Tasks page under "Bram's own routes". State-folder reads and request-body
+building stay `bramProtocol`. On this repo's Claude and Codex sessions
+(2026-11-12, 431 sessions, 95,629 steps) 56 routes recur: `/__search` 481
+runs in 60 sessions, `/__worklist/mutate op=advance` 309 in 52,
+`/__worklist` 323 in 43, `/__worklist/commit` 411 in 42, `/__app-info` 165 in
+41, and `bramProtocol` fell to 12,855 steps. Saving one as a Makefile target
+raises the permission, Codex-transport and port questions in the item's draft.
+
 The run costs about 13 s here (`[tasks] op=candidates … ms=`), all in
 parsing session files, so the pane fetches on open and Refresh only.
 What the feature itself should be (which runner, a save flow, whether

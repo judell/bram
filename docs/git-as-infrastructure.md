@@ -291,7 +291,7 @@ names the real Bram instance expects. The generated repository must remain
 without an upstream so an exploratory fixture cannot be pushed accidentally.
 
 See the command workflow in
-[`developing-bram.md`](developing-bram.md#institutionalization-339).
+[`developing-bram-reference.md`](developing-bram-reference.md#institutionalization-339).
 
 ## Linked agent worktrees and proposal coverage
 

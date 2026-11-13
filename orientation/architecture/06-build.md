@@ -62,7 +62,7 @@ The four archives are `bram-linux-amd64.tar.gz`, `bram-macos-arm64.tar.gz`, `bra
 ## rebuild and relaunch for Rust
 
 <!-- read: docs/developing-bram.md#Build vs. reload boundary -->
-<!-- read: docs/developing-bram.md#The stale-binary trap -->
+<!-- read: docs/developing-bram-reference.md#The stale-binary trap -->
 
 A person rebuilds. "`src-tauri/**` | **Rebuild + relaunch.**" [`docs/developing-bram.md:445-445`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/developing-bram.md?plain=1#L445-L445) A running process keeps the inode it started with: "`cargo build` replaces the binary file, but a running process keeps executing the inode it started with. A Bram launched before your build will happily keep running the old code". [`docs/developing-bram.md:699-707`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/developing-bram.md?plain=1#L699-L707) The development doc's remedy is to compare the binary's mtime to the process start time. [`docs/developing-bram.md:704-708`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/developing-bram.md?plain=1#L704-L708)
 
@@ -85,7 +85,7 @@ See Installed copies in source repo. `sync_skill` panics rather than copy from a
 ## Setup click seeds
 
 <!-- read: docs/setup.md#Claude First -->
-<!-- read: docs/developing-bram.md#Startup is observable without the UI -->
+<!-- read: docs/developing-bram-reference.md#Startup is observable without the UI -->
 
 A person clicks Setup or refresh. The setup test document: "Expect one Agent Coordination setup or refresh banner." [`docs/setup.md:36-36`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/setup.md?plain=1#L36-L36) Then: "Click setup or refresh." [`docs/setup.md:37-37`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/setup.md?plain=1#L37-L37) The completion message tells the user to "restart Bram, then start Claude or Codex again". [`docs/setup.md:38-40`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/setup.md?plain=1#L38-L40) `/__enhance/status` says which check failed: `setupReasons` carries stable codes (Antigravity's are `antigravity-hook-missing` and `antigravity-rules-stale`), `processOlderThanCheckout` flags a process older than its checkout, and `providerSetupKind` reads `repo-setup`, `codex-hook-refresh` or `restart-older-process`, where "the banner offers no Run Setup button". [`docs/developing-bram.md:721-728`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/developing-bram.md?plain=1#L721-L728) [`src-tauri/src/lib.rs:58640-58649`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/src-tauri/src/lib.rs?plain=1#L58640-L58649) Setup can also be driven headlessly: `GET /__enhance/run?force=true`. [`docs/developing-bram.md:717-717`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/developing-bram.md?plain=1#L717-L717) The setup harness script exercises it against throwaway projects (`pristine_git`, `already_setup`, `legacy_hooks`, `nested` and refusals). [`docs/developing-bram.md:761-766`](https://github.com/judell/bram/blob/e8a38ac08d3ac3a6323b712bb00ebf23aa4a0f05/docs/developing-bram.md?plain=1#L761-L766)
 

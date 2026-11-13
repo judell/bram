@@ -336,7 +336,7 @@ its own without blocking the others.
    should be soaked (Log-first: does the trace show `op=fire` only on
    genuine mid-turn prompts, zero fires during ordinary narrated-chatter
    turns) before being called done — the synthetic-testbed method
-   (`docs/developing-bram.md`) is the natural way to drive this: script a
+   (`docs/developing-bram-reference.md`) is the natural way to drive this: script a
    Codex turn that discusses hooks-trust in its own output, confirm no
    fire, then reproduce a real mid-turn prompt per the issue's documented
    repro (delete `trusted_hash` from `~/.codex/config.toml`) and confirm a

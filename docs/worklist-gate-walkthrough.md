@@ -41,7 +41,7 @@ wrong button is a papercut; this is a wedge.
 
 ## Setup: a demo instance
 
-Run it on a demo instance (`docs/developing-bram.md`, "The
+Run it on a demo instance (`docs/developing-bram-reference.md`, "The
 synthetic-testbed method"), never on the working repo: the probe commits
 then land in the disposable demo repo, and teardown is a reset.
 

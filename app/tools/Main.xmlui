@@ -1134,7 +1134,9 @@
            Footer's top edge, flush on the message box under every tab but
            the Worklist page itself (that page IS the Worklist). The Footer
            is the surface vertical-sticky pins, so the pane needs no measured
-           split; it has a fixed height and scrolls itself. A resizable
+           split; it fits its content up to 40% of the window, then scrolls
+           itself (worklist-pane-fits-its-content: a fixed height left a
+           short board's pane mostly empty). A resizable
            VSplitter around <Pages> was rejected: XMLUI's Splitter renders one
            child and two children in different trees, so every open or close
            would remount the current tab
@@ -1162,7 +1164,7 @@
              position (helpers.js __bramWorklistPaneMounted) across Hide/Show
              and tab switches. Lifecycle events:
              https://www.xmlui.org/docs/howto/clean-up-when-a-panel-closes -->
-        <VStack when="{worklistOpen}" height="40vh" overflowY="auto" paddingTop="$space-2"
+        <VStack when="{worklistOpen}" maxHeight="40vh" overflowY="auto" paddingTop="$space-2"
           testId="worklist-pane"
           onMount="window.__bramWorklistPaneMounted()"
           onUnmount="window.__bramWorklistPaneUnmounted()">

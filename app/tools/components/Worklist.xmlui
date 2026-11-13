@@ -195,13 +195,18 @@
            https://www.xmlui.org/docs/reference/components/Checkbox -->
       <Checkbox
         when="{!!(worklist.value &amp;&amp; worklist.value.items &amp;&amp; worklist.value.items.length)}"
-        tooltip="Select every item"
         initialValue="{window.__bramW2AllSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
         indeterminate="{window.__bramW2SomeSelected(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)}"
         enabled="{window.__bramWorklist2RowSelectable(inflightClaim.value)}"
         onClick="worklist2Selected = window.__bramW2SelectAll(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)" />
+      <!-- The tooltip sits on the label, not the Checkbox: a Checkbox with a
+           tooltip throws on every focus and blur (Toggle calls the Tooltip
+           trigger's composed handlers with no event),
+           https://github.com/xmlui-org/xmlui/issues/3958. Move it back once
+           that's fixed. -->
       <Text
         when="{!!(worklist.value &amp;&amp; worklist.value.items &amp;&amp; worklist.value.items.length)}"
+        tooltip="Select every item"
         value="All" />
       <H2>Worklist</H2>
       <!-- Parity: + New item. Inline ask (the old tab's dialog distilled):

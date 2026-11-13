@@ -22847,3 +22847,44 @@ window.__bramTokenInfoText = function (key, report) {
   if (key === "tests") return "The share of what Read returned that fell inside test code. It is only worked out for `src-tauri/src/lib.rs`; other files show a dash.";
   return "";
 };
+
+// status-page-folds-every-section: the Status tab's open folds. Focus state
+// (which sections the user is looking at), so sessionStorage, scoped by
+// project; null key means the project is unknown, so neither read nor write.
+// Default is all closed.
+window.__bramStatusOpenLoad = function () {
+  try {
+    var k = window.__bramProjectScopedKey("bram.statusOpen");
+    if (!k) return [];
+    var v = JSON.parse(window.sessionStorage.getItem(k) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+};
+window.__bramStatusOpenSave = function (list) {
+  try {
+    var k = window.__bramProjectScopedKey("bram.statusOpen");
+    if (!k) return;
+    window.sessionStorage.setItem(k, JSON.stringify(list || []));
+  } catch (e) {}
+};
+// Toggle a key in the open list and persist; returns the new list.
+window.__bramStatusToggle = function (list, key) {
+  var next = window.__bramToggleInArray(list, key);
+  window.__bramStatusOpenSave(next);
+  return next;
+};
+// A coordination section's worst row level, for its folded header.
+window.__bramStatusSectionSummary = function (section) {
+  var rows = (section && section.rows) || [];
+  var errors = rows.filter(function (r) { return r && r.level === "error"; }).length;
+  var warns = rows.filter(function (r) { return r && r.level === "warn"; }).length;
+  if (errors) return errors + " error" + (errors === 1 ? "" : "s");
+  if (warns) return warns + " warn";
+  return "ok";
+};
+window.__bramStatusSectionSummaryColor = function (section) {
+  var s = window.__bramStatusSectionSummary(section);
+  if (/error/.test(s)) return "$color-danger-700";
+  if (/warn/.test(s)) return "$color-warn-700";
+  return "$textColor-secondary";
+};

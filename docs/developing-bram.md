@@ -246,6 +246,25 @@ and the Log's eight warning sites were checked against this rule: two
 kept the color (a failed push, a switch that didn't start), and the
 rest went plain.
 
+**The same rule governs the Status tab** (Jon, 2026-11-12: "There's no point
+in warning me without offering an action"):
+
+- A `warn` or `error` row carries an `action` in plain words ("Run Setup",
+  "Relaunch Bram", "Rebuild Bram (make build-debug)"); the pane shows it under
+  the detail.
+- A signal with no action for the user reports `none`, shown as **N/A**. Its
+  detail stays in the row's text and the trace. N/A means "no verdict", not
+  "fine".
+- `ok` means a known good state, never "nothing wrong that we noticed".
+- The host enforces it: `enforce_status_actions` demotes any warn/error row
+  without an action to `none` (and traces `[status] op=warn-without-action`),
+  and `status_rows_missing_action` is what the unit tests assert on. Add the
+  `action` where the row is built.
+- Compare like with like: the `.claude/bram-reference` check in the source
+  repo compares against the unstamped source bytes, because `build.rs` writes
+  them unstamped; comparing against Setup's stamped seed made it warn forever
+  about a condition that wasn't real.
+
 ## Rust: typed data, not hand-read JSON
 
 Data inside the host is typed (Jon, 2026-11-11, a standing rule):

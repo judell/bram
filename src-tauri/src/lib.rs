@@ -55908,9 +55908,16 @@ fn send_ledger_status_rows() -> Vec<serde_json::Value> {
     let injected = ledger.iter().filter(|e| e.state == "injected").count();
     let landed = ledger.iter().filter(|e| e.state == "landed").count();
     let stranded = ledger.iter().filter(|e| e.state == "stranded").count();
+    // A stranded send that was already retried has been dealt with; only an
+    // unretried one is a message the user may need to send again.
+    let stranded_open = ledger
+        .iter()
+        .filter(|e| e.state == "stranded" && !e.retried)
+        .count();
     rows.push(serde_json::json!({
         "signal": "Send ledger",
-        "level": if stranded > 0 { "warn" } else if landed > 0 { "ok" } else { "none" },
+        "level": if stranded_open > 0 { "warn" } else if landed > 0 { "ok" } else { "none" },
+        "action": "Send the stranded message again",
         "state": format!("{} landed / {} in flight / {} stranded", landed, injected, stranded),
         "detail": format!(
             "ledger-driven Esc recovery; auto-resend trust-gated off by default; {} entries tracked this run",
@@ -55934,9 +55941,10 @@ fn send_ledger_status_rows() -> Vec<serde_json::Value> {
             "signal": format!("Send {}", entry.id),
             "level": match entry.state {
                 "landed" => "ok",
-                "stranded" => "warn",
+                "stranded" if !entry.retried => "warn",
                 _ => "none",
             },
+            "action": "Send the message again",
             "state": state_label,
             "detail": format!(
                 "{}{} — {} · injected {}s ago",
@@ -60232,6 +60240,16 @@ fn stamp_seeded_doc(bundle: &[u8]) -> Vec<u8> {
     out
 }
 
+// The bundled reference file's canonical bytes, unstamped: what build.rs
+// writes into the source repo's .claude/bram-reference/.
+fn reference_source_bytes<R: tauri::Runtime>(app: &AppHandle<R>, name: &str) -> Option<Vec<u8>> {
+    serve_app_file(
+        Some(app),
+        &format!("{}/{}", ENHANCE_REFERENCE_BUNDLE_DIR, name),
+    )
+    .map(|(bundle, _)| bundle)
+}
+
 fn seeded_reference_bytes<R: tauri::Runtime>(app: &AppHandle<R>, name: &str) -> Option<Vec<u8>> {
     let (bundle, _) = serve_app_file(
         Some(app),
@@ -60491,6 +60509,7 @@ fn source_repo_status_rows<R: tauri::Runtime>(
         json!({
             "signal": "CLAUDE.md (@-import)",
             "level": if checks.claude_md_has_marker { "ok" } else { "warn" },
+            "action": format!("Restore the @{} import in CLAUDE.md", ENHANCE_SOURCE_BUNDLE_REL),
             "state": if checks.claude_md_has_marker { "present" } else { "absent" },
             "detail": if checks.claude_md_has_marker {
                 format!("CLAUDE.md references @{}", ENHANCE_SOURCE_BUNDLE_REL)
@@ -60505,6 +60524,7 @@ fn source_repo_status_rows<R: tauri::Runtime>(
         json!({
             "signal": ENHANCE_SIDECAR_REL,
             "level": if checks.sidecar_exists { "warn" } else { "none" },
+            "action": format!("Delete {}", ENHANCE_SIDECAR_REL),
             "state": if checks.sidecar_exists { "present" } else { "absent" },
             "detail": if checks.sidecar_exists {
                 format!(
@@ -60541,6 +60561,7 @@ fn source_repo_status_rows<R: tauri::Runtime>(
         json!({
             "signal": "AGENTS.md (worklist intro)",
             "level": if checks.codex_agents_has_marker { "ok" } else { "warn" },
+            "action": "Restore the worklist-gate intro sentences in AGENTS.md",
             "state": if checks.codex_agents_has_marker { "present" } else { "absent" },
             "detail": if checks.codex_agents_has_marker {
                 "AGENTS.md contains the \"driven through Bram\" / resources/worklist.json intro sentences".to_string()
@@ -60552,6 +60573,7 @@ fn source_repo_status_rows<R: tauri::Runtime>(
         json!({
             "signal": "AGENTS.md currency",
             "level": if checks.codex_agents_current { "ok" } else { "warn" },
+            "action": "Update the worklist-gate intro in AGENTS.md to match app/__shell/conventions.md",
             "state": if checks.codex_agents_current { "current" } else { "stale" },
             "detail": if checks.codex_agents_current {
                 "Worklist-gate intro sentences match what app/__shell/conventions.md describes".to_string()
@@ -76778,14 +76800,14 @@ fn authorization_rows<R: tauri::Runtime>(
         vec![
             serde_json::json!({
                 "signal": "Latest record",
-                "level": if pending_warn { "warn" } else { "ok" },
+                "level": if pending_warn { "none" } else { "ok" },
                 "state": state,
                 "detail": detail,
                 "seen": format_iso_utc_ms(record.issued_at_ms),
             }),
             serde_json::json!({
                 "signal": "Record age",
-                "level": if pending_warn { "warn" } else { "ok" },
+                "level": if pending_warn { "none" } else { "ok" },
                 "state": coordination_duration(age_ms),
                 "detail": modified,
                 "seen": modified,
@@ -76854,19 +76876,28 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         let names = bundled_reference_names(app);
         if !names.is_empty() {
             let dir = proj.join(ENHANCE_REFERENCE_DIR_REL);
+            // In the source repo, build.rs writes these copies unstamped (they
+            // are the canonical text, not a seed), so compare against the
+            // unstamped source bytes. Elsewhere Setup stamps them.
             let stale: Vec<String> = names
                 .iter()
-                .filter(
-                    |n| match (std::fs::read(dir.join(n)), seeded_reference_bytes(app, n)) {
+                .filter(|n| {
+                    let expected = if is_source_repo {
+                        reference_source_bytes(app, n)
+                    } else {
+                        seeded_reference_bytes(app, n)
+                    };
+                    match (std::fs::read(dir.join(n)), expected) {
                         (Ok(disk), Some(expected)) => disk != expected,
                         _ => true,
-                    },
-                )
+                    }
+                })
                 .cloned()
                 .collect();
             rows.push(json!({
                 "signal": ENHANCE_REFERENCE_DIR_REL,
                 "level": if stale.is_empty() { "ok" } else { "warn" },
+                "action": if is_source_repo { "Rebuild Bram (make build-debug)" } else { "Run Setup" },
                 "state": if stale.is_empty() { "current" } else { "stale" },
                 "detail": if stale.is_empty() {
                     format!("{} reference files byte-match the bundle", names.len())
@@ -77077,7 +77108,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         let signal = "~/.codex/config.toml (hook block)";
         match path_opt {
             None => rows.push(json!({
-                "signal": signal, "level": "warn", "state": "missing",
+                "signal": signal, "level": "none", "state": "missing",
                 "detail": "HOME unset; cannot locate Codex config.",
                 "seen": "",
             })),
@@ -77137,7 +77168,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         let signal = "~/.codex/config.toml (developer_instructions)";
         match path_opt {
             None => rows.push(json!({
-                "signal": signal, "level": "warn", "state": "missing",
+                "signal": signal, "level": "none", "state": "missing",
                 "detail": "HOME unset; cannot locate Codex config.",
                 "seen": "",
             })),
@@ -77169,6 +77200,9 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         }
     }
 
+    // Every remaining warning here is a Setup-managed file that Setup
+    // refreshes; the reference-docs row named its own action above.
+    set_missing_action(&mut rows, "Run Setup");
     rows
 }
 
@@ -77190,7 +77224,7 @@ fn search_index_status_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_
         Err(e) => {
             return vec![serde_json::json!({
                 "signal": "Index db",
-                "level": "warn",
+                "level": "none",
                 "state": "open failed",
                 "detail": e.to_string(),
                 "seen": "",
@@ -77344,6 +77378,7 @@ fn untracked_undeclared_row(
     serde_json::json!({
         "signal": "Untracked, undeclared",
         "level": if warn { "warn" } else if count == 0 { "ok" } else { "none" },
+        "action": "Add generated files to .gitignore",
         "state": format!("{} files", group_thousands(count)),
         "detail": detail,
         "seen": "",
@@ -77468,7 +77503,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .as_ref()
         .map(|config| codex_hook_block_current(config, guard_link.as_deref()))
         .unwrap_or(false);
-    let hooks_rows = vec![
+    let mut hooks_rows = vec![
         serde_json::json!({
             "signal": "bram-guard link",
             "level": if guard_link.is_some() { "ok" } else { "warn" },
@@ -77491,6 +77526,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             "seen": codex_config.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
         }),
     ];
+    set_missing_action(&mut hooks_rows, "Run Setup");
     let applied_items: Vec<&serde_json::Value> = items
         .iter()
         .filter(|item| {
@@ -77563,6 +77599,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         serde_json::json!({
             "signal": "Applied integrity",
             "level": if stale_applied.is_empty() { "ok" } else { "warn" },
+            "action": "Drop the stale items from the Worklist tab",
             "state": format!("{}/{} items match working tree", matched_applied, applied_items.len()),
             "detail": if stale_applied.is_empty() { "All applied items have uncommitted changes".to_string() } else { format!("Stale: {}", stale_applied.join(", ")) },
             "seen": "",
@@ -77641,6 +77678,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     let port_row = serde_json::json!({
         "signal": "Port file",
         "level": port_level,
+        "action": "Relaunch Bram",
         "state": port_state,
         "detail": match (bound_port, file_port) {
             (Some(bound), Some(file)) => format!(
@@ -77660,6 +77698,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     });
     let loopback_row = serde_json::json!({
         "signal": "Loopback HTTP",
+        "action": "Relaunch Bram",
         "level": match &file_port_probe {
             Some(PortStatus::Live) => "ok",
             Some(PortStatus::NotListening) | Some(PortStatus::Unresponsive(_)) => "warn",
@@ -77740,12 +77779,13 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .as_ref()
         .map(|(_, _, written_at_ms)| format_iso_utc_ms(*written_at_ms))
         .unwrap_or_default();
-    let claim_level = if !claim_agrees {
-        "warn"
+    // A long-held claim or a db/file disagreement is a diagnostic, not
+    // something the user can fix (the Stranded claim row below is the
+    // actionable case), so neither warns.
+    let claim_level = if !claim_agrees || claim_age_ms > 120000 {
+        "none"
     } else if claim_ids.is_empty() {
         "ok"
-    } else if claim_age_ms > 120000 {
-        "warn"
     } else {
         "info"
     };
@@ -77788,7 +77828,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .as_ref()
         .and_then(|c| worklist_state::claim_pair_counts(c).ok())
         .unwrap_or((0, 0, None));
-    let claim_pairs_warn = claim_writes > claim_clears + 1;
     // Both sides for the hover report: the ledger counts beside the trace
     // grep the row replaced — the old source kept honest as a comparator.
     let claim_pairs_sources = ws_conn.as_ref().map(|_| {
@@ -77943,7 +77982,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         }),
         serde_json::json!({
             "signal": "Divergences (this process)",
-            "level": if ws_divergence_count > 0 { "warn" } else { "ok" },
+            "level": if ws_divergence_count > 0 { "none" } else { "ok" },
             "state": format!("{}", ws_divergence_count),
             "detail": if ws_divergence_count > 0 {
                 "db/file mismatch observed by the /__worklist tripwire — see [state-mirror] op=divergence in bram-trace.log".to_string()
@@ -78015,7 +78054,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                 "rows": [
                     {
                         "signal": "Renderer drift",
-                        "level": if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 1000 { "warn" } else if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 0 { "ok" } else { "none" },
+                        "level": if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 1000 { "none" } else if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 0 { "ok" } else { "none" },
                         "state": format!("{} ms max", startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0)),
                         "detail": format!(
                             "PTY {} chunks / {} KB over first {}s",
@@ -78027,7 +78066,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     },
                     {
                         "signal": "Inspector export",
-                        "level": if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 5_000_000 { "warn" } else if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 0 { "ok" } else { "none" },
+                        "level": if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 5_000_000 { "none" } else if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 0 { "ok" } else { "none" },
                         "state": format!("{} KB", (startup_run["traceExportSize"].as_u64().unwrap_or(0) + 1023) / 1024),
                         "detail": startup_run["traceExportPath"].as_str().unwrap_or("No xs-trace export found in ~/Downloads"),
                         "seen": trace_export_seen,
@@ -78039,9 +78078,9 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                 "rows": [
                     {
                         "signal": "Current items",
-                        // Threshold on the active count (proposed + applied):
-                        // a small worklist is normal, not a warning.
-                        "level": if items.len() >= 10 { "error" } else if items.len() >= 5 { "warn" } else { "none" },
+                        // A long worklist has no single action to name, so it
+                        // is a count, not a warning.
+                        "level": "none",
                         "state": format!("{} active", items.len()),
                         "detail": format!("proposed {}, applied {}, committed {}, pruned {}", proposed_count, applied_count, committed_count, pruned_count),
                         "seen": last_history.get("iso").and_then(|v| v.as_str()).unwrap_or(""),
@@ -78070,7 +78109,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     },
                     {
                         "signal": "Claim pairs",
-                        "level": if claim_pairs_warn { "warn" } else { "ok" },
+                        "level": "none",
                         "state": format!("{} writes / {} clears", claim_writes, claim_clears),
                         "detail": "Mirror ledger counts (claim-write vs claim-clear transitions) — replaces the old bram-trace.log grep, so it stays accurate across log rotation and when traces are off",
                         "seen": claim_pairs_last_ms.map(format_iso_utc_ms).unwrap_or_default(),
@@ -78078,7 +78117,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     },
                     {
                         "signal": "Turn completion",
-                        "level": if claim_ids.is_empty() || completion_after_claim { "ok" } else { "warn" },
+                        "level": if claim_ids.is_empty() || completion_after_claim { "ok" } else { "none" },
                         "state": completion_state,
                         "detail": completion_detail,
                         "seen": if completion_monitor.seen_at_ms > 0 { format_iso_utc_ms(completion_monitor.seen_at_ms) } else { String::new() },
@@ -78110,14 +78149,14 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                 "rows": [
                     {
                         "signal": "Guard decisions",
-                        "level": if guard_warn { "warn" } else { "ok" },
+                        "level": if guard_warn { "none" } else { "ok" },
                         "state": format!("{} recent blocks", trace["guardBlocks"].as_i64().unwrap_or(0)),
                         "detail": if trace["guardBlocks"].as_i64().unwrap_or(0) > 0 { "Recent hook block records found in trace" } else { "No recent hook blocks found in trace" },
                         "seen": trace["lastGuard"].as_str().unwrap_or(""),
                     },
                     {
                         "signal": "Stale approvals",
-                        "level": if stale_reject_warn { "warn" } else { "ok" },
+                        "level": if stale_reject_warn { "none" } else { "ok" },
                         "state": format!("{} rejected stale", trace["staleRejects"].as_i64().unwrap_or(0)),
                         "detail": if trace["staleRejects"].as_i64().unwrap_or(0) > 0 { "Resolve staleness appeared in recent trace" } else { "No rejected_stale resolve records in recent trace" },
                         "seen": "",
@@ -78161,7 +78200,108 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         }
     }
 
+    if let Some(sections) = rows.get_mut("sections").and_then(|v| v.as_array_mut()) {
+        let demoted = enforce_status_actions(sections);
+        if !demoted.is_empty() {
+            append_bram_trace_line(
+                app,
+                "status",
+                &format!("op=warn-without-action demoted={}", demoted.join(",")),
+            );
+        }
+    }
     serde_json::to_vec(&rows).map_err(|e| e.to_string())
+}
+
+/// A Status row's level. `info` is the neutral "in progress" tone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum StatusLevel {
+    Ok,
+    Warn,
+    Error,
+    None,
+    Info,
+}
+
+/// The wire shape of a Status row (`/__coordination-status`). Rows are still
+/// built with `json!` at their many sites; this type is what the rule check
+/// reads them through. `action` is present only on `warn` / `error` rows.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusRow {
+    #[serde(default)]
+    signal: String,
+    level: StatusLevel,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    detail: String,
+    #[serde(default)]
+    seen: String,
+    #[serde(default)]
+    action: Option<String>,
+}
+
+impl StatusRow {
+    fn is_warning(&self) -> bool {
+        matches!(self.level, StatusLevel::Warn | StatusLevel::Error)
+    }
+    fn has_action(&self) -> bool {
+        self.action.as_deref().is_some_and(|a| !a.trim().is_empty())
+    }
+}
+
+/// Signals of rows at warn / error that name no action. The rule
+/// (docs/developing-bram.md, "Warning color is earned"): a warning without an
+/// action is not a warning.
+#[cfg(test)]
+fn status_rows_missing_action(rows: &[serde_json::Value]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|v| serde_json::from_value::<StatusRow>(v.clone()).ok())
+        .filter(|r| r.is_warning() && !r.has_action())
+        .map(|r| r.signal)
+        .collect()
+}
+
+/// Give every warn / error row that has no action this one (rows share a
+/// remedy when Setup or a relaunch fixes them all).
+fn set_missing_action(rows: &mut [serde_json::Value], action: &str) {
+    for row in rows.iter_mut() {
+        let warn = matches!(row["level"].as_str(), Some("warn") | Some("error"));
+        let has = row["action"].as_str().is_some_and(|a| !a.trim().is_empty());
+        if warn && !has {
+            row["action"] = serde_json::json!(action);
+        }
+    }
+}
+
+/// The served-rows guard for the rule: a warn / error row with no action
+/// reads as `none` (N/A), and a row below warn carries no action. Returns the
+/// signals it demoted so the caller can trace them.
+fn enforce_status_actions(sections: &mut [serde_json::Value]) -> Vec<String> {
+    let mut demoted = Vec::new();
+    for section in sections.iter_mut() {
+        let Some(rows) = section.get_mut("rows").and_then(|r| r.as_array_mut()) else {
+            continue;
+        };
+        for row in rows.iter_mut() {
+            let Ok(typed) = serde_json::from_value::<StatusRow>(row.clone()) else {
+                continue;
+            };
+            let warn = typed.is_warning();
+            if warn && !typed.has_action() {
+                demoted.push(typed.signal.clone());
+                row["level"] = serde_json::json!(StatusLevel::None);
+            }
+            if !warn {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.remove("action");
+                }
+            }
+        }
+    }
+    demoted
 }
 
 trait IfEmpty {
@@ -83853,6 +83993,7 @@ fn stranded_approval_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::V
             serde_json::json!({
                 "signal": "Stranded approval",
                 "level": "warn",
+                "action": "Tell the agent to proceed with the item, or Refine it with a note",
                 "state": format!("{} approved, agent not notified", sorted.join(", ")),
                 "detail": format!(
                     "An approved authorization ({}s old) has no inflight claim and no agent activity since it was issued — the gate click's turn never reached the agent (#350). Recovery: tell the agent to proceed with the item, or Refine it with a note; the authorization is still valid.",
@@ -84045,6 +84186,7 @@ fn stranded_claim_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Valu
             serde_json::json!({
                 "signal": "Stranded claim",
                 "level": "warn",
+                "action": "Send any message; the turn it starts clears the claim",
                 "state": format!("{} claimed, agent quiet", sorted.join(", ")),
                 "detail": format!(
                     "An inflight claim ({}s old) has had no agent activity for {}s, so every gate button and all row selection are disabled with nothing running. Recovery: send any message — the turn it starts ends, and the turn ending clears the claim. Observe-only for now; see stranded-claim-is-detected-not-endured.",
@@ -110433,7 +110575,10 @@ mod host_note_tests {
 // status-untracked-undeclared-hint: the Status row's counting and ranking.
 #[cfg(test)]
 mod untracked_undeclared_tests {
-    use super::{group_thousands, untracked_undeclared_row, untracked_undeclared_summary};
+    use super::{
+        enforce_status_actions, group_thousands, set_missing_action, status_rows_missing_action,
+        untracked_undeclared_row, untracked_undeclared_summary,
+    };
     use std::collections::HashMap;
 
     fn paths(v: &[&str]) -> Vec<String> {
@@ -110491,6 +110636,71 @@ mod untracked_undeclared_tests {
         assert_eq!(small["level"], "none");
         assert!(!small["detail"].as_str().unwrap().contains(".gitignore"));
         assert_eq!(untracked_undeclared_row(0, &[], 0)["level"], "ok");
+    }
+
+    // status-warns-only-with-an-action: a warn/error row must name an action.
+    #[test]
+    fn warning_rows_name_an_action() {
+        let top = vec![("spike-envs/".to_string(), 28265)];
+        let warn_row = untracked_undeclared_row(28265, &top, 0);
+        assert_eq!(warn_row["level"], "warn");
+        assert!(
+            status_rows_missing_action(&[warn_row]).is_empty(),
+            "a builder's warn row carries an action"
+        );
+        let bare = serde_json::json!({
+            "signal": "Example", "level": "warn", "state": "x", "detail": "y", "seen": ""
+        });
+        let blank = serde_json::json!({
+            "signal": "Blank", "level": "error", "state": "x", "detail": "y", "seen": "",
+            "action": "  "
+        });
+        let fine = serde_json::json!({
+            "signal": "Fine", "level": "warn", "state": "x", "detail": "y", "seen": "",
+            "action": "Run Setup"
+        });
+        let calm = serde_json::json!({
+            "signal": "Calm", "level": "ok", "state": "x", "detail": "y", "seen": ""
+        });
+        assert_eq!(
+            status_rows_missing_action(&[bare, blank, fine, calm]),
+            vec!["Example".to_string(), "Blank".to_string()]
+        );
+    }
+
+    #[test]
+    fn served_rows_never_warn_without_an_action() {
+        let mut sections = vec![serde_json::json!({
+            "title": "T",
+            "rows": [
+                {"signal": "A", "level": "warn", "state": "s", "detail": "d", "seen": ""},
+                {"signal": "B", "level": "warn", "state": "s", "detail": "d", "seen": "",
+                 "action": "Relaunch Bram"},
+                {"signal": "C", "level": "ok", "state": "s", "detail": "d", "seen": "",
+                 "action": "stray"},
+            ]
+        })];
+        let demoted = enforce_status_actions(&mut sections);
+        assert_eq!(demoted, vec!["A".to_string()]);
+        let rows = sections[0]["rows"].as_array().unwrap();
+        assert_eq!(rows[0]["level"], "none");
+        assert_eq!(rows[1]["level"], "warn");
+        assert_eq!(rows[1]["action"], "Relaunch Bram");
+        assert!(rows[2].get("action").is_none());
+        assert!(status_rows_missing_action(rows).is_empty());
+    }
+
+    #[test]
+    fn set_missing_action_fills_only_warnings() {
+        let mut rows = vec![
+            serde_json::json!({"signal": "A", "level": "warn"}),
+            serde_json::json!({"signal": "B", "level": "ok"}),
+            serde_json::json!({"signal": "C", "level": "warn", "action": "Own"}),
+        ];
+        set_missing_action(&mut rows, "Run Setup");
+        assert_eq!(rows[0]["action"], "Run Setup");
+        assert!(rows[1].get("action").is_none());
+        assert_eq!(rows[2]["action"], "Own");
     }
 
     // untracked-count-excludes-bram-files: Bram's own working files are left

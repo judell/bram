@@ -526,6 +526,8 @@ this hook, Setup). Never say "send `approved: {...}`", "paste the
 structured approval payload", or describe the wire format — the button
 generates the verified payload.
 
+**Warn only with an action.** Never warn a user of what they cannot act on; name the action in plain words ("Run Setup") or say nothing.
+
 ### Keep internal jargon out of user-facing chat
 
 "Inflight sentinel", "resolve/mutate", "PreToolUse hook", "worklist

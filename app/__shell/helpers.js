@@ -22879,18 +22879,19 @@ window.__bramStatusToggle = function (list, key) {
   window.__bramStatusOpenSave(next);
   return next;
 };
-// A coordination section's worst row level, for its folded header.
-window.__bramStatusSectionSummary = function (section) {
-  var rows = (section && section.rows) || [];
-  var errors = rows.filter(function (r) { return r && r.level === "error"; }).length;
-  var warns = rows.filter(function (r) { return r && r.level === "warn"; }).length;
-  if (errors) return errors + " error" + (errors === 1 ? "" : "s");
-  if (warns) return warns + " warn";
-  return "ok";
+// Status rows with no verdict read "N/A", not "none" / "n/a" / blank
+// (status-warns-only-with-an-action).
+window.__bramStatusNA = function (v) {
+  var t = (v === null || v === undefined) ? "" : String(v).trim();
+  return (t === "" || t.toLowerCase() === "none" || t.toLowerCase() === "n/a") ? "N/A" : t;
 };
-window.__bramStatusSectionSummaryColor = function (section) {
-  var s = window.__bramStatusSectionSummary(section);
-  if (/error/.test(s)) return "$color-danger-700";
-  if (/warn/.test(s)) return "$color-warn-700";
+// The action line under a row's detail; the host sends `action` only on
+// warn / error rows.
+window.__bramStatusActionText = function (row) {
+  return row && row.action ? "Action: " + row.action : "";
+};
+window.__bramStatusActionColor = function (row) {
+  if (row && row.level === "error") return "$color-danger-700";
+  if (row && row.level === "warn") return "$color-warn-700";
   return "$textColor-secondary";
 };

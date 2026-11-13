@@ -191,10 +191,6 @@
           <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'coord:' + $item.title)}" />
           <Heading level="h3" value="{$item.title}" />
           <Text
-            fontWeight="$fontWeight-bold"
-            color="{window.__bramStatusSectionSummaryColor($item)}"
-            value="{window.__bramStatusSectionSummary($item)}" />
-          <Text
             when="{statusSectionSubhead($item.title)}"
             fontSize="$fontSize-sm"
             color="$textColor-secondary"

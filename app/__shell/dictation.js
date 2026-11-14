@@ -165,6 +165,7 @@
   //   onPartial   ({ committed, provisional, parts, openSeq, repairing })
   //   shouldAttach () => false when a stop arrived while the worklet loaded
   //   onAttach    () => void, at the moment capture is live
+  //   onHearing   () => void, once, at the first block that isn't digital silence
   //   fetch       override, for tests
   const createLoop = (options) => {
     const o = options || {};
@@ -196,6 +197,7 @@
       latencies: [],
       errors: 0,
       capture: "",
+      heard: false,
       // voice-onset-instrumentation: when sound first arrives after capture
       // starts, to tell a warming-up device (zeros) from audio too quiet to
       // keep (small, climbing RMS).
@@ -522,6 +524,16 @@
       const rms = Math.sqrt(sum / data.length);
       const voiced = rms > LIVE_RMS;
       noteOnset(rms, voiced);
+      // voice-ready-when-mic-hears: the first block that isn't digital
+      // silence means the mic is live; a quiet room still has a noise floor.
+      if (!L.heard && rms > 0) {
+        L.heard = true;
+        if (typeof o.onHearing === "function") {
+          try {
+            o.onHearing();
+          } catch (_) {}
+        }
+      }
       if (voiced) {
         // A pause inside speech just ended; keep its length for voice-final.
         if (L.spoke && L.quietMs >= LIVE_PAUSE_LOG_MIN_MS && L.pauses.length < 500) {

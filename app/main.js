@@ -2713,7 +2713,7 @@ listen("pty-send-sent", (e) => {
 
   // Start the live loop on the recording's stream. Its partials go to the
   // pane editor that owns the recording.
-  const startLive = async (mediaStream, target, requestId) => {
+  const startLive = async (mediaStream, target, requestId, onReady) => {
     const loop = window.BramDictation.createLoop({
       engine: voiceEngine,
       trace: voiceLog,
@@ -2726,6 +2726,7 @@ listen("pty-send-sent", (e) => {
       onAttach: () => {
         live = loop;
       },
+      onHearing: () => onReady("hearing"),
       onPartial: (p) => {
         if (!target || !target.source) return;
         try {
@@ -2748,7 +2749,9 @@ listen("pty-send-sent", (e) => {
       },
     });
     loop.target = target;
-    if (!(await loop.start(mediaStream)) && live === loop) live = null;
+    const attached = await loop.start(mediaStream);
+    if (!attached && live === loop) live = null;
+    if (!attached) onReady("no-live");
   };
 
   // Stop capturing, commit what's left, and return the live text.
@@ -3065,9 +3068,20 @@ listen("pty-send-sent", (e) => {
     mediaRecorder.start();
     activeRecorderStarted = true;
     voiceLog("mediaRecorder-start", { requestId: incomingId });
-    if (!fullPassReserved()) startLive(stream, target, incomingId);
-    if (active && typeof active === "object" && active.source) {
-      armIframeRecordingWatchdog();
+    if (active && typeof active === "object" && active.source) armIframeRecordingWatchdog();
+    // voice-ready-when-mic-hears: the button turns to recording only once
+    // the mic delivers sound. A fresh mic can send exact zeros for ~1 s
+    // after getUserMedia resolves (2026-11-13: 11-12 zero blocks), and words
+    // spoken then are never captured. Event-driven, once per dictation: the
+    // live loop's first nonzero block, or at once when no live loop runs.
+    const readyStartedAt = Date.now();
+    let readySent = false;
+    const sendReady = (via) => {
+      if (readySent) return;
+      if (currentRequestId() !== incomingId || activeStopRequested) return;
+      readySent = true;
+      voiceLog("voice-ready", { requestId: incomingId, via, msFromStart: Date.now() - readyStartedAt });
+      if (!(active && typeof active === "object" && active.source)) return;
       postIframeVoiceState("recording");
       try {
         active.source.postMessage(
@@ -3084,7 +3098,9 @@ listen("pty-send-sent", (e) => {
           error: String(e),
         });
       }
-    }
+    };
+    if (fullPassReserved()) sendReady("no-live");
+    else startLive(stream, target, incomingId, sendReady);
   };
 
   const stopRecording = (stopAtMs, source) => {

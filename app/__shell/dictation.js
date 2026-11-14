@@ -196,6 +196,10 @@
       latencies: [],
       errors: 0,
       capture: "",
+      // voice-onset-instrumentation: when sound first arrives after capture
+      // starts, to tell a warming-up device (zeros) from audio too quiet to
+      // keep (small, climbing RMS).
+      onset: { t0: 0, blocks: 0, firstBlockMs: null, firstNonzeroMs: null, firstVoicedMs: null, rms: [], logged: false },
       segment: null,
       repairDue: false,
       repairMs: [],
@@ -485,12 +489,39 @@
       if (!L.dead && !L.stopped) L.timer = setTimeout(liveTick, LIVE_STEP_MS);
     };
 
+    const ONSET_BLOCKS = 24;
+    const logOnset = () => {
+      const n = L.onset;
+      if (n.logged) return;
+      n.logged = true;
+      trace("voice-live-onset", {
+        requestId: L.requestId,
+        blocks: n.blocks,
+        firstBlockMs: n.firstBlockMs,
+        firstNonzeroMs: n.firstNonzeroMs,
+        firstVoicedMs: n.firstVoicedMs,
+        rms: n.rms,
+      });
+    };
+    const noteOnset = (rms, voiced) => {
+      const n = L.onset;
+      if (n.logged) return;
+      const ms = n.t0 ? Date.now() - n.t0 : null;
+      n.blocks++;
+      if (n.firstBlockMs === null) n.firstBlockMs = ms;
+      if (n.firstNonzeroMs === null && rms > 1e-4) n.firstNonzeroMs = ms;
+      if (n.firstVoicedMs === null && voiced) n.firstVoicedMs = ms;
+      if (n.rms.length < ONSET_BLOCKS) n.rms.push(Math.round(rms * 10000) / 10000);
+      if (n.rms.length >= ONSET_BLOCKS && n.firstVoicedMs !== null) logOnset();
+    };
+
     const liveFrame = (data, sampleRate) => {
       if (L.stopped) return;
       let sum = 0;
       for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
       const rms = Math.sqrt(sum / data.length);
       const voiced = rms > LIVE_RMS;
+      noteOnset(rms, voiced);
       if (voiced) {
         // A pause inside speech just ended; keep its length for voice-final.
         if (L.spoke && L.quietMs >= LIVE_PAUSE_LOG_MIN_MS && L.pauses.length < 500) {
@@ -553,6 +584,7 @@
           node.onaudioprocess = (e) => liveFrame(e.inputBuffer.getChannelData(0), L.ctx.sampleRate);
           L.capture = "script-processor";
         }
+        L.onset.t0 = Date.now();
         src.connect(node);
         node.connect(mute);
         L.nodes = [src, node, mute];
@@ -586,6 +618,7 @@
     // Stop capturing, commit what's left, and return the live text.
     const finish = async () => {
       stopLiveCapture();
+      logOnset();
       if (L.pending) {
         try {
           await L.pending;

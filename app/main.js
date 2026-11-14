@@ -2438,6 +2438,27 @@ listen("pty-send-sent", (e) => {
     typeof activeStartedAtMs === "number" &&
     Date.now() - activeStartedAtMs >= IFRAME_ORPHAN_GRACE_MS;
 
+  // voice-onset-instrumentation: the mic's name and processing settings, so
+  // a slow first second can be read against auto gain, echo cancellation and
+  // noise suppression.
+  const voiceTrackSettings = (stream) => {
+    try {
+      const t = stream && typeof stream.getAudioTracks === "function" ? stream.getAudioTracks()[0] : null;
+      if (!t) return {};
+      const s = typeof t.getSettings === "function" ? t.getSettings() : {};
+      return {
+        label: t.label || "",
+        echoCancellation: s.echoCancellation,
+        autoGainControl: s.autoGainControl,
+        noiseSuppression: s.noiseSuppression,
+        sampleRate: s.sampleRate,
+        latency: s.latency,
+      };
+    } catch (e) {
+      return { settingsError: String(e) };
+    }
+  };
+
   const mediaRecorderConfig = () => {
     const opusWebm = "audio/webm;codecs=opus";
     if (
@@ -2892,6 +2913,7 @@ listen("pty-send-sent", (e) => {
       tracks: stream && typeof stream.getAudioTracks === "function"
         ? stream.getAudioTracks().length
         : null,
+      ...voiceTrackSettings(stream),
     });
     audioChunks = [];
     const recorderConfig = mediaRecorderConfig();

@@ -741,6 +741,18 @@ routes.
 - An empty `steps` list clears the plan. Push, PRs and other non-board steps
   don't belong in it.
 
+**When the next move names an item blocked by edits made outside any item**
+(the Commit tooltip reads "Edits made outside any item in `f` are in the way",
+#478), recommend in this order, in plain words:
+
+1. If another begun item shares that file, commit that item first, then this
+   one. The commit then also includes those outside edits, disclosed in the
+   "Also includes other edits" ⓘ.
+2. Otherwise, offer to put the outside edits under this item or a new one, or to
+   revert or stash them.
+
+Don't say "unowned" or "entangled" to the user.
+
 **Recommending Start.** A `{"verb": "start", "ids": [...]}` step starts
 items that haven't begun, so "Commit `a`, then Start `b`" is one click:
 

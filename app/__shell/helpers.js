@@ -5223,6 +5223,27 @@ window.__bramItemTakeableUnowned = function (item, items, claim, coSelected) {
   return out;
 };
 
+// issue-478-name-the-blocker: the item's own changes don't apply alone
+// (commitCheckFailedPaths, no commitDependsOn, not stranded). When membership
+// shows lines in a failing path that no item owns, say so in plain words;
+// "" when it can't be told, so callers keep their older sentence. `code`
+// wraps names for Markdown (the tooltip); the row strip passes false.
+window.__bramOutsideEditsBlockerSentence = function (item, code) {
+  if (!item) return "";
+  var failed = item.commitCheckFailedPaths || [];
+  if (!failed.length || (item.commitDependsOn || []).length || (item.commitStrandedBy || []).length) return "";
+  var m = window.__bramBoardMembership();
+  if (!m || !m.byPath) return "";
+  var hit = failed.filter(function (p) {
+    var un = m.byPath[p] && m.byPath[p].unowned;
+    return !!un && ((Number(un.added) || 0) + (Number(un.removed) || 0)) > 0;
+  });
+  if (!hit.length) return "";
+  var q = function (s) { return code ? "`" + s + "`" : s; };
+  return "Edits made outside any item in " + hit.map(q).join(", ") +
+    " are in the way. Click " + (code ? "**What's my next move?**" : "What's my next move?");
+};
+
 // unowned-lines-postmortem-fixes: the Commit button's tooltip names the
 // failing check when it is withheld. With only the scope listed, a disabled
 // Commit left the user (and the agent) guessing (2026-10-09).
@@ -5247,6 +5268,8 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
       return window.__bramStrandedSentence(it.commitStrandedBy, it.commitDependsOn, true, false);
     }
     if ((it.commitCheckFailedPaths || []).length) {
+      var outsideWhy = window.__bramOutsideEditsBlockerSentence(it, true);
+      if (outsideWhy) return outsideWhy;
       return it.id + " can't be committed as it stands (" + it.commitCheckFailedPaths.join(", ") +
         "). Click **What's my next move?**";
     }
@@ -6329,6 +6352,9 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
         window.__bramStrandedSentence(strandedBy, item.commitDependsOn, false, false),
       );
     }
+    // issue-478-name-the-blocker: edits made outside any item in a failing path.
+    var outsideStrip = window.__bramOutsideEditsBlockerSentence(item, false);
+    if (outsideStrip) return withCloses(outsideStrip);
     var blockers = window.__bramItemShareBlockers(item, items, claim);
     // gate-names-the-outside-commit-that-strands-an-item: two items whose
     // patches each depend on the other's lines can't be ordered. "Commit that

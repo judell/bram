@@ -146,9 +146,8 @@ someone else's commit.** Lines no item owns ride along with the next
 whole-file commit of a begun item declaring that file (disclosed as
 `unownedTaken`). When dropping an item that has **begun**:
 
-- Say what remains on disk before the drop completes, and propose one
-  of: revert it, re-home it under another item's `files`, or leave it
-  deliberately — then say which was chosen.
+- If its edits remain on disk, say so plainly first ("edits to `f` are
+  still on disk — keep, revert, or stash?") and say which was chosen.
 - Prefer `git stash push -m "<item id> (dropped): <what>"` over
   discarding; a stash costs nothing and keeps the work recoverable.
 
@@ -405,7 +404,7 @@ risky.
 re-POST: check `git log` first and treat what you find as the answer. A
 response saying the commit "ALREADY RAN" is success.
 
-- **Entangled commits, 409 refusals, `op=refuse-joint-interval`, `split-shared-files`** (a "commit together" refusal can usually be split; offer it) → read `.claude/bram-reference/worklist-mechanics.md` (§Interval staging and entangled commits; the split, §Serializing entangled items approved together).
+- **Entangled commits, 409 refusals, `op=refuse-joint-interval`, `split-shared-files`** (offer a split only if the user asks for separate commits) → read `.claude/bram-reference/worklist-mechanics.md` (§Interval staging and entangled commits; the split, §Serializing entangled items approved together).
 - **A slow or timed-out commit** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit timeouts: never re-POST).
 - **One click approved several items that share files** → read `.claude/bram-reference/worklist-mechanics.md` (§Serializing entangled items approved together).
 - **About to delegate worklist work to subagents** → read `.claude/bram-reference/worklist-mechanics.md` (§Delegating worklist items to subagents).
@@ -536,6 +535,10 @@ does: "the Worklist tab", "approve the item", "the spinner cleared".
 Use jargon only when asked about internals or when pointing at a path
 they'll grep.
 
+Likewise for items and lines: say "X is also changing this file",
+"commit X first", "commit them together", never "entangled", "owns
+lines" or `unownedTaken`, and skip counts the user can't act on.
+
 ### Cite, don't gesture
 
 When referencing a file, route, or doc, name it
@@ -658,11 +661,9 @@ Every agent's guard **denies** unsigned forge writes; sign by default.
 - **Warn when a new item would entangle a committable item.** Before
   proposing or applying an item, intersect its `files` with those of
   begun items (`applied`, or `proposed` with `begunAtMs`); overlap is
-  the risk of entanglement. If non-empty, say so first: "issue-X has
-  changes ready to commit and touches the same file(s) — recommend
-  committing it first; otherwise this item's
-  edits will mix into X's on-disk diff and need manual separation
-  later." Don't auto-block.
+  the risk of entanglement. Say so only when X is ready to commit:
+  "X touches the same file; committing it first keeps the two commits
+  separate." Don't auto-block.
 - **Suggest a branch when isolation helps** — broad, risky,
   exploratory, multi-commit, review-before-main or
   issue-close-sensitive work, especially over unrelated changes. Explain
@@ -722,11 +723,10 @@ Every agent's guard **denies** unsigned forge writes; sign by default.
   if it changes something you told the user; don't treat it as a
   request. Notes ride only plain message turns, so they may lag a turn
   or two.
-- **Narrate partial landings.** If the success body carries
-  `residualPaths` (`[{path, owner}]`) or `retained` (`[ids]`), report
-  what committed and what remains committable instead of announcing
-  completion; retained items stay on the board with a fresh Commit
-  offer. Don't re-POST.
+- **Narrate partial landings.** If `retained` (`[ids]`) is non-empty,
+  say in one sentence which item still has changes and stays on the
+  board, instead of announcing completion. Don't mention `residualPaths`
+  owned by another item. Don't re-POST.
 
 - **Close-on-push details, squash-merge repos, residual paths** → read `.claude/bram-reference/worklist-mechanics.md` (§Close-on-push and partial landings).
 

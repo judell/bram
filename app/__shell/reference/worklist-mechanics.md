@@ -610,17 +610,20 @@ the discipline for completing them serially.
   nothing to do) or `"unowned"` — and `retained: [ids]` for requested
   items with unowned residue, which the host does **not** prune: the row
   stays on the board with its changes, and the pane's Commit offer (a
-  fresh gate click) is the resume channel. Report the partial landing
-  instead of announcing completion, and don't re-POST: the approval is
-  consumed and the claim released.
+  fresh gate click) is the resume channel. If `retained` is non-empty,
+  say in one sentence which item still has changes and that it stays on
+  the board, instead of announcing completion. A `residualPaths` entry
+  owned by another item is normal; don't mention it. Don't re-POST: the
+  approval is consumed and the claim released.
 - **Lines taken that no item wrote.** A whole-file commit takes every
   line on its paths. When some of those lines belong to no item (chat-turn
   edits, edits between claim windows, a neighbour's lines on a file it
   doesn't declare), the success body carries `unownedTaken: [{path, added,
   removed}]`. The commit went through: this is a disclosure, not a refusal.
-  Tell the user which files carried lines no item wrote and that they
-  landed in this commit, so the history doesn't silently credit them to
-  the item.
+  Record it in the commit message (next bullet), so the history doesn't
+  silently credit those lines to the item. In chat, say at most one
+  clause ("it also included edits made outside any item in `f`"), or
+  nothing.
 - **Write the commit message from the prediction, not from memory.**
   Before posting `worklist-commit`, read the item's `willCommit` from
   `GET /__worklist`: it follows the gate's routing (whole-file on every
@@ -759,8 +762,8 @@ item; say the one click in chat.
 
 **Explain the plan in `why`: why this order and not another.** Markdown,
 briefly. For each ordering choice, say what would go wrong the other way:
-which lines would entangle, which commit would be refused, which work would
-be wasted. **Where the order doesn't matter, say so, and say which you'll
+which commits would get mixed together, which commit would be refused, which
+work would be wasted. **Where the order doesn't matter, say so, and say which you'll
 do** ("the start can go first or last. We'll do it last."). Don't recite the steps, what each item is, or that work
 is done: the line already shows the steps, and "A comes first because A is
 done" explains nothing (Jon, 2026-11-08: "You tautologically recite the
@@ -770,7 +773,8 @@ button opens it in a modal, so the reasoning stays on the board after the
 chat scrolls away. Without it, **Why?** shows `summary`.
 
 **"What's my next move? (a, b, …)"** is what the gate bar's **What's my next
-move?** button sends, as chat, when two or more items are ticked; the
+move?** button sends, as chat, when two or more items are ticked (or one
+stuck item; see below); the
 parentheses name them. Answer with the order for those items, then post it
 as a plan with a `why`. Order by what the board shows:
 
@@ -778,6 +782,28 @@ as a plan with a `why`. Order by what the board shows:
   (it would entangle);
 - finish begun work before starting proposed work;
 - recommend Drop for an item that turned out to need nothing.
+
+**A stuck item: "What's my next move? (a)".** The button also shows with
+one item ticked when that item can't be committed as it stands: a commit
+outside the Worklist changed one of its files after it began (the row's
+`commitStrandedBy`), or edits outside any item sit between its own changes
+(`commitCheckFailedPaths` with no `commitDependsOn`, #478). Answer in chat
+with one move the user can take; there is no plan for a single item.
+
+- **If a re-anchor will work, offer it:** "I'll update it to apply to the
+  latest commit," then, on the user's go-ahead, `POST /__worklist/reanchor
+  {"ids": ["a"]}`. The route refuses unless the file's uncommitted lines
+  are all this item's, so check `GET /__worklist` first: no other begun
+  item changing the file, and no edits outside any item in it.
+- **If another item is also changing the file,** the move is "commit X
+  first" or "commit them together", whichever the board allows.
+- **If edits outside any item are in the way,** offer to remove them or
+  give them their own item, and say which edits (file, a line or two of
+  what they are). The user decides.
+- If the re-anchor is refused anyway, say so plainly and give the next of
+  these; never send the user to a button that won't work.
+- Keep engine words out of the answer: not "stranded", "re-anchor",
+  "interval" or "membership". Say what the user will see change.
 
 **Look for delegation.** When two or more ticked items can be worked at once,
 say so in the answer and in the plan's `why`. Both lead with the batches as
@@ -897,8 +923,9 @@ item. Apply-and-commit turns have no intermediate advance.
 Unowned lines can ride with a later whole-file commit, disclosed as
 `unownedTaken`; an entangled commit uses the membership partition and
 can leave residual work. Neither outcome makes unrelated chat edits
-belong to the item. Inspect what the gate will commit and report retained
-ids/residual paths; see Interval staging and entangled commits.
+belong to the item. Inspect what the gate will commit, and say in plain
+words if an item stays on the board; see Interval staging and entangled
+commits.
 
 With the user's explicit go-ahead for an outside-gate recovery commit,
 clear the landed rows using the verified cleanup path described above.

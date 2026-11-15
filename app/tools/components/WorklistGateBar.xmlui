@@ -8,6 +8,9 @@
        selection arrives by PushSource and the message text from the single
        Footer composer, which now serves both roles. -->
   <DataSource id="gateWorklist" url="/__worklist" transformResult="{(d) => window.__bramWorklistAccept(d)}" />
+  <ModalDialog id="gateOutsideDialog" title="{$param &amp;&amp; $param.title}">
+    <Markdown content="{($param &amp;&amp; $param.body) || ''}" />
+  </ModalDialog>
   <DataSource id="gateConfig" url="/__worklist-config" />
   <DataSource id="gateClaim" url="/__inflight" />
   <!-- delegated-release-warns-while-subagent-runs: the subagent roster, so
@@ -368,7 +371,7 @@
       width="fit-content"
       textAlign="left"
       fontSize="$fontSize-sm"
-      color="$color-warn-700"
+      color="$textColor-secondary"
       value="{window.__bramGateDelegatedLine(gateClaim.value, gateSel.value, gateWorklist.value.items)}" />
     <!-- delegated-release-warns-while-subagent-runs: while the roster says
          the bound subagent is still running, Release asks first, inline (no
@@ -379,7 +382,7 @@
       size="xs"
       variant="outlined"
       label="Release"
-      tooltip="Use when the subagent was cancelled or has finished but its stop never arrived. Releasing while it's still working leaves its later edits with no item."
+      tooltip="Use when the subagent was cancelled or has finished but its stop never arrived. Releasing now means anything it still writes won't count toward this item."
       onClick="gateReleaseAsk = window.__bramDelegatedReleaseClick(gateClaim.value, gateSel.value, gateAgents.value)" />
     <VStack
       when="{window.__bramDelegatedReleaseAskLive(gateReleaseAsk, gateClaim.value, gateSel.value, gateAgents.value)}"
@@ -389,7 +392,7 @@
         width="fit-content"
         textAlign="left"
         fontSize="$fontSize-sm"
-        value="The subagent is still working. Anything it writes after you release belongs to no item and will ride along with the next commit that takes those files." />
+        value="The subagent is still working. Releasing now means anything it still writes won't count toward this item." />
       <HStack gap="$space-2">
         <Button
           size="xs"
@@ -593,6 +596,17 @@
         enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
         onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     </Tooltip>
+    <!-- plain-words: shown only when the commit would include lines no item
+         wrote; replaces the take line's "including +u -v no item wrote".
+         Same {title, body} -> open() pattern as the files table's (i)
+         (https://www.xmlui.org/docs/reference/components/ModalDialog#open). -->
+    <Button
+      when="{!!window.__bramSelectionOutsideEdits(gateTake.value, gateSel.value, gateWorklist.value)}"
+      label="ⓘ"
+      variant="ghost"
+      size="xs"
+      tooltip="Also includes other edits"
+      onClick="gateOutsideDialog.open(window.__bramOutsideEditsExplain(gateTake.value, gateSel.value, gateWorklist.value))" />
     <!-- switch-to-transcript-on-action: Refine retired. It was never an
          authorization — the other gate buttons write auth records; Refine
          wrote none, it was conversation squatting among the signatures from

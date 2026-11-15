@@ -73053,30 +73053,81 @@ fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
         );
         return;
     }
-    let removed = retire.len();
-    for r in &retire {
-        let _ = hidden_command("git")
+    // #493: the store is written FIRST. A ref deleted while its record
+    // survives is the dangerous state (gc then prunes the tree the record
+    // names); a record dropped while its ref survives only keeps a tree alive.
+    let outcome = prune_store_then_refs(&sidecar, &mut doc, &keep, &retire, |r| {
+        hidden_command("git")
             .current_dir(&root)
             .args(["update-ref", "-d", r])
-            .output();
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    });
+    match outcome {
+        PruneStoreOutcome::StoreWriteFailed => {
+            append_bram_trace_line(app, "claim-interval", "op=prune-write-failed reason=io");
+        }
+        PruneStoreOutcome::Pruned { deleted, failed } => {
+            append_bram_trace_line(
+                app,
+                "claim-interval",
+                &format!(
+                    "op=prune removed={} kept={} refs={}",
+                    deleted.len(),
+                    keep.len(),
+                    deleted.join(",")
+                ),
+            );
+            for r in &failed {
+                append_bram_trace_line(
+                    app,
+                    "claim-interval",
+                    &format!("op=prune-ref-delete-failed ref={}", r),
+                );
+            }
+        }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PruneStoreOutcome {
+    /// The sidecar could not be written; no ref was touched.
+    StoreWriteFailed,
+    /// The sidecar holds `keep`; `deleted` and `failed` partition the retired refs.
+    Pruned {
+        deleted: Vec<String>,
+        failed: Vec<String>,
+    },
+}
+
+// Write `keep` into the sidecar, and only on success delete the retired refs.
+fn prune_store_then_refs(
+    sidecar: &Path,
+    doc: &mut serde_json::Value,
+    keep: &[serde_json::Value],
+    retire: &[String],
+    mut delete_ref: impl FnMut(&str) -> bool,
+) -> PruneStoreOutcome {
     if let Some(obj) = doc.as_object_mut() {
         obj.insert(
             "intervals".to_string(),
-            serde_json::Value::Array(keep.clone()),
+            serde_json::Value::Array(keep.to_vec()),
         );
     }
-    if let Ok(body) = serde_json::to_string_pretty(&doc) {
-        let tmp = sidecar.with_extension("json.tmp");
-        if std::fs::write(&tmp, format!("{}\n", body)).is_ok() {
-            let _ = std::fs::rename(&tmp, &sidecar);
+    if !write_claim_intervals_doc(sidecar, doc) {
+        return PruneStoreOutcome::StoreWriteFailed;
+    }
+    let mut deleted = Vec::new();
+    let mut failed = Vec::new();
+    for r in retire {
+        if delete_ref(r) {
+            deleted.push(r.clone());
+        } else {
+            failed.push(r.clone());
         }
     }
-    append_bram_trace_line(
-        app,
-        "claim-interval",
-        &format!("op=prune removed={} kept={}", removed, keep.len()),
-    );
+    PruneStoreOutcome::Pruned { deleted, failed }
 }
 
 // The synthetic write at the drop-policy validator writes and immediately
@@ -111918,7 +111969,9 @@ mod claim_interval_tests {
 
 #[cfg(test)]
 mod claim_interval_prune_tests {
-    use super::{claim_intervals_partition, GhostOwnerIndex};
+    use super::{
+        claim_intervals_partition, prune_store_then_refs, GhostOwnerIndex, PruneStoreOutcome,
+    };
     use serde_json::json;
     use std::collections::HashSet;
 
@@ -111927,6 +111980,60 @@ mod claim_interval_prune_tests {
     }
     fn live(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bram-prune493-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn failed_store_write_deletes_no_ref() {
+        let d = tmp_dir("fail");
+        // Parent directory does not exist, so the temp write fails.
+        let sidecar = d.join("missing").join(".claim-intervals.json");
+        let mut doc = json!({"intervals": [rec("refs/a", &["A"]), rec("refs/b", &["B"])]});
+        let keep = vec![rec("refs/a", &["A"])];
+        let retire = vec!["refs/b".to_string()];
+        let mut calls = Vec::new();
+        let out = prune_store_then_refs(&sidecar, &mut doc, &keep, &retire, |r| {
+            calls.push(r.to_string());
+            true
+        });
+        assert_eq!(out, PruneStoreOutcome::StoreWriteFailed);
+        assert!(calls.is_empty(), "no ref may be deleted: {calls:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn refs_are_deleted_only_after_the_store_holds_keep() {
+        let d = tmp_dir("ok");
+        let sidecar = d.join(".claim-intervals.json");
+        let mut doc = json!({"intervals": [rec("refs/a", &["A"]), rec("refs/b", &["B"])]});
+        let keep = vec![rec("refs/a", &["A"])];
+        let retire = vec!["refs/b".to_string(), "refs/c".to_string()];
+        let mut seen_in_store = Vec::new();
+        let out = prune_store_then_refs(&sidecar, &mut doc, &keep, &retire, |r| {
+            let on_disk: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+            seen_in_store.push(on_disk["intervals"].as_array().unwrap().len());
+            r != "refs/c"
+        });
+        assert_eq!(
+            seen_in_store,
+            vec![1, 1],
+            "store held keep before each delete"
+        );
+        assert_eq!(
+            out,
+            PruneStoreOutcome::Pruned {
+                deleted: vec!["refs/b".to_string()],
+                failed: vec!["refs/c".to_string()],
+            }
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     // The hazard the rule exists for: r2 begins B's interval but ENDS A's, so

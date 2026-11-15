@@ -299,6 +299,28 @@
           <Column header="Floor parts" width="150px"><Text value="{window.__bramTokenFloorParts($item)}" /></Column>
           <Column bindTo="cacheHitShare" header="Cache hit" width="90px"><Text value="{window.__bramTokenPct($item.cacheHitShare)}" /></Column>
         </Table>
+        <!-- Per-item credit (issue-486-per-item-token-table): rows shaped by
+             window.__bramTokenItemRows; a fold, closed by default. -->
+        <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
+          onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-items')">
+          <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-items')}" />
+          <Heading level="h4">By item</Heading>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="— what each Worklist item's work used" />
+        </HStack>
+        <Text when="{statusOpen.includes('tokens-items')}" fontSize="$fontSize-sm" color="$textColor-secondary"
+          value="{window.__bramTokenItemLead(tokens.value)}" />
+        <HStack when="{statusOpen.includes('tokens-items')}" gap="$space-1" verticalAlignment="center" wrapContent="true">
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About the credit:" />
+          <Button size="xs" variant="ghost" icon="info" label="What this credits and omits" onClick="tokenInfoKey = 'itemCredit'" />
+        </HStack>
+        <Table when="{statusOpen.includes('tokens-items')}" data="{window.__bramTokenItemRows(tokens.value, 25)}">
+          <Column bindTo="item" header="Item"><Text breakMode="anywhere" value="{$item.item}" /></Column>
+          <Column bindTo="thread" header="Thread" width="110px" />
+          <Column bindTo="calls" header="Calls" width="80px" />
+          <Column bindTo="context" header="Summed context" width="130px" />
+          <Column bindTo="peak" header="Peak context" width="110px" />
+          <Column bindTo="output" header="Output" width="100px" />
+        </Table>
         <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
           onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-files')">
           <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-files')}" />

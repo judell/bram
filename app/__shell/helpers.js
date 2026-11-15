@@ -22765,6 +22765,64 @@ window.__bramTokenTests = function (row) {
 window.__bramTokenFileRows = function (report) {
   return ((report && report.files) || []).slice(0, 15);
 };
+// Per-item credit (issue-486-per-item-token-table). One pass over
+// sessions[].items[] and sessions[].chat: rows of item, thread (Main thread /
+// Subagents), calls, summed context, peak context, output. A chat row per
+// thread carries work outside any claim; BucketRow has no peak, so its peak is
+// null ("—"). Items sort by summed context, main + subagents, largest first.
+window.__bramTokenItemAgg = function (report) {
+  var items = {};
+  var chat = { main: null, subagent: null };
+  function add(t, r) {
+    if (!t) { t = { calls: 0, context: 0, output: 0, peak: 0 }; }
+    t.calls += r.calls || 0;
+    t.context += r.context || 0;
+    t.output += r.output || 0;
+    t.peak = Math.max(t.peak, r.peakContext || 0);
+    return t;
+  }
+  ((report && report.sessions) || []).forEach(function (s) {
+    var th = s.thread === "subagent" ? "subagent" : "main";
+    (s.items || []).forEach(function (it) {
+      var e = items[it.id] || (items[it.id] = { main: null, subagent: null });
+      e[th] = add(e[th], it);
+    });
+    if (s.chat && s.chat.calls) chat[th] = add(chat[th], s.chat);
+  });
+  return { items: items, chat: chat };
+};
+window.__bramTokenItemRows = function (report, limit) {
+  var agg = window.__bramTokenItemAgg(report);
+  var I = window.__bramTokenInt, K = window.__bramTokenK;
+  function row(label, thread, t, noPeak) {
+    return {
+      item: label, thread: thread,
+      calls: t ? I(t.calls) : "—", context: t ? I(t.context) : "—",
+      peak: t && !noPeak ? K(t.peak) : "—", output: t ? I(t.output) : "—"
+    };
+  }
+  var ids = Object.keys(agg.items);
+  function tot(id) {
+    var e = agg.items[id];
+    return (e.main ? e.main.context : 0) + (e.subagent ? e.subagent.context : 0);
+  }
+  ids.sort(function (a, b) { return tot(b) - tot(a); });
+  var rows = [];
+  ids.slice(0, limit || 25).forEach(function (id) {
+    var e = agg.items[id];
+    if (e.main) rows.push(row(id, "Main thread", e.main, false));
+    if (e.subagent) rows.push(row(id, "Subagents", e.subagent, false));
+  });
+  if (agg.chat.main) rows.push(row("chat (outside any item)", "Main thread", agg.chat.main, true));
+  if (agg.chat.subagent) rows.push(row("chat (outside any item)", "Subagents", agg.chat.subagent, true));
+  return rows;
+};
+window.__bramTokenItemLead = function (report) {
+  var n = Object.keys(window.__bramTokenItemAgg(report).items).length;
+  if (!n) return "No call fell inside an item's claim yet.";
+  return n + " items had calls credited to them" + (n > 25 ? "; the 25 that used the most context are shown" : "") +
+    ", across every session above. Work outside any item's claim is on the chat rows.";
+};
 // Coverage of lib.rs by line, mapped onto the file at HEAD (token-accounting-
 // files-one-row-per-file). Rows for a Table: measure, share of the file, and
 // what it covers (providers and dates).
@@ -22837,7 +22895,7 @@ window.__bramTokenRegionRows = function (report) {
 window.__bramTokenInfoTitle = function (key) {
   return {
     covRead: "Through the Read tool", covShell: "Through the shell", covReads: "Reads per line",
-    covChanged: "Since changed", covRegions: "Busiest stretches",
+    covChanged: "Since changed", covRegions: "Busiest stretches", itemCredit: "Credit by item",
     provider: "Provider", calls: "Calls", context: "Context", fit: "Fit",
     floor: "Floor", cache: "Cache hit", reads: "Reads", main: "Main",
     subagents: "Subagents", sessions: "Sessions", mostSession: "Most in one session", perRead: "Per read",
@@ -22917,6 +22975,7 @@ window.__bramTokenInfoText = function (key, report) {
   if (key === "covReads") return "Line readings are each time a line came back in a result. Divide by the lines read at all and you get reads per line. A line read three or more times is one the agents keep coming back to.";
   if (key === "covChanged") return "A line read at an older commit that the changes since deleted or rewrote has no place in today's file. These are counted apart. lib.rs was reformatted in one sweep and has grown from about 85,000 to 115,000 lines, so many early readings are of code that no longer exists as it was.";
   if (key === "covRegions") return "The ten busiest stretches of 200 lines by how many times their lines were read, none overlapping, each with the functions that took most of the reading. A split of the file helps where readings gather; stretches the agents never read are not worth moving.";
+  if (key === "itemCredit") return "Each call an agent made while an item was being worked is credited to that item; nothing is estimated.\n\n- **Calls** is how many requests; **Summed context** adds up the context of every call (so it grows with calls, not just with size); **Peak** is the largest single call; **Output** is what the model wrote.\n- Discussion outside any item's claim counts as **chat**, so a conversation about an item before it was started is not credited to it. Chat has no peak.\n- When one approval covers several items at once, every item in that window is credited the same full amount, so those rows overlap and adding the rows double-counts.\n- Subagents are credited by time: a subagent's calls go to the item that was being worked when it ran, because a subagent does not say which item it serves.";
   if (key === "tests") return "The share of what Read returned that fell inside test code. It is only worked out for `src-tauri/src/lib.rs`; other files show a dash.";
   return "";
 };

@@ -14860,6 +14860,18 @@ window.__bramBottomJumpRetry = function (listRef, cause, agentId, total) {
   // in flight for one drag). A newer jump supersedes an older one.
   var gen = (window.__bramJumpGen || 0) + 1;
   window.__bramJumpGen = gen;
+  // transcript-resize-no-yank-while-reading: a reader who isn't following must
+  // not be moved. The in-loop check below ran only after the first jump, so
+  // resize-driven calls (cause "worklist-resize", the footer changing height)
+  // yanked a scrolled-up reader. Deliberate callers set follow true first via
+  // __bramFollowTransition, so they are unaffected.
+  if (window.__bramFollowAtBottom === false) {
+    window.__bramIframeTrace("follow-state", {
+      op: "jump-yielded", cause: cause || "", attempts: 0, early: true,
+      agentId: agentId || "main",
+    });
+    return;
+  }
   var MAX_ATTEMPTS = 40; // ~2s at 50ms; a jump from the top of a long
                          // virtualized list needs virtua to render and measure
                          // its way down, which the old 600ms budget cut short.

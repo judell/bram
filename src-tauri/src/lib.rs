@@ -95307,6 +95307,18 @@ fn staged_path_covered_by(approved: &str, staged: &str) -> bool {
                 .map_or(false, |rest| rest.starts_with('/')))
 }
 
+// commit-reports-skipped-files: of the declared paths `git add` couldn't
+// match, the ones the commit still leaves out — those with nothing staged
+// under them. A deletion staged earlier matches nothing for `add` but is
+// staged, so the commit carries it and it isn't reported.
+fn skipped_files_left_out(unmatched: &[String], staged: &[String]) -> Vec<String> {
+    unmatched
+        .iter()
+        .filter(|f| !staged.iter().any(|s| staged_path_covered_by(f, s)))
+        .cloned()
+        .collect()
+}
+
 fn ensure_no_unrelated_staged_files(
     staged: &[String],
     approved_files: &[String],
@@ -98450,6 +98462,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // converge on the shared post-commit tail below.
     let sha: String;
     let committed_paths: Vec<String>;
+    // commit-reports-skipped-files: listed paths that matched nothing on disk
+    // or in the index, so this commit doesn't carry them. Reported in the
+    // response; the trace line alone hid a vanished `.bram.json` (bram-studio,
+    // 2026-11-15).
+    let mut skipped_files: Vec<String> = Vec::new();
     if needs_interval_stage {
         match interval_stage_commit(app, &ids, message, &item_files_map) {
             Ok((s, cp)) => {
@@ -98613,6 +98630,10 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         if let Err(e) = ensure_no_unrelated_staged_files(&staged_after, &files) {
             return worklist_json_error(400, e);
         }
+        // A deletion staged before this call also fails `git add` as
+        // unmatched, yet the commit carries it through `staged_after`; only
+        // paths absent from the stage were really left out.
+        skipped_files = skipped_files_left_out(&skipped_unmatched, &staged_after);
         if staged_after.is_empty() {
             // issue-366: an empty stage is a no-op commit in waiting — the
             // item's declared files carry no changes (parked, or already
@@ -99006,6 +99027,9 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     if !retained.is_empty() {
         response["retained"] = serde_json::json!(retained);
     }
+    if !skipped_files.is_empty() {
+        response["skipped"] = serde_json::json!(skipped_files);
+    }
     if !prune_ids.is_empty() {
         let prune_body = serde_json::json!({
             "op": "prune",
@@ -99028,6 +99052,9 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             }
             if let Some(r) = response.get("retained") {
                 err["retained"] = r.clone();
+            }
+            if let Some(s) = response.get("skipped") {
+                err["skipped"] = s.clone();
             }
             return (
                 status,
@@ -99671,6 +99698,20 @@ mod worklist_authorization_tests {
         // The fixed behavior: the directory covers its contents, nothing left.
         let none = staged_paths_left_behind(&[st("worklist.json"), st("worklist-drafts")], &staged);
         assert!(none.is_empty(), "unexpected leftovers: {none:?}");
+    }
+
+    // commit-reports-skipped-files: only a declared path with nothing staged
+    // under it is reported. A deletion staged before the commit fails `git
+    // add` as unmatched but is committed, so it isn't.
+    #[test]
+    fn worklist_commit_reports_only_paths_left_out() {
+        let unmatched = ids(&[".bram.json", "gone.rs", "dir/"]);
+        let staged = ids(&["gone.rs", "dir/inner.txt", "other.rs"]);
+        assert_eq!(
+            super::skipped_files_left_out(&unmatched, &staged),
+            ids(&[".bram.json"])
+        );
+        assert!(super::skipped_files_left_out(&[], &staged).is_empty());
     }
 
     #[test]

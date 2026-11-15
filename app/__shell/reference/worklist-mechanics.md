@@ -615,6 +615,15 @@ the discipline for completing them serially.
   the board, instead of announcing completion. A `residualPaths` entry
   owned by another item is normal; don't mention it. Don't re-POST: the
   approval is consumed and the claim released.
+- **Skipped files.** A declared path that matches nothing on disk or in
+  the index is skipped, not refused, so a commit that includes a
+  deletion still goes through. A deletion already staged is still
+  committed and isn't reported. The success body carries `skipped:
+  [paths]` for the paths the commit left out. Say in one plain sentence
+  which listed files weren't in the commit, and check whether that was
+  intended. A vanished file is the case this exists for: in bram-studio
+  (2026-11-15) a `.bram.json` that Bram had moved away was silently
+  missing from a commit the agent reported as complete.
 - **Lines taken that no item wrote.** A whole-file commit takes every
   line on its paths. When some of those lines belong to no item (chat-turn
   edits, edits between claim windows, a neighbour's lines on a file it

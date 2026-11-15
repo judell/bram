@@ -727,6 +727,11 @@ Every agent's guard **denies** unsigned forge writes; sign by default.
   say in one sentence which item still has changes and stays on the
   board, instead of announcing completion. Don't mention `residualPaths`
   owned by another item. Don't re-POST.
+- **Narrate skipped files.** If `skipped` (`[paths]`) is non-empty, those
+  listed files weren't in the commit because they weren't on disk. Say
+  which in one plain sentence, and check whether that was meant: a file
+  the item deleted is fine; one that vanished is not. Don't announce plain
+  success over it.
 
 - **Close-on-push details, squash-merge repos, residual paths** → read `.claude/bram-reference/worklist-mechanics.md` (§Close-on-push and partial landings).
 

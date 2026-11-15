@@ -69713,6 +69713,47 @@ fn membership_diff_u0(
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+// Step index the line history records for lines written across a gap of
+// unresolvable boundary trees (#493). The final tally treats it as "no step
+// explains this line", so the lines land in `unexplained`, never in a step.
+const LINE_STEP_GAP: usize = usize::MAX;
+
+// Which of `trees` no longer exist in the object db (refs deleted, gc
+// pruned), in input order. One `git cat-file --batch-check` spawn for all of
+// them. `None` when the spawn itself fails: the caller then filters nothing.
+fn membership_missing_trees(
+    root: &Path,
+    trees: &[&str],
+    spawns: &std::cell::Cell<usize>,
+) -> Option<Vec<String>> {
+    use std::io::Write;
+    if trees.is_empty() {
+        return Some(Vec::new());
+    }
+    spawns.set(spawns.get() + 1);
+    let mut child = hidden_command("git")
+        .current_dir(root)
+        .args(["cat-file", "--batch-check"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let input: String = trees.iter().map(|t| format!("{t}\n")).collect();
+    child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Some(
+        text.lines()
+            .filter_map(|l| l.trim_end().strip_suffix(" missing"))
+            .map(String::from)
+            .collect(),
+    )
+}
+
 // `steps` is oldest-first `(tree, step_index)` and ends with the present-state
 // tree; the first step diffs against HEAD. One `git diff` per non-identical
 // step plus one final HEAD -> present diff for the universe. `None` on any
@@ -69723,16 +69764,44 @@ fn membership_line_credit(
     paths: &[String],
     spawns: &std::cell::Cell<usize>,
 ) -> Option<std::collections::BTreeMap<String, MembershipLineCredit>> {
+    membership_line_credit_gaps(root, steps, paths, spawns).map(|(map, _)| map)
+}
+
+// `membership_line_credit`, also reporting the step trees that no longer
+// exist (#493). Those steps are skipped: the diff runs from the last
+// resolvable tree before the gap to the next resolvable one, and every line
+// that diff writes or removes is recorded under `LINE_STEP_GAP`, so it tallies
+// as unexplained rather than going to the next step's holder (across a gap we
+// cannot tell who wrote it). A diff between two RESOLVABLE trees that fails
+// still returns `None`.
+fn membership_line_credit_gaps(
+    root: &Path,
+    steps: &[(String, usize)],
+    paths: &[String],
+    spawns: &std::cell::Cell<usize>,
+) -> Option<(
+    std::collections::BTreeMap<String, MembershipLineCredit>,
+    Vec<String>,
+)> {
     let mut result: std::collections::BTreeMap<String, MembershipLineCredit> = paths
         .iter()
         .map(|p| (p.clone(), MembershipLineCredit::default()))
         .collect();
     let Some((now_tree, _)) = steps.last() else {
-        return Some(result);
+        return Some((result, Vec::new()));
     };
     if paths.is_empty() {
-        return Some(result);
+        return Some((result, Vec::new()));
     }
+    // The final tree was just written, so it resolves; check the rest, once.
+    let mut distinct: Vec<&str> = Vec::new();
+    for (tree, _) in &steps[..steps.len() - 1] {
+        if !distinct.contains(&tree.as_str()) {
+            distinct.push(tree.as_str());
+        }
+    }
+    let missing = membership_missing_trees(root, &distinct, spawns).unwrap_or_default();
+    let mut gap = false;
     let mut histories: std::collections::HashMap<String, LineHistory> = Default::default();
     // The path's HEAD blob: the OLD side of the first step diff listing it
     // (the path equals HEAD until then; a new file's old side is all zeros).
@@ -69740,8 +69809,15 @@ fn membership_line_credit(
     let mut prev = "HEAD".to_string();
     for (tree, step) in steps {
         if *tree == prev {
+            gap = false;
             continue;
         }
+        if missing.contains(tree) {
+            gap = true;
+            continue;
+        }
+        let step = if gap { &LINE_STEP_GAP } else { step };
+        gap = false;
         let text = membership_diff_u0(root, &prev, tree, paths, spawns)?;
         for file in parse_line_diff(&text) {
             head_blob
@@ -69779,7 +69855,7 @@ fn membership_line_credit(
         for (old_start, old_count, new_start, new_count) in file.hunks {
             for j in new_start..new_start + new_count {
                 match hist.origin_at(j) {
-                    Some(LineOrigin::Step(k)) => {
+                    Some(LineOrigin::Step(k)) if k != LINE_STEP_GAP => {
                         credit.by_step.entry(k).or_insert((0, 0)).0 += 1;
                         credit.added_lines.push((j, k));
                     }
@@ -69788,16 +69864,48 @@ fn membership_line_credit(
             }
             for i in old_start..old_start + old_count {
                 match hist.removed_by.get(&i) {
-                    Some(k) => {
+                    Some(k) if *k != LINE_STEP_GAP => {
                         credit.by_step.entry(*k).or_insert((0, 0)).1 += 1;
                         credit.removed_lines.push((i, *k));
                     }
-                    None => credit.unexplained.1 += 1,
+                    _ => credit.unexplained.1 += 1,
                 }
             }
         }
     }
-    Some(result)
+    Some((result, missing))
+}
+
+// `atMs` and ids of the first claim-store record naming `tree`, for the
+// `op=step-missing` trace. "?" / "" when the store can't be matched.
+fn membership_record_for_tree(intervals_json: &str, tree: &str) -> (String, String) {
+    let doc: serde_json::Value = serde_json::from_str(intervals_json).unwrap_or_default();
+    let rec = doc
+        .get("intervals")
+        .and_then(|v| v.as_array())
+        .and_then(|a| {
+            a.iter().find(|r| {
+                r.get("tree")
+                    .or_else(|| r.get("ref"))
+                    .and_then(|v| v.as_str())
+                    == Some(tree)
+            })
+        });
+    let at = rec
+        .and_then(|r| r.get("atMs"))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let ids = rec
+        .and_then(|r| r.get("ids"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    (at, ids)
 }
 
 // Boundary trees and holders from the claim store. `steps` ends with
@@ -70412,8 +70520,23 @@ fn membership_partition_engine_keyed<R: tauri::Runtime>(
     let credits = if steps.is_empty() {
         Default::default()
     } else {
-        match membership_line_credit(&root, &steps, &universe_paths, &spawns) {
-            Some(c) => c,
+        match membership_line_credit_gaps(&root, &steps, &universe_paths, &spawns) {
+            Some((c, missing)) => {
+                for tree in &missing {
+                    let (at_ms, ids) = membership_record_for_tree(&intervals_raw, tree);
+                    append_bram_trace_line(
+                        app,
+                        "claim-interval",
+                        &format!(
+                            "op=step-missing tree={} atMs={} ids={}",
+                            tree.chars().take(12).collect::<String>(),
+                            at_ms,
+                            ids
+                        ),
+                    );
+                }
+                c
+            }
             None => {
                 cleanup();
                 trace_fail(app, spawns.get(), started, "line-credit-failed", None);
@@ -71098,9 +71221,15 @@ mod membership_port_support {
 #[cfg(test)]
 mod membership_engine_tests {
     use super::membership_port_support::{
-        attributed, chain_credit, commit_all, numstat, numstat_between, route, scratch_repo, snap,
+        attributed, chain_credit, commit_all, git, numstat, numstat_between, route, scratch_repo,
+        snap,
     };
-    use super::{membership_conservation_breach, membership_line_credit, membership_unowned};
+    use super::{
+        membership_conservation_breach, membership_line_credit, membership_line_credit_gaps,
+        membership_unowned,
+    };
+
+    const GONE: &str = "1111111111111111111111111111111111111111";
 
     #[test]
     fn concatenated_reedit_patch_counts_net_once() {
@@ -71182,6 +71311,115 @@ mod membership_engine_tests {
         assert_eq!(y.added_lines, vec![(3, 1)]);
         assert!(y.removed_lines.is_empty());
         assert_eq!(y.by_step.get(&1), Some(&(1, 0)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_middle_tree_leaves_the_gap_lines_unexplained() {
+        // #493: a step tree whose ref was deleted and which gc pruned. The
+        // compute must still succeed; lines written across the gap are
+        // credited to no step, and lines after it are credited as usual.
+        let root = scratch_repo("i493-middle");
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::write(root.join("f.txt"), "one\n").unwrap();
+        let b0 = snap(&root);
+        std::fs::write(root.join("f.txt"), "one\ntwo\n").unwrap();
+        let b2 = snap(&root);
+        std::fs::write(root.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        let now = snap(&root);
+
+        let steps = vec![
+            (b0, 0usize),
+            (GONE.to_string(), 1usize),
+            (b2, 2usize),
+            (now, 3usize),
+        ];
+        let spawns = std::cell::Cell::new(0usize);
+        let (map, missing) =
+            membership_line_credit_gaps(&root, &steps, &["f.txt".to_string()], &spawns)
+                .expect("a missing tree does not fail the compute");
+        assert_eq!(missing, vec![GONE.to_string()]);
+        let c = &map["f.txt"];
+        assert_eq!(c.by_step.get(&0), Some(&(1, 0)));
+        assert_eq!(c.by_step.get(&2), None, "the gap's lines are not step 2's");
+        assert_eq!(c.by_step.get(&3), Some(&(1, 0)));
+        assert_eq!(c.added_lines, vec![(1, 0), (3, 3)]);
+        assert_eq!(c.unexplained, (1, 0), "line 2 was written across the gap");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_first_tree_leaves_the_gap_lines_unexplained() {
+        let root = scratch_repo("i493-first");
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::write(root.join("f.txt"), "one\n").unwrap();
+        let b1 = snap(&root);
+        std::fs::write(root.join("f.txt"), "one\ntwo\n").unwrap();
+        let now = snap(&root);
+
+        let steps = vec![(GONE.to_string(), 0usize), (b1, 1usize), (now, 2usize)];
+        let spawns = std::cell::Cell::new(0usize);
+        let (map, missing) =
+            membership_line_credit_gaps(&root, &steps, &["f.txt".to_string()], &spawns)
+                .expect("a missing first tree does not fail the compute");
+        assert_eq!(missing, vec![GONE.to_string()]);
+        let c = &map["f.txt"];
+        assert_eq!(c.by_step.get(&1), None);
+        assert_eq!(c.by_step.get(&2), Some(&(1, 0)));
+        assert_eq!(c.unexplained, (1, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fully_resolvable_chain_is_unchanged_by_the_gap_check() {
+        let root = scratch_repo("i493-intact");
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::write(root.join("f.txt"), "one\n").unwrap();
+        let b0 = snap(&root);
+        std::fs::write(root.join("f.txt"), "one\ntwo\n").unwrap();
+        let b1 = snap(&root);
+        std::fs::write(root.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        let now = snap(&root);
+
+        let steps = vec![(b0, 0usize), (b1, 1usize), (now, 2usize)];
+        let paths = vec!["f.txt".to_string()];
+        let spawns = std::cell::Cell::new(0usize);
+        let (map, missing) = membership_line_credit_gaps(&root, &steps, &paths, &spawns).unwrap();
+        assert!(missing.is_empty());
+        // One batch-check, one diff per step, one final HEAD -> now diff.
+        assert_eq!(spawns.get(), 1 + 3 + 1);
+        let c = &map["f.txt"];
+        assert_eq!(c.by_step.get(&0), Some(&(1, 0)));
+        assert_eq!(c.by_step.get(&1), Some(&(1, 0)));
+        assert_eq!(c.by_step.get(&2), Some(&(1, 0)));
+        assert_eq!(c.added_lines, vec![(1, 0), (2, 1), (3, 2)]);
+        assert_eq!(c.unexplained, (0, 0));
+        let wrapped = membership_line_credit(&root, &steps, &paths, &spawns).unwrap();
+        assert_eq!(wrapped, map);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failing_diff_between_resolvable_trees_still_fails() {
+        // A blob exists in the object db, so it is not "missing", but it is
+        // not a tree-ish `git diff` can compare: that stays a failure.
+        let root = scratch_repo("i493-bad");
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        commit_all(&root, "head");
+        std::fs::write(root.join("f.txt"), "one\n").unwrap();
+        let blob =
+            String::from_utf8_lossy(&git(&root, None, &["hash-object", "-w", "f.txt"]).stdout)
+                .trim()
+                .to_string();
+        let now = snap(&root);
+        let steps = vec![(blob, 0usize), (now, 1usize)];
+        let spawns = std::cell::Cell::new(0usize);
+        assert!(
+            membership_line_credit_gaps(&root, &steps, &["f.txt".to_string()], &spawns).is_none()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

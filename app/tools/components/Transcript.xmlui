@@ -243,7 +243,7 @@
          https://www.xmlui.org/docs/reference/components/Button -->
     <DataSource id="orientStatus" url="/__enhance/status" />
     <HStack
-      when="{!$props.agentId &amp;&amp; !orientSent &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.startupGreetingVisible}"
+      when="{!$props.agentId &amp;&amp; !orientSent &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.startupGreetingVisible &amp;&amp; orientStatus.value.startupGreetingOrientMe}"
       width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2"
       paddingHorizontal="$space-4">
       <!-- width="*": the text takes the row's remainder and wraps, so the

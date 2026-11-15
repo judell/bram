@@ -353,6 +353,10 @@ struct ProjectConfig {
     // issue-414: start minimized and/or open the target app in the browser.
     #[serde(default)]
     launch: Option<LaunchConfig>,
+    // repo-authored-first-run-greeting: the repo's own first message, read
+    // when the first-wake greeting is armed.
+    #[serde(default)]
+    greeting: Option<GreetingConfig>,
 }
 // (The transitional `guards.rustAuthority` toggle was retired by
 // retire-python-hooks-rust-only: the Rust bram-guard is the only
@@ -611,6 +615,22 @@ struct LaunchConfig {
     // true, or a route such as "/architecture".
     #[serde(default, rename = "openApp")]
     open_app: Option<serde_json::Value>,
+}
+
+// repo-authored-first-run-greeting: `.bram.json` "greeting". `file` is the
+// repo-relative text the first message quotes; `name` is the display name
+// the frame introduces (folder name when absent); `orientMe: false` hides
+// the Orient me offer beside the greeting (absent means true). Committed,
+// so a fresh clone programs its own first encounter before Setup has
+// managed anything.
+#[derive(Clone, Default, serde::Deserialize)]
+struct GreetingConfig {
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "orientMe")]
+    orient_me: Option<bool>,
 }
 
 #[derive(Clone, Default)]
@@ -42207,6 +42227,180 @@ static REPO_STARTUP_GREETING_MARKED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static REPO_STARTUP_GREETING_ARMED_AT_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+// repo-authored-first-run-greeting: whether the Orient me offer may render
+// beside the visible greeting (`.bram.json` greeting.orientMe; default true).
+static REPO_STARTUP_GREETING_ORIENT_ME: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+// The composed repo-authored greeting (frame + the repo's own text), set at
+// arming when `.bram.json` declares one that reads cleanly. None keeps the
+// default copy.
+static REPO_AUTHORED_GREETING: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn repo_authored_greeting_text() -> Option<String> {
+    REPO_AUTHORED_GREETING
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|s| s.clone())
+}
+
+fn set_repo_authored_greeting(text: Option<String>) {
+    if let Ok(mut s) = REPO_AUTHORED_GREETING
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *s = text;
+    }
+}
+
+// The fixed frame Bram speaks before a repo-authored greeting. It introduces
+// a relationship, not a provenance — it must read for someone who has never
+// heard of Bram (a Bram Studio end user delivered here by the editor) — and
+// it names the speaker, so the quoted text can't impersonate the host.
+// Settled with Jon, 2026-11-14.
+fn repo_greeting_frame(name: &str) -> String {
+    format!(
+        "Hello — this is the agent that comes with **{}**. Its makers left you this introduction:",
+        name
+    )
+}
+
+fn compose_repo_authored_greeting(name: &str, repo_text: &str) -> String {
+    format!("{}\n\n{}", repo_greeting_frame(name), repo_text.trim())
+}
+
+// Containment for the greeting file path: inside the repo, judged by
+// spelling on every platform (docs/developing-bram.md, Paths: recognize
+// Windows absolutes and separators even where only the Mac's tests run).
+fn greeting_rel_path_refusal(rel: &str) -> Option<&'static str> {
+    let trimmed = rel.trim();
+    if trimmed.is_empty() {
+        return Some("empty");
+    }
+    if trimmed.starts_with('/') || Path::new(trimmed).is_absolute() {
+        return Some("absolute");
+    }
+    if trimmed.contains('\\') {
+        return Some("backslash");
+    }
+    if trimmed.contains(':') {
+        return Some("drive-colon");
+    }
+    if trimmed.split('/').any(|seg| seg == "." || seg == "..") {
+        return Some("dot-segment");
+    }
+    None
+}
+
+const REPO_AUTHORED_GREETING_MAX_BYTES: usize = 16 * 1024;
+
+// Cap the repo's text at a char boundary; true when truncated.
+fn cap_greeting_text(text: &str) -> (String, bool) {
+    if text.len() <= REPO_AUTHORED_GREETING_MAX_BYTES {
+        return (text.to_string(), false);
+    }
+    let mut end = REPO_AUTHORED_GREETING_MAX_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+// repo-authored-first-run-greeting: a committed `.bram.json` makes
+// `has_project_settings` true, so a repo declaring its own greeting would
+// read as "already managed" and never greet (observed on the first fixture
+// launch: `op=suppressed reason=already-managed`). The declaration is the
+// opposite evidence — the repo's makers are asking for the first message —
+// so for a greeting-declaring repo only Setup's acknowledgement artifact
+// (the authorization marker, a deliberate act on THIS machine) counts as
+// managed. Repos without a greeting block keep the old answer.
+fn repo_declares_greeting(root: &Path) -> bool {
+    load_project_config(root)
+        .map(|c| c.greeting.is_some())
+        .unwrap_or(false)
+}
+
+fn repo_managed_for_greeting(
+    declares_greeting: bool,
+    has_settings: bool,
+    auth_marker: bool,
+) -> bool {
+    if declares_greeting {
+        auth_marker
+    } else {
+        has_settings || auth_marker
+    }
+}
+
+// repo-authored-first-run-greeting: read the repo's own greeting if the
+// committed `.bram.json` declares one. Runs once, from the arming path —
+// before Setup, so a fresh clone's first message is already the repo's.
+fn load_repo_authored_greeting<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) {
+    let Some(cfg) = load_project_config(root).and_then(|c| c.greeting) else {
+        return;
+    };
+    REPO_STARTUP_GREETING_ORIENT_ME.store(
+        cfg.orient_me.unwrap_or(true),
+        std::sync::atomic::Ordering::Release,
+    );
+    let Some(file) = cfg.file.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if let Some(reason) = greeting_rel_path_refusal(file) {
+        report_startup_greeting(
+            app,
+            &format!(
+                "op=repo-greeting-refused reason={} file={}",
+                reason,
+                bram_trace_preview(file, 120)
+            ),
+        );
+        return;
+    }
+    let text = match std::fs::read_to_string(root.join(file)) {
+        Ok(t) => t,
+        Err(e) => {
+            report_startup_greeting(
+                app,
+                &format!(
+                    "op=repo-greeting-missing file={} error={}",
+                    bram_trace_preview(file, 120),
+                    bram_trace_preview(&e.to_string(), 120)
+                ),
+            );
+            return;
+        }
+    };
+    if text.trim().is_empty() {
+        report_startup_greeting(
+            app,
+            &format!(
+                "op=repo-greeting-missing file={} error=empty",
+                bram_trace_preview(file, 120)
+            ),
+        );
+        return;
+    }
+    let (capped, truncated) = cap_greeting_text(&text);
+    let name = cfg
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .or_else(|| root.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "this project".to_string());
+    set_repo_authored_greeting(Some(compose_repo_authored_greeting(&name, &capped)));
+    report_startup_greeting(
+        app,
+        &format!(
+            "op=repo-greeting file={} bytes={} truncated={}",
+            bram_trace_preview(file, 120),
+            capped.len(),
+            truncated
+        ),
+    );
+}
 
 // A pristine unmanaged repo has no `resources/` directory yet, so its trace
 // destination cannot be relied on while diagnosing the greeting that runs
@@ -42331,10 +42525,13 @@ fn repo_startup_greeting_turn() -> serde_json::Value {
     // same assistant message instead of a banner. Empty announcement leaves
     // the approved copy byte-identical.
     let announcement = auto_setup_announcement();
+    // repo-authored-first-run-greeting: a repo-declared greeting replaces the
+    // default copy; the announcement rides along either way.
+    let base = repo_authored_greeting_text().unwrap_or_else(|| REPO_STARTUP_GREETING.to_string());
     let text = if announcement.is_empty() {
-        REPO_STARTUP_GREETING.to_string()
+        base
     } else {
-        format!("{}\n\n{}", REPO_STARTUP_GREETING, announcement)
+        format!("{}\n\n{}", base, announcement)
     };
     serde_json::json!({
         "role": "assistant",
@@ -42710,12 +42907,20 @@ fn arm_repo_startup_greeting_if_needed<R: tauri::Runtime>(app: &AppHandle<R>) ->
             return false;
         }
     };
-    match claim_repo_startup_greeting(&marker, project_is_managed(&root)) {
+    let managed = repo_managed_for_greeting(
+        repo_declares_greeting(&root),
+        has_project_settings(&root),
+        resource_relative_path(&root, WORKLIST_AUTH_REL).exists(),
+    );
+    match claim_repo_startup_greeting(&marker, managed) {
         Ok(claim) if claim.should_project() => {
             REPO_STARTUP_GREETING_ARMED_AT_MS
                 .store(unix_now_ms(), std::sync::atomic::Ordering::Release);
             REPO_STARTUP_GREETING_MARKED.store(false, std::sync::atomic::Ordering::Release);
             REPO_STARTUP_GREETING_VISIBLE.store(true, std::sync::atomic::Ordering::Release);
+            // repo-authored-first-run-greeting: the repo's own words, read
+            // now so the committed file speaks before Setup manages anything.
+            load_repo_authored_greeting(app, &root);
             report_startup_greeting(
                 app,
                 &format!(
@@ -53895,9 +54100,11 @@ mod project_managed_tests {
 #[cfg(test)]
 mod repo_startup_greeting_tests {
     use super::{
-        claim_repo_startup_greeting, persist_repo_startup_greeting_projected,
+        cap_greeting_text, claim_repo_startup_greeting, compose_repo_authored_greeting,
+        greeting_rel_path_refusal, persist_repo_startup_greeting_projected,
         repo_startup_greeting_marker_path, repo_startup_greeting_turn, RepoStartupGreetingClaim,
-        REPO_STARTUP_GREETING, REPO_STARTUP_GREETING_MARKER_SCHEMA,
+        REPO_AUTHORED_GREETING_MAX_BYTES, REPO_STARTUP_GREETING,
+        REPO_STARTUP_GREETING_MARKER_SCHEMA,
     };
 
     fn scratch(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -53992,6 +54199,64 @@ mod repo_startup_greeting_tests {
             Some(REPO_STARTUP_GREETING)
         );
         assert!(turn.get("user").is_none());
+    }
+
+    // repo-authored-first-run-greeting: the frame is Bram's fixed copy; the
+    // repo's text follows it, trimmed, in one message.
+    #[test]
+    fn repo_authored_frame_names_the_project_and_quotes_the_repo() {
+        assert_eq!(
+            compose_repo_authored_greeting("Bram Studio", "Welcome to the studio.\n"),
+            "Hello — this is the agent that comes with **Bram Studio**. Its makers left you this introduction:\n\nWelcome to the studio."
+        );
+    }
+
+    // Containment is judged by spelling, so the Windows cases run (and fail
+    // meaningfully) on every platform.
+    #[test]
+    fn greeting_file_containment_rejects_escapes_on_every_platform() {
+        for (rel, why) in [
+            ("/etc/motd", "absolute"),
+            ("/c/Users/jon/x.md", "absolute"),
+            ("C:/Users/jon/x.md", "drive-colon"),
+            ("C:\\Users\\jon\\x.md", "backslash"),
+            ("docs\\welcome.md", "backslash"),
+            ("../outside.md", "dot-segment"),
+            ("docs/../../outside.md", "dot-segment"),
+            ("./docs/welcome.md", "dot-segment"),
+            ("", "empty"),
+            ("   ", "empty"),
+        ] {
+            assert_eq!(greeting_rel_path_refusal(rel), Some(why), "case: {:?}", rel);
+        }
+        assert_eq!(greeting_rel_path_refusal("docs/welcome.md"), None);
+        assert_eq!(greeting_rel_path_refusal("WELCOME.md"), None);
+    }
+
+    #[test]
+    fn greeting_cap_truncates_at_a_char_boundary() {
+        // One ASCII byte first, so the cap lands mid-"é" and must back off.
+        let text = format!("a{}", "é".repeat(REPO_AUTHORED_GREETING_MAX_BYTES));
+        let (capped, truncated) = cap_greeting_text(&text);
+        assert!(truncated);
+        assert_eq!(capped.len(), REPO_AUTHORED_GREETING_MAX_BYTES - 1);
+        assert!(
+            capped[1..].chars().all(|c| c == 'é'),
+            "no split char survives"
+        );
+        let (same, t2) = cap_greeting_text("short");
+        assert_eq!((same.as_str(), t2), ("short", false));
+    }
+
+    // A committed `.bram.json` must not suppress the greeting it declares;
+    // only Setup's acknowledgement artifact means "managed" for such a repo.
+    #[test]
+    fn declaring_a_greeting_keeps_settings_from_meaning_managed() {
+        use super::repo_managed_for_greeting;
+        assert!(!repo_managed_for_greeting(true, true, false));
+        assert!(repo_managed_for_greeting(true, true, true));
+        assert!(repo_managed_for_greeting(false, true, false));
+        assert!(!repo_managed_for_greeting(false, false, false));
     }
 }
 
@@ -61736,6 +62001,10 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         // keys on the greeting itself: true while THIS process is projecting
         // the repo-startup greeting into the transcript stream.
         "startupGreetingVisible": REPO_STARTUP_GREETING_VISIBLE
+            .load(std::sync::atomic::Ordering::Acquire),
+        // repo-authored-first-run-greeting: whether the Orient me offer may
+        // render beside the visible greeting (.bram.json greeting.orientMe).
+        "startupGreetingOrientMe": REPO_STARTUP_GREETING_ORIENT_ME
             .load(std::sync::atomic::Ordering::Acquire),
         "nestedUnder": nested_under,
         "nestedUnderIgnoredHome": nested_under_ignored_home,

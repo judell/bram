@@ -313,6 +313,27 @@ it (command-line flags win):
 app, the header's **Open app ↗** button opens the same address, and the ⓘ
 dialog shows it with a **Copy** button.
 
+### A repo's own first message
+
+The first time Bram wakes in a repo it hasn't seen, it says hello. A repo
+can supply that hello itself — useful when the repo is an app whose users
+arrive knowing nothing about Bram:
+
+```json
+{
+  "greeting": { "file": "docs/welcome.md", "name": "Bram Studio", "orientMe": false }
+}
+```
+
+Bram introduces the text — "Hello — this is the agent that comes with
+**Bram Studio**. Its makers left you this introduction:" — then quotes the
+file (Markdown, up to 16 KB; `name` falls back to the folder name). Because
+`.bram.json` is committed, the message is there the moment the repo is
+cloned. `"orientMe": false` hides the **Orient me** tour offer for repos
+whose first-time reader is an end user rather than a developer. The file
+path must be inside the repo; a missing or escaping path falls back to
+Bram's own greeting.
+
 ## Voice input
 
 Bram supports two ways to dictate instead of type:

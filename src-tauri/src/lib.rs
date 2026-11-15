@@ -13432,6 +13432,7 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
     let mut saw_assistant_after_user = false;
     let mut notifications_skipped: u32 = 0;
     let mut boundary_is_notification = false;
+    let mut compact_summary_ts: Option<i64> = None;
     // The CLI writes an `api-request` record as it sends the model a request,
     // ~30 ms after delivering a notification and seconds before the first
     // assistant record (2.1.310; demo 2026-10-24 06:47:12.158 -> .189, reply
@@ -13481,6 +13482,21 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
                     notifications_skipped = notifications_skipped.saturating_add(1);
                     continue;
                 }
+                // issue-494: the CLI writes this summary itself on
+                // auto-compaction; the user said nothing. Passing over it lets
+                // an idle compaction read as finished and keeps the turn id on
+                // the real prompt. Remember the newest one: if the real prompt
+                // is outside the tail, it stands in as the boundary, which is
+                // today's behavior.
+                if rec.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true) {
+                    if compact_summary_ts.is_none() {
+                        compact_summary_ts = rec
+                            .get("timestamp")
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_iso_to_ms);
+                    }
+                    continue;
+                }
                 // A local slash command (`/model`, `/config`, `/clear`) writes
                 // a caveat, the command frame and its stdout as user records.
                 // The user ran a local command; nobody asked the model
@@ -13513,7 +13529,7 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
             _ => {} // sidecar metadata: ignore
         }
     }
-    let user_ts_ms = user_ts_ms?;
+    let user_ts_ms = user_ts_ms.or(compact_summary_ts)?;
     // "working" unless the most recent assistant record explicitly
     // ended the turn. If no assistant has spoken yet, also working
     // (turn started, agent hasn't yielded).
@@ -73979,6 +73995,115 @@ mod notification_turn_boundary_tests {
         )
         .unwrap();
         assert!(claude_jsonl_is_genuine_user_message(&typed));
+    }
+
+    // issue-494: records as Claude Code writes them on auto-compaction.
+    const T1: &str = "2026-11-14T10:00:00.000Z";
+    const T2: &str = "2026-11-14T10:00:30.000Z";
+    const T3: &str = "2026-11-14T10:10:00.000Z";
+    const T4: &str = "2026-11-14T10:20:00.000Z";
+
+    fn prompt_rec(ts: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"{}","message":{{"role":"user","content":"do the thing"}}}}"#,
+            ts
+        )
+    }
+
+    fn assistant_rec(ts: &str, stop: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"role":"assistant","stop_reason":"{}","content":[{{"type":"text","text":"ok"}}]}}}}"#,
+            ts, stop
+        )
+    }
+
+    fn tool_result_rec(ts: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"{}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_x","content":"ok"}}]}}}}"#,
+            ts
+        )
+    }
+
+    fn boundary_rec(ts: &str) -> String {
+        format!(
+            r#"{{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","timestamp":"{}","compactMetadata":{{"trigger":"auto","preTokens":662897}}}}"#,
+            ts
+        )
+    }
+
+    fn summary_rec(ts: &str) -> String {
+        format!(
+            r#"{{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"timestamp":"{}","message":{{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}}}"#,
+            ts
+        )
+    }
+
+    fn ms_of(iso: &str) -> i64 {
+        super::parse_iso_to_ms(iso).expect("timestamp")
+    }
+
+    fn idle_compaction() -> String {
+        [
+            prompt_rec(T1),
+            assistant_rec(T2, "end_turn"),
+            boundary_rec(T3),
+            summary_rec(T3),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn an_idle_compaction_summary_opens_no_turn() {
+        let content = idle_compaction();
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(
+            !stats.is_working,
+            "nothing is running after an idle compaction"
+        );
+        assert_eq!(stats.user_ts_ms, ms_of(T1));
+    }
+
+    #[test]
+    fn a_mid_turn_compaction_keeps_the_real_prompt_as_the_turn() {
+        let content = [
+            prompt_rec(T1),
+            assistant_rec(T2, "tool_use"),
+            tool_result_rec(T2),
+            boundary_rec(T3),
+            summary_rec(T3),
+            assistant_rec(T4, "tool_use"),
+        ]
+        .join("\n");
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(stats.is_working);
+        assert_eq!(stats.user_ts_ms, ms_of(T1));
+    }
+
+    #[test]
+    fn a_typed_message_after_the_summary_starts_its_turn() {
+        let content = [idle_compaction(), prompt_rec(T4)].join("\n");
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(stats.is_working);
+        assert_eq!(stats.user_ts_ms, ms_of(T4));
+    }
+
+    #[test]
+    fn the_summary_stands_in_when_the_real_prompt_is_out_of_view() {
+        let content = [
+            boundary_rec(T3),
+            summary_rec(T3),
+            assistant_rec(T4, "tool_use"),
+        ]
+        .join("\n");
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(stats.is_working);
+        assert_eq!(stats.user_ts_ms, ms_of(T3));
+    }
+
+    #[test]
+    fn a_later_end_turn_after_an_idle_compaction_is_current() {
+        let content = [idle_compaction(), assistant_rec(T4, "end_turn")].join("\n");
+        assert!(!super::claude_end_is_stale_in(&content, None));
     }
 }
 

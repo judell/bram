@@ -60,6 +60,19 @@
   <ChangeListener
     listenTo="{sendRestore.value &amp;&amp; sendRestore.value.tick}"
     onDidChange="() => window.__bramApplySendRestore(sendRestore.value, composerBox, toast)" />
+  <!-- doorway-stage-a-repo-prompt: a page Bram serves named a repo prompt
+       (/__doorway/stage); it lands in this box unsent, focused. Same
+       PushSource + ChangeListener shape as send-restore above
+       (https://www.xmlui.org/docs/reference/components/ChangeListener).
+       Live only (false): a replay on remount would re-stage a prompt the
+       user already sent. -->
+  <PushSource
+    id="doorwayStage"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('doorway-stage', false)}" />
+  <ChangeListener
+    listenTo="{doorwayStage.value &amp;&amp; doorwayStage.value.tick}"
+    onDidChange="() => window.__bramApplyDoorwayStage(doorwayStage.value, composerBox)" />
 
   <!-- Form is retained only for TextArea.enterSubmits. Draft persistence is
        debounced in helpers.js; blur and submit flush/clear explicitly. -->

@@ -40,6 +40,40 @@ Use `toTurn` for one-shot form submissions (Approve, Confirm). Use
 > `__worklist/*`, `__settings`, …) and serves only project content plus
 > the static `__vendor/*` / `__shell/*` namespaces.
 
+### Handing the user to the agent from a page (the doorway)
+
+When the app is open in the user's **browser** (the usual case) and
+something in it needs the agent (setup, an install, a question), a
+button can bring Bram's window forward with a prepared prompt in its
+message box. Nothing is sent: the user reads it and presses Enter.
+
+1. Declare the prompt in the committed `.bram.json`, with its words in a
+   repo file (repo-relative, 4 KB max):
+
+   ```json
+   "prompts": { "get-me-going": { "file": "docs/get-me-going-prompt.md" } }
+   ```
+
+   Names are lowercase letters, digits and `-`. Point the prompt's words
+   at whatever the agent should follow ("Read and follow
+   docs/get-me-going.md").
+2. Load the script and call it from the button:
+
+   ```html
+   <script src="/__shell/doorway.js"></script>
+   <button onclick="BramDoorway.stage('get-me-going')">Get me going</button>
+   ```
+
+`stage()` resolves `{ ok, prompt }`, or rejects with an `Error` whose
+`reason` says why (`unknown-prompt`, `missing-file`, `unreachable` when
+Bram isn't running, …); show a fallback then, such as copying the
+prompt's text. It works only from a page **Bram serves** (its built-in
+server, the project root's `index.html`): Bram admits the request only
+from its own address. Not yet from the embedded preview pane, or from
+an app served by its own dev server on another port. A page can only
+name a prompt, never send words of its own, so the repo stays the only
+author of what lands in the box.
+
 Device APIs that Bram's app bundle can't grant — geolocation is the first
 one (judell/bram#386) — are made **absent** in the preview pane on
 purpose, not left present-but-failing: `navigator.geolocation` doesn't

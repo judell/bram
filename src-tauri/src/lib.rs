@@ -357,6 +357,16 @@ struct ProjectConfig {
     // when the first-wake greeting is armed.
     #[serde(default)]
     greeting: Option<GreetingConfig>,
+    // doorway-stage-a-repo-prompt: prompts a page may ask Bram to stage in
+    // the message box, by name. The words live in committed repo files.
+    #[serde(default)]
+    prompts: Option<std::collections::BTreeMap<String, PromptConfig>>,
+}
+
+#[derive(Clone, Default, serde::Deserialize)]
+struct PromptConfig {
+    #[serde(default)]
+    file: Option<String>,
 }
 // (The transitional `guards.rustAuthority` toggle was retired by
 // retire-python-hooks-rust-only: the Rust bram-guard is the only
@@ -42310,6 +42320,116 @@ fn greeting_rel_path_refusal(rel: &str) -> Option<&'static str> {
 
 const REPO_AUTHORED_GREETING_MAX_BYTES: usize = 16 * 1024;
 
+// doorway-stage-a-repo-prompt: a staged prompt is a short message, not a
+// document.
+const DOORWAY_PROMPT_MAX_BYTES: usize = 4 * 1024;
+
+// Prompt names are `[a-z0-9-]`, 1–40 characters: a name, never a path or text.
+fn doorway_prompt_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+// The text of the repo-declared prompt `name`, or the refusal reason. Pure
+// over the project folder: reads `.bram.json` (merged config) and the file.
+fn doorway_prompt_text(root: &Path, name: &str) -> Result<String, &'static str> {
+    if !doorway_prompt_name_ok(name) {
+        return Err("bad-name");
+    }
+    let file = load_project_config(root)
+        .and_then(|c| c.prompts)
+        .and_then(|p| p.get(name).cloned())
+        .and_then(|p| p.file)
+        .ok_or("unknown-prompt")?;
+    if greeting_rel_path_refusal(&file).is_some() {
+        return Err("refused-path");
+    }
+    let bytes = std::fs::read(root.join(file.trim())).map_err(|_| "missing-file")?;
+    if bytes.len() > DOORWAY_PROMPT_MAX_BYTES {
+        return Err("too-large");
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "not-utf8")?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("empty");
+    }
+    Ok(text)
+}
+
+// doorway-stage-a-repo-prompt: `POST /__doorway/stage?prompt=<name>`. A page
+// Bram serves names a prompt its repo declared; Bram comes forward and the
+// pane puts the prompt in the message box, unsent (`doorway-stage` event,
+// `__bramApplyDoorwayStage`). The raise is the sequence doorway-focus-test
+// proved brings the window in front of the browser, minimized or covered.
+fn handle_doorway_stage<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    query: &str,
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let name = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("prompt="))
+        .unwrap_or("")
+        .to_string();
+    let result = project_root(Some(app))
+        .ok_or("no-project")
+        .and_then(|root| doorway_prompt_text(&root, &name));
+    let text = match result {
+        Ok(t) => t,
+        Err(reason) => {
+            append_bram_trace_line(
+                app,
+                "doorway",
+                &format!(
+                    "op=refused reason={} prompt={}",
+                    reason,
+                    bram_trace_preview(&name, 60)
+                ),
+            );
+            return (
+                404,
+                JSON,
+                serde_json::json!({ "ok": false, "reason": reason })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+    };
+    let raised = app
+        .get_webview_window("main")
+        .map(|w| {
+            let a = w.unminimize().is_ok();
+            let b = w.show().is_ok();
+            let c = w.set_focus().is_ok();
+            a && b && c
+        })
+        .unwrap_or(false);
+    let _ = app.emit(
+        "doorway-stage",
+        serde_json::json!({ "text": text, "prompt": name }),
+    );
+    append_bram_trace_line(
+        app,
+        "doorway",
+        &format!(
+            "op=stage prompt={} bytes={} raised={}",
+            name,
+            text.len(),
+            raised
+        ),
+    );
+    (
+        200,
+        JSON,
+        serde_json::json!({ "ok": true, "prompt": name })
+            .to_string()
+            .into_bytes(),
+    )
+}
+
 // Cap the repo's text at a char boundary; true when truncated.
 fn cap_greeting_text(text: &str) -> (String, bool) {
     if text.len() <= REPO_AUTHORED_GREETING_MAX_BYTES {
@@ -54264,6 +54384,54 @@ mod repo_startup_greeting_tests {
         assert_eq!((same.as_str(), t2), ("short", false));
     }
 
+    // doorway-stage-a-repo-prompt: a request can only name a declared
+    // prompt; the words always come from a committed repo file.
+    #[test]
+    fn doorway_prompt_resolves_only_declared_contained_files() {
+        use super::{doorway_prompt_name_ok, doorway_prompt_text, DOORWAY_PROMPT_MAX_BYTES};
+        let root = std::env::temp_dir().join(format!("bram-doorway-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join(".bram.json"),
+            r#"{"prompts":{
+                "get-me-going":{"file":"docs/go.md"},
+                "escape":{"file":"../outside.md"},
+                "gone":{"file":"docs/none.md"},
+                "big":{"file":"docs/big.md"},
+                "blank":{"file":"docs/blank.md"}
+            }}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/go.md"), "  Start the server.\n").unwrap();
+        std::fs::write(
+            root.join("docs/big.md"),
+            "x".repeat(DOORWAY_PROMPT_MAX_BYTES + 1),
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/blank.md"), "\n\n").unwrap();
+        assert_eq!(
+            doorway_prompt_text(&root, "get-me-going"),
+            Ok("Start the server.".to_string())
+        );
+        assert_eq!(doorway_prompt_text(&root, "nope"), Err("unknown-prompt"));
+        assert_eq!(doorway_prompt_text(&root, "escape"), Err("refused-path"));
+        assert_eq!(doorway_prompt_text(&root, "gone"), Err("missing-file"));
+        assert_eq!(doorway_prompt_text(&root, "big"), Err("too-large"));
+        assert_eq!(doorway_prompt_text(&root, "blank"), Err("empty"));
+        assert_eq!(doorway_prompt_text(&root, "Get Me Going"), Err("bad-name"));
+        assert_eq!(doorway_prompt_text(&root, "docs/go.md"), Err("bad-name"));
+        assert!(doorway_prompt_name_ok("a-1"));
+        assert!(!doorway_prompt_name_ok(""));
+        assert!(!doorway_prompt_name_ok(&"a".repeat(41)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prompts_is_a_team_settings_key() {
+        assert!(super::TEAM_SETTINGS_KEYS.contains(&"prompts"));
+    }
+
     // A committed `.bram.json` must not suppress the greeting it declares;
     // only Setup's acknowledgement artifact means "managed" for such a repo.
     #[test]
@@ -65560,9 +65728,10 @@ const SETTINGS_NOTE_REL: &str = ".settings-note";
 // settings-fold-keeps-team-keys: team settings are the keys a repo writes
 // for every clone, so they belong in the committed root file and never in
 // private `.bram/settings.json`. `launch` (#414) and `greeting`
-// (repo-authored-first-run-greeting) joined `server`; the fold and the
-// settings note share this one list.
-const TEAM_SETTINGS_KEYS: &[&str] = &["server", "launch", "greeting"];
+// (repo-authored-first-run-greeting) joined `server`, then `prompts`
+// (doorway-stage-a-repo-prompt); the fold and the settings note share this
+// one list.
+const TEAM_SETTINGS_KEYS: &[&str] = &["server", "launch", "greeting", "prompts"];
 const SETTINGS_NOTE_HEAD: &str =
     "This project's tracked .bram.json differs from HEAD. Since 0.8.4 \
 Bram keeps personal settings in .bram/settings.json and never writes the root file.";
@@ -107381,6 +107550,12 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         } else {
             handle_pane_flush(app)
         }
+    } else if path == "__doorway/stage" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            handle_doorway_stage(app, query)
+        }
     } else if path == "__trace/pane" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
@@ -107683,6 +107858,23 @@ const STATE_CHANGING_GET_PATHS: &[&str] = &[
 // page's own loopback origin may call them. Hand-kept like its sibling above.
 const READ_ONLY_POST_PATHS: &[&str] = &["query"];
 
+// doorway-stage-a-repo-prompt: POST routes a page this Bram serves may call
+// from its own loopback origin (http://127.0.0.1:<port> or
+// http://localhost:<port>, this port only). Not a same-origin allowance in
+// general: each route here must be safe for any such page to call. The
+// doorway is: a request can only NAME a prompt the repo declared in
+// committed `.bram.json`, and the text is staged in the message box, never
+// sent. Hand-kept like its siblings above.
+const PAGE_ORIGIN_POST_PATHS: &[&str] = &["__doorway/stage"];
+
+fn page_origin_allowed(request_origin: Option<&str>, port: Option<u16>) -> bool {
+    let (Some(origin), Some(port)) = (request_origin, port) else {
+        return false;
+    };
+    let origin = origin.trim().to_ascii_lowercase();
+    origin == format!("http://127.0.0.1:{port}") || origin == format!("http://localhost:{port}")
+}
+
 // issue-469-retire-resources step 2: the routes that may still change
 // something while the start is held. None of them writes Bram's state: the
 // hold's own Move / Retry (migrate-relaunch, and Status's decision, which
@@ -107781,7 +107973,12 @@ fn loopback_gate_refusal(
     if !loopback_host_allowed(request_host, port) {
         return Some("bad-host");
     }
-    if request_changes_state(method, path) && !state_change_origin_allowed(request_origin) {
+    if request_changes_state(method, path)
+        && !state_change_origin_allowed(request_origin)
+        && !(method == "POST"
+            && PAGE_ORIGIN_POST_PATHS.contains(&path)
+            && page_origin_allowed(request_origin, port))
+    {
         return Some("foreign-origin");
     }
     None
@@ -107888,6 +108085,46 @@ mod cors_origin_tests {
         assert_eq!(
             loopback_gate_refusal("GET", "__enhance/run", Some("http://127.0.0.1:57373"), h, p),
             Some("foreign-origin")
+        );
+        // doorway-stage-a-repo-prompt: the doorway accepts this Bram's own
+        // page origin, at this port only; nothing else widens.
+        for own in ["http://127.0.0.1:5000", "http://localhost:5000"] {
+            assert_eq!(
+                loopback_gate_refusal("POST", "__doorway/stage", Some(own), h, p),
+                None,
+                "{own}"
+            );
+        }
+        for other in [
+            "http://127.0.0.1:5001",
+            "http://localhost:57373",
+            "https://127.0.0.1:5000",
+            "https://evil.example",
+            "bramapp://localhost",
+            "http://bramapp.localhost",
+            "null",
+            "",
+        ] {
+            assert_eq!(
+                loopback_gate_refusal("POST", "__doorway/stage", Some(other), h, p),
+                Some("foreign-origin"),
+                "{other}"
+            );
+        }
+        assert_eq!(
+            loopback_gate_refusal(
+                "POST",
+                "__worklist/reorder",
+                Some("http://127.0.0.1:5000"),
+                h,
+                p
+            ),
+            Some("foreign-origin"),
+            "the page origin opens only the doorway"
+        );
+        assert_eq!(
+            loopback_gate_refusal("POST", "__doorway/stage", None, h, p),
+            None
         );
         // legitimate
         assert_eq!(

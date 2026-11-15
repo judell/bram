@@ -18090,6 +18090,76 @@ window.__bramToastIssuesClosed = function (evtValue, toastApi) {
   toastApi("Closed " + list + " on push");
 };
 
+// doorway-stage-a-repo-prompt: a page Bram serves asked to hand the user to
+// the agent (/__doorway/stage). Put the repo's prompt in the message box,
+// unsent, with send-restore's merge rule: an empty box gets the prompt; the
+// user's own unsent text is kept and the prompt goes below a blank line;
+// the same text already there is left alone. Then focus the box with the
+// caret at the end, 300 ms later: the host raised the window as it emitted,
+// and doorway-focus-test showed focus set before the window activates lands
+// nowhere. The trace records what the pane saw (document.hasFocus(), the
+// active element), not Tauri's window flag, which read true even when Jon
+// judged a run a failure.
+window.__bramApplyDoorwayStage = function (evtValue, box) {
+  var p = evtValue && evtValue.payload;
+  var text = p && p.text;
+  // The listener also fires once at mount with no payload: nothing to say.
+  if (!text) return;
+  if (!box) {
+    try { window.__bramIframeTrace("doorway-stage", { skipped: true, hasBox: false }); } catch (e) {}
+    return;
+  }
+  var existing = "";
+  try {
+    existing = box.value == null ? "" : String(box.value);
+  } catch (e) { existing = ""; }
+  var merged;
+  if (existing.trim() === "" || existing === text) {
+    merged = text;
+  } else if (existing.indexOf(text) !== -1) {
+    merged = existing;
+  } else {
+    merged = existing + "\n\n" + text;
+  }
+  __bramWriteMessageDraft(merged, "doorway-stage");
+  if (typeof box.setValue === "function") {
+    try { box.setValue(merged); } catch (e) {}
+  }
+  // Report what the pane sees: once when focus is set, and again a second
+  // later, because the window may still be activating at 300 ms (the first
+  // live run read docHasFocus:false there while the caret was visibly in the
+  // box).
+  var report = function (when) {
+    try {
+      var el = document.activeElement;
+      window.__bramIframeTrace("doorway-stage", {
+        when: when,
+        prompt: (p && p.prompt) || "",
+        chars: text.length,
+        merged: merged !== text,
+        boxFocused: !!(el && el.tagName === "TEXTAREA"),
+        docHasFocus: document.hasFocus(),
+      });
+    } catch (e) {}
+  };
+  setTimeout(function () {
+    try {
+      // The pane is a frame inside the shell: focusing an element in it
+      // doesn't take keyboard focus from the shell (the terminal may hold
+      // it). Focus the frame's own window first, as doorway-focus-test's
+      // probe did (frame, then box) when focus did land.
+      try { window.focus(); } catch (e) {}
+      if (typeof box.focus === "function") box.focus();
+      var el = document.activeElement;
+      if (el && el.tagName === "TEXTAREA" && typeof el.setSelectionRange === "function") {
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+    } catch (e) {}
+    report("focus");
+    setTimeout(function () { report("1s"); }, 1000);
+  }, 300);
+};
+
 // pane-send-refuses-bare-shell: `toastApi` is XMLUI's toast()
 // (https://www.xmlui.org/docs/howto/show-toast-notifications-from-code), used
 // to say why a refused send came back (p.reason === "shell-foreground").

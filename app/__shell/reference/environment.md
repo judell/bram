@@ -305,10 +305,31 @@ Evidence: a table, a code block, a count.
 </details>
 ```
 
+### Say what a mention asks
+
+When a forge post @-mentions a person, say on the same line what it
+wants from them:
+
+- **A question or request:** "@name: question for you — …"
+- **Awareness only:** "cc @name, no reply needed"
+- **A credit or reference:** "thanks to @name", which asks nothing
+
+One ask per mention, and keep asks where a reader sees them, not inside
+a fold. A bare mention reads the same as a credit or a cc, both to
+GitHub's inbox and to anyone's triage agent, so a real ask gets filed
+as FYI. That is how a direct question sat unanswered for two weeks
+([#464](https://github.com/judell/bram/issues/464)). This holds for
+issue bodies, comments, PR descriptions and reviews, alongside the
+standing rule to write a bare `@name` only for a real login you mean to
+notify.
+
 ## Signature fields
 
 The expander signature (`.claude/bram-conventions.md`, §Signing
-agent-authored forge artifacts) is a `<details>` block. Shape:
+agent-authored forge artifacts) is a `<details>` block. The older
+one-line form (`… (Bram <version>, <thread>, …) speaking from the
+<Project> project (<locator>):`) is still accepted; write expanders.
+Shape:
 
 ```markdown
 <details>

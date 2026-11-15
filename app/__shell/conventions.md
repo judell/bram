@@ -613,9 +613,7 @@ after a short opener a person wrote:
 
 `Commit`, `Item` and `Agent CLI` are optional; `Commit` must resolve
 locally. Field meanings, sources and locator rules → read
-`.claude/bram-reference/environment.md` (§Signature fields). The older
-one-line form (`… (Bram <version>, <thread>, …) speaking from the
-<Project> project (<locator>):`) is still accepted; write expanders.
+`.claude/bram-reference/environment.md` (§Signature fields).
 
 Rules:
 
@@ -633,6 +631,8 @@ Rules:
   details-summary form) and use its outline: the signature block, a bold
   sentence, bullets with bold claims, numbered folds. The guard denies a long post with
   no fold. Never write a PR's opener yourself.
+- **Say what an @-mention asks** (a reply, or nothing) on its line →
+  read `.claude/bram-reference/environment.md` (§Say what a mention asks).
 - Commit messages don't take the forge signature (they carry an author
   field), but a commit message another session will read should still
   say who wrote it and from which build.

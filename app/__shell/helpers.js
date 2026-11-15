@@ -4906,9 +4906,10 @@ window.__bramDelegatedReleaseKept = function (sel) {
 // owns lines, and only those lines are counted; a declared path the item
 // wrote nothing on contributes nothing — #273's opening report, where a
 // chat/skip-worklist/hand edit read as the item's work and offered Commit.
-// Display only: the gate, staging and refusals still decide by the replay
-// (#273 step 4a), and the tooltip's "Commits +X" still quotes the host's
-// willCommit, i.e. what the gate will actually take.
+// Display only: the gate stages from the item's own patch
+// (issue-425-retire-replay; the replay is gone), and the tooltip's
+// "Commits +X" quotes the host's willCommit, i.e. what the gate will
+// actually take.
 window.__bramBoardMembership = function () {
   var p = __bramWlAccepted;
   if (!p || !p.membership || !p.membership.byPath) return null;
@@ -12971,6 +12972,95 @@ window.__bramAnnotatePrecedingIntent = function (turns) {
   return list;
 };
 
+// issue-388-transcript-shown-trace: one `transcript-shown` line per new turn,
+// saying whether the Transcript actually rendered it. A broadcast that grows
+// the turn count (Transcript mounted) opens ONE pending record and a 2 s
+// timer; the List's visible-range callback (__bramSetVisibleRangeYou ->
+// __bramShownObserve) closes it as `shown` the moment the new turn's last row
+// is mounted inside the range. At the timer: row present in the adapter's
+// snapshot but outside the range = `offscreen` (reader scrolled up); no
+// observation of the row at all = `not-shown`, the "appeared only on reload"
+// signature. A newer broadcast before resolution retargets the same pending
+// record (t0 and timer kept), so a fast stream yields one line, not one per
+// token. Cost: one Date.now()/length compare per broadcast and, only while a
+// record is pending, a short backward scan per range event; no DOM reads.
+// Row ids are positional ("pt<turnIdx>-..."), set by the projected-turns
+// adapter, so the turn's rows are found by that prefix.
+var __bramShownPending = null;
+var __bramShownBase = {};
+function __bramShownRowIdx(list, turnIdx) {
+  if (!list || !list.length) return -1;
+  var pre = "pt" + turnIdx + "-";
+  var lo = Math.max(0, list.length - 400);
+  for (var i = list.length - 1; i >= lo; i--) {
+    var id = list[i] && list[i].id;
+    if (typeof id === "string" && id.indexOf(pre) === 0) return i;
+  }
+  return -1;
+}
+function __bramShownFinish(p, state, latencyMs) {
+  if (__bramShownPending !== p) return;
+  __bramShownPending = null;
+  try { clearTimeout(p.timer); } catch (e) { /* ignore */ }
+  try {
+    window.__bramIframeTrace("transcript-shown", {
+      state: state, turns: p.turns, latencyMs: latencyMs, agentId: p.agentId,
+    });
+  } catch (e2) { /* ignore */ }
+}
+function __bramShownTimeout(p) {
+  if (__bramShownPending !== p) return;
+  // Unmounted meanwhile: nothing was owed to a Transcript that left.
+  if (!window.__bramTranscriptMounted) {
+    __bramShownPending = null;
+    return;
+  }
+  var idx = __bramShownRowIdx(window.__bramLastTranscriptEvents, p.turnIdx);
+  var r = window.__bramVisibleRange;
+  var inRange = r && typeof r.startIndex === "number" && r.startIndex >= 0 &&
+    typeof r.endIndex === "number";
+  if (idx >= 0 && inRange && r.endIndex < idx) {
+    __bramShownFinish(p, "offscreen", p.seenMs);
+  } else {
+    __bramShownFinish(p, "not-shown", -1);
+  }
+}
+function __bramShownNote(payload, reason, t0) {
+  var turns = (payload && payload.turns) || [];
+  var n = turns.length;
+  var key = String((payload && payload.sid) || "") + "\u0001" + String((payload && payload.agentId) || "");
+  var prevN = __bramShownBase[key];
+  if (Object.keys(__bramShownBase).length > 200) __bramShownBase = {};
+  __bramShownBase[key] = n;
+  // First sight of a stream is a baseline, not a new turn; a mount's own
+  // refetch can surface turns that arrived while the tab was away.
+  if (prevN === undefined || n <= prevN) return;
+  if (String(reason || "").indexOf("transcript-mount") >= 0) return;
+  if (!window.__bramTranscriptMounted || window.__bramYouOnlyActive) return;
+  var agent = String((payload && payload.agentId) || "main");
+  var p = __bramShownPending;
+  if (p && p.agentId === agent) {
+    p.turnIdx = n - 1;
+    p.turns = n;
+    return;
+  }
+  if (p) {
+    try { clearTimeout(p.timer); } catch (e) { /* ignore */ }
+  }
+  p = { turnIdx: n - 1, turns: n, agentId: agent, t0: t0, seenMs: -1, timer: null };
+  __bramShownPending = p;
+  p.timer = setTimeout(function () { __bramShownTimeout(p); }, 2000);
+}
+window.__bramShownObserve = function (range, shown, agentId) {
+  var p = __bramShownPending;
+  if (!p || !shown || !range || typeof range.endIndex !== "number") return;
+  if (String(agentId || "main") !== p.agentId) return;
+  var idx = __bramShownRowIdx(shown, p.turnIdx);
+  if (idx < 0) return;
+  if (p.seenMs < 0) p.seenMs = Date.now() - p.t0;
+  if (range.endIndex >= idx) __bramShownFinish(p, "shown", p.seenMs);
+};
+
 window.__bramBroadcastProjectedTurns = function (payload, reason) {
   var __bcastT0 = Date.now();
   // transcript-scroll-jump-watch: when content last changed, for sinceContentMs.
@@ -12989,6 +13079,7 @@ window.__bramBroadcastProjectedTurns = function (payload, reason) {
   }
   payload.revision = ++__projectedTurnsRevision;
   __projectedTurnsValue = payload;
+  try { __bramShownNote(payload, reason, __bcastT0); } catch (eShown) { /* trace only */ }
   // Busy span (issue-473-readable-launch-log): opens at the subscriber
   // fan-out and closes at the double-rAF settle below, because React renders
   // the new projection in a later task, not inside this loop. A stall while
@@ -16330,6 +16421,8 @@ window.__bramTranscriptYouStep = function (dir) {
 // that changes only when the You nav's state does.
 window.__bramSetVisibleRangeYou = function (range, listRef, agentId, shown) {
   window.__bramSetVisibleRange(range, listRef, agentId);
+  // issue-388: the render observation for `transcript-shown` (trace only).
+  try { window.__bramShownObserve(range, shown, agentId); } catch (eShown) { /* ignore */ }
   // transcript-you-first-step-noop: cache the fresh list, keyed by agent. The
   // onMount-registered step closure holds the `events` captured at mount
   // (before the projection filled), so the first click after a mount scanned

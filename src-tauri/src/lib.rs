@@ -107696,6 +107696,156 @@ fn handle_test_drive(path: &str, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
     }
 }
 
+// ---- loopback-self-probe ---------------------------------------------------
+//
+// tiny_http accepts and reads requests internally, so a request delayed
+// before `handle_http` leaves no trace. A background thread opens a fresh
+// connection to our own loopback every 5 s and times it: connect, first
+// byte, total. Slow probes and failures are traced as `[http] op=self-probe-*`;
+// a heartbeat every 10 minutes says silence means fast, not stopped.
+
+const SELF_PROBE_HEADER: &str = "X-Bram-Probe";
+const SELF_PROBE_INTERVAL_SECS: u64 = 5;
+const SELF_PROBE_TIMEOUT_SECS: u64 = 60;
+const SELF_PROBE_SLOW_MS: u64 = 1000;
+const SELF_PROBE_STARTUP_GRACE_SECS: u64 = 10;
+const SELF_PROBE_HEARTBEAT_SECS: u64 = 600;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeOutcome {
+    Ok {
+        connect_ms: u64,
+        first_byte_ms: u64,
+        total_ms: u64,
+        status: u16,
+    },
+    Fail {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Default)]
+struct ProbeStats {
+    n: u64,
+    max_ms: u64,
+}
+
+impl ProbeStats {
+    // Fold one probe in; the trace line it earns, if any (slow or failed).
+    fn record(&mut self, outcome: &ProbeOutcome) -> Option<String> {
+        match outcome {
+            ProbeOutcome::Ok {
+                connect_ms,
+                first_byte_ms,
+                total_ms,
+                status,
+            } => {
+                self.n += 1;
+                self.max_ms = self.max_ms.max(*total_ms);
+                if *total_ms > SELF_PROBE_SLOW_MS {
+                    Some(format!(
+                        "op=self-probe-slow ms={} connectMs={} firstByteMs={} status={}",
+                        total_ms, connect_ms, first_byte_ms, status
+                    ))
+                } else {
+                    None
+                }
+            }
+            ProbeOutcome::Fail { reason } => {
+                self.n += 1;
+                Some(format!("op=self-probe-fail reason={}", reason))
+            }
+        }
+    }
+
+    // The periodic line, then reset. None when no probe ran since the last.
+    fn heartbeat(&mut self) -> Option<String> {
+        if self.n == 0 {
+            return None;
+        }
+        let line = format!("op=self-probe-ok n={} maxMs={}", self.n, self.max_ms);
+        self.n = 0;
+        self.max_ms = 0;
+        Some(line)
+    }
+}
+
+// One probe over a fresh connection. Never panics; errors become `Fail`.
+fn run_self_probe(port: u16) -> ProbeOutcome {
+    let fail = |what: &str, e: &std::io::Error| ProbeOutcome::Fail {
+        reason: format!("{}:{:?}", what, e.kind()),
+    };
+    let timeout = std::time::Duration::from_secs(SELF_PROBE_TIMEOUT_SECS);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let started = std::time::Instant::now();
+    let mut stream = match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(s) => s,
+        Err(e) => return fail("connect", &e),
+    };
+    let connect_ms = started.elapsed().as_millis() as u64;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let request = format!(
+        "GET /__inflight HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n{}: 1\r\n\r\n",
+        port, SELF_PROBE_HEADER
+    );
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        return fail("write", &e);
+    }
+    let mut first = [0u8; 64];
+    let got = match stream.read(&mut first) {
+        Ok(0) => {
+            return ProbeOutcome::Fail {
+                reason: "closed-before-response".to_string(),
+            }
+        }
+        Ok(n) => n,
+        Err(e) => return fail("read", &e),
+    };
+    let first_byte_ms = started.elapsed().as_millis() as u64;
+    let status = String::from_utf8_lossy(&first[..got])
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let mut rest = Vec::new();
+    if let Err(e) = stream.read_to_end(&mut rest) {
+        return fail("read", &e);
+    }
+    ProbeOutcome::Ok {
+        connect_ms,
+        first_byte_ms,
+        total_ms: started.elapsed().as_millis() as u64,
+        status,
+    }
+}
+
+fn spawn_self_probe<R: tauri::Runtime>(app: AppHandle<R>, port: u16) {
+    let _ = std::thread::Builder::new()
+        .name("self-probe".to_string())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            let mut last_heartbeat = started;
+            let mut stats = ProbeStats::default();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(SELF_PROBE_INTERVAL_SECS));
+                let outcome = run_self_probe(port);
+                let in_grace = started.elapsed().as_secs() < SELF_PROBE_STARTUP_GRACE_SECS;
+                if !(in_grace && matches!(outcome, ProbeOutcome::Fail { .. })) {
+                    if let Some(line) = stats.record(&outcome) {
+                        append_bram_trace_line(&app, "http", &line);
+                    }
+                }
+                if last_heartbeat.elapsed().as_secs() >= SELF_PROBE_HEARTBEAT_SECS {
+                    last_heartbeat = std::time::Instant::now();
+                    if let Some(line) = stats.heartbeat() {
+                        append_bram_trace_line(&app, "http", &line);
+                    }
+                }
+            }
+        });
+}
+
 fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Request) {
     let url = request.url().to_string();
     let method = request.method().as_str().to_uppercase();
@@ -107714,7 +107864,16 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
     } else {
         query.to_string()
     };
-    trace_route_entry(app, &method, path, &traced_query, &route_correlation_id);
+    // loopback-self-probe: the probe's own requests carry this header and
+    // are answered normally but kept out of [route] tracing, so they add no
+    // line every 5 s.
+    let is_self_probe = request
+        .headers()
+        .iter()
+        .any(|h| h.field.equiv(SELF_PROBE_HEADER) && h.value.as_str().trim() == "1");
+    if !is_self_probe {
+        trace_route_entry(app, &method, path, &traced_query, &route_correlation_id);
+    }
 
     // issue-113-h6: the request Origin drives the CORS response. The agent
     // pane's cross-origin fetches to the loopback send NO Origin (confirmed by
@@ -108153,15 +108312,17 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
     };
 
     let body_size = body.len();
-    trace_route_exit(
-        app,
-        &method,
-        path,
-        &route_correlation_id,
-        status,
-        body_size,
-        route_start.elapsed().as_millis(),
-    );
+    if !is_self_probe {
+        trace_route_exit(
+            app,
+            &method,
+            path,
+            &route_correlation_id,
+            status,
+            body_size,
+            route_start.elapsed().as_millis(),
+        );
+    }
 
     let mut response = tiny_http::Response::from_data(body)
         .with_status_code(status)
@@ -109935,6 +110096,7 @@ pub fn run() {
                     std::thread::spawn(move || handle_http(&app, request));
                 }
             });
+            spawn_self_probe(app.handle().clone(), port);
             // Publish the loopback port only after the accept loop is
             // actually serving HTTP, and preserve a live same-project owner.
             // Leave the old files in place until this decision: deleting them
@@ -117561,5 +117723,83 @@ mod hidden_spawn_tests {
                 "{file}: use hidden_command(..) for git/gh/glab, not Command::new, at line(s) {bad:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod self_probe_tests {
+    use super::*;
+
+    fn ok(total_ms: u64) -> ProbeOutcome {
+        ProbeOutcome::Ok {
+            connect_ms: 1,
+            first_byte_ms: total_ms.saturating_sub(1),
+            total_ms,
+            status: 200,
+        }
+    }
+
+    #[test]
+    fn fast_probe_earns_no_line() {
+        let mut s = ProbeStats::default();
+        assert_eq!(s.record(&ok(12)), None);
+        assert_eq!(s.record(&ok(SELF_PROBE_SLOW_MS)), None);
+    }
+
+    #[test]
+    fn slow_probe_traces_all_fields() {
+        let mut s = ProbeStats::default();
+        let line = s
+            .record(&ProbeOutcome::Ok {
+                connect_ms: 1200,
+                first_byte_ms: 1300,
+                total_ms: 1301,
+                status: 200,
+            })
+            .unwrap();
+        assert_eq!(
+            line,
+            "op=self-probe-slow ms=1301 connectMs=1200 firstByteMs=1300 status=200"
+        );
+    }
+
+    #[test]
+    fn failed_probe_traces_reason() {
+        let mut s = ProbeStats::default();
+        let line = s
+            .record(&ProbeOutcome::Fail {
+                reason: "connect:TimedOut".to_string(),
+            })
+            .unwrap();
+        assert_eq!(line, "op=self-probe-fail reason=connect:TimedOut");
+    }
+
+    #[test]
+    fn heartbeat_reports_count_and_max_then_resets() {
+        let mut s = ProbeStats::default();
+        assert_eq!(s.heartbeat(), None);
+        s.record(&ok(5));
+        s.record(&ok(40));
+        s.record(&ok(7));
+        assert_eq!(
+            s.heartbeat().as_deref(),
+            Some("op=self-probe-ok n=3 maxMs=40")
+        );
+        assert_eq!(s.heartbeat(), None);
+        s.record(&ok(9));
+        assert_eq!(
+            s.heartbeat().as_deref(),
+            Some("op=self-probe-ok n=1 maxMs=9")
+        );
+    }
+
+    #[test]
+    fn probe_host_passes_the_loopback_gate() {
+        let port = 5000u16;
+        let host = format!("127.0.0.1:{port}");
+        assert_eq!(
+            loopback_gate_refusal("GET", "__inflight", None, Some(&host), Some(port)),
+            None
+        );
     }
 }

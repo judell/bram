@@ -14029,7 +14029,21 @@ function __bramW2ReportRestoreDrops(next) {
 // selection, so the second writer was never named. Each real change now
 // traces its ids and caller, and a churn alarm (more than 20 changes in 10 s)
 // traces once per 30 s with the writers behind it.
-var __bramW2SelEvidence = { reorders: 0, recent: [], churnAt: 0 };
+var __bramW2SelEvidence = { reorders: 0, offBoard: 0, recent: [], churnAt: 0 };
+// A new board arrived: drop stored ids it doesn't have, without waiting for
+// the Worklist page to mount. Guarded so it is inert before the setter exists.
+function __bramW2PruneSelectionToBoard() {
+  try {
+    var sel = window.__bramW2Selection;
+    var b = __bramWlAccepted;
+    if (!sel || !sel.length || !b || !Array.isArray(b.items)) return;
+    if (typeof window.__bramW2SetSelection !== "function") return;
+    var onBoard = {};
+    b.items.forEach(function (i) { if (i && i.id) onBoard[i.id] = true; });
+    var kept = sel.filter(function (id) { return onBoard[id]; });
+    if (kept.length !== sel.length) window.__bramW2SetSelection(kept);
+  } catch (e) { /* pruning is best-effort */ }
+}
 function __bramW2Caller() {
   try {
     var lines = String(new Error().stack || "").split("\n").map(function (l) { return l.trim(); });
@@ -14037,7 +14051,7 @@ function __bramW2Caller() {
     // the writer.
     for (var i = 1; i < lines.length; i++) {
       var l = lines[i];
-      if (!l || /__bramW2Caller|__bramW2SetSelection|__bramW2NoteSelectionChange/.test(l)) continue;
+      if (!l || /__bramW2Caller|__bramW2SetSelection|__bramW2SetSelectionImpl|__bramW2NoteSelectionChange/.test(l)) continue;
       return l.slice(0, 160);
     }
   } catch (e) {}
@@ -14062,9 +14076,29 @@ window.bramSubscribeW2Selection = (function () {
   return function () {
     if (factory) return factory;
     var subscribers = new Set();
-    window.__bramW2SetSelection = function (ids) {
+    window.__bramW2SetSelection = function __bramW2SetSelectionImpl(ids) {
       var next = (ids || []).slice();
       var prev = window.__bramW2Selection || [];
+      // w2-selection-store-rejects-off-board-ids: with a board known, an id
+      // that isn't on it can't be selected. A stale id re-entering from any
+      // writer made the page prune and the store bridge swap values 691 times
+      // on 2026-11-15. With no board known yet, keep everything (a restore at
+      // load still works). First refusal and every 50th are traced.
+      var board = (__bramWlAccepted && Array.isArray(__bramWlAccepted.items)) ? __bramWlAccepted.items : null;
+      if (board) {
+        var onBoard = {};
+        board.forEach(function (i) { if (i && i.id) onBoard[i.id] = true; });
+        var refused = next.filter(function (id) { return !onBoard[id]; });
+        if (refused.length) {
+          next = next.filter(function (id) { return onBoard[id]; });
+          if ((__bramW2SelEvidence.offBoard++ % 50) === 0) {
+            window.__bramIframeTrace("w2-selection-store", {
+              op: "off-board-dropped", ids: refused,
+              from: __bramW2Caller(), n: __bramW2SelEvidence.offBoard,
+            });
+          }
+        }
+      }
       // next-move-button-inline-and-quiet: the same items in another order
       // are the same selection. The Worklist's prune rewrites it in board
       // order on every board refresh while other writers keep tick order
@@ -19965,6 +19999,7 @@ window.__bramWorklistAccept = function (payload) {
     __bramWlSeen = v;
     __bramWlAccepted = payload;
     __bramWlRefusals = 0;
+    __bramW2PruneSelectionToBoard();
     return payload;
   }
   if (__bramWlSeen - v > __BRAM_WL_RESET_DELTA) {
@@ -19972,13 +20007,15 @@ window.__bramWorklistAccept = function (payload) {
     __bramWlSeen = v;
     __bramWlAccepted = payload;
     __bramWlRefusals = 0;
+    __bramW2PruneSelectionToBoard();
     return payload;
   }
-  if (__bramWlRefusals >= __BRAM_WL_MAX_REFUSALS) {
+  if (__bramWlRefusals >=__BRAM_WL_MAX_REFUSALS) {
     window.__bramIframeTrace("worklist-accept", { op: "refuse-cap", seen: __bramWlSeen, got: v });
     __bramWlSeen = v;
     __bramWlAccepted = payload;
     __bramWlRefusals = 0;
+    __bramW2PruneSelectionToBoard();
     return payload;
   }
   __bramWlRefusals += 1;

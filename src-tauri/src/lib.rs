@@ -65535,12 +65535,18 @@ fn state_dir_root_settings(root: &Path) -> serde_json::Value {
 const SETTINGS_NOTE_KIND: &str = "tracked-settings-dirty";
 const SETTINGS_NOTE_REL: &str = ".settings-note";
 // settings-note-says-finish-with-drop: the recipe depends on what HEAD's
-// .bram.json holds. Team settings only (`server`): restore to HEAD, which
-// leaves nothing to commit, so the item ends in Drop (community-calendar,
+// .bram.json holds. Team settings only: restore to HEAD, which leaves
+// nothing to commit, so the item ends in Drop (community-calendar,
 // 2026-11-04). Personal keys in HEAD: restoring would keep them tracked, so
 // they come out in a real commit, and other clones must copy theirs first
 // (Bram's own repo, 2026-11-04, 5d4f1a0). Unreadable HEAD: the agent decides.
-const SETTINGS_NOTE_TEAM_KEYS: &[&str] = &["server"];
+//
+// settings-fold-keeps-team-keys: team settings are the keys a repo writes
+// for every clone, so they belong in the committed root file and never in
+// private `.bram/settings.json`. `launch` (#414) and `greeting`
+// (repo-authored-first-run-greeting) joined `server`; the fold and the
+// settings note share this one list.
+const TEAM_SETTINGS_KEYS: &[&str] = &["server", "launch", "greeting"];
 const SETTINGS_NOTE_HEAD: &str =
     "This project's tracked .bram.json differs from HEAD. Since 0.8.4 \
 Bram keeps personal settings in .bram/settings.json and never writes the root file.";
@@ -65559,7 +65565,7 @@ fn head_settings_personal_keys(root: &Path) -> Option<Vec<String>> {
     Some(
         v.as_object()?
             .keys()
-            .filter(|k| !SETTINGS_NOTE_TEAM_KEYS.contains(&k.as_str()))
+            .filter(|k| !TEAM_SETTINGS_KEYS.contains(&k.as_str()))
             .cloned()
             .collect(),
     )
@@ -65571,8 +65577,8 @@ fn settings_note_text(head_personal: Option<&[String]>) -> (&'static str, String
         Some([]) => (
             "restore",
             format!(
-                "{} Propose a worklist item that copies the personal keys (not team settings \
-such as `server`) into .bram/settings.json, keeping their values, and restores .bram.json to \
+                "{} Propose a worklist item that copies the personal keys (not the team settings \
+`server`, `launch` and `greeting`) into .bram/settings.json, keeping their values, and restores .bram.json to \
 HEAD. This leaves nothing to commit (.bram/ ignores itself), so say so when proposing, and \
 when the files are in place recommend Drop.",
                 SETTINGS_NOTE_HEAD
@@ -65584,7 +65590,7 @@ when the files are in place recommend Drop.",
                 "{} HEAD's .bram.json itself holds personal keys ({}), so restoring it would \
 keep them tracked. Propose a worklist item that copies every personal key from the working file \
 into .bram/settings.json, keeping their values, then removes them from .bram.json: delete the \
-file if only personal keys remain, else keep just the team settings such as `server`. That is a \
+file if only personal keys remain, else keep just the team settings (`server`, `launch`, `greeting`). That is a \
 real commit. Its message should tell other clones to copy their own .bram.json keys into their \
 .bram/settings.json before pulling it.",
                 SETTINGS_NOTE_HEAD,
@@ -65594,8 +65600,8 @@ real commit. Its message should tell other clones to copy their own .bram.json k
         None => (
             "unknown",
             format!(
-                "{} Propose a worklist item that copies the personal keys (not team settings \
-such as `server`) into .bram/settings.json, keeping their values, and takes them out of the \
+                "{} Propose a worklist item that copies the personal keys (not the team settings \
+`server`, `launch` and `greeting`) into .bram/settings.json, keeping their values, and takes them out of the \
 tracked .bram.json: restore it to HEAD if HEAD holds only team settings (nothing to commit; \
 recommend Drop), otherwise remove them in a commit.",
                 SETTINGS_NOTE_HEAD
@@ -65672,6 +65678,22 @@ fn fold_untracked_root_settings(root: &Path) -> Option<String> {
         .as_object()
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
+    // settings-fold-keeps-team-keys: a root file declaring team settings is
+    // the repo's intent in progress, about to be committed for every clone.
+    // Folding it moved bram-studio's `greeting` and `launch` into private
+    // state on relaunch (2026-11-15, `op=settings-folded keys=greeting,
+    // launch,ui`), and the next commit silently left the file out.
+    let team: Vec<&str> = keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| TEAM_SETTINGS_KEYS.contains(k))
+        .collect();
+    if !team.is_empty() {
+        return Some(format!(
+            "op=settings-fold-skipped reason=team-keys keys={}",
+            team.join(",")
+        ));
+    }
     let state = bram_state_dir(root);
     let target = state.join("settings.json");
     let how = if target.exists() {
@@ -92156,6 +92178,37 @@ mod state_url_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // settings-fold-keeps-team-keys: an untracked root file with any team key
+    // stays at the root, personal keys beside it included; one with only
+    // personal keys still folds.
+    #[test]
+    fn fold_leaves_a_root_file_that_declares_team_settings() {
+        let root = fold_repo();
+        let body =
+            r#"{"greeting":{"file":"docs/welcome.md"},"launch":{"minimized":true},"ui":{"a":1}}"#;
+        std::fs::write(root.join(".bram.json"), body).unwrap();
+        assert_eq!(
+            super::fold_untracked_root_settings(&root).unwrap(),
+            "op=settings-fold-skipped reason=team-keys keys=greeting,launch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(".bram.json")).unwrap(),
+            body
+        );
+        assert!(!root.join(".bram/settings.json").exists());
+        std::fs::write(root.join(".bram.json"), r#"{"server":{"port":1}}"#).unwrap();
+        assert_eq!(
+            super::fold_untracked_root_settings(&root).unwrap(),
+            "op=settings-fold-skipped reason=team-keys keys=server"
+        );
+        std::fs::write(root.join(".bram.json"), r#"{"ui":{"a":1}}"#).unwrap();
+        assert_eq!(
+            super::fold_untracked_root_settings(&root).unwrap(),
+            "op=settings-folded how=rename keys=ui backup=none"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn fold_waits_for_the_move() {
         let root = std::env::temp_dir().join(format!("bram-fold-{}", uuid::Uuid::new_v4()));
@@ -92203,6 +92256,16 @@ mod state_url_tests {
         std::fs::write(root.join(".bram.json"), "{\"server\":{\"port\":1}}\n").unwrap();
         git(&["add", ".bram.json"]);
         git(&["commit", "-q", "-m", "team"]);
+        assert_eq!(super::head_settings_personal_keys(&root), Some(vec![]));
+        // settings-fold-keeps-team-keys: launch and greeting are team keys,
+        // so a HEAD holding them alongside server still reads as team-only
+        // (recipe `restore`, never "move them into private settings").
+        std::fs::write(
+            root.join(".bram.json"),
+            "{\"server\":{\"port\":1},\"launch\":{\"minimized\":true},\"greeting\":{\"file\":\"w.md\"}}\n",
+        )
+        .unwrap();
+        git(&["commit", "-q", "-am", "repo intent"]);
         assert_eq!(super::head_settings_personal_keys(&root), Some(vec![]));
         std::fs::write(
             root.join(".bram.json"),

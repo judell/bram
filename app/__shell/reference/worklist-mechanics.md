@@ -745,9 +745,10 @@ routes.
 (the Commit tooltip reads "Edits made outside any item in `f` are in the way",
 #478), recommend in this order, in plain words:
 
-1. If another begun item shares that file, commit that item first, then this
-   one. The commit then also includes those outside edits, disclosed in the
-   "Also includes other edits" ⓘ.
+1. If another begun item shares any file with this item, commit that item
+   first, then this one. The commit then takes this item's files whole,
+   including those outside edits, disclosed in the "Also includes other
+   edits" ⓘ.
 2. Otherwise, offer to put the outside edits under this item or a new one, or to
    revert or stash them.
 

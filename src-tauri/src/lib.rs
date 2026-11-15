@@ -42349,7 +42349,10 @@ fn greeting_rel_path_refusal(rel: &str) -> Option<&'static str> {
     if trimmed.is_empty() {
         return Some("empty");
     }
-    if trimmed.starts_with('/') || Path::new(trimmed).is_absolute() {
+    // Spelling only: `Path::is_absolute()` would call `C:/…` "absolute" on
+    // Windows and "drive-colon" elsewhere. The backslash and colon checks
+    // below catch every Windows absolute.
+    if trimmed.starts_with('/') {
         return Some("absolute");
     }
     if trimmed.contains('\\') {
@@ -93320,13 +93323,23 @@ fn guard_selftest_run_case(
             }
         }
     }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                "error".to_string(),
-                format!("could not run the guard: {}", e),
-            )
+    // ETXTBSY (26): on Linux a script just written can be briefly "busy" while
+    // a concurrently forked child still holds its write fd
+    // (rust-lang/rust#114554). Retry a few times before calling it an error.
+    let mut attempt = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Ok(c) => break c,
+            Err(e) if cfg!(unix) && e.raw_os_error() == Some(26) && attempt < 5 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => {
+                return (
+                    "error".to_string(),
+                    format!("could not run the guard: {}", e),
+                )
+            }
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
@@ -93900,10 +93913,8 @@ mod guard_selftest_tests {
             ("deny".to_string(), "Blocked: uncovered".to_string())
         );
         let allow = fake("allow", r#"echo '{"decision":"allow","message":""}'"#);
-        assert_eq!(
-            guard_selftest_run_case(&allow, "opencode-worklist", &payload).0,
-            "allow"
-        );
+        let got = guard_selftest_run_case(&allow, "opencode-worklist", &payload);
+        assert_eq!(got.0, "allow", "message: {}", got.1);
         let silent = fake("silent", "exit 0");
         assert_eq!(
             guard_selftest_run_case(&silent, "opencode-worklist", &payload).0,
@@ -93941,10 +93952,8 @@ mod guard_selftest_tests {
             ("deny".to_string(), "Blocked: uncovered".to_string())
         );
         let allow = fake("allow", r#"echo '{"decision":"allow"}'"#);
-        assert_eq!(
-            guard_selftest_run_case(&allow, "antigravity-worklist", &payload).0,
-            "allow"
-        );
+        let got = guard_selftest_run_case(&allow, "antigravity-worklist", &payload);
+        assert_eq!(got.0, "allow", "message: {}", got.1);
         let silent = fake("silent", "exit 0");
         assert_eq!(
             guard_selftest_run_case(&silent, "antigravity-worklist", &payload).0,

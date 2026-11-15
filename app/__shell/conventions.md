@@ -16,28 +16,24 @@ assume an iframe is present — detect before you rely on it.
 > `.claude/bram-conventions.md`, `@`-imported by `CLAUDE.md`. **Don't
 > save project-related memories** — worklist preferences, helper APIs,
 > release quirks, conventions you discover. Per-user memory is private
-> to one agent on one machine; shared files reach everyone running Bram
-> (every agent alike). Route by audience: knowledge that would
+> to one agent on one machine; shared files reach every agent running Bram.
+> Route by audience: knowledge that would
 > change an agent's behavior in a project that is NOT the Bram source
 > repo belongs in these conventions; knowledge that matters only when
 > editing Bram's own source belongs in Bram's source-repo developer
 > docs; XMLUI-framework-generic findings go to the upstream xmlui docs,
-> reachable through the xmlui-mcp server. Memory stays reserved for
-> what can't live in any repo (cross-project user preferences,
-> provider-specific tool quirks).
+> reachable through the xmlui-mcp server. Memory is for what
+> can't live in any repo (cross-project preferences, provider tool quirks).
 
-Bram's own UI is XMLUI. When developing Bram, or when the app under
-development is XMLUI, expect the XMLUI MCP server to be available, read
-the xmlui_rules, and follow them.
+Bram's own UI is XMLUI. When developing Bram, or when the app is XMLUI,
+expect the XMLUI MCP server, read the xmlui_rules, and follow them.
 
 **Reference files.** Detail you need only in a recognizable situation
 lives beside this file in `.claude/bram-reference/`:
 `worklist-mechanics.md`, `diagnostics.md`, `environment.md` and
-`orientation.md` (orienting in a new repo). Each section below says when
-to read which. Setup refreshes these files and Bram-bundled skills
+`orientation.md` (orienting in a new repo). Sections below say when to read which. Setup refreshes these files and Bram-bundled skills
 (`.claude/skills/<name>/SKILL.md` carrying a `<!-- bram-managed` marker);
-don't make functional edits to installed copies, since the next Setup
-overwrites them.
+don't edit installed copies, since the next Setup overwrites them.
 
 
 ## Coordinate via worklist.json
@@ -510,7 +506,7 @@ each check that record. Hooks check coverage, which is not approval.
 convention enforcing itself — not bugs to work around;** never route
 around one. **Don't ask before editing the worklist or calling
 mutate**: adding items, refining prose and already-approved transitions
-need no verbal confirmation. Save back-and-forth for design decisions.
+need no confirmation. Save back-and-forth for design decisions.
 
 - **What each route requires, exceptions, and enforcement limits** → read `.claude/bram-reference/worklist-mechanics.md` (§Enforcement and security contract).
 
@@ -544,7 +540,9 @@ lines" or `unownedTaken`, and skip counts the user can't act on.
 When referencing a file, route, or doc, name it
 (`<state>/worklist.json`, `/__worklist/resolve`,
 `.claude/bram-reference/diagnostics.md`) so the user can verify in one
-click. If you can't cite, say so.
+click. If you can't cite, say so. Local files, media included, go as
+links with absolute paths → `.claude/bram-reference/environment.md`
+(§Presenting local files).
 
 ### Match terseness to the question
 
@@ -567,14 +565,14 @@ When the user pivots to a different project ("let's look at
 ~/other-app"), flag the boundary and offer the choice: a quick
 read-only look from here, or a handoff to that project's own session.
 Sustained investigation, issue filing and follow-up belong in the
-target project's session, because session transcripts, the `/__search`
-index and worklist history are scoped by working directory and record
-work where it *runs*. If the user proceeds from here anyway, make any
+target project's session: transcripts, the `/__search` index and
+worklist history are scoped by working directory and record work where
+it *runs*. If the user proceeds from here anyway, make any
 artifact left in the target project (issue, doc, commit message)
 self-contained, carrying the evidence inline.
 
 **Sessions coordinate on the record.** Don't message another agent
-session directly unless the user says to for that case. Post on a forge
+session unless the user says to for that case. Post on a forge
 issue, or tell the user what to relay.
 
 - **Two sessions coordinating across a boundary (upstream, another machine, another agent)** → read `.claude/bram-reference/environment.md` (§Working across project boundaries).

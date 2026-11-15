@@ -89818,6 +89818,24 @@ fn route_request<R: tauri::Runtime>(
             // issue-414: where a person opens this project's app, so an agent
             // or a start script can say exactly where to go. null when the
             // project has no target app.
+            // local-file-links-open-in-browser: the per-process token the
+            // pane appends (as `t`) to /__file links.
+            obj.insert(
+                "fileToken".to_string(),
+                serde_json::Value::String(file_token().to_string()),
+            );
+            // The pane lives at tauri://localhost, so it cannot read the loopback
+            // port or the home folder from its own location; /__file links
+            // need the port, and `~/` links need the home folder.
+            if let Some(port) = LOOPBACK_PORT.get() {
+                obj.insert("loopbackPort".to_string(), serde_json::json!(port));
+            }
+            if let Some(home) = home_dir() {
+                obj.insert(
+                    "homeDir".to_string(),
+                    serde_json::Value::String(home.to_string_lossy().into_owned()),
+                );
+            }
             obj.insert(
                 "targetAppUrl".to_string(),
                 target_app_browser_url(app)
@@ -107344,7 +107362,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
 
     let route_correlation_id = next_route_correlation_id();
     let route_start = std::time::Instant::now();
-    trace_route_entry(app, &method, path, query, &route_correlation_id);
+    // local-file-links-open-in-browser: the /__file token rides in the query
+    // string, so it never reaches the trace.
+    let traced_query = if path == "__file" {
+        redact_query_param(query, "t")
+    } else {
+        query.to_string()
+    };
+    trace_route_entry(app, &method, path, &traced_query, &route_correlation_id);
 
     // issue-113-h6: the request Origin drives the CORS response. The agent
     // pane's cross-origin fetches to the loopback send NO Origin (confirmed by
@@ -107401,6 +107426,32 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             "[state-hold] op=refuse-write method={} path=/{} obstacle={}",
             method, path, obstacle
         );
+    }
+
+    // local-file-links-open-in-browser: GET /__file streams bytes with its own
+    // headers (Range, Content-Range), which the (status, type, body) route
+    // shape cannot carry, so it answers here and returns.
+    if gate_refusal.is_none()
+        && held_refusal.is_none()
+        && path == "__file"
+        && (method == "GET" || method == "HEAD")
+    {
+        let range_header: Option<String> = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Range"))
+            .map(|h| h.value.as_str().to_string());
+        let (status, bytes) = serve_file_request(app, request, query, range_header.as_deref());
+        trace_route_exit(
+            app,
+            &method,
+            path,
+            &route_correlation_id,
+            status,
+            bytes as usize,
+            route_start.elapsed().as_millis(),
+        );
+        return;
     }
 
     // POST-only routes (route_request is GET-only).
@@ -107982,6 +108033,528 @@ fn loopback_gate_refusal(
         return Some("foreign-origin");
     }
     None
+}
+
+// ---- local-file-links-open-in-browser: GET /__file -------------------------
+//
+// Serves a local file's bytes to the user's browser so a link in the
+// Transcript plays or shows it. Gated three ways: the loopback Host check
+// (above), a per-process token the pane gets from /__app-info (a page in the
+// user's browser cannot guess it), and a scope check on the canonical path.
+
+static FILE_TOKEN: OnceLock<String> = OnceLock::new();
+
+// 32 hex chars from uuid v4, which draws on the OS CSPRNG on every platform.
+fn file_token() -> &'static str {
+    FILE_TOKEN.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
+fn token_matches(given: &str, expected: &str) -> bool {
+    let (a, b) = (given.as_bytes(), expected.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+// The query with one parameter's value replaced, for tracing.
+fn redact_query_param(query: &str, name: &str) -> String {
+    let prefix = format!("{}=", name);
+    query
+        .split('&')
+        .map(|pair| {
+            if pair.starts_with(&prefix) {
+                format!("{}<redacted>", prefix)
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+// Fold a path for comparison: `\` to `/`, no `\\?\` prefix, no trailing `/`,
+// and a drive letter lowercased (Windows roots are case-insensitive).
+fn fold_scope_path(p: &str) -> String {
+    let mut s = p.replace('\\', "/");
+    if let Some(rest) = s.strip_prefix("//?/") {
+        if !rest.starts_with("UNC/") {
+            s = rest.to_string();
+        }
+    }
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        let lower = (b[0] as char).to_ascii_lowercase();
+        s.replace_range(0..1, &lower.to_string());
+    }
+    s
+}
+
+// The part of `path` below `base`, or None when `path` is not under it.
+fn scope_rest<'a>(path: &'a str, base: &str) -> Option<&'a str> {
+    if path == base {
+        return Some("");
+    }
+    let tail = path.strip_prefix(base)?;
+    if base.ends_with('/') {
+        return Some(tail);
+    }
+    tail.strip_prefix('/')
+}
+
+// Pure scope check over ALREADY-CANONICAL path strings (symlinks and `..`
+// resolved by the caller), so it runs without a filesystem and with Windows
+// spellings on every platform. Allowed: under the project root or the home
+// folder. Refused: the project's `.bram/` state, and any hidden component
+// below the base that matched (~/.ssh, ~/.aws, ~/.config, root/.git).
+fn file_scope_check(path: &str, home: &str, root: &str) -> Result<(), &'static str> {
+    let p = fold_scope_path(path);
+    let h = fold_scope_path(home);
+    let r = fold_scope_path(root);
+    if scope_rest(&p, &format!("{}/.bram", r.trim_end_matches('/'))).is_some() {
+        return Err("bram-state");
+    }
+    let rest = scope_rest(&p, &r)
+        .or_else(|| scope_rest(&p, &h))
+        .ok_or("outside-scope")?;
+    if rest.split('/').any(|c| c.starts_with('.')) {
+        return Err("hidden");
+    }
+    Ok(())
+}
+
+fn path_looks_absolute(p: &str) -> bool {
+    let b = p.as_bytes();
+    p.starts_with('/')
+        || p.starts_with('\\')
+        || Path::new(p).is_absolute()
+        || (b.len() >= 3 && b[1] == b':' && b[0].is_ascii_alphabetic())
+}
+
+// Canonicalize the request and apply the scope check. Err is (status, reason).
+fn resolve_file_request(
+    requested: &str,
+    home: Option<&Path>,
+    root: &Path,
+) -> Result<PathBuf, (u16, &'static str)> {
+    if requested.is_empty() || !path_looks_absolute(requested) {
+        return Err((400, "not-absolute"));
+    }
+    let canon = std::fs::canonicalize(requested)
+        .map(strip_unc_prefix)
+        .map_err(|_| (404, "not-found"))?;
+    let canon_root =
+        strip_unc_prefix(std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+    let canon_home = home
+        .map(|h| strip_unc_prefix(std::fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf())));
+    let home_s = canon_home
+        .as_ref()
+        .map(|h| h.to_string_lossy().into_owned())
+        // No home known: only the project root is in scope.
+        .unwrap_or_else(|| canon_root.to_string_lossy().into_owned());
+    file_scope_check(
+        &canon.to_string_lossy(),
+        &home_s,
+        &canon_root.to_string_lossy(),
+    )
+    .map_err(|reason| (403, reason))?;
+    if !canon.is_file() {
+        return Err((404, "not-a-file"));
+    }
+    Ok(canon)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ByteRange {
+    // No usable Range header: serve the whole body (200).
+    Full,
+    // Inclusive byte offsets (206).
+    Partial { start: u64, end: u64 },
+    // 416.
+    Unsatisfiable,
+}
+
+// A single `bytes=a-b`, `a-` or `-n`. A malformed or multi-range header is
+// ignored (RFC 9110: a server may ignore Range), so it yields Full.
+fn parse_byte_range(header: Option<&str>, len: u64) -> ByteRange {
+    let Some(spec) = header.and_then(|h| h.trim().strip_prefix("bytes=")) else {
+        return ByteRange::Full;
+    };
+    if spec.contains(',') {
+        return ByteRange::Full;
+    }
+    let Some((a, b)) = spec.trim().split_once('-') else {
+        return ByteRange::Full;
+    };
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() {
+        let Ok(n) = b.parse::<u64>() else {
+            return ByteRange::Full;
+        };
+        if n == 0 || len == 0 {
+            return ByteRange::Unsatisfiable;
+        }
+        return ByteRange::Partial {
+            start: len.saturating_sub(n),
+            end: len - 1,
+        };
+    }
+    let Ok(start) = a.parse::<u64>() else {
+        return ByteRange::Full;
+    };
+    let end = if b.is_empty() {
+        u64::MAX
+    } else {
+        match b.parse::<u64>() {
+            Ok(e) => e,
+            Err(_) => return ByteRange::Full,
+        }
+    };
+    if end < start {
+        return ByteRange::Full;
+    }
+    if start >= len {
+        return ByteRange::Unsatisfiable;
+    }
+    ByteRange::Partial {
+        start,
+        end: end.min(len - 1),
+    }
+}
+
+fn file_content_type(path: &str) -> &'static str {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "html" | "htm" => "text/html; charset=utf-8",
+        "md" | "markdown" | "txt" | "log" | "json" | "jsonl" | "rs" | "js" | "mjs" | "ts"
+        | "tsx" | "jsx" | "py" | "sh" | "toml" | "yaml" | "yml" | "css" | "xml" | "csv"
+        | "xmlui" | "xs" | "c" | "h" | "cpp" | "go" | "java" | "rb" | "sql" | "ini" | "cfg" => {
+            "text/plain; charset=utf-8"
+        }
+        _ => "application/octet-stream",
+    }
+}
+
+fn http_header(name: &str, value: &str) -> tiny_http::Header {
+    tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+        .unwrap_or_else(|_| tiny_http::Header::from_bytes(&b"X-Bram"[..], &b"1"[..]).unwrap())
+}
+
+// Answers GET/HEAD /__file and returns (status, body bytes) for the route
+// trace. Reads only the requested byte range from disk.
+fn serve_file_request<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    request: tiny_http::Request,
+    query: &str,
+    range_header: Option<&str>,
+) -> (u16, u64) {
+    use std::io::{Seek, SeekFrom};
+    let mut file_path = String::new();
+    let mut token = String::new();
+    for pair in query.split('&') {
+        if let Some(enc) = pair.strip_prefix("path=") {
+            file_path = percent_decode(enc);
+        } else if let Some(enc) = pair.strip_prefix("t=") {
+            token = percent_decode(enc);
+        }
+    }
+    let refuse = |request: tiny_http::Request, status: u16, reason: &str| -> (u16, u64) {
+        append_bram_trace_line(
+            app,
+            "file-serve",
+            &format!(
+                "op=refuse reason={} status={} path={}",
+                reason, status, file_path
+            ),
+        );
+        let body = format!("refused: {}", reason).into_bytes();
+        let n = body.len() as u64;
+        let _ = request.respond(
+            tiny_http::Response::from_data(body)
+                .with_status_code(status)
+                .with_header(http_header("Content-Type", "text/plain; charset=utf-8"))
+                .with_header(http_header("Cache-Control", "no-store")),
+        );
+        (status, n)
+    };
+    if !token_matches(&token, file_token()) {
+        return refuse(request, 403, "bad-token");
+    }
+    let root = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
+    let canon = match resolve_file_request(&file_path, home_dir().as_deref(), &root) {
+        Ok(p) => p,
+        Err((status, reason)) => return refuse(request, status, reason),
+    };
+    let shown = canon.to_string_lossy().into_owned();
+    let mut file = match std::fs::File::open(&canon) {
+        Ok(f) => f,
+        Err(_) => return refuse(request, 404, "open-failed"),
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let content_type = file_content_type(&shown);
+    let mut headers = vec![
+        http_header("Content-Type", content_type),
+        http_header("Accept-Ranges", "bytes"),
+        http_header("Cache-Control", "no-store"),
+        http_header("X-Content-Type-Options", "nosniff"),
+    ];
+    // A file's own scripts must not run with this origin's reach.
+    if content_type.starts_with("text/html") || content_type == "image/svg+xml" {
+        headers.push(http_header("Content-Security-Policy", "sandbox"));
+    }
+    let (status, start, count) = match parse_byte_range(range_header, len) {
+        ByteRange::Full => (200u16, 0u64, len),
+        ByteRange::Partial { start, end } => {
+            headers.push(http_header(
+                "Content-Range",
+                &format!("bytes {}-{}/{}", start, end, len),
+            ));
+            (206, start, end - start + 1)
+        }
+        ByteRange::Unsatisfiable => {
+            append_bram_trace_line(
+                app,
+                "file-serve",
+                &format!("op=serve path={} status=416 bytes=0", shown),
+            );
+            let _ = request.respond(
+                tiny_http::Response::from_data(Vec::<u8>::new())
+                    .with_status_code(416)
+                    .with_header(http_header("Content-Range", &format!("bytes */{}", len)))
+                    .with_header(http_header("Cache-Control", "no-store")),
+            );
+            return (416, 0);
+        }
+    };
+    if start > 0 && file.seek(SeekFrom::Start(start)).is_err() {
+        return refuse(request, 500, "seek-failed");
+    }
+    append_bram_trace_line(
+        app,
+        "file-serve",
+        &format!("op=serve path={} status={} bytes={}", shown, status, count),
+    );
+    let reader: Box<dyn Read + Send> = Box::new(file.take(count));
+    let response = tiny_http::Response::new(
+        tiny_http::StatusCode(status),
+        headers,
+        reader,
+        Some(count as usize),
+        None,
+    );
+    let _ = request.respond(response);
+    (status, count)
+}
+
+#[cfg(test)]
+mod file_serve_tests {
+    use super::{
+        file_content_type, file_scope_check, file_token, parse_byte_range, redact_query_param,
+        resolve_file_request, token_matches, ByteRange,
+    };
+    use std::path::Path;
+
+    const H: &str = "/Users/jon";
+    const R: &str = "/Users/jon/bram";
+
+    #[test]
+    fn scope_allows_home_and_project() {
+        assert_eq!(
+            file_scope_check("/Users/jon/bram-studio/media/take-3.mp4", H, R),
+            Ok(())
+        );
+        assert_eq!(
+            file_scope_check("/Users/jon/Desktop/handoff.md", H, R),
+            Ok(())
+        );
+        assert_eq!(file_scope_check("/Users/jon/bram/docs/a.md", H, R), Ok(()));
+        // Root outside home is allowed too.
+        assert_eq!(file_scope_check("/srv/proj/a.txt", H, "/srv/proj"), Ok(()));
+    }
+
+    #[test]
+    fn scope_refuses_outside_hidden_and_state() {
+        assert_eq!(file_scope_check("/etc/passwd", H, R), Err("outside-scope"));
+        assert_eq!(
+            file_scope_check("/Users/jonathan/x", H, R),
+            Err("outside-scope")
+        );
+        assert_eq!(
+            file_scope_check("/Users/jon/.ssh/id_rsa", H, R),
+            Err("hidden")
+        );
+        assert_eq!(
+            file_scope_check("/Users/jon/.aws/credentials", H, R),
+            Err("hidden")
+        );
+        assert_eq!(
+            file_scope_check("/Users/jon/.config/x/y", H, R),
+            Err("hidden")
+        );
+        assert_eq!(
+            file_scope_check("/Users/jon/docs/.env", H, R),
+            Err("hidden")
+        );
+        assert_eq!(
+            file_scope_check("/Users/jon/bram/.git/config", H, R),
+            Err("hidden")
+        );
+        assert_eq!(
+            file_scope_check("/Users/jon/bram/.bram/worklist.json", H, R),
+            Err("bram-state")
+        );
+        assert_eq!(
+            file_scope_check("/srv/proj/.bram/x", H, "/srv/proj"),
+            Err("bram-state")
+        );
+    }
+
+    #[test]
+    fn scope_project_under_hidden_home_dir_is_allowed() {
+        // The root's own dotted ancestors are not "below" the root.
+        assert_eq!(
+            file_scope_check("/Users/jon/.local/proj/a.md", H, "/Users/jon/.local/proj"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn scope_windows_spellings() {
+        let (h, r) = (r"C:\Users\jon", r"C:\Users\jon\bram");
+        assert_eq!(file_scope_check(r"C:\Users\jon\Desktop\a.md", h, r), Ok(()));
+        assert_eq!(
+            file_scope_check("c:/users-not/x", h, r),
+            Err("outside-scope")
+        );
+        assert_eq!(file_scope_check(r"c:\Users\jon\Desktop\a.md", h, r), Ok(()));
+        assert_eq!(
+            file_scope_check(r"\\?\C:\Users\jon\Desktop\a.md", h, r),
+            Ok(())
+        );
+        assert_eq!(
+            file_scope_check(r"C:\Users\jon\.ssh\id_rsa", h, r),
+            Err("hidden")
+        );
+        assert_eq!(
+            file_scope_check(r"C:\Users\jon\bram\.bram\worklist.json", h, r),
+            Err("bram-state")
+        );
+        assert_eq!(
+            file_scope_check(r"D:\other\a.md", h, r),
+            Err("outside-scope")
+        );
+        assert_eq!(file_scope_check(r"C:\Users\jon", h, r), Ok(()));
+    }
+
+    #[test]
+    fn resolve_collapses_traversal_and_symlinks() {
+        let base = std::env::temp_dir().join(format!("bram-file-scope-{}", std::process::id()));
+        let home = base.join("home");
+        let root = home.join("proj");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join(".bram")).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("a.txt"), "hi").unwrap();
+        std::fs::write(root.join(".bram/w.json"), "{}").unwrap();
+        std::fs::write(home.join(".ssh/id"), "k").unwrap();
+        std::fs::write(outside.join("s.txt"), "s").unwrap();
+        let r = |p: &Path| resolve_file_request(&p.to_string_lossy(), Some(&home), &root);
+        assert!(r(&root.join("a.txt")).is_ok());
+        // `..` out of the project into a hidden home folder.
+        assert_eq!(r(&root.join("../.ssh/id")), Err((403, "hidden")));
+        assert_eq!(r(&root.join(".bram/w.json")), Err((403, "bram-state")));
+        assert_eq!(r(&outside.join("s.txt")), Err((403, "outside-scope")));
+        assert_eq!(r(&root.join("missing.txt")), Err((404, "not-found")));
+        assert_eq!(r(&root), Err((404, "not-a-file")));
+        assert_eq!(
+            resolve_file_request("relative/a.txt", Some(&home), &root),
+            Err((400, "not-absolute"))
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.join("s.txt"), root.join("link.txt")).unwrap();
+            assert_eq!(r(&root.join("link.txt")), Err((403, "outside-scope")));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn range_parsing() {
+        let p = |h: &str, len| parse_byte_range(Some(h), len);
+        assert_eq!(parse_byte_range(None, 100), ByteRange::Full);
+        assert_eq!(p("bytes=0-9", 100), ByteRange::Partial { start: 0, end: 9 });
+        assert_eq!(
+            p("bytes=10-", 100),
+            ByteRange::Partial { start: 10, end: 99 }
+        );
+        assert_eq!(
+            p("bytes=-20", 100),
+            ByteRange::Partial { start: 80, end: 99 }
+        );
+        assert_eq!(
+            p("bytes=-500", 100),
+            ByteRange::Partial { start: 0, end: 99 }
+        );
+        assert_eq!(
+            p("bytes=50-5000", 100),
+            ByteRange::Partial { start: 50, end: 99 }
+        );
+        assert_eq!(p("bytes=100-", 100), ByteRange::Unsatisfiable);
+        assert_eq!(p("bytes=200-300", 100), ByteRange::Unsatisfiable);
+        assert_eq!(p("bytes=-0", 100), ByteRange::Unsatisfiable);
+        assert_eq!(p("bytes=0-", 0), ByteRange::Unsatisfiable);
+        // Ignored: wrong unit, multi-range, garbage, reversed.
+        assert_eq!(p("items=0-5", 100), ByteRange::Full);
+        assert_eq!(p("bytes=0-5,10-15", 100), ByteRange::Full);
+        assert_eq!(p("bytes=abc", 100), ByteRange::Full);
+        assert_eq!(p("bytes=x-5", 100), ByteRange::Full);
+        assert_eq!(p("bytes=9-3", 100), ByteRange::Full);
+    }
+
+    #[test]
+    fn content_types_and_token() {
+        assert_eq!(file_content_type("/a/take.MP4"), "video/mp4");
+        assert_eq!(file_content_type("/a/x.m4a"), "audio/mp4");
+        assert_eq!(file_content_type("/a/x.md"), "text/plain; charset=utf-8");
+        assert_eq!(file_content_type("/a/x.html"), "text/html; charset=utf-8");
+        assert_eq!(file_content_type("C:\\a\\x.svg"), "image/svg+xml");
+        assert_eq!(file_content_type("/a/x.bin"), "application/octet-stream");
+        assert_eq!(file_content_type("/a/noext"), "application/octet-stream");
+        let t = file_token();
+        assert_eq!(t.len(), 32);
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(token_matches(t, t));
+        assert!(!token_matches("", t));
+        assert!(!token_matches("nope", t));
+    }
+
+    #[test]
+    fn token_is_redacted_for_trace() {
+        assert_eq!(
+            redact_query_param("path=%2Fa&t=deadbeef", "t"),
+            "path=%2Fa&t=<redacted>"
+        );
+        assert_eq!(redact_query_param("path=%2Ft", "t"), "path=%2Ft");
+    }
 }
 
 #[cfg(test)]

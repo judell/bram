@@ -96,6 +96,17 @@ whose app is the point can launch Bram minimized with the app opened:
 `bram <dir> --minimized --open-app[=<path>]`, or `.bram.json`
 `"launch": { "minimized": true, "openApp": "/route" }`.
 
+## Presenting local files
+
+When you mention a local file in chat, write it as a Markdown link with its
+absolute path, never a bare path, media included:
+`[take-3.mp4](/Users/jon/bram-studio/media/take-3.mp4)`. In Bram's
+Transcript the link opens in the user's browser, served by Bram, so video and
+audio play and seek, images and PDFs show, and text opens as plain text.
+Bram serves only files under the home folder or the project; hidden folders
+(`~/.ssh`, `~/.config`) and the project's `.bram/` are refused. Don't use
+`file://` links or `~/` paths.
+
 ## Live SQL views via `/query`
 
 When a managed project keeps data in SQLite, its target app (or the

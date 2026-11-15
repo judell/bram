@@ -3472,8 +3472,12 @@ window.__bramPlanTooltip = function (board) {
 // and in detail in the Why"): the start-consequence line shows only while no
 // plan answers the selection. Before a plan it is still the warning at the
 // decision point (the 2026-09-03 case in WorklistGateBar.xmlui).
-window.__bramShowStartConsequence = function (board, sel, claim) {
+// gate-bar-one-line-while-working: while the running turn is working on the
+// selection, the working line says it all, so this one steps aside (turnCtx
+// is optional; omitted, behavior is unchanged).
+window.__bramShowStartConsequence = function (board, sel, claim, turnCtx) {
   if (window.__bramPlanVisible(board, sel)) return false;
+  if (window.__bramAddressedBlockMessage && window.__bramAddressedBlockMessage(sel, turnCtx)) return false;
   return !!window.__bramStartConsequence(board && board.items, sel, claim);
 };
 window.__bramPlanVisible = function (board, sel) {
@@ -12347,6 +12351,65 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   if (raw.indexOf("://") >= 0) return { skip: true, reason: "unknown-url", href: href, raw: raw };
   return { path: raw, line: line, href: href };
 };
+// local-file-links-open-in-browser: what the pane needs to build a
+// /__file URL (loopback port, per-process token, home folder, project root).
+// Fetched once from /__app-info and cached; until it lands a click falls back
+// to the in-pane preview.
+window.__bramFileLinkInfo = null;
+window.__bramFileLinkInfoLoad = function () {
+  try {
+    fetch("/__app-info", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (info) {
+        if (info && info.loopbackPort && info.fileToken) {
+          window.__bramFileLinkInfo = {
+            port: info.loopbackPort,
+            token: String(info.fileToken),
+            home: typeof info.homeDir === "string" ? info.homeDir : "",
+            root: typeof info.projectKey === "string" ? info.projectKey : "",
+          };
+        }
+      })
+      .catch(function () {});
+  } catch (e) {}
+};
+window.__bramFileLinkInfoLoad();
+// Absolute path for a local-link request path: absolute stays, `~/` takes the
+// home folder, anything else is project-relative. Null when it can't be made.
+window.__bramLocalLinkAbsolutePath = function (path, info) {
+  var p = String(path || "");
+  if (!p || !info) return null;
+  var sep = /\\/.test(info.root) && info.root.indexOf("/") < 0 ? "\\" : "/";
+  if (/^\//.test(p) || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p)) return p;
+  if (/^~[\\/]/.test(p)) return info.home ? info.home.replace(/[\\/]+$/, "") + sep + p.slice(2) : null;
+  if (!info.root) return null;
+  return info.root.replace(/[\\/]+$/, "") + sep + p.replace(/^\.\//, "");
+};
+// Click on a local-file link: open it in the default browser through the
+// host's /__file route; a meta/ctrl-click, or no token yet, keeps the in-pane
+// text preview.
+window.__bramOpenLocalLink = function (request, e) {
+  var info = window.__bramFileLinkInfo;
+  var ext = String((request && request.path) || "").replace(/^.*\./, "").toLowerCase();
+  if (ext.length > 8 || /[\\/]/.test(ext)) ext = "";
+  var modifier = !!(e && (e.metaKey || e.ctrlKey));
+  var abs = modifier ? null : window.__bramLocalLinkAbsolutePath(request && request.path, info);
+  if (!abs || typeof window.openExternal !== "function") {
+    window.__bramIframeTrace("local-link", {
+      op: "preview",
+      ext: ext,
+      how: modifier ? "modifier" : info ? "unresolved" : "no-token",
+    });
+    if (!info) window.__bramFileLinkInfoLoad();
+    window.__bramOpenLocalLinkPreview(request);
+    return;
+  }
+  window.__bramIframeTrace("local-link", { op: "open-browser", ext: ext, how: "click" });
+  window.openExternal(
+    "http://127.0.0.1:" + info.port + "/__file?path=" + encodeURIComponent(abs) +
+      "&t=" + encodeURIComponent(info.token)
+  );
+};
 // issue-230 Search facets: add/remove a type from the selectedTypes array
 // (keeps array-mutation logic out of the Checkbox onDidChange attribute).
 window.__bramToggleType = function (types, t, on) {
@@ -14210,8 +14273,8 @@ window.bramSubscribeW2Selection = (function () {
     var ids = liveIds(ctx);
     var hit = (sel || []).filter(function (id) { return ids.indexOf(id) !== -1; });
     if (!hit.length) return "";
-    return "This turn is working on " + hit.join(", ") +
-      " — the commit unlocks when it finishes.";
+    return "The agent is working on " + hit.join(", ") +
+      "; Commit opens when it finishes.";
   };
   window.bramSubscribeTurnContext = function () {
     if (factory) return factory;
@@ -20393,7 +20456,7 @@ document.addEventListener("click", function (e) {
         line: localRequest.line || null,
       });
     } catch (traceErr2) {}
-    window.__bramOpenLocalLinkPreview(localRequest);
+    window.__bramOpenLocalLink(localRequest, e);
     return;
   }
   if (localRequest && localRequest.skip) {

@@ -122,8 +122,18 @@
        beneath it. Supersedes next-move-button-inline-and-quiet's end-of-line
        placement, which left-aligned the button once the line wrapped.
        https://www.xmlui.org/docs/howto/center-content-on-the-page -->
+  <!-- issue-368-addressed-turn-context, rung 2: when the RUNNING turn is
+       addressed to an id in the selection (an approved:/iterate:/drop: turn
+       naming it, per the host's turn-context events), the commit-emitting
+       buttons are withheld outright rather than confirmed — the turn
+       literally names the item whose files it may still be editing, so
+       "edits may still be landing" is a fact, not a guess. Selections
+       outside the addressed set keep the coarse caution above. The context
+       clears on turn end (host detectors), so the row unlocks itself.
+       Declared above the start-consequence line, which also reads it. -->
+  <PushSource id="gateTurnCtx" subscribe="{window.bramSubscribeTurnContext()}" />
   <VStack
-    when="{window.__bramShowStartConsequence(gateWorklist.value, gateSel.value, gateClaim.value)}"
+    when="{window.__bramShowStartConsequence(gateWorklist.value, gateSel.value, gateClaim.value, gateTurnCtx.value)}"
     horizontalAlignment="center"
     gap="$space-1"
     paddingHorizontal="$space-2"
@@ -311,15 +321,10 @@
        caution for those kinds. The queued button is disabled; the row's
        Cancel is the only control. Stopping the turn delivers it sooner. -->
   <PushSource id="gateQueue" subscribe="{window.bramSubscribeGateQueue()}" />
-  <!-- issue-368-addressed-turn-context, rung 2: when the RUNNING turn is
-       addressed to an id in the selection (an approved:/iterate:/drop: turn
-       naming it, per the host's turn-context events), the commit-emitting
-       buttons are withheld outright rather than confirmed — the turn
-       literally names the item whose files it may still be editing, so
-       "edits may still be landing" is a fact, not a guess. Selections
-       outside the addressed set keep the coarse caution above. The context
-       clears on turn end (host detectors), so the row unlocks itself. -->
-  <PushSource id="gateTurnCtx" subscribe="{window.bramSubscribeTurnContext()}" />
+  <!-- gate-bar-one-line-while-working: this is the only line while the turn
+       works (the start-consequence line steps aside). Plain color, since
+       there is no action to take but wait; width + center so it wraps.
+       https://www.xmlui.org/docs/reference/components/Text -->
   <HStack
     when="{!!window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value)}"
     horizontalAlignment="center"
@@ -328,7 +333,9 @@
     paddingTop="$space-1">
     <Text
       fontSize="$fontSize-sm"
-      color="$color-warn-700"
+      width="100%"
+      textAlign="center"
+      color="$textColor-secondary"
       value="{window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value)}" />
   </HStack>
   <HStack

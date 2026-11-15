@@ -7963,8 +7963,49 @@ window.__bramSetupInfoMarkdown = function () {
     "",
     "**After Setup runs**",
     "",
-    "Restart the agent, because it reads hooks and instructions when it starts. The banner won't return until something Setup wrote goes missing or falls out of date.",
+    "Bram then says whether anything needs a restart, which depends on the agent and on what Setup changed. The banner won't return until something Setup wrote goes missing or falls out of date.",
   ].join("\n");
+};
+// The "Setup complete" banner's sentence, tailored to the active agent and to
+// what Setup actually changed. `result` is the /__enhance/run response; its
+// `wrote` holds absolute paths of files Setup changed (templates and block
+// merges list a path only on change), except the two Claude settings files,
+// which are always listed. Worded as Bram actions, not terminal commands.
+// Per-agent facts and sources: docs/decisions/2026-11-15-agent-reload-after-setup.md.
+window.__bramSetupCompleteMessage = function (provider, result) {
+  var fallback = "Setup complete. Restart Bram to load the updated files.";
+  var wrote = result && Array.isArray(result.wrote) ? result.wrote : null;
+  if (!wrote) return fallback;
+  var paths = wrote.map(function (p) { return String(p).replace(/\\/g, "/").toLowerCase(); });
+  var any = function (test) { return paths.some(test); };
+  var endsWith = function (p, s) { return p === s || p.slice(-s.length - 1) === "/" + s; };
+  var restart = "Setup complete. Restart Bram to load the updated instructions.";
+  if (provider === "claude") {
+    var claudeInstr = any(function (p) {
+      return endsWith(p, "claude.md") || endsWith(p, ".claude/bram-conventions.md") ||
+        p.indexOf("/.claude/bram-reference/") >= 0;
+    });
+    return claudeInstr ? restart : "Setup complete. Claude picks it up as it runs.";
+  }
+  if (provider === "codex") {
+    var codexInstr = any(function (p) { return endsWith(p, "agents.md"); });
+    var codexHooks = any(function (p) { return endsWith(p, ".codex/config.toml"); });
+    var trust = "Bram's hooks changed: open the terminal and use `/hooks` to trust them.";
+    if (codexInstr && codexHooks) return restart + " " + trust;
+    if (codexInstr) return restart;
+    if (codexHooks) return "Setup complete. " + trust;
+    // Setup writes developer_instructions without listing it in `wrote`, so
+    // an empty Codex list can still hide a change: restarting is the safe ask.
+    return restart;
+  }
+  if (provider === "opencode") return "Setup complete. OpenCode picks it up as it runs.";
+  if (provider === "antigravity") {
+    var agyRules = any(function (p) {
+      return endsWith(p, "agents.md") || endsWith(p, "gemini.md") || p.indexOf("/.agents/") >= 0;
+    });
+    return agyRules ? "Setup complete. Restart Bram to load the updated rules." : "Setup complete.";
+  }
+  return fallback;
 };
 window.__bramSetupBanner = function (status, field) {
   var s = status || {};
@@ -8003,7 +8044,7 @@ window.__bramSetupBanner = function (status, field) {
   }
   if (field === "heading") return "Agent Coordination Needs Attention";
   if (field === "text")
-    return found.join(" ") + " Run Setup to fix this now, or Bram will at its next launch; it is safe to run again. Restart the agent afterwards.";
+    return found.join(" ") + " Run Setup to fix this now, or Bram will at its next launch; it is safe to run again. Bram says afterwards whether anything needs a restart.";
   if (field === "button") return "Run Setup";
   return "About agent coordination setup";
 };

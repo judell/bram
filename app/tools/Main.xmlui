@@ -1062,16 +1062,10 @@
     padding="$space-2"
     gap="$space-3"
     verticalAlignment="center">
-    <!-- Agent restart only: nothing Setup writes is read by the Bram process
-         solely at startup (the guard link is ticker-ensured, routes read
-         files per request), so the old "Restart Bram" half of this message
-         was ceremony. Hooks ARE captured at agent-session startup, so the
-         agent restart is the one real requirement — and only on this manual
-         fallback path; the automatic path runs Setup before the agent
-         launches (first-run-sequence-greeting-vs-setup). -->
-    <Text fontSize="$fontSize-sm" width="*" overflowMode="flow">
-      Setup complete. Restart the agent in the terminal (exit it, then start it again) to pick up the new coordination files.
-    </Text>
+    <!-- The sentence depends on the agent and on what Setup changed (the
+         /__enhance/run response, held by runEnhanceSetupAct): see
+         docs/decisions/2026-11-15-agent-reload-after-setup.md. -->
+    <Text fontSize="$fontSize-sm" width="*" overflowMode="flow">{window.__bramSetupCompleteMessage(setupCompleteProvider, runEnhanceSetupAct.value &amp;&amp; runEnhanceSetupAct.value.data)}</Text>
     <Button
       label="✕"
       variant="ghost"

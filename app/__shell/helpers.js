@@ -12484,7 +12484,7 @@ window.__bramOpenLocalLink = function (request, e) {
   }
   window.__bramIframeTrace("local-link", { op: "open-browser", ext: ext, how: "click" });
   window.openExternal(
-    "http://127.0.0.1:" + info.port + "/__file?path=" + encodeURIComponent(abs) +
+    "http://127.0.0.1:" + info.port + "/__open-file?path=" + encodeURIComponent(abs) +
       "&t=" + encodeURIComponent(info.token)
   );
 };

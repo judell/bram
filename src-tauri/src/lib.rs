@@ -90691,6 +90691,9 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
+    // Pasted screenshots and captures (the pane's /__file?path= shim). The
+    // token-gated browser route is /__open-file, answered earlier in
+    // handle_http; never give it this name (open-file-route-stops-shadowing-file).
     if path == "__file" {
         let mut file_path = String::new();
         for pair in query.split('&') {
@@ -107857,9 +107860,9 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
 
     let route_correlation_id = next_route_correlation_id();
     let route_start = std::time::Instant::now();
-    // local-file-links-open-in-browser: the /__file token rides in the query
-    // string, so it never reaches the trace.
-    let traced_query = if path == "__file" {
+    // local-file-links-open-in-browser: the /__open-file token rides in the
+    // query string, so it never reaches the trace.
+    let traced_query = if path == "__open-file" {
         redact_query_param(query, "t")
     } else {
         query.to_string()
@@ -107932,12 +107935,15 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         );
     }
 
-    // local-file-links-open-in-browser: GET /__file streams bytes with its own
-    // headers (Range, Content-Range), which the (status, type, body) route
-    // shape cannot carry, so it answers here and returns.
+    // local-file-links-open-in-browser: GET /__open-file streams bytes with its
+    // own headers (Range, Content-Range), which the (status, type, body) route
+    // shape cannot carry, so it answers here and returns. NOT `/__file`: that
+    // older route serves pasted screenshots (no token, ~/.cache/bram allowed),
+    // and answering it here first broke every Transcript screenshot
+    // (open-file-route-stops-shadowing-file, 2026-11-15).
     if gate_refusal.is_none()
         && held_refusal.is_none()
-        && path == "__file"
+        && path == "__open-file"
         && (method == "GET" || method == "HEAD")
     {
         let range_header: Option<String> = request
@@ -108541,7 +108547,7 @@ fn loopback_gate_refusal(
     None
 }
 
-// ---- local-file-links-open-in-browser: GET /__file -------------------------
+// ---- local-file-links-open-in-browser: GET /__open-file --------------------
 //
 // Serves a local file's bytes to the user's browser so a link in the
 // Transcript plays or shows it. Gated three ways: the loopback Host check
@@ -108764,7 +108770,7 @@ fn http_header(name: &str, value: &str) -> tiny_http::Header {
         .unwrap_or_else(|_| tiny_http::Header::from_bytes(&b"X-Bram"[..], &b"1"[..]).unwrap())
 }
 
-// Answers GET/HEAD /__file and returns (status, body bytes) for the route
+// Answers GET/HEAD /__open-file and returns (status, body bytes) for the route
 // trace. Reads only the requested byte range from disk.
 fn serve_file_request<R: tauri::Runtime>(
     app: &AppHandle<R>,

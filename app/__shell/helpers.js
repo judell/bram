@@ -992,6 +992,16 @@ window.__bramIsTypeSomethingRow = function (menu, item) {
   return !!(menu && menu.tool === "AskUserQuestion" && item &&
     opts.length >= 3 && String(item.key) === String(opts.length - 1));
 };
+// #228: the card answers only the first of several AskUserQuestion questions.
+// The host sends questionCount; say the rest wait in the terminal.
+window.__bramAskMoreQuestionsText = function (menu) {
+  if (!menu || menu.tool !== "AskUserQuestion") return "";
+  var n = Number(menu.questionCount) - 1;
+  if (!(n >= 1)) return "";
+  return n === 1
+    ? "+1 more question: answer it in the terminal."
+    : "+" + n + " more questions: answer them in the terminal.";
+};
 // A card row click. Returns the value for the card's typeSomethingKey var:
 // the row's key when it's the "Type something." row (opening the text box),
 // otherwise the current value, after sending the row's answer.

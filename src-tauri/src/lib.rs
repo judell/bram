@@ -2249,6 +2249,7 @@ mod grid_rescue_candidate_tests {
                 cache_source: None,
                 at_host_ms: None,
                 signature_source: None,
+                question_count: None,
             },
             at_ms: 0,
             answered: false,
@@ -6631,6 +6632,12 @@ struct PtyMenu {
     // Refs #170 follow-up.
     #[serde(skip)]
     signature_source: Option<&'static str>,
+    // AskUserQuestion only: how many questions the agent asked. The card
+    // shows the first; the pane uses this to say the rest are in the
+    // terminal (#228). Absent for every other menu, so their wire shape is
+    // unchanged.
+    #[serde(rename = "questionCount", skip_serializing_if = "Option::is_none")]
+    question_count: Option<usize>,
 }
 
 // (Comment context restored with the impl below; the byte-scan helpers that
@@ -6775,6 +6782,7 @@ fn grid_rescue_menu(
         cache_source: Some("grid-rescue".to_string()),
         at_host_ms: Some(now),
         signature_source: Some("grid"),
+        question_count: None,
     }
 }
 
@@ -10905,11 +10913,11 @@ fn permission_suggestion_fragment(s: &serde_json::Value) -> String {
 // click->keystroke path lines up; same PtyMenu shape the grid produces for
 // these. Returns None if there are no labelled options.
 fn askuserquestion_to_menu(value: &serde_json::Value, tool: &str) -> Option<PtyMenu> {
-    let q0 = value
+    let questions = value
         .get("tool_input")
         .and_then(|t| t.get("questions"))
-        .and_then(|q| q.as_array())
-        .and_then(|q| q.first())?;
+        .and_then(|q| q.as_array())?;
+    let q0 = questions.first()?;
     let opts = q0.get("options").and_then(|o| o.as_array())?;
     let mut options = Vec::new();
     for (i, o) in opts.iter().enumerate() {
@@ -10970,6 +10978,7 @@ fn askuserquestion_to_menu(value: &serde_json::Value, tool: &str) -> Option<PtyM
         cache_source: None,
         at_host_ms: None,
         signature_source: None,
+        question_count: Some(questions.len()),
     })
 }
 
@@ -10995,6 +11004,33 @@ mod item_turn_ids_tests {
 #[cfg(test)]
 mod askuserquestion_menu_tests {
     use super::askuserquestion_to_menu;
+
+    #[test]
+    fn question_count_reports_every_question_asked() {
+        let q = |n: usize| {
+            serde_json::json!({
+                "question": format!("Q{n}?"),
+                "options": [{"label": "A"}, {"label": "B"}]
+            })
+        };
+        let payload = serde_json::json!({"tool_input": {"questions": [q(1), q(2), q(3)]}});
+        let menu = askuserquestion_to_menu(&payload, "AskUserQuestion").expect("menu");
+        assert_eq!(menu.question_count, Some(3));
+        let wire = serde_json::to_value(&menu).unwrap();
+        assert_eq!(wire["questionCount"], serde_json::json!(3));
+        assert_eq!(wire["text"], "Q1?");
+    }
+
+    #[test]
+    fn menus_without_a_question_count_keep_their_wire_shape() {
+        let menu = super::PtyMenu {
+            tool: "Bash".to_string(),
+            text: "Run it?".to_string(),
+            ..super::PtyMenu::default()
+        };
+        let wire = serde_json::to_value(&menu).unwrap();
+        assert!(wire.get("questionCount").is_none());
+    }
 
     #[test]
     fn claudes_own_rows_follow_the_agents_options() {
@@ -11382,6 +11418,7 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
         cache_source: None,
         at_host_ms: None,
         signature_source: Some("hook"),
+        question_count: None,
     })
 }
 
@@ -11489,6 +11526,7 @@ fn opencode_permission_request_to_menu(data: &serde_json::Value) -> Option<PtyMe
         cache_source: None,
         at_host_ms: None,
         signature_source: Some("hook"),
+        question_count: None,
     })
 }
 
@@ -11644,6 +11682,7 @@ fn opencode_form_to_menu(form: &serde_json::Value) -> Result<PtyMenu, &'static s
         cache_source: None,
         at_host_ms: None,
         signature_source: Some("hook"),
+        question_count: None,
     })
 }
 
@@ -12255,6 +12294,7 @@ fn permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu> {
         cache_source: None,
         at_host_ms: None,
         signature_source: None,
+        question_count: None,
     })
 }
 
@@ -15074,6 +15114,7 @@ fn codex_trust_prompt_menu_from_chunk(stripped_chunk: &str) -> Option<PtyMenu> {
         cache_source: None,
         at_host_ms: None,
         signature_source: None,
+        question_count: None,
     })
 }
 
@@ -15432,6 +15473,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 cache_source: None,
                                 at_host_ms: None,
                                 signature_source: Some("grid"),
+                                question_count: None,
                             });
                         } else if bram_trace_enabled() {
                             append_bram_trace_line(
@@ -15479,6 +15521,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                             cache_source: None,
                             at_host_ms: None,
                             signature_source: Some("grid"),
+                            question_count: None,
                         });
                     } else {
                         // Host missed the menu box. Only build when there's a LIVE
@@ -15523,6 +15566,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 cache_source: None,
                                 at_host_ms: None,
                                 signature_source: Some("jsonl"),
+                                question_count: None,
                             });
                         } else if grid_menu_is_bash_command_box(
                             &grid_opts,
@@ -15562,6 +15606,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 cache_source: None,
                                 at_host_ms: None,
                                 signature_source: Some("grid"),
+                                question_count: None,
                             });
                         } else if let Some(ew_tool) =
                             grid_menu_edit_write_tool(&grid_opts, &grid_above, &grid_header)
@@ -15598,6 +15643,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 cache_source: None,
                                 at_host_ms: None,
                                 signature_source: Some("grid"),
+                                question_count: None,
                             });
                         } else {
                             // Signature-less and not a recognizable Bash, Edit, or
@@ -79961,6 +80007,7 @@ mod pty_menu_tests {
             cache_source: None,
             at_host_ms: None,
             signature_source: None,
+            question_count: None,
         };
         assert_eq!(pty_menu_preview_source(&signatureless), "raw");
         assert_eq!(pty_menu_preview_chars(&signatureless), 0);
@@ -79968,6 +80015,7 @@ mod pty_menu_tests {
         let jsonl_backed = super::PtyMenu {
             tool_call_signature: Some(signature.clone()),
             signature_source: Some("jsonl"),
+            question_count: None,
             ..signatureless
         };
         assert_eq!(pty_menu_preview_source(&jsonl_backed), "jsonl");
@@ -80202,6 +80250,7 @@ mod pty_menu_tests {
             cache_source: None,
             at_host_ms: None,
             signature_source: None,
+            question_count: None,
         };
         let raw_grid = menu(None);
         let displayed = super::HookMenuDisplayed {
@@ -80232,6 +80281,7 @@ mod pty_menu_tests {
             cache_source: None,
             at_host_ms: None,
             signature_source: None,
+            question_count: None,
         };
         let current = super::HookMenuDisplayed {
             id_key: "sig:Bash(date +%s)".to_string(),
@@ -80439,6 +80489,7 @@ mod pty_menu_tests {
             cache_source: None,
             at_host_ms: None,
             signature_source: None,
+            question_count: None,
         };
         let after = super::PtyMenu {
             tool_call_signature: Some("Bash(touch /tmp/x.txt)".to_string()),
@@ -80461,6 +80512,7 @@ mod pty_menu_tests {
             cache_source: None,
             at_host_ms: None,
             signature_source: Some("pty"),
+            question_count: None,
         };
         let after = super::PtyMenu {
             options: vec![
@@ -80503,6 +80555,7 @@ mod pty_menu_tests {
             cache_source: None,
             at_host_ms: None,
             signature_source: Some("pty"),
+            question_count: None,
         };
         let same = base.clone();
         let different_signature = super::PtyMenu {
@@ -80551,6 +80604,7 @@ mod pty_menu_tests {
             cache_source: Some("setAgentMenuFromEvent".to_string()),
             at_host_ms: Some(1781386752695),
             signature_source: Some("pty"),
+            question_count: None,
         };
         let mut state = super::TurnState::idle();
         state.provider = Some("codex".to_string());
@@ -104466,6 +104520,7 @@ fn antigravity_permission_menu(
                     cache_source: None,
                     at_host_ms: None,
                     signature_source: None,
+                    question_count: None,
                 });
             }
         }
@@ -104551,6 +104606,7 @@ fn antigravity_permission_menu(
         cache_source: None,
         at_host_ms: None,
         signature_source: None,
+        question_count: None,
     })
 }
 

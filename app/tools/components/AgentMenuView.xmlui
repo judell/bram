@@ -187,6 +187,12 @@
           onClick="window.__bramAnswerTypeSomething(window.__bramTypeSomethingKey($props.menu), typeSomethingText, promptId)" />
       </HStack>
     </VStack>
+    <!-- #228: the card answers question 1; say when more are waiting in the terminal -->
+    <Text
+      when="{window.__bramAskMoreQuestionsText($props.menu) !== ''}"
+      value="{window.__bramAskMoreQuestionsText($props.menu)}"
+      fontSize="$fontSize-xs"
+      color="$textColor-secondary" />
     <HStack
       when="{!$props.menu.options || $props.menu.options.length === 0}"
       gap="$space-2"

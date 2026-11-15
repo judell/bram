@@ -22603,12 +22603,18 @@ window.__bramStoryTell = (function () {
       // changed under the user, told in the Log.
       else if (cat === "iframe" && sub === "w2-selection-restore") {
         var sj = jsonTail(rest);
-        var sids = Array.isArray(sj.ids) ? sj.ids : [];
+        // log-tuneup-0-8-9: the trace records `ids` as a summary object
+        // ({__summary, length, sample}), not an array, so reading only an
+        // array named nothing ("no item were no longer on the Worklist").
+        var sids = Array.isArray(sj.ids) ? sj.ids
+          : (sj.ids && Array.isArray(sj.ids.sample) ? sj.ids.sample : []);
         // Nothing ticked before the reload means nothing could change under
         // the user, so there is nothing to tell (the empty case read "I kept
         // your selection: no item", 2026-11-07).
         if (sj.op === "restore" && sids.length) simple(t, "selection", "The pane reloaded; I kept your selection: " + linked(sids) + ".", false);
-        else if (sj.op === "dropped") simple(t, "selection", "After the reload, " + linked(sids) + (sids.length === 1 ? " was" : " were") + " no longer on the Worklist, so I unticked " + (sids.length === 1 ? "it" : "them") + ".", true);
+        // Plain, not orange: Bram already unticked them, so there is nothing
+        // for the user to do (§Warning color is earned).
+        else if (sj.op === "dropped" && sids.length) simple(t, "selection", "After the reload, " + linked(sids) + (sids.length === 1 ? " was" : " were") + " no longer on the Worklist, so I unticked " + (sids.length === 1 ? "it" : "them") + ".", false);
       }
       else if (cat === "iframe" && sub === "heartbeat-drift") drift = { t: t, focused: jsonTail(rest).focused };
       else if (cat === "iframe" && (sub === "long-task" || sub === "input-latency")) onStall(t, sub, jsonTail(rest));
@@ -22703,10 +22709,12 @@ window.__bramStoryTell = (function () {
         var quote = window.__bramStoryLeadingSentence(message);
         var text = o.text;
         if (quote) text = (o.kind === "queue-delete" ? "Deleted queue message: “" : "New queue message: “") + quote + "”";
-        // A sent message: an inline ↗ to the row that added it (when shown),
-        // and its target (Claude, a Worklist item) from the saved draft.
+        // A sent message: its words are quoted in the expansion (below, via
+        // turnPreview) rather than linked to the row that added it (Jon,
+        // 2026-11-15: "the external link is lame here, just quote the item
+        // in the expansion"), and its target (Claude, a Worklist item) comes
+        // from the saved draft.
         var qid = o.kind === "queue" && o._ep && o._ep.d && o._ep.d.qid;
-        if (qid && shownAdds[qid]) text += " [↗](/log?focus=" + encodeURIComponent("queue-add:" + qid) + ' "Show the message this sent")';
         // A turn told in the Log (skip-worklist) links to that turn in the
         // Transcript, when it's in the session the Transcript shows.
         var curSid = payload.currentSession && payload.currentSession.sessionId;
@@ -22723,6 +22731,9 @@ window.__bramStoryTell = (function () {
           if (best && best.text) turnPreview = best.text.length > 600 ? best.text.slice(0, 597) + "…" : best.text;
         }
         var sentDraft = qid && payload.queueDrafts && payload.queueDrafts[qid];
+        if (!turnPreview && sentDraft && typeof sentDraft.text === "string" && sentDraft.text.trim()) {
+          turnPreview = sentDraft.text.length > 600 ? sentDraft.text.slice(0, 597) + "…" : sentDraft.text;
+        }
         return {
           id: o.kind + ":" + (o.queueId || o.t),
           at: o.at, text: text, kind: o.kind, surprising: o.surprising, queueId: o.queueId || null,

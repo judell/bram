@@ -69806,7 +69806,9 @@ fn membership_missing_trees(
 // `steps` is oldest-first `(tree, step_index)` and ends with the present-state
 // tree; the first step diffs against HEAD. One `git diff` per non-identical
 // step plus one final HEAD -> present diff for the universe. `None` on any
-// git failure (the engine fails open).
+// git failure (the engine fails open). Test-only: production goes through
+// `membership_line_credit_gaps`, which also reports missing step trees (#493).
+#[cfg(test)]
 fn membership_line_credit(
     root: &Path,
     steps: &[(String, usize)],

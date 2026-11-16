@@ -5105,6 +5105,14 @@ window.__bramWorklist2StripTooltip = function (item, claim, items) {
     // ran off-screen as one line before the switch to tooltipMarkdown.
     return lines.join("\n\n");
   }
+  // strip-begun-item-names-uncredited-edits: a begun row credited with no
+  // line whose files moved; the strip names them, this says why and to whom.
+  var wcNone = item && item.willCommit;
+  if (wcNone && (Number(wcNone.added) || 0) + (Number(wcNone.removed) || 0) === 0 &&
+      window.__bramWorklist2Begun(item, claim)) {
+    var notCreditedTip = window.__bramBegunNotCreditedPaths(item);
+    if (notCreditedTip.length) return window.__bramNotCreditedPhrase(notCreditedTip, true, true);
+  }
   // Non-committable rows: the strip already says what to do.
   return "";
 };
@@ -6353,7 +6361,13 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
       ? (Number(wcShared.added) || 0) + (Number(wcShared.removed) || 0)
       : null;
     if (ownLines === 0 || !window.__bramOwnClause(item, attribution)) {
-      return withCloses("No changes yet");
+      // strip-begun-item-names-uncredited-edits: "No changes yet" beside a
+      // file table full of changes was false. Say they're there and not
+      // credited here; the tooltip says to whom and what to check.
+      var notCredited = ownLines === 0 ? window.__bramBegunNotCreditedPaths(item) : [];
+      return withCloses(
+        notCredited.length ? window.__bramNotCreditedPhrase(notCredited, false, false) : "No changes yet",
+      );
     }
     // gate-names-the-outside-commit-that-strands-an-item: name the commit
     // that stranded it, never the neighbour the host would otherwise blame.
@@ -6589,6 +6603,46 @@ window.__bramUncreditedPhrase = function (paths, code, full) {
       ? ". Start & commit includes them in this item's commit; Start leaves them for this item's later commit; Drop leaves them on disk."
       : "")
   );
+};
+// strip-begun-item-names-uncredited-edits: a BEGUN row the host credits with
+// no line (willCommit +0 −0) whose declared files still moved. Each moved
+// file with the other items credited for it (owners may be empty: no item).
+// Live 2026-11-15 (~/xmlui): issue-3941-read-scoped-rendering read "No
+// changes yet" beside +1209 −8, because a subagent built its step 2 during
+// issue-3941-land-read-sets' turn (judell/bram#495).
+window.__bramBegunNotCreditedPaths = function (item) {
+  var id = item && item.id;
+  return ((item && item.changedFiles) || []).filter(window.__bramFileRecMoved).map(function (f) {
+    var o = window.__bramPathOwners(f.path, id);
+    return { path: f.path, owners: (o && o.owners) || [] };
+  });
+};
+// Its sentence. Deliberately no commit order: the credit itself can be
+// wrong (the other item's lines may be this one's work), so "commit X first"
+// was the wrong move in the live case. `full` adds why, who is credited, and
+// the check that decides the move.
+window.__bramNotCreditedPhrase = function (list, code, full) {
+  var l = list || [];
+  if (!l.length) return "";
+  var q = function (t) { return code ? "`" + t + "`" : t; };
+  var more = l.length > 1 ? " and " + (l.length - 1) + " more" : "";
+  var verb = l.length > 1 ? " have" : " has";
+  var head = q(l[0].path) + more + verb + " edits this item isn't credited with";
+  if (!full) return head;
+  var parts = [
+    head + ".",
+    "Edits are credited to whichever item was being worked when they were made, so work for this item done during another item's turn (by a subagent, a stash pop or a branch switch) can be credited to that item, or to none.",
+  ];
+  var owned = l.filter(function (x) { return x.owners.length; });
+  if (owned.length) {
+    parts.push(
+      owned.map(function (x) {
+        return "- " + q(x.path) + ": credited to " + x.owners.map(q).join(" and ");
+      }).join("\n"),
+    );
+    parts.push("If that item's work is already committed, **Drop** it, then **Commit** this one.");
+  }
+  return parts.join("\n\n");
 };
 // The gate tooltips' input: the selection's uncredited paths, but only when
 // EVERY selected item is not begun -- the strip's own branch -- so a begun

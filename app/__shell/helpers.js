@@ -3100,9 +3100,15 @@ window.__bramW2SetCloseMap = function (m) { window.__bramW2CloseMap = m || {}; }
 // whole map from the page var and can drop a gate untick made for a
 // DIFFERENT item in the same window — acceptable for the look/feel trial,
 // noted here so the next editor inherits it.
+// read-scoped-rendering-on: the map lives on window, which XMLUI's read-scoped
+// rendering can't see, so each write returns a new version and the handler
+// assigns it to the gate bar's gateCloseTick. Bindings that read the map
+// (the issue-345 contradiction row) pass that tick.
+window.__bramW2CloseMapVersion = 0;
 window.__bramGateCloseToggle = function (itemId, issueNumber, checked, closesIssues) {
   window.__bramW2CloseMap = window.__bramInlineCloseToggle(
     window.__bramW2CloseMap, itemId, issueNumber, checked, closesIssues);
+  return ++window.__bramW2CloseMapVersion;
 };
 // The row-expansion comment box writes the window map directly too (the
 // expansion's own checkbox is GONE — gate-only toggle, Jon 2026-09-05),
@@ -3274,6 +3280,7 @@ window.__bramMisaddressedDismissClick = function (ds) {
 window.__bramGateCloseComment = function (itemId, issueNumber, text, closesIssues) {
   window.__bramW2CloseMap = window.__bramInlineCloseComment(
     window.__bramW2CloseMap, itemId, issueNumber, text, closesIssues);
+  return ++window.__bramW2CloseMapVersion;
 };
 // Flat rows for the gate line: selected items' closesIssues with their
 // current effective tick state (absent map entry = default all-ticked,
@@ -16047,7 +16054,7 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
 
 // Append the live pending agent menu (if any) as the last transcript event.
 // Called by the projected-turns adapter (__bramTranscriptEventsFromTurns).
-window.__bramAppendMenuEvents = function (events, menu) {
+window.__bramAppendMenuEvents = function (events, menu, turnEnd) {
   // menu-stack-pty-inflight-prose: while a permission menu is up, Claude hasn't
   // written the turn's assistant record to its JSONL yet, so the explanatory
   // prose is missing from the transcript. Show the grid-sourced prose
@@ -16055,18 +16062,24 @@ window.__bramAppendMenuEvents = function (events, menu) {
   // supplies the prose; once it's dismissed there is a ~0.5–1.6s gap before the
   // real record lands, during which we KEEP showing the prose (bridge) so it
   // doesn't blink out and back. The bridge clears when the real record lands
-  // (content match) or after an 8s backstop (a no-tool_use prompt may never
-  // produce a record). The provisional is a separate block, never inserted into
+  // (content match) or when the agent's turn ends (a no-tool_use prompt may
+  // never produce a record). Both are events: the turns payload and the
+  // agent-turn-end tick (`turnEnd`) are arguments, so the binding re-runs on
+  // either (read-scoped-rendering-on; formerly an 8s clock backstop, which
+  // nothing re-evaluated once it expired). The provisional is a separate block, never inserted into
   // the record list, so there is no duplicate risk; a stable id keeps XMLUI from
   // remounting (flashing) across the live→bridge→swap transitions.
   var prose = ((menu && menu.inflightProse) || "").trim();
-  if (prose) {
-    window.__bramPendingProse = { text: prose, atMs: Date.now() };
-  } else if (
-    window.__bramPendingProse &&
-    Date.now() - window.__bramPendingProse.atMs < 8000
-  ) {
-    prose = window.__bramPendingProse.text;
+  // No turnEnd argument (SessionDetail's history view): show live prose
+  // only, and leave the live Transcript's bridge alone.
+  var endTick = turnEnd || 0;
+  if (turnEnd === undefined) {
+    // no bridge here
+  } else if (prose) {
+    window.__bramPendingProse = { text: prose, turnEnd: endTick };
+  } else if (window.__bramPendingProse) {
+    if (window.__bramPendingProse.turnEnd === endTick) prose = window.__bramPendingProse.text;
+    else window.__bramPendingProse = null;
   }
   if (prose) {
     var key = prose.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 40);
@@ -16101,7 +16114,7 @@ window.__bramAppendMenuEvents = function (events, menu) {
 // unchanged rows keep identical event objects and the List doesn't
 // re-mount them.
 window.__bramProjectedEventCache = (typeof WeakMap === "function") ? new WeakMap() : null;
-window.__bramTranscriptEventsFromTurns = function (payload, menu) {
+window.__bramTranscriptEventsFromTurns = function (payload, menu, turnEnd) {
   // viewport-priority describe: the pump maps mounted rows' data-index
   // back to entries through this snapshot of the adapter's last output.
 
@@ -16195,7 +16208,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
     for (var si = 0; si < slice.length; si++) events.push(slice[si]);
   window.__bramLastTranscriptEvents = events;
   }
-  return window.__bramAppendMenuEvents(events, menu);
+  return window.__bramAppendMenuEvents(events, menu, turnEnd);
 };
 
 // issue-470-compaction-summary-collapsed: when Claude Code auto-compacts, it
@@ -16279,8 +16292,8 @@ window.__bramSplitHostNotes = function (text) {
   return { notes: notes, text: rest };
 };
 window.__bramHostNotesEventCache = (typeof WeakMap === "function") ? new WeakMap() : null;
-window.__bramLiveTranscriptEvents = function (payload, menu) {
-  var events = window.__bramTranscriptEventsFromTurns(payload, menu);
+window.__bramLiveTranscriptEvents = function (payload, menu, turnEnd) {
+  var events = window.__bramTranscriptEventsFromTurns(payload, menu, turnEnd);
   for (var i = 0; i < events.length; i++) {
     var ev = events[i];
     if (!ev || ev.kind !== "user") continue;

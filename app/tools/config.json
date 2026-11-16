@@ -1,6 +1,7 @@
 {
   "xmluiConfig": {
-    "compileScripts": true
+    "compileScripts": true,
+    "readScopedRendering": true
   },
   "appGlobals": {
     "xsVerbose": true,

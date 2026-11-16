@@ -70,6 +70,13 @@
     id="transcriptFindClearEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTranscriptFindClear()}" />
+  <!-- read-scoped-rendering-on: the turn's end clears the menu-prose bridge
+       (__bramAppendMenuEvents) when no record ever lands. Event-driven, the
+       same subscription Issues.xmlui uses. -->
+  <PushSource
+    id="turnEndEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('agent-turn-end')}" />
   <!-- Pending menus no longer interleave here: the footer in Main.xmlui is
        the single canonical menu surface (same place on every tab, always
        visible). The menu-prose provisional block went with it; the real
@@ -142,7 +149,7 @@
          registers them and runs the mount work, with an enter trace. -->
     onMount="window.__bramTranscriptOnMount(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); }, (dir) => { youStepSeq = window.__bramYouStep(dir, events, transcriptList, $props.agentId); })"
     onUnmount="window.__bramTranscriptUnmount(atBottom, events.length, $props.agentId)"
-    var.allEvents="{window.__bramLiveTranscriptEvents($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
+    var.allEvents="{window.__bramLiveTranscriptEvents($props.agentId ? subagentTurns.value : turnsEvt.value, null, (turnEndEvt.value &amp;&amp; turnEndEvt.value.tick) || 0)}"
     var.youOnly="{window.__bramYouOnlyInitial()}"
     var.events="{window.__bramShownTranscriptEvents(allEvents, youOnly)}"
     var.youTick="{''}"

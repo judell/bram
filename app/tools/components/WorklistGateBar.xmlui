@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateLastSessionTick="{0}" var.gateReleaseAsk="{[]}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateCloseTick="{0}" var.gateLastSessionTick="{0}" var.gateReleaseAsk="{[]}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -269,7 +269,7 @@
       <HStack gap="$space-1" verticalAlignment="center">
         <Checkbox
           initialValue="{$item.close}"
-          onDidChange="(v) => window.__bramGateCloseToggle($item.itemId, $item.number, v, $item.closesIssues)" />
+          onDidChange="(v) => gateCloseTick = window.__bramGateCloseToggle($item.itemId, $item.number, v, $item.closesIssues)" />
         <Text
           value="{'closes #' + $item.number}"
           fontSize="$fontSize-sm"
@@ -281,7 +281,7 @@
         <TextBox
           width="14rem"
           placeholder="closing comment (optional)"
-          onDidChange="(v) => window.__bramGateCloseComment($item.itemId, $item.number, v, $item.closesIssues)" />
+          onDidChange="(v) => gateCloseTick = window.__bramGateCloseComment($item.itemId, $item.number, v, $item.closesIssues)" />
       </HStack>
     </Items>
   </HStack>
@@ -295,7 +295,7 @@
        disables a button; per the issue's own framing the guard makes the
        conflict visible and lets the user reconcile it, it never decides. -->
   <HStack
-    when="{(window.__bramGateCloseContradiction(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value, gateText.value) || []).length > 0}"
+    when="{(window.__bramGateCloseContradiction(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value, gateText.value, gateCloseTick) || []).length > 0}"
     horizontalAlignment="center"
     gap="$space-2"
     paddingHorizontal="$space-2"
@@ -303,7 +303,7 @@
     <Text
       fontSize="$fontSize-sm"
       color="$color-warn-700"
-      value="{window.__bramGateCloseContradictionMessage(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value, gateText.value)}" />
+      value="{window.__bramGateCloseContradictionMessage(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value, gateText.value, gateCloseTick)}" />
   </HStack>
   <!-- issue-368-commit-caution-while-agent-working: a commit-emitting click
        taken while the agent's turn is in flight is withheld once — this row

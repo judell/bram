@@ -729,9 +729,17 @@ routes.
   in more than one step.
 - **The pane shows it above the gate row** as "Recommended: Drop a, b ·
   Commit c", with **Do recommended** and a dismiss ×. It's shown only while
+  two or more items are ticked, every item the plan names is among them, and
   the board is unchanged since you posted it: any board change (a prune, an
   advance, a reorder) makes it stale, and it disappears. Post again if it
   still applies.
+- **Post a plan only for the selection the user asked about** (the ids in a
+  "What's my next move? (...)" turn). For a single item, or an item the user
+  hasn't ticked, post no plan; name the button in chat ("tick `x` and click
+  **Start**"). A plan the pane hides leaves "Do recommended" pointing at
+  nothing: in `~/xmlui` on 2026-11-15, an agent posted a one-step plan for a
+  freshly added, unticked item and told the user to click **Do recommended**,
+  which never appeared.
 - **The plan grants nothing.** **Do recommended** runs the gate buttons' own
   paths for exactly those ids. Drops happen at once, host-direct, like a
   feedback-less **Drop**. Commits arrive as an ordinary `approved:` commit
@@ -745,11 +753,16 @@ routes.
 (the Commit tooltip reads "Edits made outside any item in `f` are in the way",
 #478), recommend in this order, in plain words:
 
-1. If another begun item shares any file with this item, commit that item
+1. If the begun item sharing the file already has its work committed (its
+   commits show in `git log`, or its row reads "Looks already committed"),
+   recommend **Drop** on that item first. The lines it is credited with may
+   really be this item's work (#495). Then this item's Commit takes its
+   files whole.
+2. If another begun item shares any file with this item, commit that item
    first, then this one. The commit then takes this item's files whole,
    including those outside edits, disclosed in the "Also includes other
    edits" ⓘ.
-2. Otherwise, offer to put the outside edits under this item or a new one, or to
+3. Otherwise, offer to put the outside edits under this item or a new one, or to
    revert or stash them.
 
 Don't say "unowned" or "entangled" to the user.

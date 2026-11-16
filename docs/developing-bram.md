@@ -193,7 +193,9 @@ After ANY iframe-side change (`.xmlui`, `Globals.xs`, `helpers.js`):
 grep `console-error|console-unhandledrejection` in
 `resources/bram-traces/bram-trace.log` once the pane has reloaded.
 Zero matches is the pass condition; any match is triaged before
-reading anything else from the trace.
+reading anything else from the trace. When the edit touched a binding or a
+helper it calls, also run `node scripts/check-bound-helpers.mjs` (see
+*Displayed state lives in XMLUI, not on `window`*).
 
 #### Known noise: the ResizeObserver loop
 
@@ -239,6 +241,36 @@ just stops. (Top-level `window.X = ...` statements in Globals.xs are
 fine — the file loader parses those, not the expression engine.)
 Workaround: define the setter in helpers.js (real JS) and call it as
 a function from xs.
+
+### Displayed state lives in XMLUI, not on `window`
+
+Functions live on `window` because they reach the outside world: `fetch`,
+the PTY, Tauri events, timers, the DOM. That isn't a choice, since the xs
+sandbox can't host them. Keeping *displayed* state on `window` is a choice,
+and it's the one that defeats XMLUI's tracking (Jon, 2026-11-16).
+
+- **State the pane displays lives in XMLUI state:** a `var.` for one
+  component and its children, a global (a top-level var in `Globals.xs`)
+  across components, a DataSource or PushSource for anything from the host.
+  The PushSource is the declarative bridge from outside.
+- **A helper called from a binding reads only its arguments.** No
+  `window.__bram*` data, helpers.js module variables, storage, or clock.
+  Pass the value in, or pass the tick that changes with it.
+
+Why it matters: the pane runs with XMLUI's `readScopedRendering` on
+(`f5c8d84a`). A container re-renders only when values its bindings read
+from XMLUI state change, so a binding whose helper reads `window` state
+goes stale, and it looks like an unrelated bug ("the warning didn't clear").
+Before the switch, such bindings were refreshed incidentally whenever
+anything else in their container rendered.
+
+**The check:** `node scripts/check-bound-helpers.mjs`. It walks every
+helper reached from a display binding through helpers.js and fails on a
+read that isn't in its allowlist. Each allowlist entry gives its reason:
+caches filled from the same payload, trace de-dup, memos keyed by input,
+initializers, ticks already passed. `--list` prints them all. The known
+debt is the gate's close map (`window.__bramW2CloseMap`, patched with
+`gateCloseTick`), whose declarative fix is a `Globals.xs` global.
 
 ### Peer-pattern check before designing
 

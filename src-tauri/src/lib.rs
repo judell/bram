@@ -43356,21 +43356,14 @@ enum LaunchRunRequestChoice {
     Allow,
     // The banner's Don't allow, or the switch turned off.
     Decline,
-    // Settings saved a command: written to local settings; allowed here
-    // when the switch is on, since the user typed it. Not run until the
-    // next launch.
-    SetCommand,
-    // launch-stop-field: Settings saved a stop command to local launch.stop
-    // (empty clears it). Nothing runs on save; a stop still runs only after
-    // the run command was allowed here.
-    SetStop,
+    // (set-command and set-stop retired by companion-app-settings: the run
+    // and stop commands are authored in the repo's .bram.json, changed by
+    // proposing a Worklist item, not edited in Settings.)
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct LaunchRunRequest {
     choice: LaunchRunRequestChoice,
-    #[serde(default)]
-    command: Option<String>,
 }
 
 static LAUNCH_RUN_STARTED: std::sync::atomic::AtomicBool =
@@ -43764,15 +43757,12 @@ fn start_launch_run_at_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
-// POST /__launch-run/decision {"choice": "allow" | "decline" | "set-command" | "set-stop",
-// "command"?}. The banner and the Settings tab both come here.
+// POST /__launch-run/decision {"choice": "allow" | "decline"}. The banner
+// and the Settings switch both come here.
 // - allow: the switch on (local launch.runAtLaunch), this command allowed on
 //   this computer, and run now, so nobody has to relaunch to get it.
 // - decline: the switch off. The command never runs and the banner never
 //   asks, until the switch goes back on.
-// - set-command: Settings saved a command to local launch.run. With the
-//   switch on it is allowed here (the user typed it); it runs at the next
-//   launch, not on save.
 fn handle_launch_run_decision<R: tauri::Runtime>(
     app: &AppHandle<R>,
     root: &Path,
@@ -43812,25 +43802,6 @@ fn handle_launch_run_decision<R: tauri::Runtime>(
             ("allow", Some(command), r)
         }
         LaunchRunRequestChoice::Decline => ("decline", view.command.clone(), set_switch(false)),
-        LaunchRunRequestChoice::SetCommand => {
-            let command = req.command.as_deref().unwrap_or("").trim().to_string();
-            let mut r = write_settings_to_config(
-                root,
-                &serde_json::json!({"launch": {"run": command.clone()}}),
-            );
-            if r.is_ok() && view.run_at_launch && !command.is_empty() {
-                r = allow(&command);
-            }
-            ("set-command", Some(command), r)
-        }
-        LaunchRunRequestChoice::SetStop => {
-            let stop = req.command.as_deref().unwrap_or("").trim().to_string();
-            let r = write_settings_to_config(
-                root,
-                &serde_json::json!({"launch": {"stop": stop.clone()}}),
-            );
-            ("set-stop", Some(stop), r)
-        }
     };
     let cmd_field = bram_trace_preview(command.as_deref().unwrap_or(""), 160);
     if let Err(e) = result {
@@ -44140,14 +44111,10 @@ mod launch_run_tests {
             p(r#"{"choice":"decline"}"#).unwrap(),
             LaunchRunRequestChoice::Decline
         );
-        assert_eq!(
-            p(r#"{"choice":"set-command","command":"./site.sh"}"#).unwrap(),
-            LaunchRunRequestChoice::SetCommand
-        );
-        assert_eq!(
-            p(r#"{"choice":"set-stop","command":"./site.sh --stop"}"#).unwrap(),
-            LaunchRunRequestChoice::SetStop
-        );
+        // companion-app-settings: commands are authored in the repo, not
+        // set from the pane.
+        assert!(p(r#"{"choice":"set-command","command":"./site.sh"}"#).is_err());
+        assert!(p(r#"{"choice":"set-stop","command":"./site.sh --stop"}"#).is_err());
         assert!(p(r#"{"choice":"always"}"#).is_err());
     }
 
@@ -44236,6 +44203,394 @@ mod launch_run_tests {
             Some("started")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// companion-app-settings: Settings' "Companion App" section. The keys split by
+// audience, not by repo (Jon, 2026-11-17): what the app's makers author for
+// every clone (name, greeting, prompts, launch and stop commands; team
+// settings in the committed .bram.json) is shown with where it came from;
+// what the person at this computer prefers (start minimized, open the app,
+// show it inside Bram) is edited in .bram/settings.json over the repo's
+// default. The merged config can't say where a value came from, so the root
+// file and the local settings are read apart here.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ConfigSource {
+    // The committed root .bram.json.
+    Repo,
+    // This computer's .bram/settings.json.
+    Local,
+    // Neither: Bram's default.
+    Default,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionField<T> {
+    value: T,
+    source: ConfigSource,
+    // The repo's value, when it has one, so a local override can show it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<T>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum OpenAppMode {
+    Off,
+    Home,
+    Page,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenAppChoice {
+    mode: OpenAppMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionPrompt {
+    name: String,
+    file: Option<String>,
+    source: ConfigSource,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionAppView {
+    // Authored by the app's makers.
+    name: CompanionField<String>,
+    greeting_file: CompanionField<Option<String>>,
+    orient_me: CompanionField<bool>,
+    prompts: Vec<CompanionPrompt>,
+    run: CompanionField<Option<String>>,
+    stop: CompanionField<Option<String>>,
+    // The person at this computer.
+    minimized: CompanionField<bool>,
+    open_app: CompanionField<OpenAppChoice>,
+    show_target_app: CompanionField<bool>,
+}
+
+fn companion_at<'a>(v: &'a serde_json::Value, pointer: &str) -> Option<&'a serde_json::Value> {
+    v.pointer(pointer).filter(|x| !x.is_null())
+}
+
+// One field: the local value wins, then the repo's, then the default.
+fn companion_field<T: Clone>(
+    root: &serde_json::Value,
+    local: &serde_json::Value,
+    pointer: &str,
+    read: impl Fn(&serde_json::Value) -> T,
+    default: T,
+) -> CompanionField<T> {
+    let repo = companion_at(root, pointer).map(&read);
+    match companion_at(local, pointer) {
+        Some(v) => CompanionField {
+            value: read(v),
+            source: ConfigSource::Local,
+            repo,
+        },
+        None => match repo {
+            Some(r) => CompanionField {
+                value: r,
+                source: ConfigSource::Repo,
+                repo: None,
+            },
+            None => CompanionField {
+                value: default,
+                source: ConfigSource::Default,
+                repo: None,
+            },
+        },
+    }
+}
+
+fn companion_text(v: &serde_json::Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+// launch.openApp: true (the app's address) or a path. "/" is the home page
+// too; false, "" or anything else is off.
+fn companion_open_app(v: &serde_json::Value) -> OpenAppChoice {
+    match v {
+        serde_json::Value::Bool(true) => OpenAppChoice {
+            mode: OpenAppMode::Home,
+            page: None,
+        },
+        serde_json::Value::String(s) => match s.trim() {
+            "" => OpenAppChoice {
+                mode: OpenAppMode::Off,
+                page: None,
+            },
+            "/" => OpenAppChoice {
+                mode: OpenAppMode::Home,
+                page: None,
+            },
+            p => OpenAppChoice {
+                mode: OpenAppMode::Page,
+                page: Some(p.to_string()),
+            },
+        },
+        _ => OpenAppChoice {
+            mode: OpenAppMode::Off,
+            page: None,
+        },
+    }
+}
+
+fn companion_app_view_from(
+    root: &serde_json::Value,
+    local: &serde_json::Value,
+    folder_name: &str,
+) -> CompanionAppView {
+    let mut name = companion_field(
+        root,
+        local,
+        "/greeting/name",
+        |v| companion_text(v).unwrap_or_default(),
+        folder_name.to_string(),
+    );
+    if name.value.is_empty() {
+        name.value = folder_name.to_string();
+    }
+    // Prompts: every name in either file; the local entry wins.
+    let mut names: Vec<String> = Vec::new();
+    for v in [root, local] {
+        if let Some(map) = companion_at(v, "/prompts").and_then(|p| p.as_object()) {
+            for k in map.keys() {
+                if !names.contains(k) {
+                    names.push(k.clone());
+                }
+            }
+        }
+    }
+    names.sort();
+    let prompts = names
+        .into_iter()
+        .map(|n| {
+            let ptr = format!("/prompts/{}", n.replace('~', "~0").replace('/', "~1"));
+            let field =
+                companion_field(root, local, &format!("{}/file", ptr), companion_text, None);
+            CompanionPrompt {
+                name: n,
+                file: field.value,
+                source: field.source,
+            }
+        })
+        .collect();
+    CompanionAppView {
+        name,
+        greeting_file: companion_field(root, local, "/greeting/file", companion_text, None),
+        orient_me: companion_field(
+            root,
+            local,
+            "/greeting/orientMe",
+            |v| v.as_bool().unwrap_or(true),
+            true,
+        ),
+        prompts,
+        run: companion_field(root, local, "/launch/run", companion_text, None),
+        stop: companion_field(root, local, "/launch/stop", companion_text, None),
+        minimized: companion_field(
+            root,
+            local,
+            "/launch/minimized",
+            |v| v.as_bool().unwrap_or(false),
+            false,
+        ),
+        open_app: companion_field(
+            root,
+            local,
+            "/launch/openApp",
+            companion_open_app,
+            OpenAppChoice {
+                mode: OpenAppMode::Off,
+                page: None,
+            },
+        ),
+        show_target_app: companion_field(
+            root,
+            local,
+            "/ui/showTargetApp",
+            |v| v.as_bool().unwrap_or(false),
+            false,
+        ),
+    }
+}
+
+// The two files, read apart: the committed root (.bram.json, or the legacy
+// .xmlui-desktop.json) and this computer's .bram/settings.json.
+fn companion_config_files(root: &Path) -> (serde_json::Value, serde_json::Value) {
+    let read = |p: PathBuf| {
+        std::fs::read(&p)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+    };
+    let empty = || serde_json::Value::Object(serde_json::Map::new());
+    let root_cfg = [".bram.json", ".xmlui-desktop.json"]
+        .iter()
+        .find_map(|rel| read(root.join(rel)))
+        .unwrap_or_else(empty);
+    let local_cfg = bram_state_dir_exists(root)
+        .then(|| read(bram_state_dir(root).join("settings.json")))
+        .flatten()
+        .unwrap_or_else(empty);
+    (root_cfg, local_cfg)
+}
+
+fn companion_app_view(root: &Path) -> CompanionAppView {
+    let (root_cfg, local_cfg) = companion_config_files(root);
+    let folder = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    companion_app_view_from(&root_cfg, &local_cfg, &folder)
+}
+
+// "Propose a change…": put an unsent request in the message box through the
+// doorway's own event, so it merges with any unsent text and takes focus the
+// same way (__bramApplyDoorwayStage). The author finishes the sentence; the
+// agent proposes a Worklist item; .bram.json changes by commit, never by
+// Bram writing a tracked file.
+const COMPANION_PROPOSE_TEXT: &str =
+    "Propose a change to this repo's Companion App settings in .bram.json: ";
+
+fn handle_companion_app_propose<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> (u16, &'static str, Vec<u8>) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        "doorway-stage",
+        serde_json::json!({ "text": COMPANION_PROPOSE_TEXT, "prompt": "companion-app" }),
+    );
+    append_bram_trace_line(app, "companion-app", "op=propose-staged");
+    (
+        200,
+        "application/json; charset=utf-8",
+        br#"{"ok":true}"#.to_vec(),
+    )
+}
+
+#[cfg(test)]
+mod companion_app_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn studio() -> serde_json::Value {
+        json!({
+            "launch": { "minimized": true, "openApp": "/", "run": "./start.sh" },
+            "greeting": { "file": "docs/welcome.md", "name": "Bram Studio", "orientMe": false },
+            "prompts": { "get-me-going": { "file": "docs/get-me-going-prompt.md" } },
+            "ui": { "showTargetApp": false }
+        })
+    }
+
+    #[test]
+    fn a_studio_shaped_repo_reads_as_authored() {
+        let v = companion_app_view_from(&studio(), &json!({}), "bram-studio");
+        assert_eq!(v.name.value, "Bram Studio");
+        assert_eq!(v.name.source, ConfigSource::Repo);
+        assert_eq!(v.greeting_file.value.as_deref(), Some("docs/welcome.md"));
+        assert!(!v.orient_me.value);
+        assert_eq!(v.run.value.as_deref(), Some("./start.sh"));
+        assert_eq!(v.run.source, ConfigSource::Repo);
+        assert_eq!(v.stop.source, ConfigSource::Default);
+        assert!(v.minimized.value);
+        assert_eq!(v.open_app.value.mode, OpenAppMode::Home);
+        assert_eq!(v.prompts.len(), 1);
+        assert_eq!(v.prompts[0].name, "get-me-going");
+        assert_eq!(
+            v.prompts[0].file.as_deref(),
+            Some("docs/get-me-going-prompt.md")
+        );
+        assert_eq!(v.prompts[0].source, ConfigSource::Repo);
+    }
+
+    #[test]
+    fn a_local_value_wins_and_keeps_the_repo_default_visible() {
+        let local = json!({ "launch": { "minimized": false, "openApp": "/architecture" } });
+        let v = companion_app_view_from(&studio(), &local, "bram-studio");
+        assert!(!v.minimized.value);
+        assert_eq!(v.minimized.source, ConfigSource::Local);
+        assert_eq!(v.minimized.repo, Some(true));
+        assert_eq!(v.open_app.value.mode, OpenAppMode::Page);
+        assert_eq!(v.open_app.value.page.as_deref(), Some("/architecture"));
+        // A local false turns opening off even though the repo says "/".
+        let off = companion_app_view_from(&studio(), &json!({"launch":{"openApp":false}}), "x");
+        assert_eq!(off.open_app.value.mode, OpenAppMode::Off);
+        assert_eq!(off.open_app.source, ConfigSource::Local);
+    }
+
+    // Bram's own repo: no .bram.json launch keys; site.sh lives locally.
+    #[test]
+    fn a_local_only_command_reads_as_this_computers() {
+        let local = json!({ "launch": { "run": "./site.sh", "stop": "./site.sh --stop", "runAtLaunch": false } });
+        let v = companion_app_view_from(&json!({}), &local, "bram");
+        assert_eq!(v.run.value.as_deref(), Some("./site.sh"));
+        assert_eq!(v.run.source, ConfigSource::Local);
+        assert_eq!(v.run.repo, None);
+        assert_eq!(v.stop.value.as_deref(), Some("./site.sh --stop"));
+        // No greeting name: the folder name, by default.
+        assert_eq!(v.name.value, "bram");
+        assert_eq!(v.name.source, ConfigSource::Default);
+    }
+
+    #[test]
+    fn nothing_set_is_all_defaults() {
+        let v = companion_app_view_from(&json!({}), &json!({}), "p5.js");
+        assert_eq!(v.name.value, "p5.js");
+        assert_eq!(v.run.value, None);
+        assert!(v.orient_me.value);
+        assert!(!v.minimized.value);
+        assert_eq!(v.open_app.value.mode, OpenAppMode::Off);
+        assert!(v.prompts.is_empty());
+        for s in [
+            v.run.source,
+            v.minimized.source,
+            v.open_app.source,
+            v.show_target_app.source,
+        ] {
+            assert_eq!(s, ConfigSource::Default);
+        }
+    }
+
+    #[test]
+    fn open_app_spellings() {
+        let m = |v: serde_json::Value| companion_open_app(&v).mode;
+        assert_eq!(m(json!(true)), OpenAppMode::Home);
+        assert_eq!(m(json!("/")), OpenAppMode::Home);
+        assert_eq!(m(json!("/architecture")), OpenAppMode::Page);
+        assert_eq!(m(json!(false)), OpenAppMode::Off);
+        assert_eq!(m(json!("")), OpenAppMode::Off);
+    }
+
+    #[test]
+    fn the_wire_shape_is_pinned() {
+        let local = json!({ "launch": { "minimized": false } });
+        let v = companion_app_view_from(&studio(), &local, "bram-studio");
+        let w = serde_json::to_value(&v).unwrap();
+        assert_eq!(w["name"], json!({"value": "Bram Studio", "source": "repo"}));
+        assert_eq!(
+            w["minimized"],
+            json!({"value": false, "source": "local", "repo": true})
+        );
+        assert_eq!(
+            w["openApp"],
+            json!({"value": {"mode": "home"}, "source": "repo"})
+        );
+        assert_eq!(
+            w["prompts"][0],
+            json!({"name": "get-me-going", "file": "docs/get-me-going-prompt.md", "source": "repo"})
+        );
+        assert_eq!(w["stop"], json!({"value": null, "source": "default"}));
     }
 }
 
@@ -93556,6 +93911,22 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
+    // /__companion-app — companion-app-settings: Settings' Companion App
+    // section, each value with where it came from.
+    if path == "__companion-app" {
+        let Some(root) = project_root(Some(app)) else {
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            );
+        };
+        return match serde_json::to_vec(&companion_app_view(&root)) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => (500, "text/plain; charset=utf-8", e.to_string().into_bytes()),
+        };
+    }
+
     // /__launch-run — issue-498-launch-run-command: the repo's launch command,
     // this machine's decision about it, and how its last run went.
     if path == "__launch-run" {
@@ -109448,6 +109819,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
                 "text/plain; charset=utf-8",
                 b"no project root".to_vec(),
             )
+        }
+    } else if path == "__companion-app/propose" {
+        // companion-app-settings: "Propose a change…" stages a request in the
+        // message box.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            handle_companion_app_propose(app)
         }
     } else if path == "__launch-run/decision" {
         // issue-498-launch-run-command: the banner's Allow / Don't allow and

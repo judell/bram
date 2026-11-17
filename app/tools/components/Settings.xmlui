@@ -41,6 +41,13 @@
     <ChangeListener
       listenTo="{highlightKey}"
       onDidChange="() => { if (highlightKey) window.__bramHighlightSetting(highlightKey); }" />
+    <!-- companion-app-settings: sections start collapsed (Bram Studio's
+         Settings pattern, beb5a44), so a deep link opens its section, on
+         arrival via initiallyExpanded and when re-targeted here via expand()
+         (https://www.xmlui.org/docs/reference/components/ExpandableItem). -->
+    <ChangeListener
+      listenTo="{highlightKey}"
+      onDidChange="(change) => window.__bramSettingsOpenGroup(change.newValue, settingsGroupWorklist, settingsGroupUi, settingsGroupAi)" />
     <Timer
       interval="500"
       enabled="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'pending'}"
@@ -52,29 +59,26 @@
       tooltip="Back to where you were" onClick="navigate(-1)">
       <Text value="← Back" />
     </Link>
-    <Heading level="h2">Settings</Heading>
-    <Text
-      fontSize="$fontSize-sm"
-      color="$textColor-secondary"
-      value="Mirrors .bram.json in the project root. Most changes save immediately; agent and retention changes require Save. All changes persist there." />
+    <!-- The page's blurb sits behind an info button, like each setting's
+         (companion-app-settings, Jon 2026-11-17). -->
+    <HStack verticalAlignment="center" gap="$space-1">
+      <Button icon="info" size="xs" variant="ghost" tooltip="About Settings"
+        onClick="infoTitle = 'Settings'; infoBody = window.settingsInfoBodies.page; settingInfoDialog.open()" />
+      <Heading level="h2">Settings</Heading>
+    </HStack>
 
     <VStack when="{settingsValue}" gap="$space-5">
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupAgent" initiallyExpanded="{false}" iconPosition="start" summary="Agent · which agent, and how it starts">
       <VStack gap="$space-4">
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
+            label="About Agent"
             tooltip="About Agent"
             onClick="infoTitle = 'Agent'; infoBody = window.settingsInfoBodies.shell; settingInfoDialog.open()" />
-          <Heading level="h3">Agent</Heading>
         </HStack>
         <Form
           id="agentSettingsForm"
@@ -158,115 +162,172 @@
           listenTo="{settingsValue}"
           onDidChange="window.__bramSyncSettingsForm(settingsValue, agentSettingsForm, 'shell')" />
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
-      <ContentSeparator />
 
-      <!-- launch-run-setting: the repo's launch command (launch.run, #498)
-           and whether to run it (launch.runAtLaunch, absent = on). Both go
-           through POST /__launch-run/decision, not saveSettings, because
-           turning the switch on is also this computer's consent for the
-           command, and runs it now. The view refetches on the host's
-           launch-run-changed push; a ChangeListener keeps the switch in step
-           with the banner via setValue, which doesn't fire didChange
-           (https://www.xmlui.org/docs/reference/components/Switch). -->
+      <!-- companion-app-settings: the app this repo is (Bram Studio,
+           bram-processing-ide) or carries (Bram's own site preview). The keys
+           split by audience (Jon, 2026-11-17): what the app's makers author
+           for every clone is shown with where it came from, and changed by
+           proposing a Worklist item (Bram never writes the tracked
+           .bram.json); what the person at this computer prefers saves to
+           .bram/settings.json over the repo's default. GET /__companion-app
+           attributes each value; it refetches on the settings-changed push
+           this page already holds. The run switch keeps the launch-run route
+           and its consent rule (launch-run-setting). -->
+      <DataSource id="companionApp" url="/__companion-app" />
+      <ChangeListener listenTo="{settingsChangedEvt.value &amp;&amp; settingsChangedEvt.value.tick}"
+        onDidChange="window.__bramRefetchOnLiveEvent(settingsChangedEvt.value, companionApp)" />
       <DataSource id="launchRunSettings" url="/__launch-run" />
       <PushSource id="launchRunSettingsEvt" initial="{null}"
         subscribe="{window.bramSubscribeTauriEvent('launch-run-changed')}" />
       <ChangeListener listenTo="{launchRunSettingsEvt.value &amp;&amp; launchRunSettingsEvt.value.tick}"
         onDidChange="window.__bramRefetchOnLiveEvent(launchRunSettingsEvt.value, launchRunSettings)" />
-      <VStack gap="$space-2">
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupCompanion" initiallyExpanded="{false}" iconPosition="start" summary="Companion App · the app that comes with this repo">
+      <VStack gap="$space-3">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
-            tooltip="About Launch command"
-            onClick="infoTitle = 'Launch command'; infoBody = window.settingsInfoBodies.launchRun; settingInfoDialog.open()" />
-          <Heading level="h3">Launch command</Heading>
+            label="About Companion App"
+            tooltip="About Companion App"
+            onClick="infoTitle = 'Companion App'; infoBody = window.settingsInfoBodies.companionApp; settingInfoDialog.open()" />
         </HStack>
-        <Text
-          color="$textColor-secondary"
-          fontSize="$fontSize-sm"
-          value="A command Bram runs from the project folder each time it opens, such as a script that starts your app's back end. Bram doesn't stop it when it quits." />
-        <VStack when="{launchRunSettings.loaded}" gap="$space-2">
-          <HStack verticalAlignment="center" gap="$space-2" wrapContent="true">
-            <TextBox
-              id="launchRunCommand"
-              width="24rem"
-              placeholder="./start.sh"
-              initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'command')}" />
-            <Button
-              label="Save"
-              size="sm"
-              enabled="{launchRunCommand.value !== window.__bramLaunchRunText(launchRunSettings.value, 'command')}"
-              onClick="window.__bramLaunchRunDecide('set-command', launchRunCommand.value)" />
+        <!-- companion-app-settings: each row is "Title: value (source)" with
+             an info button to its left (Jon, 2026-11-17); the long
+             explanation opens in the Settings info dialog. Addresses come
+             from /__app-info. -->
+        <DataSource id="companionAppInfo" url="/__app-info" />
+        <VStack when="{companionApp.loaded &amp;&amp; launchRunSettings.loaded}" gap="$space-2">
+          <Text fontSize="$fontSize-sm" value="{window.__bramCompanionText(companionApp.value, 'intro', companionAppInfo.value)}" />
+          <HStack verticalAlignment="center" gap="$space-1">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About From the repo"
+              onClick="infoTitle = 'From the repo'; infoBody = window.__bramCompanionText(companionApp.value, 'fromRepoInfo'); settingInfoDialog.open()" />
+            <Text fontWeight="$fontWeight-bold" value="From the repo" />
           </HStack>
-          <Switch
-            id="launchRunSwitch"
-            label="Run it each time Bram opens"
-            labelPosition="end"
-            enabled="{!!window.__bramLaunchRunText(launchRunSettings.value, 'command')}"
-            initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'on')}"
-            onDidChange="(v) => window.__bramLaunchRunSwitch(v, launchRunSettings.value)" />
-          <!-- launch-stop-field: what turning the switch off runs, edited
-               like the run command. Empty clears it. -->
-          <Text fontSize="$fontSize-sm" value="When turned off, run" />
-          <HStack verticalAlignment="center" gap="$space-2" wrapContent="true">
-            <TextBox
-              id="launchStopCommand"
-              width="24rem"
-              placeholder="./start.sh --stop"
-              initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'stop')}" />
-            <Button
-              label="Save"
-              size="sm"
-              enabled="{launchStopCommand.value !== window.__bramLaunchRunText(launchRunSettings.value, 'stop')}"
-              onClick="window.__bramLaunchRunDecide('set-stop', launchStopCommand.value)" />
+          <!-- Rows sit indented under their group heading (Jon, 2026-11-17). -->
+          <VStack paddingLeft="$space-6" gap="$space-2">
+          <Items data="{window.__bramCompanionAuthored(companionApp.value)}">
+            <HStack verticalAlignment="center" gap="$space-1">
+              <Button icon="info" size="xs" variant="ghost" tooltip="{'About ' + $item.title}"
+                onClick="infoTitle = $item.title; infoBody = $item.info; settingInfoDialog.open()" />
+              <Text fontSize="$fontSize-sm" value="{$item.line}" />
+            </HStack>
+          </Items>
+          <HStack verticalAlignment="center" gap="$space-1">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Propose a change"
+              onClick="infoTitle = 'Propose a change'; infoBody = window.__bramCompanionText(companionApp.value, 'fromRepoInfo'); settingInfoDialog.open()" />
+            <Button label="Propose a change…" size="sm" variant="outlined" onClick="window.__bramCompanionPropose()" />
+          </HStack>
+          </VStack>
+          <HStack verticalAlignment="center" gap="$space-1" marginTop="$space-2">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About For this computer"
+              onClick="infoTitle = 'For this computer'; infoBody = window.__bramCompanionText(companionApp.value, 'thisComputerInfo'); settingInfoDialog.open()" />
+            <Text fontWeight="$fontWeight-bold" value="For this computer" />
+          </HStack>
+          <VStack paddingLeft="$space-6" gap="$space-2">
+          <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Run the launch command"
+              onClick="infoTitle = 'Run the launch command'; infoBody = window.__bramCompanionText(companionApp.value, 'runInfo', launchRunSettings.value); settingInfoDialog.open()" />
+            <Switch
+              id="launchRunSwitch"
+              label="Run the launch command"
+              labelPosition="end"
+              enabled="{!!window.__bramLaunchRunText(launchRunSettings.value, 'command')}"
+              initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'on')}"
+              onDidChange="(v) => window.__bramLaunchRunSwitch(v, launchRunSettings.value)" />
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramCompanionText(companionApp.value, 'runTag', launchRunSettings.value)}" />
           </HStack>
           <!-- The handler gets {prevValue, newValue}, not the value
                (https://www.xmlui.org/docs/reference/components/ChangeListener).
                Passing the object made setValue turn the switch on, and that
-               fired didChange here, so the switch wouldn't stay off. -->
+               fired didChange, so the switch wouldn't stay off. -->
           <ChangeListener
             listenTo="{window.__bramLaunchRunText(launchRunSettings.value, 'on')}"
             onDidChange="(change) => launchRunSwitch.setValue(change.newValue)" />
+          <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Start Bram minimized"
+              onClick="infoTitle = 'Start Bram minimized'; infoBody = window.__bramCompanionText(companionApp.value, 'minimizedInfo'); settingInfoDialog.open()" />
+            <Switch
+              label="Start Bram minimized"
+              labelPosition="end"
+              initialValue="{companionApp.value.minimized.value}"
+              onDidChange="(v) => saveSettings.execute({ launch: { minimized: v } })" />
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramCompanionText(companionApp.value, 'minimizedTag')}" />
+          </HStack>
+          <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Show the app inside Bram"
+              onClick="infoTitle = 'Show the app inside Bram'; infoBody = window.__bramCompanionText(companionApp.value, 'showAppInfo', companionAppInfo.value); settingInfoDialog.open()" />
+            <!-- targetAppSwitch moved here from UI (companion-app-settings). -->
+            <Switch
+              id="targetAppSwitch"
+              label="Show the app inside Bram"
+              labelPosition="end"
+              initialValue="{settingsShowTargetApp(settingsValue)}"
+              onDidChange="(v) => saveSettings.execute({ ui: { showTargetApp: v } })" />
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramCompanionText(companionApp.value, 'showAppTag')}" />
+          </HStack>
+          <!-- launch.openApp: false, true (home page), or a path. Typed:
+               Bram can't list a web app's pages. -->
+          <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Open the app at launch"
+              onClick="infoTitle = 'Open the app at launch'; infoBody = window.__bramCompanionText(companionApp.value, 'openAppInfo', companionAppInfo.value); settingInfoDialog.open()" />
+            <Text fontSize="$fontSize-sm" value="Open the app at launch" />
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramCompanionText(companionApp.value, 'openAppTag')}" />
+          </HStack>
+          <RadioGroup
+            id="openAppMode"
+            paddingLeft="$space-6"
+            initialValue="{window.__bramCompanionText(companionApp.value, 'openMode')}"
+            onDidChange="(v) => saveSettings.execute({ launch: { openApp: window.__bramOpenAppValue(v, openAppPage.value) } })">
+            <Option value="off" label="Off" />
+            <Option value="home" label="{window.__bramCompanionText(companionApp.value, 'homeLabel', companionAppInfo.value)}" />
+            <Option value="page" label="A specific page" />
+          </RadioGroup>
+          <HStack when="{openAppMode.value === 'page'}" paddingLeft="$space-6" verticalAlignment="center" gap="$space-2" wrapContent="true">
+            <TextBox
+              id="openAppPage"
+              width="16rem"
+              placeholder="/architecture"
+              initialValue="{window.__bramCompanionText(companionApp.value, 'openPage')}" />
+            <Button
+              label="Save"
+              size="sm"
+              enabled="{openAppPage.value !== window.__bramCompanionText(companionApp.value, 'openPage')}"
+              onClick="saveSettings.execute({ launch: { openApp: window.__bramOpenAppValue('page', openAppPage.value) } })" />
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+              value="{window.__bramCompanionPageUrl(companionAppInfo.value, openAppPage.value)}" />
+          </HStack>
+          </VStack>
         </VStack>
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
-      <ContentSeparator />
 
       <!-- suggest-fresh-session: the host serves sessions.{suggestOnNewItem,
            suggestOnNewIssue,suggestOnTopicShift} from GET /__settings. Same
            save-on-change shape as the hot-reload switch below; the read goes
            through window.__bramSuggestSetting so the defaults (true/true/false)
            live in one place. https://www.xmlui.org/docs/reference/components/Checkbox -->
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupSessions" initiallyExpanded="{false}" iconPosition="start" summary="Suggest a fresh session · when the agent offers one">
       <VStack gap="$space-2">
-        <!-- settings-info-says-storage-and-default: the same heading-with-info
-             chip as the other cards, so this card's settings say their kind
-             and default too. -->
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
+            label="About Suggest a fresh session"
             tooltip="About Suggest a fresh session"
             onClick="infoTitle = 'Suggest a fresh session'; infoBody = window.settingsInfoBodies.sessions; settingInfoDialog.open()" />
-          <Heading level="h3">Suggest a fresh session</Heading>
         </HStack>
+        <!-- settings-info-says-storage-and-default: the same heading-with-info
+             chip as the other cards, so this card's settings say their kind
+             and default too. -->
         <Text
           color="$textColor-secondary"
           fontSize="$fontSize-sm"
@@ -299,25 +360,21 @@
           initialValue="{window.__bramSuggestSetting(settingsValue, 'pairAcrossProviders')}"
           onDidChange="(v) => saveSettings.execute({ sessions: { pairAcrossProviders: v } })" />
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
-      <ContentSeparator />
 
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupWorklist" initiallyExpanded="{highlightKey === 'worklistEnforcement'}" iconPosition="start" summary="Worklist · issue comments, enforcement">
       <VStack gap="$space-4">
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
+            label="About Worklist"
             tooltip="About Worklist"
             onClick="infoTitle = 'Worklist'; infoBody = window.settingsInfoBodies.batchCommitActions; settingInfoDialog.open()" />
-          <Heading level="h3">Worklist</Heading>
         </HStack>
         <!-- Post-cutover (#267 A2): "Batch commit actions" switch removed —
              batch is selection in the Worklist gate, no setting gates it.
@@ -350,32 +407,22 @@
             onDidChange="(v) => saveSettings.execute(window.__bramEnforcementUpdate(v))" />
         </VStack>
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
-      <ContentSeparator />
 
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupUi" initiallyExpanded="{highlightKey === 'tipsDismissInterval'}" iconPosition="start" summary="UI · terminal, reloads, tips, sounds">
       <VStack gap="$space-4">
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
+            label="About UI"
             tooltip="About UI"
             onClick="infoTitle = 'UI'; infoBody = window.settingsInfoBodies.ui; settingInfoDialog.open()" />
-          <Heading level="h3">UI</Heading>
         </HStack>
-        <Switch
-          id="targetAppSwitch"
-          label="Show target app"
-          labelPosition="end"
-          initialValue="{settingsShowTargetApp(settingsValue)}"
-          onDidChange="(v) => saveSettings.execute({ ui: { showTargetApp: v } })" />
         <!-- terminal-open-at-startup-setting: per-user preference,
              localStorage-backed like the tips and beep switches below. The
              parent shell reads it at launch; the toolbar toggle is
@@ -457,25 +504,21 @@
           initialValue="{window.__bramCompactSummaryExpanded ? window.__bramCompactSummaryExpanded() : false}"
           onDidChange="(v) => window.__bramSetCompactSummaryExpanded(v)" />
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
-      <ContentSeparator />
 
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupAi" initiallyExpanded="{highlightKey === 'describeCommands'}" iconPosition="start" summary="AI · describing what commands do">
       <VStack gap="$space-4">
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
+            label="About AI"
             tooltip="About AI"
             onClick="infoTitle = 'AI'; infoBody = window.settingsInfoBodies.ai; settingInfoDialog.open()" />
-          <Heading level="h3">AI</Heading>
         </HStack>
         <VStack
           testId="setting-describeCommands"
@@ -490,25 +533,21 @@
             onDidChange="(v) => saveSettings.execute({ ai: { describeCommands: v } })" />
         </VStack>
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
-      <ContentSeparator />
 
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupTraces" initiallyExpanded="{false}" iconPosition="start" summary="Traces · logging and retention">
       <VStack gap="$space-4">
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
+            label="About Traces"
             tooltip="About Traces"
             onClick="infoTitle = 'Traces'; infoBody = window.settingsInfoBodies.traces; settingInfoDialog.open()" />
-          <Heading level="h3">Traces</Heading>
         </HStack>
         <Switch
           id="tracingSwitch"
@@ -568,29 +607,25 @@
           color="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.failures ? '$color-danger-700' : '$textColor-secondary'}"
           value="{'Last startup: ' + traceArchiveStatus.value.candidateFiles + ' candidate(s) older than ' + traceArchiveStatus.value.archiveAfterDays + ' days; ' + traceArchiveStatus.value.archivedFiles + ' archived, ' + traceArchiveStatus.value.failures + ' failed.'}" />
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
-      <ContentSeparator />
 
       <!-- search-depth-settings: per-project depth bounds for the search
            index (issue #250 follow-up). Values persist in .bram.json under
            `search`; the host clamps at read time and each indexing pass
            reads them fresh, so a change applies on the next pass. -->
+      <Theme paddingLeft-summary-ExpandableItem="0">
+        <ExpandableItem id="settingsGroupSearch" initiallyExpanded="{false}" iconPosition="start" summary="Search · how much history is indexed">
       <VStack gap="$space-4">
-        <HStack
-          width="fit-content"
-          gap="$space-1"
-          verticalAlignment="center"
-          paddingHorizontal="$space-2"
-          paddingVertical="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="$color-surface-100">
+        <HStack>
           <Button
             icon="info"
             size="xs"
             variant="ghost"
+            label="About Search"
             tooltip="About Search"
             onClick="infoTitle = 'Search'; infoBody = window.settingsInfoBodies.search; settingInfoDialog.open()" />
-          <Heading level="h3">Search</Heading>
         </HStack>
         <Form
           id="searchSettingsForm"
@@ -631,6 +666,8 @@
           color="$textColor-secondary"
           value="Changes apply on the next indexing pass. Deeper commit indexing lengthens the next cold rebuild." />
       </VStack>
+        </ExpandableItem>
+      </Theme>
 
     </VStack>
 

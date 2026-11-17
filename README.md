@@ -348,6 +348,17 @@ script that starts the app's back end:
   stop the server itself, since the command detaches it. Quitting Bram stops
   nothing.
 
+### The Companion App section in Settings
+
+Settings → **Companion App** gathers these keys in one place, split by who
+sets them. **From the repo** shows what the app's makers committed for
+everyone (the name, greeting, prompts, launch and stop commands), each with
+where it came from; **Propose a change…** asks the agent for a Worklist item
+that edits `.bram.json`, since Bram never writes that tracked file itself.
+**For this computer** holds your preferences: run the launch command, start
+minimized, show the app inside Bram, and open it at launch. These save to
+`.bram/settings.json` over the repo's defaults.
+
 ### A repo's own first message
 
 The first time Bram wakes in a repo it hasn't seen, it says hello. A repo

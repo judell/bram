@@ -4033,8 +4033,10 @@ window.__bramSaveSplitterSize = function (key, sizes) {
 // The project defaults are pinned by settings_default_view_tests in lib.rs;
 // change a default there and here together.
 window.settingsInfoBodies = {
-  launchRun:
-    "## Launch command\n\nA command Bram runs once each time it opens, from the project folder, such as a script that starts your app's back end. Bram doesn't wait for it, and doesn't stop it when it quits, so whatever it starts keeps running. It should return quickly and reuse what's already running. Its output goes to `.bram/bram-traces/launch-run.log`, and Status shows how its last run went.\n\nA repo can commit one in `.bram.json` as `launch.run`. Editing the field here changes it for this computer only.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.run`. Default: the repo's command, if it has one.*\n\n## Run it each time Bram opens\n\nTurning this on also allows the command on this computer, and runs it right away. Off, it never runs. Turning it off doesn't stop what the command started, unless there's a stop command (below). Quitting Bram stops nothing. When a repo's command hasn't been allowed here yet, Bram asks once with a banner; **Don't allow** turns this off.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.runAtLaunch`. Default: on when the repo names a command.*\n\n## When turned off, run\n\nA command Bram runs when you turn the switch off, to stop what the launch command started, such as `./start.sh --stop`. Bram can't stop it itself, because the launch command detaches what it starts. It runs only once the launch command has been allowed on this computer. Leave it empty for none.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.stop`. Default: the repo's stop command, if it has one.*",
+  page:
+    "Settings for this project. They're saved on this computer in `.bram/settings.json`, over the repo's committed `.bram.json`, so changing one here affects only you.\n\nMost changes save as soon as you make them; agent and retention changes need **Save**.\n\nEach section opens when you click its name. The **i** buttons explain each section and setting.",
+  companionApp:
+    "The app this repo is, or carries: Bram Studio's editor, a sketch IDE, or Bram's own site preview. Its settings split in two.\n\n## From the repo\n\nWhat the app's makers set for everyone who clones it, in the committed `.bram.json`: its **name** (`greeting.name`), its first-run **greeting** file and whether it offers **Orient me** (`greeting.file`, `greeting.orientMe`), the **prompts** a page can stage in the message box (`prompts`), and the **launch command** and **stop command** (`launch.run`, `launch.stop`). Each says where it came from. They aren't edited here: **Propose a change…** puts a request in the message box, and the agent proposes a Worklist item changing `.bram.json`, which you commit like any change. A value that comes from this computer's `.bram/settings.json` says so.\n\nThe launch command runs once each time Bram opens, from the project folder, and Bram doesn't stop it when it quits; it should return quickly and reuse what's already running. Its output goes to `.bram/bram-traces/launch-run.log`, and Status shows how its last run went. The stop command runs when you turn the run switch off, to stop what the launch command started.\n\n## For this computer\n\nYour preferences, saved in `.bram/settings.json` over the repo's defaults; each says the repo's default when you've changed it.\n\n**Run the launch command each time Bram opens.** Turning it on also allows the command on this computer and runs it right away; off, it never runs, and turning it off runs the stop command if there is one. When a repo's command hasn't been allowed here yet, Bram asks once with a banner; **Don't allow** turns this off. *Default: on when the repo names a command.*\n\n**Start Bram minimized** (`launch.minimized`). *Default: off.*\n\n**Show the app inside Bram** (`ui.showTargetApp`): the embedded preview pane. *Default: off.*\n\n**Open the app when Bram opens** (`launch.openApp`): off, the app's home page, or a specific page, typed as its path (`/architecture`). *Default: off.*",
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
@@ -4043,7 +4045,7 @@ window.settingsInfoBodies = {
     "## Mirror Worklist lifecycle to GitHub issues\n\nPost Worklist lifecycle comments to linked GitHub issues.\n\n*Project setting, saved in `.bram.json` as `mirrorWorklistLifecycleToIssue` and shared with everyone who works in this repo. Default: off.*" +
     "\n\n## Pause Worklist enforcement for Claude\n\nAn advanced, experimental setting. While it is on, Bram's guard stops denying Claude's edits that no Worklist item covers, and Claude is told the Worklist is paused, so it edits directly and proposes no items. You define the work and manage commits yourself. The guard's other checks (session URLs, forge signatures) still apply. Codex, OpenCode and Antigravity stay enforced. Edits made while paused belong to no item: before turning enforcement back on, commit or stash them, or the next whole-file commit of a begun item may take them.\n\n*Project setting, saved in `.bram.json` as `worklist.enforcement` (`paused` or `on`) and shared with everyone who works in this repo. Default: on.*",
   ui:
-    "## Show target app\n\nShow the embedded target-app preview pane. Usually off.\n\n*Project setting, saved in `.bram.json` as `ui.showTargetApp` and shared with everyone who works in this repo. Default: off.*\n\n## Terminal open at startup\n\nOpen the terminal pane when Bram launches. The agent pane's Worklist and Transcript are the main surface; the toolbar's terminal button still opens and closes it for the current session.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: off.*\n\n## Agent-pane hot-reload\n\nAuto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n*Project setting, saved in `.bram.json` as `ui.toolsPaneHotReload` and shared with everyone who works in this repo. Default: off.*\n\n## Reload a slowed pane when idle\n\nA workaround for an unexplained slowdown: the agent pane gets sluggish the longer it stays loaded, and a reload clears it. With this on, the pane reloads itself once it has measurably slowed down and you are not using it. It never reloads while you are using the pane: not while the window is focused, a turn is running, a dialog is open, the message box has focus, or a Worklist click is queued.\n\n*Project setting, saved in `.bram.json` as `ui.paneIdleFlush` and shared with everyone who works in this repo. Default: on.*\n\n## Show files several items touch\n\nShow the Worklist header's summary of files more than one item touches, its Review overlaps button and the table beneath it. While this is off, all three are hidden. The Commit button and the row strips don't read this setting, so they work the same either way.\n\n*Your setting, saved on this machine for every Bram window, not in the repo (`bram.worklistReviewOverlaps` in localStorage). Default: off.*\n\n## Show tips in the footer\n\nShow rotating tips in the footer.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Soft beep on menus and turn completion\n\nPlay a soft beep when a permission menu appears or a turn finishes.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Dismissed tips return after\n\nHow long a dismissed tip stays hidden before showing again.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: 1 week.*\n\n## Search badges start all on\n\nWhether the Search tab opens with all facet badges selected, or none.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*",
+    "## Terminal open at startup\n\nOpen the terminal pane when Bram launches. The agent pane's Worklist and Transcript are the main surface; the toolbar's terminal button still opens and closes it for the current session.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: off.*\n\n## Agent-pane hot-reload\n\nAuto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n*Project setting, saved in `.bram.json` as `ui.toolsPaneHotReload` and shared with everyone who works in this repo. Default: off.*\n\n## Reload a slowed pane when idle\n\nA workaround for an unexplained slowdown: the agent pane gets sluggish the longer it stays loaded, and a reload clears it. With this on, the pane reloads itself once it has measurably slowed down and you are not using it. It never reloads while you are using the pane: not while the window is focused, a turn is running, a dialog is open, the message box has focus, or a Worklist click is queued.\n\n*Project setting, saved in `.bram.json` as `ui.paneIdleFlush` and shared with everyone who works in this repo. Default: on.*\n\n## Show files several items touch\n\nShow the Worklist header's summary of files more than one item touches, its Review overlaps button and the table beneath it. While this is off, all three are hidden. The Commit button and the row strips don't read this setting, so they work the same either way.\n\n*Your setting, saved on this machine for every Bram window, not in the repo (`bram.worklistReviewOverlaps` in localStorage). Default: off.*\n\n## Show tips in the footer\n\nShow rotating tips in the footer.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Soft beep on menus and turn completion\n\nPlay a soft beep when a permission menu appears or a turn finishes.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Dismissed tips return after\n\nHow long a dismissed tip stays hidden before showing again.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: 1 week.*\n\n## Search badges start all on\n\nWhether the Search tab opens with all facet badges selected, or none.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*",
   // tool-descriptions-prompt-names-the-agent (Jon, 2026-11-05: "i can
   // barely understand this, peggy never would"). Facts and sources are in
   // that item's draft: per-agent behaviour measured on real sessions; cost
@@ -19997,9 +19999,10 @@ window.__bramStateMoveDecide = function (choice) {
 // Ask again. A plain fetch, like __bramStateMoveDecide; the host pushes
 // launch-run-changed and the view refetches on it.
 //   choice: "allow" (banner Allow, or the Settings switch turned on),
-//   "decline" (banner Don't allow, or the switch turned off), "set-command"
-//   (Settings saved `command`). launch-run-setting.
-window.__bramLaunchRunDecide = function (choice, command) {
+//   "decline" (banner Don't allow, or the switch turned off).
+//   launch-run-setting; the commands themselves are authored in the repo
+//   (companion-app-settings).
+window.__bramLaunchRunDecide = function (choice) {
   var started = Date.now();
   var trace = function (op, extra) {
     try {
@@ -20021,7 +20024,7 @@ window.__bramLaunchRunDecide = function (choice, command) {
     .fetch("/__launch-run/decision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(choice === "set-command" || choice === "set-stop" ? { choice: choice, command: command || "" } : { choice: choice }),
+      body: JSON.stringify({ choice: choice }),
     })
     .then(function (r) { trace("done", { status: r.status }); })
     .catch(function (e) { trace("failed", { error: String(e) }); });
@@ -20039,6 +20042,195 @@ window.__bramLaunchRunSwitch = function (on, view) {
   return window.__bramLaunchRunDecide(want ? "allow" : "decline");
 };
 
+// companion-app-settings: the words for /__companion-app's view, written to
+// explain as much as possible (Jon: "be maximally informative everywhere,
+// this is confusing stuff"). Pure: reads only its arguments. Each field is
+// {value, source: repo|local|default, repo?}; `repo` is the repo's value
+// under a local override. `extra` is /__app-info (for addresses) or, for
+// runNote, /__launch-run's view.
+window.__bramCompanionBaseUrl = function (info) {
+  var u = info && info.targetAppUrl;
+  if (!u) return "";
+  return String(u).replace(/index\.html$/, "");
+};
+
+window.__bramCompanionPageUrl = function (info, page) {
+  var base = window.__bramCompanionBaseUrl(info);
+  var path = String(page || "").trim();
+  if (!base || !path) return "";
+  return "Opens " + base.replace(/\/$/, "") + (path.charAt(0) === "/" ? path : "/" + path);
+};
+
+// Short source tags for a row: "from the repo", "changed on this computer;
+// repo: on", "default".
+window.__bramCompanionSource = function (f, words) {
+  if (!f) return "";
+  var w = words || function (x) { return String(x); };
+  if (f.source === "repo") return "from the repo";
+  if (f.source === "local") {
+    return f.repo !== undefined && f.repo !== null
+      ? "changed on this computer; repo: " + w(f.repo)
+      : "set on this computer";
+  }
+  return "default";
+};
+
+window.__bramCompanionText = function (view, key, extra) {
+  var v = view || {};
+  var onOff = function (b) { return b ? "on" : "off"; };
+  var openWords = function (o) {
+    if (!o || o.mode === "off") return "off";
+    if (o.mode === "home") return "home page";
+    return o.page || "a page";
+  };
+  // The long form of whose value it is, for the info dialogs.
+  var whose = function (f, words) {
+    if (!f) return "";
+    if (f.source === "local" && f.repo !== undefined && f.repo !== null) return "You've changed this on this computer; the repo's default is **" + words(f.repo) + "**.";
+    if (f.source === "local") return "You've set this on this computer; the repo doesn't set it.";
+    if (f.source === "repo") return "This is the repo's setting (**" + words(f.value) + "**); changing it here applies to this computer only.";
+    return "The repo doesn't set this; Bram's default is **" + words(f.value) + "**.";
+  };
+  var saved = function (keyName) {
+    return "\n\n*Saved for this computer in `.bram/settings.json` as `" + keyName + "`, over the repo's `.bram.json`.*";
+  };
+  var base = window.__bramCompanionBaseUrl(extra);
+  var name = (v.name && v.name.value) || "this app";
+  if (key === "intro") {
+    return "The app that comes with this repo: " + name + (base ? ", at " + base : ", with no page for Bram to open") + ".";
+  }
+  // Short tags beside each preference.
+  if (key === "runTag") {
+    var lv0 = extra || {};
+    if (!lv0.command) return "(no launch command)";
+    return "(" + lv0.command + (lv0.decision === "allow" ? "; allowed here" : lv0.decision === "ask" ? "; not yet allowed here" : "") + ")";
+  }
+  if (key === "minimizedTag") return "(" + window.__bramCompanionSource(v.minimized, onOff) + ")";
+  if (key === "showAppTag") return "(" + window.__bramCompanionSource(v.showTargetApp, onOff) + ")";
+  if (key === "openAppTag") {
+    return "(" + openWords(v.openApp && v.openApp.value) + "; " + window.__bramCompanionSource(v.openApp, openWords) + ")";
+  }
+  // Long explanations, for the info dialogs (Markdown).
+  if (key === "runInfo") {
+    var lv = extra || {};
+    var cmd = lv.command;
+    if (!cmd) return "The repo names no launch command, so there's nothing to run. A repo sets one in `.bram.json` as `launch.run`.";
+    var stop = lv.stopCommand;
+    var last = window.__bramLaunchRunText(lv, "line").replace(/ Change it in Settings\.$/, "");
+    return "Runs `" + cmd + "` from the project folder each time Bram opens, typically to start the app's back end. Bram doesn't wait for it, and doesn't stop it when Bram quits.\n\n" +
+      (stop ? "Turning this off runs `" + stop + "` to stop what it started." : "Turning this off stops future runs, but not what's already running: the repo names no stop command.") +
+      "\n\nTurning it on also allows the command on this computer and runs it now. A repo's command that hasn't been allowed here yet is asked about once, with a banner; **Don't allow** turns this off.\n\n" +
+      "Output goes to `" + (lv.logPath || ".bram/bram-traces/launch-run.log") + "`. " + last + saved("launch.runAtLaunch");
+  }
+  if (key === "minimizedInfo") {
+    return "Bram's window starts minimized: for repos whose app is the main thing you use, with Bram working in the background.\n\n" + whose(v.minimized, onOff) + saved("launch.minimized");
+  }
+  if (key === "showAppInfo") {
+    return "Shows the app in a pane beside Bram's terminal" + (base ? ", loaded from " + base : "") + ". Off, you use the app in your own browser.\n\n" + whose(v.showTargetApp, onOff) + saved("ui.showTargetApp");
+  }
+  if (key === "openAppInfo") {
+    return "Opens the app in your default browser when Bram starts, once it's being served.\n\n- **Off**: nothing opens.\n- **Home page**: " + (base || "the app's address") + ".\n- **A specific page**: a path on that address, such as `/architecture`" + (base ? " (" + base.replace(/\/$/, "") + "/architecture)" : "") + ".\n\n" + whose(v.openApp, openWords) + saved("launch.openApp");
+  }
+  if (key === "fromRepoInfo") {
+    return "What the app's makers set for everyone who clones this repo, in its committed `.bram.json`. Each row says where its value came from. They aren't edited here: **Propose a change…** puts a request in the message box; finish it and send it, and the agent proposes a Worklist item that edits `.bram.json`, which you commit like any change. Bram never writes that tracked file itself.";
+  }
+  if (key === "thisComputerInfo") {
+    return "Your preferences, saved in `.bram/settings.json` on this computer only. They override the repo's values; nobody else is affected. Each row says whether its value is the repo's, yours, or Bram's default.";
+  }
+  if (key === "homeLabel") {
+    return base ? "Home page (" + base + ")" : "Home page";
+  }
+  if (key === "openMode") return (v.openApp && v.openApp.value && v.openApp.value.mode) || "off";
+  if (key === "openPage") return (v.openApp && v.openApp.value && v.openApp.value.page) || "";
+  return "";
+};
+
+// The "From the repo" rows: "Title: value (source)", and the long form for
+// each row's info dialog.
+window.__bramCompanionAuthored = function (view) {
+  var v = view || {};
+  var src = function (f) {
+    if (!f) return "";
+    if (f.source === "repo") return " (from the repo)";
+    if (f.source === "local") return " (from this computer, not the repo)";
+    return " (not set)";
+  };
+  var key = function (k) { return "\n\n*In `.bram.json` as `" + k + "`.*"; };
+  var rows = [];
+  var n = v.name || {};
+  rows.push({
+    title: "Name",
+    line: "Name: " + (n.value || "") + (n.source === "default" ? " (the folder's name; not set)" : src(n)),
+    info: "What Bram calls the app when it introduces it in a new clone's first message. Without one, Bram uses the folder's name." + key("greeting.name"),
+  });
+  var g = v.greetingFile || {};
+  rows.push({
+    title: "Greeting",
+    line: "Greeting: " + (g.value || "Bram's own") + (g.value ? src(g) : " (not set)"),
+    info: "The first message someone sees when they open a fresh clone in Bram, quoted from this file and introduced as coming from the app's makers. Without one, Bram uses its own greeting." + key("greeting.file"),
+  });
+  var o = v.orientMe || {};
+  rows.push({
+    title: "Orient me offer",
+    line: "Orient me offer: " + (o.value === false ? "hidden" : "shown") + src(o),
+    info: "Whether that first message offers **Orient me**, a guided tour of the repo's code with architecture diagrams. Useful for developers; noise for an app's end users, which is why an app like Bram Studio hides it." + key("greeting.orientMe"),
+  });
+  var ps = v.prompts || [];
+  rows.push({
+    title: "Prompts",
+    line: "Prompts: " + (ps.length ? ps.map(function (p) { return p.name + " → " + (p.file || "(no file)"); }).join(", ") + (ps.every(function (p) { return p.source === "repo"; }) ? " (from the repo)" : " (some from this computer)") : "none"),
+    info: "Named requests the app's own pages can put in Bram's message box, such as a **Get me going** button that hands a new user to the agent. Each is read from its file; the user sees it in the message box and sends it." + key("prompts.<name>.file"),
+  });
+  var r = v.run || {};
+  rows.push({
+    title: "Launch command",
+    line: "Launch command: " + (r.value || "none") + (r.value ? src(r) : ""),
+    info: "What Bram runs from the project folder when it opens, typically to start the app's back end. Bram doesn't own it, so whatever it starts outlives Bram. Whether it runs on this computer is your choice, under **For this computer**." + key("launch.run"),
+  });
+  var st = v.stop || {};
+  rows.push({
+    title: "Stop command",
+    line: "Stop command: " + (st.value || "none") + (st.value ? src(st) : ""),
+    info: "What Bram runs when you turn the launch command off, to stop what it started; it runs only once the launch command has been allowed on this computer. Without one, turning the launch command off leaves running whatever is already running." + key("launch.stop"),
+  });
+  return rows;
+};
+
+// launch.openApp from the radio and the page box: off -> false, home ->
+// true, page -> its path (a leading "/" added). A page with no path yet
+// returns undefined, which JSON drops, so picking "A specific page" saves
+// nothing until a path is typed and saved.
+window.__bramOpenAppValue = function (mode, page) {
+  if (mode === "off") return false;
+  if (mode === "home") return true;
+  var path = String(page || "").trim();
+  if (!path) return undefined;
+  return path.charAt(0) === "/" ? path : "/" + path;
+};
+
+// companion-app-settings: Settings sections start collapsed, so a deep link
+// (?highlight=<key>) re-targeted while Settings is showing opens the section
+// holding that key. Takes the ExpandableItem refs; an event handler, not a
+// binding.
+window.__bramSettingsOpenGroup = function (key, worklistGroup, uiGroup, aiGroup) {
+  var group = key === "worklistEnforcement" ? worklistGroup
+    : key === "tipsDismissInterval" ? uiGroup
+    : key === "describeCommands" ? aiGroup
+    : null;
+  try { if (group && typeof group.expand === "function") group.expand(); } catch (e) {}
+};
+
+// "Propose a change…": the host stages the request in the message box
+// through the doorway's event (POST /__companion-app/propose).
+window.__bramCompanionPropose = function () {
+  try { window.__bramIframeTrace("companion-app", { op: "propose-click" }); } catch (e) {}
+  return window
+    .fetch("/__companion-app/propose", { method: "POST" })
+    .catch(function (e) {
+      try { window.__bramIframeTrace("companion-app", { op: "propose-failed", error: String(e) }); } catch (e2) {}
+    });
+};
+
 // The words for /__launch-run's view. Pure: reads only its arguments.
 //   show      the banner asks (decision "ask")
 //   text      the banner's sentence
@@ -20047,7 +20239,6 @@ window.__bramLaunchRunSwitch = function (on, view) {
 //   line      Status's one-line summary
 //   on        the Settings switch's state (launch.runAtLaunch, absent = on)
 //   command   the command, or "" (the Settings field)
-//   stop      the stop command, or "" (the Settings field; launch-stop-field)
 window.__bramLaunchRunText = function (view, key) {
   var v = view || {};
   var cmd = v.command || "";
@@ -20056,7 +20247,6 @@ window.__bramLaunchRunText = function (view, key) {
   if (key === "configured") return !!cmd && d !== "not-configured";
   if (key === "on") return v.runAtLaunch !== false;
   if (key === "command") return cmd;
-  if (key === "stop") return v.stopCommand || "";
   if (key === "text") {
     return "This repo asks Bram to run " + cmd + " each time it opens. Allow it on this computer?";
   }

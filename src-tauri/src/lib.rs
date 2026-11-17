@@ -625,6 +625,11 @@ struct LaunchConfig {
     // true, or a route such as "/architecture".
     #[serde(default, rename = "openApp")]
     open_app: Option<serde_json::Value>,
+    // issue-498-launch-run-command: a command Bram runs once per launch,
+    // after the user allows it on this machine. Never the app's server or
+    // address, and never owned or stopped by Bram (see run_launch_command).
+    #[serde(default)]
+    run: Option<String>,
 }
 
 // repo-authored-first-run-greeting: `.bram.json` "greeting". `file` is the
@@ -43142,6 +43147,799 @@ fn arm_repo_startup_greeting_if_needed<R: tauri::Runtime>(app: &AppHandle<R>) ->
     }
 }
 
+// issue-498-launch-run-command: `.bram.json` "launch": {"run": "<command>"}.
+// A repo names a helper (Bram Studio's ./start.sh, which starts its back end
+// detached) that Bram runs once per launch from the project root. Unlike the
+// `server` entry, the process is neither the app's address nor Bram's: no
+// stored Child, no sidecar, its own process group, nothing for exit cleanup
+// to signal, so whatever it starts outlives Bram.
+//
+// A committed command would otherwise run code from a fresh clone before
+// anyone read it, so it runs only after the user allows it on THIS machine.
+// The consent lives in Bram's app-local data dir (not the project, so a clone
+// can't carry it; not the cache dir, which the OS may clear), one file per
+// canonical project root, and names the exact command: change the command
+// and Bram asks again. "Don't allow" is remembered the same way.
+const LAUNCH_RUN_CONSENT_SCHEMA: u32 = 1;
+const LAUNCH_RUN_LOG_REL: &str = "bram-traces/launch-run.log";
+const LAUNCH_RUN_LOG_DISPLAY: &str = ".bram/bram-traces/launch-run.log";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LaunchRunChoice {
+    Allow,
+    Decline,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchRunConsent {
+    schema: u32,
+    project_root: String,
+    command: String,
+    decision: LaunchRunChoice,
+    at_ms: i64,
+}
+
+// What the pane and the launch sequence act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum LaunchRunDecision {
+    NotConfigured,
+    Ask,
+    Allow,
+    Decline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum LaunchRunState {
+    Running,
+    Exited,
+    Failed,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchRunOutcome {
+    command: String,
+    reason: String,
+    state: LaunchRunState,
+    started_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchRunView {
+    decision: LaunchRunDecision,
+    command: Option<String>,
+    project_root: String,
+    log_path: String,
+    last_run: Option<LaunchRunOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum LaunchRunRequestChoice {
+    Allow,
+    Decline,
+    AskAgain,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LaunchRunRequest {
+    choice: LaunchRunRequestChoice,
+}
+
+static LAUNCH_RUN_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static LAUNCH_RUN_LAST: Mutex<Option<LaunchRunOutcome>> = Mutex::new(None);
+
+fn launch_run_command_of(cfg: Option<&ProjectConfig>) -> Option<String> {
+    cfg.and_then(|c| c.launch.as_ref())
+        .and_then(|l| l.run.as_deref())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+}
+
+// Same folder by spelling: `\` folds to `/`, a trailing slash is ignored, and
+// a drive letter is case-insensitive (developing-bram.md §Paths).
+fn launch_run_roots_match(a: &str, b: &str) -> bool {
+    fn norm(p: &str) -> String {
+        let mut s = p.replace('\\', "/");
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+        let bytes = s.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            let first = (bytes[0] as char).to_ascii_lowercase();
+            s.replace_range(0..1, &first.to_string());
+        }
+        s
+    }
+    norm(a) == norm(b)
+}
+
+fn launch_run_decision(
+    command: Option<&str>,
+    project_root: &str,
+    consent: Option<&LaunchRunConsent>,
+) -> LaunchRunDecision {
+    let Some(command) = command.map(str::trim).filter(|c| !c.is_empty()) else {
+        return LaunchRunDecision::NotConfigured;
+    };
+    match consent {
+        Some(c)
+            if c.schema == LAUNCH_RUN_CONSENT_SCHEMA
+                && c.command == command
+                && launch_run_roots_match(&c.project_root, project_root) =>
+        {
+            match c.decision {
+                LaunchRunChoice::Allow => LaunchRunDecision::Allow,
+                LaunchRunChoice::Decline => LaunchRunDecision::Decline,
+            }
+        }
+        _ => LaunchRunDecision::Ask,
+    }
+}
+
+fn launch_run_canonical_root(root: &Path) -> PathBuf {
+    strip_unc_prefix(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+}
+
+fn launch_run_consent_path(data_dir: &Path, root: &Path) -> PathBuf {
+    data_dir.join("launch-run-consent").join(format!(
+        "{}.json",
+        encode_path_for_filename(&launch_run_canonical_root(root))
+    ))
+}
+
+fn launch_run_consent_path_for_app<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+) -> Result<PathBuf, String> {
+    let data = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    Ok(launch_run_consent_path(&data, root))
+}
+
+fn read_launch_run_consent(path: &Path) -> Option<LaunchRunConsent> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_launch_run_consent(path: &Path, consent: &LaunchRunConsent) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::to_string(consent).map_err(|e| e.to_string())?;
+    std::fs::write(path, format!("{}\n", body)).map_err(|e| e.to_string())
+}
+
+fn launch_run_view<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> LaunchRunView {
+    let command = launch_run_command_of(load_project_config(root).as_ref());
+    let root_str = launch_run_canonical_root(root)
+        .to_string_lossy()
+        .to_string();
+    let consent = launch_run_consent_path_for_app(app, root)
+        .ok()
+        .and_then(|p| read_launch_run_consent(&p));
+    let decision = launch_run_decision(command.as_deref(), &root_str, consent.as_ref());
+    let last_run = LAUNCH_RUN_LAST.lock().ok().and_then(|g| g.clone());
+    LaunchRunView {
+        decision,
+        command,
+        project_root: root_str,
+        log_path: LAUNCH_RUN_LOG_DISPLAY.to_string(),
+        last_run,
+    }
+}
+
+fn trace_launch_run<R: tauri::Runtime>(app: &AppHandle<R>, line: &str) {
+    append_bram_trace_line(app, "launch-run", line);
+}
+
+// The last non-empty line the command wrote after `offset`, for Status.
+fn launch_run_log_last_line(log_path: &Path, offset: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(log_path).ok()?;
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = Vec::new();
+    f.take(64 * 1024).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| {
+            if l.chars().count() <= 200 {
+                l.to_string()
+            } else {
+                format!("{}…", l.chars().take(200).collect::<String>())
+            }
+        })
+}
+
+fn set_launch_run_last(outcome: LaunchRunOutcome) {
+    if let Ok(mut g) = LAUNCH_RUN_LAST.lock() {
+        *g = Some(outcome);
+    }
+}
+
+// The unowned process: the platform shell, from the project root, stdin
+// null, output to the launch log, in its own process group.
+fn launch_run_process(
+    command: &str,
+    root: &Path,
+    out: std::fs::File,
+    err: std::fs::File,
+) -> std::process::Command {
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        // Not DETACHED_PROCESS: see issue-469-relaunch-hidden-console.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(command);
+        c.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(command);
+        // Its own process group, so neither a terminal hangup nor Bram's
+        // exit cleanup reaches it.
+        c.process_group(0);
+        c
+    };
+    cmd.current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(out))
+        .stderr(std::process::Stdio::from(err));
+    cmd
+}
+
+// Spawn the command unowned and record how it ends. A second request while
+// one is still running is skipped (Allow clicked twice, say).
+fn run_launch_command<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    command: &str,
+    reason: &str,
+) {
+    let started_at_ms = unix_now_ms();
+    {
+        let Ok(mut g) = LAUNCH_RUN_LAST.lock() else {
+            return;
+        };
+        if g.as_ref().map(|o| o.state) == Some(LaunchRunState::Running) {
+            drop(g);
+            trace_launch_run(app, "op=skip reason=already-running");
+            return;
+        }
+        *g = Some(LaunchRunOutcome {
+            command: command.to_string(),
+            reason: reason.to_string(),
+            state: LaunchRunState::Running,
+            started_at_ms,
+            ended_at_ms: None,
+            code: None,
+            last_line: None,
+            error: None,
+        });
+    }
+    let fail = |app: &AppHandle<R>, error: String| {
+        trace_launch_run(
+            app,
+            &format!("op=spawn-failed error={}", bram_trace_preview(&error, 160)),
+        );
+        set_launch_run_last(LaunchRunOutcome {
+            command: command.to_string(),
+            reason: reason.to_string(),
+            state: LaunchRunState::Failed,
+            started_at_ms,
+            ended_at_ms: Some(unix_now_ms()),
+            code: None,
+            last_line: None,
+            error: Some(error),
+        });
+        emit_replayable_signal(app, "launch-run-changed");
+    };
+    let log_path = resource_relative_path(root, LAUNCH_RUN_LOG_REL);
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut log = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => return fail(app, format!("open {}: {}", log_path.display(), e)),
+    };
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            log,
+            "[{}] run ({}): {}",
+            format_iso_utc_ms(started_at_ms),
+            reason,
+            command
+        );
+    }
+    let offset = log.metadata().map(|m| m.len()).unwrap_or(0);
+    let log2 = match log.try_clone() {
+        Ok(f) => f,
+        Err(e) => return fail(app, format!("clone log handle: {}", e)),
+    };
+
+    let spawned = launch_run_process(command, root, log, log2).spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => return fail(app, format!("spawn `{}`: {}", command, e)),
+    };
+    trace_launch_run(
+        app,
+        &format!(
+            "op=started pid={} reason={} cmd={}",
+            child.id(),
+            reason,
+            bram_trace_preview(command, 160)
+        ),
+    );
+    emit_replayable_signal(app, "launch-run-changed");
+    let app2 = app.clone();
+    let command = command.to_string();
+    let reason = reason.to_string();
+    // The waiter reaps the shell (no zombie) and records the outcome. It
+    // waits on the command itself, not on anything it backgrounds.
+    std::thread::spawn(move || {
+        let waited = child.wait();
+        let ended = unix_now_ms();
+        let last_line = launch_run_log_last_line(&log_path, offset);
+        let outcome = match waited {
+            Ok(status) => {
+                trace_launch_run(
+                    &app2,
+                    &format!(
+                        "op=exit status={} ms={}",
+                        status
+                            .code()
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "signal".to_string()),
+                        ended - started_at_ms
+                    ),
+                );
+                LaunchRunOutcome {
+                    command,
+                    reason,
+                    state: LaunchRunState::Exited,
+                    started_at_ms,
+                    ended_at_ms: Some(ended),
+                    code: status.code(),
+                    last_line,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                trace_launch_run(
+                    &app2,
+                    &format!(
+                        "op=wait-failed error={}",
+                        bram_trace_preview(&e.to_string(), 160)
+                    ),
+                );
+                LaunchRunOutcome {
+                    command,
+                    reason,
+                    state: LaunchRunState::Failed,
+                    started_at_ms,
+                    ended_at_ms: Some(ended),
+                    code: None,
+                    last_line,
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+        set_launch_run_last(outcome);
+        emit_replayable_signal(&app2, "launch-run-changed");
+    });
+}
+
+// Once per Bram process, from setup (not pty_spawn, which a window reload can
+// re-enter, #457). Skipped wherever the launch itself is held.
+fn start_launch_run_at_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if LAUNCH_RUN_STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    if !project_folder().is_ok() || state_hold().is_some() || !project_writable() {
+        return;
+    }
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    let view = launch_run_view(app, &root);
+    let Some(command) = view.command.as_deref() else {
+        return;
+    };
+    match view.decision {
+        LaunchRunDecision::NotConfigured => {}
+        LaunchRunDecision::Ask => trace_launch_run(
+            app,
+            &format!(
+                "op=awaiting-consent cmd={}",
+                bram_trace_preview(command, 160)
+            ),
+        ),
+        LaunchRunDecision::Decline => trace_launch_run(app, "op=skip reason=declined"),
+        LaunchRunDecision::Allow => run_launch_command(app, &root, command, "launch"),
+    }
+}
+
+// POST /__launch-run/decision {"choice": "allow" | "decline" | "ask-again"}.
+// Allow also runs the command now, so nobody has to relaunch to get it.
+fn handle_launch_run_decision<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let text = "text/plain; charset=utf-8";
+    let req: LaunchRunRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return (400, text, format!("bad request: {}", e).into_bytes()),
+    };
+    let view = launch_run_view(app, root);
+    let Some(command) = view.command.clone() else {
+        return (409, text, b"no launch.run in .bram.json".to_vec());
+    };
+    let path = match launch_run_consent_path_for_app(app, root) {
+        Ok(p) => p,
+        Err(e) => return (500, text, e.into_bytes()),
+    };
+    let write = |decision: LaunchRunChoice| {
+        write_launch_run_consent(
+            &path,
+            &LaunchRunConsent {
+                schema: LAUNCH_RUN_CONSENT_SCHEMA,
+                project_root: view.project_root.clone(),
+                command: command.clone(),
+                decision,
+                at_ms: unix_now_ms(),
+            },
+        )
+    };
+    let result = match req.choice {
+        LaunchRunRequestChoice::Allow => write(LaunchRunChoice::Allow),
+        LaunchRunRequestChoice::Decline => write(LaunchRunChoice::Decline),
+        LaunchRunRequestChoice::AskAgain => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        },
+    };
+    let choice = match req.choice {
+        LaunchRunRequestChoice::Allow => "allow",
+        LaunchRunRequestChoice::Decline => "decline",
+        LaunchRunRequestChoice::AskAgain => "ask-again",
+    };
+    if let Err(e) = result {
+        trace_launch_run(
+            app,
+            &format!(
+                "op=decision choice={} error={}",
+                choice,
+                bram_trace_preview(&e, 160)
+            ),
+        );
+        return (500, text, e.into_bytes());
+    }
+    trace_launch_run(
+        app,
+        &format!(
+            "op=decision choice={} cmd={}",
+            choice,
+            bram_trace_preview(&command, 160)
+        ),
+    );
+    if req.choice == LaunchRunRequestChoice::Allow {
+        run_launch_command(app, root, &command, "allowed");
+    }
+    emit_replayable_signal(app, "launch-run-changed");
+    match serde_json::to_vec(&launch_run_view(app, root)) {
+        Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+        Err(e) => (500, text, e.to_string().into_bytes()),
+    }
+}
+
+// The Status row. Only a finished run earns a verdict: a zero exit is ok, a
+// non-zero exit or a failed spawn is a warning whose action names the log.
+fn launch_run_status_row(view: &LaunchRunView) -> Option<serde_json::Value> {
+    let command = view.command.as_deref()?;
+    let (level, state, action) = match (view.decision, view.last_run.as_ref()) {
+        (_, Some(o)) if o.state == LaunchRunState::Running => ("none", "running".to_string(), None),
+        (_, Some(o)) if o.state == LaunchRunState::Exited && o.code == Some(0) => {
+            ("ok", "exited 0".to_string(), None)
+        }
+        (_, Some(o)) => (
+            "warn",
+            match o.code {
+                Some(c) => format!("exited {}", c),
+                None if o.state == LaunchRunState::Failed => "didn't start".to_string(),
+                None => "stopped by a signal".to_string(),
+            },
+            Some(format!("Open {} to see what went wrong", view.log_path)),
+        ),
+        (LaunchRunDecision::Ask, None) => ("none", "waiting for you to allow it".to_string(), None),
+        (LaunchRunDecision::Decline, None) => ("none", "not allowed".to_string(), None),
+        (_, None) => ("none", "not run yet".to_string(), None),
+    };
+    let mut detail = format!("`{}` from the project root", command);
+    if let Some(o) = view.last_run.as_ref() {
+        if let Some(line) = o.last_line.as_deref().or(o.error.as_deref()) {
+            detail.push_str(&format!(". Last output: {}", line));
+        }
+    }
+    let seen = view
+        .last_run
+        .as_ref()
+        .map(|o| format_iso_utc_ms(o.ended_at_ms.unwrap_or(o.started_at_ms)))
+        .unwrap_or_default();
+    let mut row = serde_json::json!({
+        "signal": "Launch command",
+        "level": level,
+        "state": state,
+        "detail": detail,
+        "seen": seen,
+    });
+    if let Some(a) = action {
+        row["action"] = serde_json::json!(a);
+    }
+    Some(row)
+}
+
+#[cfg(test)]
+mod launch_run_tests {
+    use super::*;
+
+    fn consent(root: &str, command: &str, decision: LaunchRunChoice) -> LaunchRunConsent {
+        LaunchRunConsent {
+            schema: LAUNCH_RUN_CONSENT_SCHEMA,
+            project_root: root.to_string(),
+            command: command.to_string(),
+            decision,
+            at_ms: 1,
+        }
+    }
+
+    fn view(decision: LaunchRunDecision, last: Option<LaunchRunOutcome>) -> LaunchRunView {
+        LaunchRunView {
+            decision,
+            command: Some("./start.sh".to_string()),
+            project_root: "/Users/me/studio".to_string(),
+            log_path: LAUNCH_RUN_LOG_DISPLAY.to_string(),
+            last_run: last,
+        }
+    }
+
+    fn outcome(state: LaunchRunState, code: Option<i32>) -> LaunchRunOutcome {
+        LaunchRunOutcome {
+            command: "./start.sh".to_string(),
+            reason: "launch".to_string(),
+            state,
+            started_at_ms: 1_000,
+            ended_at_ms: Some(2_000),
+            code,
+            last_line: Some("Studio's server is running on port 8765".to_string()),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn no_command_means_not_configured() {
+        assert_eq!(
+            launch_run_decision(None, "/r", None),
+            LaunchRunDecision::NotConfigured
+        );
+        assert_eq!(
+            launch_run_decision(Some("  "), "/r", None),
+            LaunchRunDecision::NotConfigured
+        );
+    }
+
+    #[test]
+    fn asks_until_this_exact_command_is_decided_for_this_root() {
+        let r = "/Users/me/studio";
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), r, None),
+            LaunchRunDecision::Ask
+        );
+        let allow = consent(r, "./start.sh", LaunchRunChoice::Allow);
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), r, Some(&allow)),
+            LaunchRunDecision::Allow
+        );
+        // A changed command asks again, whatever was decided before.
+        assert_eq!(
+            launch_run_decision(Some("./start.sh --restart"), r, Some(&allow)),
+            LaunchRunDecision::Ask
+        );
+        // Another folder's consent doesn't count.
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), "/Users/me/other", Some(&allow)),
+            LaunchRunDecision::Ask
+        );
+        let decline = consent(r, "./start.sh", LaunchRunChoice::Decline);
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), r, Some(&decline)),
+            LaunchRunDecision::Decline
+        );
+        let mut old = allow.clone();
+        old.schema = 0;
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), r, Some(&old)),
+            LaunchRunDecision::Ask
+        );
+    }
+
+    #[test]
+    fn roots_match_across_windows_spellings() {
+        assert!(launch_run_roots_match(
+            r"C:\Users\jon\studio",
+            "c:/Users/jon/studio/"
+        ));
+        assert!(launch_run_roots_match(
+            "/Users/me/studio/",
+            "/Users/me/studio"
+        ));
+        assert!(!launch_run_roots_match(
+            r"C:\Users\jon\studio",
+            r"C:\Users\jon\Studio2"
+        ));
+        let c = consent(r"C:\Users\jon\studio", "start.cmd", LaunchRunChoice::Allow);
+        assert_eq!(
+            launch_run_decision(Some("start.cmd"), "c:/Users/jon/studio", Some(&c)),
+            LaunchRunDecision::Allow
+        );
+    }
+
+    #[test]
+    fn consent_lives_outside_the_project_one_file_per_root() {
+        let data = Path::new("/data");
+        let a = launch_run_consent_path(data, Path::new("/no/such/a"));
+        let b = launch_run_consent_path(data, Path::new("/no/such/b"));
+        assert!(a.starts_with("/data/launch-run-consent"));
+        assert_ne!(a, b);
+        assert_eq!(a.extension().and_then(|e| e.to_str()), Some("json"));
+    }
+
+    #[test]
+    fn consent_round_trips_with_a_stable_wire_shape() {
+        let c = consent("/r", "./start.sh", LaunchRunChoice::Decline);
+        let text = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            text,
+            r#"{"schema":1,"projectRoot":"/r","command":"./start.sh","decision":"decline","atMs":1}"#
+        );
+        assert_eq!(serde_json::from_str::<LaunchRunConsent>(&text).unwrap(), c);
+    }
+
+    #[test]
+    fn request_choices_parse_and_unknown_ones_are_refused() {
+        let p = |s: &str| serde_json::from_str::<LaunchRunRequest>(s).map(|r| r.choice);
+        assert_eq!(
+            p(r#"{"choice":"allow"}"#).unwrap(),
+            LaunchRunRequestChoice::Allow
+        );
+        assert_eq!(
+            p(r#"{"choice":"decline"}"#).unwrap(),
+            LaunchRunRequestChoice::Decline
+        );
+        assert_eq!(
+            p(r#"{"choice":"ask-again"}"#).unwrap(),
+            LaunchRunRequestChoice::AskAgain
+        );
+        assert!(p(r#"{"choice":"always"}"#).is_err());
+    }
+
+    #[test]
+    fn command_comes_from_launch_run_trimmed() {
+        let cfg: ProjectConfig =
+            serde_json::from_str(r#"{"launch":{"minimized":true,"run":"  ./start.sh  "}}"#)
+                .unwrap();
+        assert_eq!(
+            launch_run_command_of(Some(&cfg)).as_deref(),
+            Some("./start.sh")
+        );
+        let none: ProjectConfig = serde_json::from_str(r#"{"launch":{"openApp":"/"}}"#).unwrap();
+        assert_eq!(launch_run_command_of(Some(&none)), None);
+        assert_eq!(launch_run_command_of(None), None);
+    }
+
+    #[test]
+    fn status_row_earns_a_verdict_only_from_a_finished_run() {
+        let level = |v: &LaunchRunView| launch_run_status_row(v).unwrap()["level"].clone();
+        assert_eq!(level(&view(LaunchRunDecision::Ask, None)), "none");
+        assert_eq!(level(&view(LaunchRunDecision::Decline, None)), "none");
+        assert_eq!(
+            level(&view(
+                LaunchRunDecision::Allow,
+                Some(outcome(LaunchRunState::Running, None))
+            )),
+            "none"
+        );
+        assert_eq!(
+            level(&view(
+                LaunchRunDecision::Allow,
+                Some(outcome(LaunchRunState::Exited, Some(0)))
+            )),
+            "ok"
+        );
+        let failed = launch_run_status_row(&view(
+            LaunchRunDecision::Allow,
+            Some(outcome(LaunchRunState::Exited, Some(1))),
+        ))
+        .unwrap();
+        assert_eq!(failed["level"], "warn");
+        assert!(failed["action"]
+            .as_str()
+            .unwrap()
+            .contains(LAUNCH_RUN_LOG_DISPLAY));
+        // The served-rows guard keeps it a warning: it names an action.
+        let mut sections = vec![serde_json::json!({"rows": [failed]})];
+        assert!(enforce_status_actions(&mut sections).is_empty());
+        let mut none = view(LaunchRunDecision::NotConfigured, None);
+        none.command = None;
+        assert!(launch_run_status_row(&none).is_none());
+    }
+
+    // The command returns at once; what it backgrounds keeps running. That is
+    // the property Studio's start.sh relies on.
+    #[cfg(unix)]
+    #[test]
+    fn a_backgrounded_child_outlives_the_command() {
+        let dir = std::env::temp_dir().join(format!("bram-launch-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("launch-run.log");
+        let out = std::fs::File::create(&log).unwrap();
+        let err = out.try_clone().unwrap();
+        let status =
+            launch_run_process("sleep 30 & echo $! > bg.pid; echo started", &dir, out, err)
+                .status()
+                .unwrap();
+        assert!(status.success());
+        let pid = std::fs::read_to_string(dir.join("bg.pid"))
+            .unwrap()
+            .trim()
+            .to_string();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap();
+        assert!(
+            alive.success(),
+            "backgrounded child {} should still run",
+            pid
+        );
+        let _ = std::process::Command::new("kill").arg(&pid).status();
+        assert_eq!(
+            launch_run_log_last_line(&log, 0).as_deref(),
+            Some("started")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     let (tx, rx) = std::sync::mpsc::channel::<IndexBucket>();
     if let Ok(mut guard) = search_index_tx_cell().lock() {
@@ -79536,6 +80334,18 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         }
     }
 
+    // issue-498-launch-run-command: only when the repo names a launch command.
+    if let Some(proj) = project_root_path.as_ref() {
+        if let Some(row) = launch_run_status_row(&launch_run_view(app, proj)) {
+            if let Some(sections) = rows.get_mut("sections").and_then(|v| v.as_array_mut()) {
+                sections.push(serde_json::json!({
+                    "title": "Launch command",
+                    "rows": [row]
+                }));
+            }
+        }
+    }
+
     if let Some(sections) = rows.get_mut("sections").and_then(|v| v.as_array_mut()) {
         let demoted = enforce_status_actions(sections);
         if !demoted.is_empty() {
@@ -92329,6 +93139,22 @@ fn route_request<R: tauri::Runtime>(
                 eprintln!("[http /__coordination-status] {}", e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
+        };
+    }
+
+    // /__launch-run — issue-498-launch-run-command: the repo's launch command,
+    // this machine's decision about it, and how its last run went.
+    if path == "__launch-run" {
+        let Some(root) = project_root(Some(app)) else {
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            );
+        };
+        return match serde_json::to_vec(&launch_run_view(app, &root)) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => (500, "text/plain; charset=utf-8", e.to_string().into_bytes()),
         };
     }
 
@@ -108209,6 +109035,22 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
                 b"no project root".to_vec(),
             )
         }
+    } else if path == "__launch-run/decision" {
+        // issue-498-launch-run-command: the banner's Allow / Don't allow and
+        // Status's Ask again.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else if let Some(root) = project_root(Some(app)) {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_launch_run_decision(app, &root, &buf)
+        } else {
+            (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            )
+        }
     } else if path == "__state-dir/migrate-relaunch" {
         // issue-469-leftover-folder-reported: Status's Migrate and relaunch.
         if method != "POST" {
@@ -109925,6 +110767,9 @@ pub fn run() {
             trace_whisper_env(app.handle());
             // issue-230 unified search: background Claude-session indexer.
             start_search_indexer(app.handle().clone());
+            // issue-498-launch-run-command: the repo's launch command, if
+            // it has one and the user allowed it here.
+            start_launch_run_at_launch(app.handle());
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     app.handle(),

@@ -987,6 +987,41 @@
       onClick="codexTrustBannerDismissed = true" />
   </HStack>
 
+  <!-- issue-498-launch-run-command: the repo's .bram.json names a launch
+       command ("launch": {"run": ...}) that hasn't been decided on this
+       computer. It doesn't run until Allow; Allow also runs it now. Don't
+       allow is remembered until the command changes; Status's Launch
+       command block offers Ask again. Same plain-fetch + PushSource idiom
+       as the state-move banner below. -->
+  <DataSource id="launchRun" url="/__launch-run" />
+  <PushSource id="launchRunEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('launch-run-changed')}" />
+  <ChangeListener listenTo="{launchRunEvt.value &amp;&amp; launchRunEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(launchRunEvt.value, launchRun)" />
+  <HStack
+    when="{window.__bramLaunchRunText(launchRun.value, 'show')}"
+    backgroundColor="$color-warn-100"
+    padding="$space-2"
+    gap="$space-3"
+    wrapContent="true"
+    verticalAlignment="center">
+    <Text
+      fontSize="$fontSize-sm"
+      value="{window.__bramLaunchRunText(launchRun.value, 'text')}"
+      tooltip="{window.__bramLaunchRunText(launchRun.value, 'where')}" />
+    <SpaceFiller />
+    <Button
+      label="Allow"
+      size="xs"
+      tooltip="{window.__bramLaunchRunText(launchRun.value, 'where')}"
+      onClick="window.__bramLaunchRunDecide('allow')" />
+    <Button
+      label="Don't allow"
+      variant="ghost"
+      size="xs"
+      onClick="window.__bramLaunchRunDecide('decline')" />
+  </HStack>
+
   <!-- issue-469-mixed-folder-dialog: resources/ holds files that aren't
        Bram's (or are tracked), so Bram can't move the folder whole. The
        answer is written to resources/.state-move and acted on at the next

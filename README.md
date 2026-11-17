@@ -313,6 +313,31 @@ it (command-line flags win):
 app, the header's **Open app ↗** button opens the same address, and the ⓘ
 dialog shows it with a **Copy** button.
 
+### A command to run at each launch
+
+A repo can name a helper for Bram to run each time it opens, such as a
+script that starts the app's back end:
+
+```json
+{
+  "launch": { "run": "./start.sh" }
+}
+```
+
+- **It runs once per launch,** from the project root (`sh -c`, or `cmd /C`
+  on Windows), and Bram doesn't wait for it. Its output goes to
+  `.bram/bram-traces/launch-run.log`, and the Status tab's **Launch command**
+  section shows how its last run ended.
+- **Bram doesn't own it.** Unlike `server`, it isn't the app's address, and
+  Bram doesn't stop it when it quits. Whatever it starts keeps running. So
+  the command should return quickly and reuse what's already running, as
+  Bram Studio's `start.sh` does.
+- **It asks first.** A cloned repo's command doesn't run until you click
+  **Allow** on the banner, on each computer. Allow runs it right away, too.
+  The answer, Allow or **Don't allow**, is kept for that exact command:
+  change the command and Bram asks again. Status's **Ask again** forgets
+  the answer.
+
 ### A repo's own first message
 
 The first time Bram wakes in a repo it hasn't seen, it says hello. A repo

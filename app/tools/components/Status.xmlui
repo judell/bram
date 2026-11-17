@@ -25,6 +25,14 @@
   <ChangeListener listenTo="{stateDirPlanEvt.value &amp;&amp; stateDirPlanEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(stateDirPlanEvt.value, stateDirPlan)" />
 
+  <!-- issue-498-launch-run-command: the way back from Allow or Don't allow.
+       Same plain-fetch + PushSource idiom as the state-move rows above. -->
+  <DataSource id="launchRunView" url="/__launch-run?t={refreshTick}" />
+  <PushSource id="launchRunViewEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('launch-run-changed')}" />
+  <ChangeListener listenTo="{launchRunViewEvt.value &amp;&amp; launchRunViewEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(launchRunViewEvt.value, launchRunView)" />
+
   <VStack padding="$space-6" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Status</Heading>
@@ -85,6 +93,21 @@
     <!-- issue-469-status-dry-run: the state folder's plan, formatted by the
          window.__bramStateDirPlan* helpers. Items, not List: short lists
          (tracked is capped at 200 by the host). -->
+    <VStack when="{window.__bramLaunchRunText(launchRunView.value, 'configured')}" gap="$space-2">
+      <Heading level="h3">Launch command</Heading>
+      <HStack verticalAlignment="center" wrapContent="true" gap="$space-2">
+        <Text
+          value="{window.__bramLaunchRunText(launchRunView.value, 'line')}"
+          tooltip="{window.__bramLaunchRunText(launchRunView.value, 'where')}" />
+        <Button
+          when="{window.__bramLaunchRunText(launchRunView.value, 'askAgain')}"
+          label="Ask again"
+          variant="outlined"
+          size="xs"
+          tooltip="Forget this computer's answer and show the question again"
+          onClick="window.__bramLaunchRunDecide('ask-again')" />
+      </HStack>
+    </VStack>
     <VStack when="{stateDirPlan.value}" gap="$space-2">
       <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
         onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'state-folder')">

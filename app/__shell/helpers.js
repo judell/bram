@@ -19991,6 +19991,71 @@ window.__bramStateMoveDecide = function (choice) {
     .catch(function (e) { trace("failed", { error: String(e) }); });
 };
 
+// issue-498-launch-run-command: the banner's Allow / Don't allow and Status's
+// Ask again. A plain fetch, like __bramStateMoveDecide; the host pushes
+// launch-run-changed and the view refetches on it.
+window.__bramLaunchRunDecide = function (choice) {
+  var started = Date.now();
+  var trace = function (op, extra) {
+    try {
+      if (typeof window.logToHost !== "function") return;
+      var payload = {
+        kind: "iframe-trace",
+        subkind: "launch-run-decide",
+        at: new Date().toISOString(),
+        op: op,
+        choice: choice,
+        ms: Date.now() - started,
+      };
+      if (extra) Object.assign(payload, extra);
+      window.logToHost(payload);
+    } catch (e) {}
+  };
+  trace("click");
+  return window
+    .fetch("/__launch-run/decision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ choice: choice }),
+    })
+    .then(function (r) { trace("done", { status: r.status }); })
+    .catch(function (e) { trace("failed", { error: String(e) }); });
+};
+
+// The words for /__launch-run's view. Pure: reads only its arguments.
+//   show      the banner asks (decision "ask")
+//   text      the banner's sentence
+//   where     the banner's tooltip: the folder it runs in, and the log
+//   configured  the repo names a launch command
+//   line      Status's one-line summary
+//   askAgain  Status offers Ask again (a decision is recorded)
+window.__bramLaunchRunText = function (view, key) {
+  var v = view || {};
+  var cmd = v.command || "";
+  var d = v.decision || "not-configured";
+  if (key === "show") return d === "ask" && !!cmd;
+  if (key === "configured") return !!cmd && d !== "not-configured";
+  if (key === "askAgain") return d === "allow" || d === "decline";
+  if (key === "text") {
+    return "This repo asks Bram to run " + cmd + " each time it opens. Allow it on this computer?";
+  }
+  if (key === "where") {
+    return "Runs from " + (v.projectRoot || "the project folder") + ". Output goes to " + (v.logPath || "the launch log") + ". Bram doesn't stop it when it quits.";
+  }
+  if (key === "line") {
+    var verdict = d === "allow" ? "allowed on this computer"
+      : d === "decline" ? "not allowed on this computer"
+      : "waiting for you to allow it";
+    var run = v.lastRun;
+    var last = "";
+    if (run && run.state === "running") last = " Running now.";
+    else if (run && run.state === "exited") last = " Last run exited " + run.code + ".";
+    else if (run && run.state === "failed") last = " Last run didn't start.";
+    return "Runs " + cmd + " at each launch: " + verdict + "." + last;
+  }
+  return "";
+};
+
 // Status's plan, kept across a refetch: a value that is briefly empty while a
 // refetch is in flight (or slow to render) must not hide the Move row, the
 // only way back from Not now (Windows check, 2026-11-04 21:28:36).

@@ -20972,6 +20972,234 @@ fn set_shell_window_title<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
+// issue-403: several Brams run as several identical Dock icons, and the
+// Dock's hover label is the app name (bundle or executable), not the window
+// title, so every instance reads "bram". Each instance draws its own Dock
+// icon instead: the usual artwork with a strip across the bottom naming the
+// project's folder, in the project's color -- the hue the pane's header band
+// and project chip use (__bramProjectHue), so the Dock matches the windows
+// (Jon, 2026-11-17: "2 if we can match the colors used in the instances").
+// Started from Raymond's badge prototype (rdhyee/bram@c4ab07a), whose red
+// notification badge read as an unread count and cut names at 9 characters.
+// The leading 9 characters, as Raymond's badge had them (Jon: "keep label as
+// the leading 9 chars").
+const DOCK_BADGE_MAX_CHARS: usize = 9;
+
+fn dock_badge_label(project_root: Option<&Path>) -> Option<String> {
+    // Fold Windows separators so a `C:\\…` spelling names its last folder on
+    // every platform (developing-bram.md §Paths).
+    let text = project_root?.to_string_lossy().replace('\\', "/");
+    let name = text.trim_end_matches('/').rsplit('/').next()?.to_string();
+    if name.is_empty() || name.ends_with(':') {
+        return None;
+    }
+    if name.chars().count() <= DOCK_BADGE_MAX_CHARS {
+        return Some(name);
+    }
+    let head: String = name.chars().take(DOCK_BADGE_MAX_CHARS - 1).collect();
+    Some(format!("{}…", head))
+}
+
+// The pane's __bramProjectHue, in Rust: FNV-1a over the key's UTF-16 code
+// units, then spread by the golden angle. The key is the absolute project
+// root, as /__app-info's projectKey publishes it. Pinned to the JavaScript's
+// output in dock_badge_tests.
+fn dock_project_hue(key: &str) -> u32 {
+    if key.is_empty() {
+        return 210;
+    }
+    let mut h: u32 = 2166136261;
+    for unit in key.encode_utf16() {
+        h ^= unit as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    ((h as f64 * 137.508) % 360.0).round() as u32 % 360
+}
+
+// hsl(h, s, l) to sRGB in 0..=1, for __bramProjectTint's hsl(hue, 62%, 45%).
+fn dock_hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h % 360.0) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    (r + m, g + m, b + m)
+}
+
+// Draw the labelled icon. AppKit: main thread only.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // lockFocus/unlockFocus: the plain way to draw into an NSImage.
+fn draw_dock_icon(label: &str, rgb: (f64, f64, f64)) -> Result<(), String> {
+    use objc2::runtime::AnyObject;
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{
+        NSApplication, NSBezierPath, NSColor, NSFont, NSFontAttributeName,
+        NSForegroundColorAttributeName, NSImage, NSStringDrawing,
+    };
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_foundation::{NSAttributedStringKey, NSDictionary, NSString};
+
+    let mtm = MainThreadMarker::new().ok_or("not on the main thread")?;
+    let app = NSApplication::sharedApplication(mtm);
+    let base = app.applicationIconImage().ok_or("no application icon")?;
+    let side = 512.0;
+    let image = NSImage::initWithSize(NSImage::alloc(), CGSize::new(side, side));
+    image.lockFocus();
+    base.drawInRect(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(side, side)));
+    // The strip sits low on the artwork (which macOS insets within the
+    // square), in the project's color at full strength, as the chip uses it.
+    let strip = CGRect::new(
+        CGPoint::new(side * 0.10, side * 0.11),
+        CGSize::new(side * 0.80, side * 0.20),
+    );
+    NSColor::colorWithSRGBRed_green_blue_alpha(rgb.0, rgb.1, rgb.2, 1.0).setFill();
+    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(strip, side * 0.045, side * 0.045)
+        .fill();
+    let text = NSString::from_str(label);
+    let white = NSColor::whiteColor();
+    // Largest bold size that fits the strip's width, down to a floor.
+    let mut size = side * 0.13;
+    let (attrs, measured) = loop {
+        let font = NSFont::boldSystemFontOfSize(size);
+        let keys: [&NSAttributedStringKey; 2] =
+            unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+        let objects: [&AnyObject; 2] = [&font, &white];
+        let attrs = NSDictionary::from_slices(&keys, &objects);
+        let measured = unsafe { text.sizeWithAttributes(Some(&attrs)) };
+        if measured.width <= strip.size.width * 0.90 || size <= side * 0.06 {
+            break (attrs, measured);
+        }
+        size -= 2.0;
+    };
+    let at = CGPoint::new(
+        strip.origin.x + (strip.size.width - measured.width) / 2.0,
+        strip.origin.y + (strip.size.height - measured.height) / 2.0,
+    );
+    unsafe { text.drawAtPoint_withAttributes(at, Some(&attrs)) };
+    image.unlockFocus();
+    unsafe { app.setApplicationIconImage(Some(&image)) };
+    Ok(())
+}
+
+// macOS only: elsewhere the window title stays the indicator (Windows offers
+// only an overlay image, Linux a numeric badge). Called from RunEvent::Ready,
+// on the main thread.
+fn set_shell_dock_badge<R: tauri::Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "macos")]
+    {
+        let root = project_root(Some(app));
+        let Some(label) = dock_badge_label(root.as_deref()) else {
+            return;
+        };
+        let key = root.map(|r| r.display().to_string()).unwrap_or_default();
+        let hue = dock_project_hue(&key);
+        let rgb = dock_hsl_to_rgb(hue as f64, 0.62, 0.45);
+        let line = match draw_dock_icon(&label, rgb) {
+            Ok(()) => format!("op=dock-icon label={} hue={}", label, hue),
+            Err(e) => format!("op=dock-icon-failed label={} error={}", label, e),
+        };
+        // stderr too: the first try failed with nothing in either place.
+        eprintln!("[launch] {}", line);
+        append_bram_trace_line(app, "launch", &line);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+#[cfg(test)]
+mod dock_badge_tests {
+    use super::{dock_badge_label, dock_hsl_to_rgb, dock_project_hue};
+    use std::path::Path;
+
+    #[test]
+    fn dock_badge_uses_project_folder_name() {
+        assert_eq!(
+            dock_badge_label(Some(Path::new("/Users/raymondyee/C/src/wtdickens"))),
+            Some("wtdickens".to_string())
+        );
+        assert_eq!(
+            dock_badge_label(Some(Path::new("/Users/jonudell/p5.js"))),
+            Some("p5.js".to_string())
+        );
+    }
+
+    #[test]
+    fn dock_badge_caps_long_names() {
+        assert_eq!(
+            dock_badge_label(Some(Path::new("/Users/jonudell/bram-studio"))),
+            Some("bram-stu…".to_string())
+        );
+        assert_eq!(
+            dock_badge_label(Some(Path::new("/x/onrealm-integration"))),
+            Some("onrealm-…".to_string())
+        );
+    }
+
+    // The pane's __bramProjectHue, computed in JavaScript (node, 2026-11-17),
+    // so the Dock's color matches each window's header band and chip.
+    #[test]
+    fn dock_hue_matches_the_panes() {
+        for (key, hue) in [
+            ("/Users/jonudell/bram", 86),
+            ("/Users/jonudell/bram-studio", 346),
+            ("/Users/jonudell/p5.js", 111),
+            ("/Users/jonudell/bram-processing-ide", 57),
+            (r"C:\Users\jon\bram", 306),
+            ("/Users/Måns/Projekt", 196),
+            ("", 210),
+        ] {
+            assert_eq!(dock_project_hue(key), hue, "{}", key);
+        }
+    }
+
+    #[test]
+    fn hsl_converts_like_css() {
+        let close = |a: (f64, f64, f64), b: (f64, f64, f64)| {
+            (a.0 - b.0).abs() < 0.005 && (a.1 - b.1).abs() < 0.005 && (a.2 - b.2).abs() < 0.005
+        };
+        // hsl(0, 62%, 45%) = rgb(186, 44, 44); hsl(120, ...) = rgb(44, 186, 44).
+        assert!(close(
+            dock_hsl_to_rgb(0.0, 0.62, 0.45),
+            (0.7290, 0.1710, 0.1710)
+        ));
+        assert!(close(
+            dock_hsl_to_rgb(120.0, 0.62, 0.45),
+            (0.1710, 0.7290, 0.1710)
+        ));
+        assert!(close(
+            dock_hsl_to_rgb(240.0, 0.62, 0.45),
+            (0.1710, 0.1710, 0.7290)
+        ));
+    }
+
+    #[test]
+    fn dock_badge_absent_without_project() {
+        assert_eq!(dock_badge_label(None), None);
+        assert_eq!(dock_badge_label(Some(Path::new("/"))), None);
+    }
+
+    // Windows spellings, as plain strings, so every platform checks them.
+    #[test]
+    fn dock_badge_reads_windows_spellings() {
+        assert_eq!(
+            dock_badge_label(Some(Path::new(r"C:\Users\jon\bram"))),
+            Some("bram".to_string())
+        );
+        assert_eq!(
+            dock_badge_label(Some(Path::new(r"C:\Users\jon\bram-studio\"))),
+            Some("bram-stu…".to_string())
+        );
+        assert_eq!(dock_badge_label(Some(Path::new(r"C:\"))), None);
+    }
+}
+
 #[cfg(test)]
 mod shell_window_title_tests {
     use super::{shell_window_title_parts, title_path_with_home};
@@ -112889,6 +113117,11 @@ pub fn run() {
             // loop without ExitRequested or a traced window destruction, so
             // the last event, Exit, runs the same idempotent cleanup.
             tauri::RunEvent::Exit => shutdown_children(app, "exit"),
+            // issue-403-dock-badge: on Ready, not in setup. In dev builds
+            // Tauri sets its own Dock icon on Ready (tauri-2.11.0
+            // src/app.rs:2556) before calling this handler, which replaced an
+            // icon drawn during setup. Drawing here lands on top.
+            tauri::RunEvent::Ready => set_shell_dock_badge(app),
             _ => {}
         });
 }

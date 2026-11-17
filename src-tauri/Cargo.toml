@@ -41,6 +41,16 @@ rusqlite = { version = "0.40.1", features = ["bundled"] }
 time = { version = "0.3.54", features = ["parsing"] }
 uuid = { version = "1", features = ["v4"] }
 
+# issue-403-dock-badge: draw each instance's Dock icon with its project's name
+# on a strip in its project color (NSApplication.setApplicationIconImage).
+# All already in Cargo.lock through tao, so this compiles nothing new;
+# default-features off because objc2-app-kit's defaults turn on all of AppKit.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSGeometry", "NSAttributedString", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSImage", "NSColor", "NSBezierPath", "NSFont", "NSFontDescriptor", "NSStringDrawing", "NSAttributedString", "NSGraphics", "NSRunningApplication"] }
+
 # bram-guard-authority-flip: serde_json parses transcript lines on the
 # guard's deny path, and debug is the shipping format — at opt-level 0 the
 # scan ran ~3x slower than the Python guard's C json on the same payload.

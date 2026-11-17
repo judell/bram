@@ -215,12 +215,21 @@
             enabled="{!!window.__bramLaunchRunText(launchRunSettings.value, 'command')}"
             initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'on')}"
             onDidChange="(v) => window.__bramLaunchRunSwitch(v, launchRunSettings.value)" />
-          <!-- launch-stop-command: say what turning it off runs. -->
-          <Text
-            when="{window.__bramLaunchRunText(launchRunSettings.value, 'stopLine')}"
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            value="{window.__bramLaunchRunText(launchRunSettings.value, 'stopLine')}" />
+          <!-- launch-stop-field: what turning the switch off runs, edited
+               like the run command. Empty clears it. -->
+          <Text fontSize="$fontSize-sm" value="When turned off, run" />
+          <HStack verticalAlignment="center" gap="$space-2" wrapContent="true">
+            <TextBox
+              id="launchStopCommand"
+              width="24rem"
+              placeholder="./start.sh --stop"
+              initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'stop')}" />
+            <Button
+              label="Save"
+              size="sm"
+              enabled="{launchStopCommand.value !== window.__bramLaunchRunText(launchRunSettings.value, 'stop')}"
+              onClick="window.__bramLaunchRunDecide('set-stop', launchStopCommand.value)" />
+          </HStack>
           <!-- The handler gets {prevValue, newValue}, not the value
                (https://www.xmlui.org/docs/reference/components/ChangeListener).
                Passing the object made setValue turn the switch on, and that

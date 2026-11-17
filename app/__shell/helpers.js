@@ -4034,7 +4034,7 @@ window.__bramSaveSplitterSize = function (key, sizes) {
 // change a default there and here together.
 window.settingsInfoBodies = {
   launchRun:
-    "## Launch command\n\nA command Bram runs once each time it opens, from the project folder, such as a script that starts your app's back end. Bram doesn't wait for it, and doesn't stop it when it quits, so whatever it starts keeps running. It should return quickly and reuse what's already running. Its output goes to `.bram/bram-traces/launch-run.log`, and Status shows how its last run went.\n\nA repo can commit one in `.bram.json` as `launch.run`. Editing the field here changes it for this computer only.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.run`. Default: the repo's command, if it has one.*\n\n## Run it each time Bram opens\n\nTurning this on also allows the command on this computer, and runs it right away. Off, it never runs. Turning it off doesn't stop what the command started, unless the repo also names a stop command (`launch.stop`, such as `./start.sh --stop`): then turning it off runs that, but only once the run command has been allowed on this computer. Quitting Bram stops nothing. When a repo's command hasn't been allowed here yet, Bram asks once with a banner; **Don't allow** turns this off.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.runAtLaunch`. Default: on when the repo names a command.*",
+    "## Launch command\n\nA command Bram runs once each time it opens, from the project folder, such as a script that starts your app's back end. Bram doesn't wait for it, and doesn't stop it when it quits, so whatever it starts keeps running. It should return quickly and reuse what's already running. Its output goes to `.bram/bram-traces/launch-run.log`, and Status shows how its last run went.\n\nA repo can commit one in `.bram.json` as `launch.run`. Editing the field here changes it for this computer only.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.run`. Default: the repo's command, if it has one.*\n\n## Run it each time Bram opens\n\nTurning this on also allows the command on this computer, and runs it right away. Off, it never runs. Turning it off doesn't stop what the command started, unless there's a stop command (below). Quitting Bram stops nothing. When a repo's command hasn't been allowed here yet, Bram asks once with a banner; **Don't allow** turns this off.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.runAtLaunch`. Default: on when the repo names a command.*\n\n## When turned off, run\n\nA command Bram runs when you turn the switch off, to stop what the launch command started, such as `./start.sh --stop`. Bram can't stop it itself, because the launch command detaches what it starts. It runs only once the launch command has been allowed on this computer. Leave it empty for none.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.stop`. Default: the repo's stop command, if it has one.*",
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
@@ -20021,7 +20021,7 @@ window.__bramLaunchRunDecide = function (choice, command) {
     .fetch("/__launch-run/decision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(choice === "set-command" ? { choice: choice, command: command || "" } : { choice: choice }),
+      body: JSON.stringify(choice === "set-command" || choice === "set-stop" ? { choice: choice, command: command || "" } : { choice: choice }),
     })
     .then(function (r) { trace("done", { status: r.status }); })
     .catch(function (e) { trace("failed", { error: String(e) }); });
@@ -20047,7 +20047,7 @@ window.__bramLaunchRunSwitch = function (on, view) {
 //   line      Status's one-line summary
 //   on        the Settings switch's state (launch.runAtLaunch, absent = on)
 //   command   the command, or "" (the Settings field)
-//   stopLine  what turning the switch off runs, or "" (launch-stop-command)
+//   stop      the stop command, or "" (the Settings field; launch-stop-field)
 window.__bramLaunchRunText = function (view, key) {
   var v = view || {};
   var cmd = v.command || "";
@@ -20056,9 +20056,7 @@ window.__bramLaunchRunText = function (view, key) {
   if (key === "configured") return !!cmd && d !== "not-configured";
   if (key === "on") return v.runAtLaunch !== false;
   if (key === "command") return cmd;
-  if (key === "stopLine") {
-    return v.stopCommand ? "Turning this off runs " + v.stopCommand + "." : "";
-  }
+  if (key === "stop") return v.stopCommand || "";
   if (key === "text") {
     return "This repo asks Bram to run " + cmd + " each time it opens. Allow it on this computer?";
   }

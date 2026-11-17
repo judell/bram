@@ -43360,6 +43360,10 @@ enum LaunchRunRequestChoice {
     // when the switch is on, since the user typed it. Not run until the
     // next launch.
     SetCommand,
+    // launch-stop-field: Settings saved a stop command to local launch.stop
+    // (empty clears it). Nothing runs on save; a stop still runs only after
+    // the run command was allowed here.
+    SetStop,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -43760,7 +43764,7 @@ fn start_launch_run_at_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
-// POST /__launch-run/decision {"choice": "allow" | "decline" | "set-command",
+// POST /__launch-run/decision {"choice": "allow" | "decline" | "set-command" | "set-stop",
 // "command"?}. The banner and the Settings tab both come here.
 // - allow: the switch on (local launch.runAtLaunch), this command allowed on
 //   this computer, and run now, so nobody has to relaunch to get it.
@@ -43818,6 +43822,14 @@ fn handle_launch_run_decision<R: tauri::Runtime>(
                 r = allow(&command);
             }
             ("set-command", Some(command), r)
+        }
+        LaunchRunRequestChoice::SetStop => {
+            let stop = req.command.as_deref().unwrap_or("").trim().to_string();
+            let r = write_settings_to_config(
+                root,
+                &serde_json::json!({"launch": {"stop": stop.clone()}}),
+            );
+            ("set-stop", Some(stop), r)
         }
     };
     let cmd_field = bram_trace_preview(command.as_deref().unwrap_or(""), 160);
@@ -44069,6 +44081,10 @@ mod launch_run_tests {
         let run_only: ProjectConfig =
             serde_json::from_str(r#"{"launch":{"run":"./start.sh"}}"#).unwrap();
         assert_eq!(launch_run_stop_of(Some(&run_only)), None);
+        // Settings' empty field saves "", which clears it.
+        let cleared: ProjectConfig =
+            serde_json::from_str(r#"{"launch":{"run":"./site.sh","stop":""}}"#).unwrap();
+        assert_eq!(launch_run_stop_of(Some(&cleared)), None);
     }
 
     #[test]
@@ -44127,6 +44143,10 @@ mod launch_run_tests {
         assert_eq!(
             p(r#"{"choice":"set-command","command":"./site.sh"}"#).unwrap(),
             LaunchRunRequestChoice::SetCommand
+        );
+        assert_eq!(
+            p(r#"{"choice":"set-stop","command":"./site.sh --stop"}"#).unwrap(),
+            LaunchRunRequestChoice::SetStop
         );
         assert!(p(r#"{"choice":"always"}"#).is_err());
     }

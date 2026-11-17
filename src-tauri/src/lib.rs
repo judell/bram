@@ -591,6 +591,29 @@ fn encode_path_for_filename(p: &std::path::Path) -> String {
         .collect()
 }
 
+// claude-session-dir-dotted-and-late: Claude Code's own name for a project's
+// folder under ~/.claude/projects: every character that isn't an ASCII letter
+// or digit becomes `-` (`/Users/jon/p5.js` → `-Users-jon-p5-js`,
+// `C:\Users\jon\p5.js` → `C--Users-jon-p5-js`). Claude Code does this per
+// UTF-16 unit, so a character outside the BMP becomes two dashes; matched
+// here with len_utf16. `encode_path_for_filename` keeps `.` and other marks,
+// so it misses any such path; it stays as it is because its other callers
+// name Bram's own files, and changing it would orphan them. Claude Code also
+// shortens very long names; the cwd scan covers those.
+fn encode_claude_project_dir(p: &std::path::Path) -> String {
+    let mut out = String::new();
+    for c in p.to_string_lossy().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            for _ in 0..c.len_utf16() {
+                out.push('-');
+            }
+        }
+    }
+    out
+}
+
 fn encode_path_for_filename_ascii_lossy(p: &std::path::Path) -> String {
     p.to_string_lossy()
         .chars()
@@ -34998,11 +35021,17 @@ fn find_existing_claude_sessions_dir(
     projects_root: &Path,
     project_path: &Path,
 ) -> SessionsDirLookup {
+    // claude-session-dir-dotted-and-late: Claude Code's own encoding first.
+    // When nothing exists yet it is also the guess, and the right one: the
+    // folder Claude will create later has exactly this name.
+    let claude = projects_root.join(encode_claude_project_dir(project_path));
     let strict = projects_root.join(encode_path_for_filename(project_path));
     let lossy = projects_root.join(encode_path_for_filename_ascii_lossy(project_path));
-    let mut tried = vec![strict.clone()];
-    if lossy != strict {
-        tried.push(lossy.clone());
+    let mut tried = vec![claude.clone()];
+    for candidate in [strict, lossy] {
+        if !tried.contains(&candidate) {
+            tried.push(candidate);
+        }
     }
 
     for candidate in &tried {
@@ -35027,9 +35056,87 @@ fn find_existing_claude_sessions_dir(
     }
 
     SessionsDirLookup {
-        chosen: strict,
+        chosen: claude,
         found: false,
         tried,
+    }
+}
+
+// claude-session-dir-dotted-and-late: what one leaf's transcripts say about
+// whose project it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeLeafCwd {
+    Ours,
+    // Some record names another cwd: never this project's leaf.
+    Foreign,
+    // No cwd record yet (a session that has only just begun writing).
+    Unknown,
+}
+
+fn claude_sessions_dir_cwd_verdict(dir: &Path, project_cwd: &str) -> ClaudeLeafCwd {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return ClaudeLeafCwd::Unknown;
+    };
+    let mut foreign = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines().take(50).flatten() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(cwd) = record.get("cwd").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if canonical_path_string(Path::new(cwd)) == project_cwd {
+                return ClaudeLeafCwd::Ours;
+            }
+            foreign = true;
+            break;
+        }
+    }
+    if foreign {
+        ClaudeLeafCwd::Foreign
+    } else {
+        ClaudeLeafCwd::Unknown
+    }
+}
+
+// The watcher's adopt step, while the startup lookup came back found=false.
+// Given a path an event touched, decide whether its leaf under the projects
+// root is this project's: by Claude Code's folder name, or by a cwd record.
+// Only the event's own leaf is examined, and a leaf proven foreign is
+// remembered in `foreign`, so other projects' writes never set off a scan.
+fn claude_adopt_leaf(
+    projects_root: &Path,
+    project_path: &Path,
+    project_cwd: &str,
+    event_path: &Path,
+    foreign: &mut std::collections::HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let rel = event_path.strip_prefix(projects_root).ok()?;
+    let first = rel.components().next()?;
+    let leaf = projects_root.join(first.as_os_str());
+    if foreign.contains(&leaf) || !leaf.is_dir() {
+        return None;
+    }
+    if leaf.file_name().and_then(|n| n.to_str())
+        == Some(encode_claude_project_dir(project_path).as_str())
+    {
+        return Some(leaf);
+    }
+    match claude_sessions_dir_cwd_verdict(&leaf, project_cwd) {
+        ClaudeLeafCwd::Ours => Some(leaf),
+        ClaudeLeafCwd::Foreign => {
+            foreign.insert(leaf);
+            None
+        }
+        ClaudeLeafCwd::Unknown => None,
     }
 }
 
@@ -81922,9 +82029,11 @@ mod turn_completion_tests {
 #[cfg(test)]
 mod sessions_discovery_tests {
     use super::{
+        canonical_path_string, claude_adopt_leaf, encode_claude_project_dir,
         encode_path_for_filename, encode_path_for_filename_ascii_lossy,
         find_existing_claude_sessions_dir,
     };
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
     fn temp_projects_root(name: &str) -> PathBuf {
@@ -82005,7 +82114,8 @@ mod sessions_discovery_tests {
 
         assert!(lookup.found);
         assert_eq!(lookup.chosen, actual);
-        assert_eq!(lookup.tried.len(), 3);
+        // Claude's encoding, strict, ASCII-lossy, then the scanned match.
+        assert_eq!(lookup.tried.len(), 4);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -82014,7 +82124,8 @@ mod sessions_discovery_tests {
         let root = temp_projects_root("strict-before-scan");
         let project = Path::new("/Users/Måns/Projekt");
         let strict = root.join(encode_path_for_filename(project));
-        let scanned = root.join("-Users-M-ns-Projekt");
+        // Not any encoding of the project: found only by its cwd.
+        let scanned = root.join("-elsewhere");
         std::fs::create_dir_all(&strict).expect("strict dir should be created");
         std::fs::create_dir_all(&scanned).expect("scanned dir should be created");
         std::fs::write(
@@ -82042,7 +82153,8 @@ mod sessions_discovery_tests {
         let lookup = find_existing_claude_sessions_dir(&root, project);
 
         assert!(!lookup.found);
-        assert_eq!(lookup.chosen, root.join(encode_path_for_filename(project)));
+        // The guess is Claude Code's own name for the folder it will create.
+        assert_eq!(lookup.chosen, root.join("-Users-M-ns-Projekt"));
         assert_eq!(lookup.tried.len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -82057,6 +82169,116 @@ mod sessions_discovery_tests {
         assert!(!lookup.found);
         assert_eq!(lookup.tried.len(), 1);
         assert_eq!(lookup.chosen, root.join("-Users-jon-bram"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // claude-session-dir-dotted-and-late: Claude Code's folder names.
+    #[test]
+    fn claude_encoding_turns_every_non_alphanumeric_into_a_dash() {
+        let enc = |p: &str| encode_claude_project_dir(Path::new(p));
+        assert_eq!(enc("/Users/jonudell/p5.js"), "-Users-jonudell-p5-js");
+        assert_eq!(enc("/Users/me/my project_v2"), "-Users-me-my-project-v2");
+        // Windows spellings, as plain strings so every platform checks them.
+        assert_eq!(enc(r"C:\Users\jon\p5.js"), "C--Users-jon-p5-js");
+        // Per UTF-16 unit, as Claude Code's JavaScript replace does.
+        assert_eq!(enc("/a/\u{1F600}"), "-a---");
+        assert_eq!(enc("/Users/Måns"), "-Users-M-ns");
+    }
+
+    // The p5.js receipt: a dotted project whose folder doesn't exist yet. The
+    // guess must be the name Claude will create, not the strict encoding.
+    #[test]
+    fn claude_sessions_lookup_guesses_claudes_name_for_a_dotted_project() {
+        let root = temp_projects_root("dotted-missing");
+        let project = Path::new("/Users/jonudell/p5.js");
+
+        let lookup = find_existing_claude_sessions_dir(&root, project);
+
+        assert!(!lookup.found);
+        assert_eq!(lookup.chosen, root.join("-Users-jonudell-p5-js"));
+        assert_eq!(lookup.tried[0], root.join("-Users-jonudell-p5-js"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_sessions_lookup_prefers_claudes_encoding_over_strict() {
+        let root = temp_projects_root("claude-over-strict");
+        let project = Path::new("/Users/jonudell/p5.js");
+        let strict = root.join(encode_path_for_filename(project));
+        let claude = root.join("-Users-jonudell-p5-js");
+        std::fs::create_dir_all(&strict).expect("strict dir should be created");
+        std::fs::create_dir_all(&claude).expect("claude dir should be created");
+
+        let lookup = find_existing_claude_sessions_dir(&root, project);
+
+        assert!(lookup.found);
+        assert_eq!(lookup.chosen, claude);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn write_session(dir: &Path, cwd: Option<&str>) {
+        std::fs::create_dir_all(dir).expect("leaf should be created");
+        let line = match cwd {
+            Some(c) => format!("{{\"type\":\"user\",\"cwd\":\"{}\"}}\n", c),
+            None => "{\"type\":\"summary\"}\n".to_string(),
+        };
+        std::fs::write(dir.join("s.jsonl"), line).expect("session should be written");
+    }
+
+    // The watcher's adopt step: a leaf created after launch is recognized as
+    // this project's, by name or by cwd; a foreign leaf is remembered and
+    // never re-read; a leaf with no cwd yet is retried on its next write.
+    #[test]
+    fn adopt_step_classifies_late_leaves() {
+        let root = temp_projects_root("adopt");
+        let project = root.join("work").join("p5.js");
+        std::fs::create_dir_all(&project).expect("project should be created");
+        let cwd = canonical_path_string(&project);
+        let mut foreign = HashSet::new();
+
+        // By Claude Code's folder name.
+        let named = root.join(encode_claude_project_dir(&project));
+        write_session(&named, None);
+        assert_eq!(
+            claude_adopt_leaf(&root, &project, &cwd, &named.join("s.jsonl"), &mut foreign),
+            Some(named.clone())
+        );
+
+        // Another project's leaf: not ours, and not read again.
+        let other = root.join("-elsewhere");
+        write_session(&other, Some("/somewhere/else"));
+        assert_eq!(
+            claude_adopt_leaf(&root, &project, &cwd, &other.join("s.jsonl"), &mut foreign),
+            None
+        );
+        assert!(foreign.contains(&other));
+
+        // A shortened or otherwise unexpected name: cwd decides, and a leaf
+        // with no cwd record yet is retried rather than written off.
+        let odd = root.join("-shortened-abc123");
+        write_session(&odd, None);
+        assert_eq!(
+            claude_adopt_leaf(&root, &project, &cwd, &odd.join("s.jsonl"), &mut foreign),
+            None
+        );
+        assert!(!foreign.contains(&odd));
+        write_session(&odd, Some(&project.display().to_string()));
+        assert_eq!(
+            claude_adopt_leaf(&root, &project, &cwd, &odd.join("s.jsonl"), &mut foreign),
+            Some(odd.clone())
+        );
+
+        // Nothing outside the projects root is adopted.
+        assert_eq!(
+            claude_adopt_leaf(
+                &root,
+                &project,
+                &cwd,
+                Path::new("/tmp/x.jsonl"),
+                &mut foreign
+            ),
+            None
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -111061,7 +111283,13 @@ pub fn run() {
             // containing roots (not the file — the file rotates per session
             // and may not exist at startup) so the tools pane can refetch
             // immediately instead of waiting on fallback polling.
-            let claude_sessions_dir = claude_sessions_dir(&app.handle()).ok();
+            // claude-session-dir-dotted-and-late: keep `found` too. When the
+            // lookup only guessed, the loop below adopts the real leaf when it
+            // appears, instead of treating this project's own session as
+            // foreign until a relaunch.
+            let claude_lookup = claude_sessions_dir_lookup(&app.handle()).ok();
+            let claude_dir_found = claude_lookup.as_ref().map_or(false, |l| l.found);
+            let claude_sessions_dir = claude_lookup.map(|l| l.chosen);
             let codex_sessions_dir = home_dir().map(|h| h.join(".codex").join("sessions"));
             // #212 trace: record the session dirs the watcher resolved at
             // startup. `claude=unresolved` (or a path that doesn't match where
@@ -111329,6 +111557,15 @@ pub fn run() {
                 let claude_sessions_parent: Option<std::path::PathBuf> = claude_sessions_dir
                     .as_ref()
                     .and_then(|sd| sd.parent().map(|p| p.to_path_buf()));
+                // claude-session-dir-dotted-and-late: the leaf can be adopted
+                // once, while the startup lookup only guessed.
+                let mut claude_sessions_dir = claude_sessions_dir;
+                let mut claude_dir_found = claude_dir_found;
+                let claude_project_path =
+                    strip_unc_prefix(proj_root_path.canonicalize().unwrap_or_else(|_| proj_root_path.clone()));
+                let claude_project_cwd = canonical_path_string(&claude_project_path);
+                let mut claude_foreign_leaves: std::collections::HashSet<std::path::PathBuf> =
+                    std::collections::HashSet::new();
                 use std::sync::mpsc::RecvTimeoutError;
                 loop {
                     let res = rx.recv_timeout(Duration::from_millis(100));
@@ -111402,6 +111639,43 @@ pub fn run() {
                         Err(RecvTimeoutError::Timeout) => continue,
                         Err(RecvTimeoutError::Disconnected) => break,
                     };
+                    // claude-session-dir-dotted-and-late: while the startup
+                    // lookup only guessed, adopt this project's real leaf
+                    // the first time an event lands in it, then handle that
+                    // event as our own below. Once found, the leaf stays put.
+                    if !claude_dir_found {
+                        if let Some(parent) = claude_sessions_parent.as_ref() {
+                            let adopted = event.paths.iter().find_map(|p| {
+                                claude_adopt_leaf(
+                                    parent,
+                                    &claude_project_path,
+                                    &claude_project_cwd,
+                                    p,
+                                    &mut claude_foreign_leaves,
+                                )
+                            });
+                            if let Some(leaf) = adopted {
+                                // `appeared`: the guess was right and the
+                                // folder now exists. `adopted`: a different
+                                // folder turned out to be ours.
+                                let line = if claude_sessions_dir.as_ref() == Some(&leaf) {
+                                    format!("op=session-dir-appeared path={}", leaf.display())
+                                } else {
+                                    format!(
+                                        "op=session-dir-adopted from={} to={}",
+                                        claude_sessions_dir
+                                            .as_ref()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| "unresolved".to_string()),
+                                        leaf.display()
+                                    )
+                                };
+                                append_bram_trace_line(&app_handle, "watcher", &line);
+                                claude_sessions_dir = Some(leaf);
+                                claude_dir_found = true;
+                            }
+                        }
+                    }
                     let state_dir_name = bram_state_dir_name(&proj_root_path);
                     let in_ignored_dir = |p: &std::path::Path| {
                         let igs = [".git", "target", "node_modules", state_dir_name];

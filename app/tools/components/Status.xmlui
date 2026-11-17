@@ -95,18 +95,11 @@
          (tracked is capped at 200 by the host). -->
     <VStack when="{window.__bramLaunchRunText(launchRunView.value, 'configured')}" gap="$space-2">
       <Heading level="h3">Launch command</Heading>
-      <HStack verticalAlignment="center" wrapContent="true" gap="$space-2">
-        <Text
-          value="{window.__bramLaunchRunText(launchRunView.value, 'line')}"
-          tooltip="{window.__bramLaunchRunText(launchRunView.value, 'where')}" />
-        <Button
-          when="{window.__bramLaunchRunText(launchRunView.value, 'askAgain')}"
-          label="Ask again"
-          variant="outlined"
-          size="xs"
-          tooltip="Forget this computer's answer and show the question again"
-          onClick="window.__bramLaunchRunDecide('ask-again')" />
-      </HStack>
+      <!-- launch-run-setting: the switch and the command live in Settings. -->
+      <Text
+        value="{window.__bramLaunchRunText(launchRunView.value, 'line')}"
+        tooltip="{window.__bramLaunchRunText(launchRunView.value, 'where')}" />
+
     </VStack>
     <VStack when="{stateDirPlan.value}" gap="$space-2">
       <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"

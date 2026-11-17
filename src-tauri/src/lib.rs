@@ -653,6 +653,11 @@ struct LaunchConfig {
     // address, and never owned or stopped by Bram (see run_launch_command).
     #[serde(default)]
     run: Option<String>,
+    // launch-run-setting: whether to run it at all. Absent means on: a repo
+    // that commits a `run` wants it run. The Settings tab's switch writes
+    // this to the local .bram/settings.json, which overrides .bram.json.
+    #[serde(default, rename = "runAtLaunch")]
+    run_at_launch: Option<bool>,
 }
 
 // repo-authored-first-run-greeting: `.bram.json` "greeting". `file` is the
@@ -43293,9 +43298,10 @@ struct LaunchRunConsent {
 #[serde(rename_all = "kebab-case")]
 enum LaunchRunDecision {
     NotConfigured,
+    // launch-run-setting: the switch is off. Never runs, never asks.
+    Off,
     Ask,
     Allow,
-    Decline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -43328,6 +43334,8 @@ struct LaunchRunOutcome {
 struct LaunchRunView {
     decision: LaunchRunDecision,
     command: Option<String>,
+    // The switch's state: launch.runAtLaunch, absent meaning on.
+    run_at_launch: bool,
     project_root: String,
     log_path: String,
     last_run: Option<LaunchRunOutcome>,
@@ -43336,14 +43344,22 @@ struct LaunchRunView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum LaunchRunRequestChoice {
+    // The banner's Allow, or the Settings switch turned on: the switch on,
+    // this command allowed here, and run now.
     Allow,
+    // The banner's Don't allow, or the switch turned off.
     Decline,
-    AskAgain,
+    // Settings saved a command: written to local settings; allowed here
+    // when the switch is on, since the user typed it. Not run until the
+    // next launch.
+    SetCommand,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct LaunchRunRequest {
     choice: LaunchRunRequestChoice,
+    #[serde(default)]
+    command: Option<String>,
 }
 
 static LAUNCH_RUN_STARTED: std::sync::atomic::AtomicBool =
@@ -43376,14 +43392,24 @@ fn launch_run_roots_match(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
+fn launch_run_at_launch_of(cfg: Option<&ProjectConfig>) -> bool {
+    cfg.and_then(|c| c.launch.as_ref())
+        .and_then(|l| l.run_at_launch)
+        .unwrap_or(true)
+}
+
 fn launch_run_decision(
     command: Option<&str>,
+    run_at_launch: bool,
     project_root: &str,
     consent: Option<&LaunchRunConsent>,
 ) -> LaunchRunDecision {
     let Some(command) = command.map(str::trim).filter(|c| !c.is_empty()) else {
         return LaunchRunDecision::NotConfigured;
     };
+    if !run_at_launch {
+        return LaunchRunDecision::Off;
+    }
     match consent {
         Some(c)
             if c.schema == LAUNCH_RUN_CONSENT_SCHEMA
@@ -43392,7 +43418,8 @@ fn launch_run_decision(
         {
             match c.decision {
                 LaunchRunChoice::Allow => LaunchRunDecision::Allow,
-                LaunchRunChoice::Decline => LaunchRunDecision::Decline,
+                // A decline record from #498's first build: the switch's off.
+                LaunchRunChoice::Decline => LaunchRunDecision::Off,
             }
         }
         _ => LaunchRunDecision::Ask,
@@ -43432,18 +43459,26 @@ fn write_launch_run_consent(path: &Path, consent: &LaunchRunConsent) -> Result<(
 }
 
 fn launch_run_view<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> LaunchRunView {
-    let command = launch_run_command_of(load_project_config(root).as_ref());
+    let cfg = load_project_config(root);
+    let command = launch_run_command_of(cfg.as_ref());
+    let run_at_launch = launch_run_at_launch_of(cfg.as_ref());
     let root_str = launch_run_canonical_root(root)
         .to_string_lossy()
         .to_string();
     let consent = launch_run_consent_path_for_app(app, root)
         .ok()
         .and_then(|p| read_launch_run_consent(&p));
-    let decision = launch_run_decision(command.as_deref(), &root_str, consent.as_ref());
+    let decision = launch_run_decision(
+        command.as_deref(),
+        run_at_launch,
+        &root_str,
+        consent.as_ref(),
+    );
     let last_run = LAUNCH_RUN_LAST.lock().ok().and_then(|g| g.clone());
     LaunchRunView {
         decision,
         command,
+        run_at_launch,
         project_root: root_str,
         log_path: LAUNCH_RUN_LOG_DISPLAY.to_string(),
         last_run,
@@ -43689,13 +43724,20 @@ fn start_launch_run_at_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
                 bram_trace_preview(command, 160)
             ),
         ),
-        LaunchRunDecision::Decline => trace_launch_run(app, "op=skip reason=declined"),
+        LaunchRunDecision::Off => trace_launch_run(app, "op=skip reason=off"),
         LaunchRunDecision::Allow => run_launch_command(app, &root, command, "launch"),
     }
 }
 
-// POST /__launch-run/decision {"choice": "allow" | "decline" | "ask-again"}.
-// Allow also runs the command now, so nobody has to relaunch to get it.
+// POST /__launch-run/decision {"choice": "allow" | "decline" | "set-command",
+// "command"?}. The banner and the Settings tab both come here.
+// - allow: the switch on (local launch.runAtLaunch), this command allowed on
+//   this computer, and run now, so nobody has to relaunch to get it.
+// - decline: the switch off. The command never runs and the banner never
+//   asks, until the switch goes back on.
+// - set-command: Settings saved a command to local launch.run. With the
+//   switch on it is allowed here (the user typed it); it runs at the next
+//   launch, not on save.
 fn handle_launch_run_decision<R: tauri::Runtime>(
     app: &AppHandle<R>,
     root: &Path,
@@ -43707,45 +43749,54 @@ fn handle_launch_run_decision<R: tauri::Runtime>(
         Err(e) => return (400, text, format!("bad request: {}", e).into_bytes()),
     };
     let view = launch_run_view(app, root);
-    let Some(command) = view.command.clone() else {
-        return (409, text, b"no launch.run in .bram.json".to_vec());
-    };
-    let path = match launch_run_consent_path_for_app(app, root) {
+    let consent_path = match launch_run_consent_path_for_app(app, root) {
         Ok(p) => p,
         Err(e) => return (500, text, e.into_bytes()),
     };
-    let write = |decision: LaunchRunChoice| {
+    let allow = |command: &str| {
         write_launch_run_consent(
-            &path,
+            &consent_path,
             &LaunchRunConsent {
                 schema: LAUNCH_RUN_CONSENT_SCHEMA,
                 project_root: view.project_root.clone(),
-                command: command.clone(),
-                decision,
+                command: command.to_string(),
+                decision: LaunchRunChoice::Allow,
                 at_ms: unix_now_ms(),
             },
         )
     };
-    let result = match req.choice {
-        LaunchRunRequestChoice::Allow => write(LaunchRunChoice::Allow),
-        LaunchRunRequestChoice::Decline => write(LaunchRunChoice::Decline),
-        LaunchRunRequestChoice::AskAgain => match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        },
+    let set_switch = |on: bool| {
+        write_settings_to_config(root, &serde_json::json!({"launch": {"runAtLaunch": on}}))
     };
-    let choice = match req.choice {
-        LaunchRunRequestChoice::Allow => "allow",
-        LaunchRunRequestChoice::Decline => "decline",
-        LaunchRunRequestChoice::AskAgain => "ask-again",
+    let (choice, command, result): (&str, Option<String>, Result<(), String>) = match req.choice {
+        LaunchRunRequestChoice::Allow => {
+            let Some(command) = view.command.clone() else {
+                return (409, text, b"no launch.run configured".to_vec());
+            };
+            let r = set_switch(true).and_then(|_| allow(&command));
+            ("allow", Some(command), r)
+        }
+        LaunchRunRequestChoice::Decline => ("decline", view.command.clone(), set_switch(false)),
+        LaunchRunRequestChoice::SetCommand => {
+            let command = req.command.as_deref().unwrap_or("").trim().to_string();
+            let mut r = write_settings_to_config(
+                root,
+                &serde_json::json!({"launch": {"run": command.clone()}}),
+            );
+            if r.is_ok() && view.run_at_launch && !command.is_empty() {
+                r = allow(&command);
+            }
+            ("set-command", Some(command), r)
+        }
     };
+    let cmd_field = bram_trace_preview(command.as_deref().unwrap_or(""), 160);
     if let Err(e) = result {
         trace_launch_run(
             app,
             &format!(
-                "op=decision choice={} error={}",
+                "op=decision choice={} cmd={} error={}",
                 choice,
+                cmd_field,
                 bram_trace_preview(&e, 160)
             ),
         );
@@ -43753,14 +43804,12 @@ fn handle_launch_run_decision<R: tauri::Runtime>(
     }
     trace_launch_run(
         app,
-        &format!(
-            "op=decision choice={} cmd={}",
-            choice,
-            bram_trace_preview(&command, 160)
-        ),
+        &format!("op=decision choice={} cmd={}", choice, cmd_field),
     );
     if req.choice == LaunchRunRequestChoice::Allow {
-        run_launch_command(app, root, &command, "allowed");
+        if let Some(command) = command.as_deref() {
+            run_launch_command(app, root, command, "allowed");
+        }
     }
     emit_replayable_signal(app, "launch-run-changed");
     match serde_json::to_vec(&launch_run_view(app, root)) {
@@ -43788,7 +43837,7 @@ fn launch_run_status_row(view: &LaunchRunView) -> Option<serde_json::Value> {
             Some(format!("Open {} to see what went wrong", view.log_path)),
         ),
         (LaunchRunDecision::Ask, None) => ("none", "waiting for you to allow it".to_string(), None),
-        (LaunchRunDecision::Decline, None) => ("none", "not allowed".to_string(), None),
+        (LaunchRunDecision::Off, None) => ("none", "turned off in Settings".to_string(), None),
         (_, None) => ("none", "not run yet".to_string(), None),
     };
     let mut detail = format!("`{}` from the project root", command);
@@ -43833,6 +43882,7 @@ mod launch_run_tests {
         LaunchRunView {
             decision,
             command: Some("./start.sh".to_string()),
+            run_at_launch: decision != LaunchRunDecision::Off,
             project_root: "/Users/me/studio".to_string(),
             log_path: LAUNCH_RUN_LOG_DISPLAY.to_string(),
             last_run: last,
@@ -43855,11 +43905,11 @@ mod launch_run_tests {
     #[test]
     fn no_command_means_not_configured() {
         assert_eq!(
-            launch_run_decision(None, "/r", None),
+            launch_run_decision(None, true, "/r", None),
             LaunchRunDecision::NotConfigured
         );
         assert_eq!(
-            launch_run_decision(Some("  "), "/r", None),
+            launch_run_decision(Some("  "), true, "/r", None),
             LaunchRunDecision::NotConfigured
         );
     }
@@ -43868,35 +43918,82 @@ mod launch_run_tests {
     fn asks_until_this_exact_command_is_decided_for_this_root() {
         let r = "/Users/me/studio";
         assert_eq!(
-            launch_run_decision(Some("./start.sh"), r, None),
+            launch_run_decision(Some("./start.sh"), true, r, None),
             LaunchRunDecision::Ask
         );
         let allow = consent(r, "./start.sh", LaunchRunChoice::Allow);
         assert_eq!(
-            launch_run_decision(Some("./start.sh"), r, Some(&allow)),
+            launch_run_decision(Some("./start.sh"), true, r, Some(&allow)),
             LaunchRunDecision::Allow
         );
         // A changed command asks again, whatever was decided before.
         assert_eq!(
-            launch_run_decision(Some("./start.sh --restart"), r, Some(&allow)),
+            launch_run_decision(Some("./start.sh --restart"), true, r, Some(&allow)),
             LaunchRunDecision::Ask
         );
         // Another folder's consent doesn't count.
         assert_eq!(
-            launch_run_decision(Some("./start.sh"), "/Users/me/other", Some(&allow)),
+            launch_run_decision(Some("./start.sh"), true, "/Users/me/other", Some(&allow)),
             LaunchRunDecision::Ask
         );
         let decline = consent(r, "./start.sh", LaunchRunChoice::Decline);
         assert_eq!(
-            launch_run_decision(Some("./start.sh"), r, Some(&decline)),
-            LaunchRunDecision::Decline
+            launch_run_decision(Some("./start.sh"), true, r, Some(&decline)),
+            LaunchRunDecision::Off
         );
         let mut old = allow.clone();
         old.schema = 0;
         assert_eq!(
-            launch_run_decision(Some("./start.sh"), r, Some(&old)),
+            launch_run_decision(Some("./start.sh"), true, r, Some(&old)),
             LaunchRunDecision::Ask
         );
+    }
+
+    // launch-run-setting: the switch. Off wins over any consent; on with no
+    // consent for this command asks; absent means on.
+    #[test]
+    fn the_switch_decides_before_consent() {
+        let r = "/Users/me/studio";
+        let allow = consent(r, "./start.sh", LaunchRunChoice::Allow);
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), false, r, Some(&allow)),
+            LaunchRunDecision::Off
+        );
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), false, r, None),
+            LaunchRunDecision::Off
+        );
+        assert_eq!(
+            launch_run_decision(Some("./start.sh"), true, r, None),
+            LaunchRunDecision::Ask
+        );
+        // No command at all is not configured, whatever the switch says.
+        assert_eq!(
+            launch_run_decision(None, false, r, None),
+            LaunchRunDecision::NotConfigured
+        );
+    }
+
+    #[test]
+    fn run_at_launch_defaults_on_and_local_settings_override() {
+        let committed: ProjectConfig =
+            serde_json::from_str(r#"{"launch":{"run":"./start.sh"}}"#).unwrap();
+        assert!(launch_run_at_launch_of(Some(&committed)));
+        let off: ProjectConfig =
+            serde_json::from_str(r#"{"launch":{"run":"./site.sh","runAtLaunch":false}}"#).unwrap();
+        assert!(!launch_run_at_launch_of(Some(&off)));
+        assert!(launch_run_at_launch_of(None));
+        // The merge that lays .bram/settings.json over .bram.json.
+        let merged = merge_settings_into_config(
+            serde_json::json!({"launch":{"openApp":"/","run":"./start.sh"}}),
+            &serde_json::json!({"launch":{"runAtLaunch":false}}),
+        );
+        let cfg: ProjectConfig = serde_json::from_value(merged).unwrap();
+        assert_eq!(
+            launch_run_command_of(Some(&cfg)).as_deref(),
+            Some("./start.sh")
+        );
+        assert!(!launch_run_at_launch_of(Some(&cfg)));
     }
 
     #[test]
@@ -43915,7 +44012,7 @@ mod launch_run_tests {
         ));
         let c = consent(r"C:\Users\jon\studio", "start.cmd", LaunchRunChoice::Allow);
         assert_eq!(
-            launch_run_decision(Some("start.cmd"), "c:/Users/jon/studio", Some(&c)),
+            launch_run_decision(Some("start.cmd"), true, "c:/Users/jon/studio", Some(&c)),
             LaunchRunDecision::Allow
         );
     }
@@ -43953,8 +44050,8 @@ mod launch_run_tests {
             LaunchRunRequestChoice::Decline
         );
         assert_eq!(
-            p(r#"{"choice":"ask-again"}"#).unwrap(),
-            LaunchRunRequestChoice::AskAgain
+            p(r#"{"choice":"set-command","command":"./site.sh"}"#).unwrap(),
+            LaunchRunRequestChoice::SetCommand
         );
         assert!(p(r#"{"choice":"always"}"#).is_err());
     }
@@ -43977,7 +44074,7 @@ mod launch_run_tests {
     fn status_row_earns_a_verdict_only_from_a_finished_run() {
         let level = |v: &LaunchRunView| launch_run_status_row(v).unwrap()["level"].clone();
         assert_eq!(level(&view(LaunchRunDecision::Ask, None)), "none");
-        assert_eq!(level(&view(LaunchRunDecision::Decline, None)), "none");
+        assert_eq!(level(&view(LaunchRunDecision::Off, None)), "none");
         assert_eq!(
             level(&view(
                 LaunchRunDecision::Allow,

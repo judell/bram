@@ -4033,6 +4033,8 @@ window.__bramSaveSplitterSize = function (key, sizes) {
 // The project defaults are pinned by settings_default_view_tests in lib.rs;
 // change a default there and here together.
 window.settingsInfoBodies = {
+  launchRun:
+    "## Launch command\n\nA command Bram runs once each time it opens, from the project folder, such as a script that starts your app's back end. Bram doesn't wait for it, and doesn't stop it when it quits, so whatever it starts keeps running. It should return quickly and reuse what's already running. Its output goes to `.bram/bram-traces/launch-run.log`, and Status shows how its last run went.\n\nA repo can commit one in `.bram.json` as `launch.run`. Editing the field here changes it for this computer only.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.run`. Default: the repo's command, if it has one.*\n\n## Run it each time Bram opens\n\nTurning this on also allows the command on this computer, and runs it right away. Off, it never runs. When a repo's command hasn't been allowed here yet, Bram asks once with a banner; **Don't allow** turns this off.\n\n*Saved for this project on this computer, in `.bram/settings.json` as `launch.runAtLaunch`. Default: on when the repo names a command.*",
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
@@ -19994,7 +19996,10 @@ window.__bramStateMoveDecide = function (choice) {
 // issue-498-launch-run-command: the banner's Allow / Don't allow and Status's
 // Ask again. A plain fetch, like __bramStateMoveDecide; the host pushes
 // launch-run-changed and the view refetches on it.
-window.__bramLaunchRunDecide = function (choice) {
+//   choice: "allow" (banner Allow, or the Settings switch turned on),
+//   "decline" (banner Don't allow, or the switch turned off), "set-command"
+//   (Settings saved `command`). launch-run-setting.
+window.__bramLaunchRunDecide = function (choice, command) {
   var started = Date.now();
   var trace = function (op, extra) {
     try {
@@ -20016,10 +20021,22 @@ window.__bramLaunchRunDecide = function (choice) {
     .fetch("/__launch-run/decision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ choice: choice }),
+      body: JSON.stringify(choice === "set-command" ? { choice: choice, command: command || "" } : { choice: choice }),
     })
     .then(function (r) { trace("done", { status: r.status }); })
     .catch(function (e) { trace("failed", { error: String(e) }); });
+};
+
+// launch-run-setting: the Settings switch. On is Allow (this computer's
+// consent for the command shown, and it runs now); off is Decline. Sends
+// nothing when the host already has that state, so a programmatic setValue
+// that echoes the host's state can never post (the loop that kept the switch
+// from staying off).
+window.__bramLaunchRunSwitch = function (on, view) {
+  var want = !!on;
+  var has = !!(view && view.runAtLaunch !== false && view.decision !== "off");
+  if (view && want === has && (want ? view.decision === "allow" : true)) return null;
+  return window.__bramLaunchRunDecide(want ? "allow" : "decline");
 };
 
 // The words for /__launch-run's view. Pure: reads only its arguments.
@@ -20028,14 +20045,16 @@ window.__bramLaunchRunDecide = function (choice) {
 //   where     the banner's tooltip: the folder it runs in, and the log
 //   configured  the repo names a launch command
 //   line      Status's one-line summary
-//   askAgain  Status offers Ask again (a decision is recorded)
+//   on        the Settings switch's state (launch.runAtLaunch, absent = on)
+//   command   the command, or "" (the Settings field)
 window.__bramLaunchRunText = function (view, key) {
   var v = view || {};
   var cmd = v.command || "";
   var d = v.decision || "not-configured";
   if (key === "show") return d === "ask" && !!cmd;
   if (key === "configured") return !!cmd && d !== "not-configured";
-  if (key === "askAgain") return d === "allow" || d === "decline";
+  if (key === "on") return v.runAtLaunch !== false;
+  if (key === "command") return cmd;
   if (key === "text") {
     return "This repo asks Bram to run " + cmd + " each time it opens. Allow it on this computer?";
   }
@@ -20043,15 +20062,15 @@ window.__bramLaunchRunText = function (view, key) {
     return "Runs from " + (v.projectRoot || "the project folder") + ". Output goes to " + (v.logPath || "the launch log") + ". Bram doesn't stop it when it quits.";
   }
   if (key === "line") {
-    var verdict = d === "allow" ? "allowed on this computer"
-      : d === "decline" ? "not allowed on this computer"
+    var verdict = d === "allow" ? "on, and allowed on this computer"
+      : d === "off" ? "turned off"
       : "waiting for you to allow it";
     var run = v.lastRun;
     var last = "";
     if (run && run.state === "running") last = " Running now.";
     else if (run && run.state === "exited") last = " Last run exited " + run.code + ".";
     else if (run && run.state === "failed") last = " Last run didn't start.";
-    return "Runs " + cmd + " at each launch: " + verdict + "." + last;
+    return "Runs " + cmd + " at each launch: " + verdict + "." + last + " Change it in Settings.";
   }
   return "";
 };

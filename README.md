@@ -332,11 +332,16 @@ script that starts the app's back end:
   Bram doesn't stop it when it quits. Whatever it starts keeps running. So
   the command should return quickly and reuse what's already running, as
   Bram Studio's `start.sh` does.
+- **It's a setting.** Settings → **Launch command** shows the command and
+  a **Run it each time Bram opens** switch. Both are saved for this computer
+  in `.bram/settings.json`, which overrides the repo's `.bram.json`. The
+  switch is on by default when a repo names a command; to have it off, set
+  `"runAtLaunch": false` beside `run`.
 - **It asks first.** A cloned repo's command doesn't run until you click
-  **Allow** on the banner, on each computer. Allow runs it right away, too.
-  The answer, Allow or **Don't allow**, is kept for that exact command:
-  change the command and Bram asks again. Status's **Ask again** forgets
-  the answer.
+  **Allow** on the banner, on each computer. Allow runs it right away, too,
+  and is kept for that exact command: change the command and Bram asks
+  again. **Don't allow** turns the switch off. Turning the switch on in
+  Settings counts as Allow.
 
 ### A repo's own first message
 

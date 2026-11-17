@@ -161,6 +161,72 @@
 
       <ContentSeparator />
 
+      <!-- launch-run-setting: the repo's launch command (launch.run, #498)
+           and whether to run it (launch.runAtLaunch, absent = on). Both go
+           through POST /__launch-run/decision, not saveSettings, because
+           turning the switch on is also this computer's consent for the
+           command, and runs it now. The view refetches on the host's
+           launch-run-changed push; a ChangeListener keeps the switch in step
+           with the banner via setValue, which doesn't fire didChange
+           (https://www.xmlui.org/docs/reference/components/Switch). -->
+      <DataSource id="launchRunSettings" url="/__launch-run" />
+      <PushSource id="launchRunSettingsEvt" initial="{null}"
+        subscribe="{window.bramSubscribeTauriEvent('launch-run-changed')}" />
+      <ChangeListener listenTo="{launchRunSettingsEvt.value &amp;&amp; launchRunSettingsEvt.value.tick}"
+        onDidChange="window.__bramRefetchOnLiveEvent(launchRunSettingsEvt.value, launchRunSettings)" />
+      <VStack gap="$space-2">
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
+          <Button
+            icon="info"
+            size="xs"
+            variant="ghost"
+            tooltip="About Launch command"
+            onClick="infoTitle = 'Launch command'; infoBody = window.settingsInfoBodies.launchRun; settingInfoDialog.open()" />
+          <Heading level="h3">Launch command</Heading>
+        </HStack>
+        <Text
+          color="$textColor-secondary"
+          fontSize="$fontSize-sm"
+          value="A command Bram runs from the project folder each time it opens, such as a script that starts your app's back end. Bram doesn't stop it when it quits." />
+        <VStack when="{launchRunSettings.loaded}" gap="$space-2">
+          <HStack verticalAlignment="center" gap="$space-2" wrapContent="true">
+            <TextBox
+              id="launchRunCommand"
+              width="24rem"
+              placeholder="./start.sh"
+              initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'command')}" />
+            <Button
+              label="Save"
+              size="sm"
+              enabled="{launchRunCommand.value !== window.__bramLaunchRunText(launchRunSettings.value, 'command')}"
+              onClick="window.__bramLaunchRunDecide('set-command', launchRunCommand.value)" />
+          </HStack>
+          <Switch
+            id="launchRunSwitch"
+            label="Run it each time Bram opens"
+            labelPosition="end"
+            enabled="{!!window.__bramLaunchRunText(launchRunSettings.value, 'command')}"
+            initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'on')}"
+            onDidChange="(v) => window.__bramLaunchRunSwitch(v, launchRunSettings.value)" />
+          <!-- The handler gets {prevValue, newValue}, not the value
+               (https://www.xmlui.org/docs/reference/components/ChangeListener).
+               Passing the object made setValue turn the switch on, and that
+               fired didChange here, so the switch wouldn't stay off. -->
+          <ChangeListener
+            listenTo="{window.__bramLaunchRunText(launchRunSettings.value, 'on')}"
+            onDidChange="(change) => launchRunSwitch.setValue(change.newValue)" />
+        </VStack>
+      </VStack>
+
+      <ContentSeparator />
+
       <!-- suggest-fresh-session: the host serves sessions.{suggestOnNewItem,
            suggestOnNewIssue,suggestOnTopicShift} from GET /__settings. Same
            save-on-change shape as the hot-reload switch below; the read goes

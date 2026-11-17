@@ -83170,7 +83170,9 @@ mod sessions_discovery_tests {
     fn write_session(dir: &Path, cwd: Option<&str>) {
         std::fs::create_dir_all(dir).expect("leaf should be created");
         let line = match cwd {
-            Some(c) => format!("{{\"type\":\"user\",\"cwd\":\"{}\"}}\n", c),
+            // Serialized, not formatted: a Windows cwd's backslashes made the
+            // formatted line invalid JSON (v0.8.10 windows-latest, 2026-11-17).
+            Some(c) => format!("{}\n", serde_json::json!({ "type": "user", "cwd": c })),
             None => "{\"type\":\"summary\"}\n".to_string(),
         };
         std::fs::write(dir.join("s.jsonl"), line).expect("session should be written");

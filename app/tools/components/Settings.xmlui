@@ -215,6 +215,12 @@
             enabled="{!!window.__bramLaunchRunText(launchRunSettings.value, 'command')}"
             initialValue="{window.__bramLaunchRunText(launchRunSettings.value, 'on')}"
             onDidChange="(v) => window.__bramLaunchRunSwitch(v, launchRunSettings.value)" />
+          <!-- launch-stop-command: say what turning it off runs. -->
+          <Text
+            when="{window.__bramLaunchRunText(launchRunSettings.value, 'stopLine')}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{window.__bramLaunchRunText(launchRunSettings.value, 'stopLine')}" />
           <!-- The handler gets {prevValue, newValue}, not the value
                (https://www.xmlui.org/docs/reference/components/ChangeListener).
                Passing the object made setValue turn the switch on, and that

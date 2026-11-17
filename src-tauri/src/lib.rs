@@ -658,6 +658,11 @@ struct LaunchConfig {
     // this to the local .bram/settings.json, which overrides .bram.json.
     #[serde(default, rename = "runAtLaunch")]
     run_at_launch: Option<bool>,
+    // launch-stop-command: run when the switch goes off, to stop what `run`
+    // started (Bram can't: the command is unowned and detaches). Only after
+    // this computer allowed `run`; never at quit.
+    #[serde(default)]
+    stop: Option<String>,
 }
 
 // repo-authored-first-run-greeting: `.bram.json` "greeting". `file` is the
@@ -43336,6 +43341,8 @@ struct LaunchRunView {
     command: Option<String>,
     // The switch's state: launch.runAtLaunch, absent meaning on.
     run_at_launch: bool,
+    // launch-stop-command: what turning the switch off runs, if anything.
+    stop_command: Option<String>,
     project_root: String,
     log_path: String,
     last_run: Option<LaunchRunOutcome>,
@@ -43390,6 +43397,26 @@ fn launch_run_roots_match(a: &str, b: &str) -> bool {
         s
     }
     norm(a) == norm(b)
+}
+
+fn launch_run_stop_of(cfg: Option<&ProjectConfig>) -> Option<String> {
+    cfg.and_then(|c| c.launch.as_ref())
+        .and_then(|l| l.stop.as_deref())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+}
+
+// launch-stop-command: the stop command to run when the switch goes off,
+// given the decision just before. Only an allowed run command earns its
+// stop: a repo never allowed here has its stop command unread too.
+fn launch_run_stop_to_run(before: LaunchRunDecision, stop: Option<&str>) -> Option<String> {
+    if before != LaunchRunDecision::Allow {
+        return None;
+    }
+    stop.map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
 }
 
 fn launch_run_at_launch_of(cfg: Option<&ProjectConfig>) -> bool {
@@ -43462,6 +43489,7 @@ fn launch_run_view<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> Launch
     let cfg = load_project_config(root);
     let command = launch_run_command_of(cfg.as_ref());
     let run_at_launch = launch_run_at_launch_of(cfg.as_ref());
+    let stop_command = launch_run_stop_of(cfg.as_ref());
     let root_str = launch_run_canonical_root(root)
         .to_string_lossy()
         .to_string();
@@ -43479,6 +43507,7 @@ fn launch_run_view<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> Launch
         decision,
         command,
         run_at_launch,
+        stop_command,
         project_root: root_str,
         log_path: LAUNCH_RUN_LOG_DISPLAY.to_string(),
         last_run,
@@ -43565,7 +43594,9 @@ fn run_launch_command<R: tauri::Runtime>(
         let Ok(mut g) = LAUNCH_RUN_LAST.lock() else {
             return;
         };
-        if g.as_ref().map(|o| o.state) == Some(LaunchRunState::Running) {
+        // A stop always runs: a run command that never returned must not
+        // block the command that stops it.
+        if reason != "stop" && g.as_ref().map(|o| o.state) == Some(LaunchRunState::Running) {
             drop(g);
             trace_launch_run(app, "op=skip reason=already-running");
             return;
@@ -43811,6 +43842,11 @@ fn handle_launch_run_decision<R: tauri::Runtime>(
             run_launch_command(app, root, command, "allowed");
         }
     }
+    if req.choice == LaunchRunRequestChoice::Decline {
+        if let Some(stop) = launch_run_stop_to_run(view.decision, view.stop_command.as_deref()) {
+            run_launch_command(app, root, &stop, "stop");
+        }
+    }
     emit_replayable_signal(app, "launch-run-changed");
     match serde_json::to_vec(&launch_run_view(app, root)) {
         Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
@@ -43883,6 +43919,7 @@ mod launch_run_tests {
             decision,
             command: Some("./start.sh".to_string()),
             run_at_launch: decision != LaunchRunDecision::Off,
+            stop_command: None,
             project_root: "/Users/me/studio".to_string(),
             log_path: LAUNCH_RUN_LOG_DISPLAY.to_string(),
             last_run: last,
@@ -43994,6 +44031,44 @@ mod launch_run_tests {
             Some("./start.sh")
         );
         assert!(!launch_run_at_launch_of(Some(&cfg)));
+    }
+
+    // launch-stop-command: turning the switch off runs the stop command only
+    // after this computer allowed the run command.
+    #[test]
+    fn stop_runs_only_after_an_allow() {
+        let stop = Some("./site.sh --stop");
+        assert_eq!(
+            launch_run_stop_to_run(LaunchRunDecision::Allow, stop).as_deref(),
+            Some("./site.sh --stop")
+        );
+        // A first-time Don't allow, or a switch already off: nothing runs.
+        assert_eq!(launch_run_stop_to_run(LaunchRunDecision::Ask, stop), None);
+        assert_eq!(launch_run_stop_to_run(LaunchRunDecision::Off, stop), None);
+        assert_eq!(launch_run_stop_to_run(LaunchRunDecision::Allow, None), None);
+        assert_eq!(
+            launch_run_stop_to_run(LaunchRunDecision::Allow, Some("  ")),
+            None
+        );
+    }
+
+    #[test]
+    fn stop_parses_beside_run_and_is_absent_by_default() {
+        let both: ProjectConfig = serde_json::from_str(
+            r#"{"launch":{"run":"./site.sh","stop":" ./site.sh --stop ","runAtLaunch":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            launch_run_stop_of(Some(&both)).as_deref(),
+            Some("./site.sh --stop")
+        );
+        assert_eq!(
+            launch_run_command_of(Some(&both)).as_deref(),
+            Some("./site.sh")
+        );
+        let run_only: ProjectConfig =
+            serde_json::from_str(r#"{"launch":{"run":"./start.sh"}}"#).unwrap();
+        assert_eq!(launch_run_stop_of(Some(&run_only)), None);
     }
 
     #[test]

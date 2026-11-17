@@ -342,6 +342,11 @@ script that starts the app's back end:
   and is kept for that exact command: change the command and Bram asks
   again. **Don't allow** turns the switch off. Turning the switch on in
   Settings counts as Allow.
+- **Turning it off can stop it too.** A repo can also name a stop command,
+  `"stop": "./start.sh --stop"`, which Bram runs when the switch goes off,
+  but only after the run command was allowed on this computer. Bram can't
+  stop the server itself, since the command detaches it. Quitting Bram stops
+  nothing.
 
 ### A repo's own first message
 

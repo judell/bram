@@ -19633,11 +19633,30 @@ fn cached_issue_list_covered_by(list_json: &str, probe_numbers: &HashSet<u64>) -
     }
 }
 
+// issues-reconcile-drops-transferred: the cached list's numbers the full
+// probe no longer has (deleted, or transferred to another repo). Without this
+// a reconcile rebuilt the list only when a surviving issue changed, so #501
+// and #502, transferred to judell/bram-studio on 2026-11-18, stayed in the
+// Issues view indefinitely. Both calls use `--state all` and the same limit,
+// so a healthy cache is a subset of the probe. A cache that doesn't parse
+// yields nothing: the stale marker covers that case. Pure, for tests.
+fn cached_issue_numbers_missing_from(list_json: &str, probe_numbers: &HashSet<u64>) -> Vec<u64> {
+    match serde_json::from_str::<serde_json::Value>(list_json) {
+        Ok(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|i| i.get("number").and_then(|n| n.as_u64()))
+            .filter(|n| !probe_numbers.contains(n))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod issues_since_tests {
     use super::{
-        cached_issue_list_covered_by, issue_poll_can_go_incremental, issue_poll_next_since,
-        parse_issues_since_response, IssuePollState, ISSUE_RECONCILE_MS,
+        cached_issue_list_covered_by, cached_issue_numbers_missing_from,
+        issue_poll_can_go_incremental, issue_poll_next_since, parse_issues_since_response,
+        IssuePollState, ISSUE_RECONCILE_MS,
     };
     use std::collections::HashSet;
 
@@ -19723,6 +19742,28 @@ mod issues_since_tests {
             &probe
         ));
         assert!(!cached_issue_list_covered_by("not json", &probe));
+    }
+
+    // issues-reconcile-drops-transferred: the numbers a reconcile must drop.
+    #[test]
+    fn a_transferred_issue_is_named_as_gone() {
+        let probe: HashSet<u64> = [499, 500, 503].into_iter().collect();
+        // None missing.
+        assert!(
+            cached_issue_numbers_missing_from(r#"[{"number":503},{"number":500}]"#, &probe)
+                .is_empty()
+        );
+        // Two transferred away (2026-11-18: #501, #502 to bram-studio).
+        assert_eq!(
+            cached_issue_numbers_missing_from(
+                r#"[{"number":503},{"number":502},{"number":501},{"number":500}]"#,
+                &probe
+            ),
+            vec![502, 501]
+        );
+        // An empty or unreadable cache names nothing.
+        assert!(cached_issue_numbers_missing_from("[]", &probe).is_empty());
+        assert!(cached_issue_numbers_missing_from("not json", &probe).is_empty());
     }
 }
 
@@ -41754,6 +41795,30 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     // list row, then emit) already had this order.
     let list_stale = issues_list_stale(&conn);
     let mut signal_issues_changed = indexed > 0;
+    // issues-reconcile-drops-transferred: this is the full-probe path (the
+    // incremental pass returned above), so a cached number missing from the
+    // probe is gone from the repo, and only a rebuild drops its row. The
+    // `issue:<n>` search docs stay: the index keeps history.
+    let gone = search_index::get_extra(&conn, "issues:list")
+        .ok()
+        .flatten()
+        .map(|list| cached_issue_numbers_missing_from(&list, &probe_numbers))
+        .unwrap_or_default();
+    if !gone.is_empty() {
+        append_bram_trace_line(
+            app,
+            "search-index",
+            &format!(
+                "op=issues-gone n={} numbers={}",
+                gone.len(),
+                gone.iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        );
+        signal_issues_changed = true;
+    }
     // issues-incremental-since-poll: splice when it's a complete update: a
     // few changes, a healthy cache, and every cached issue still in the probe
     // (a deletion or transfer needs the full rebuild to drop its row).
@@ -41774,7 +41839,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
             &format!("op=issues-list-splice n={}", indexed),
         );
     }
-    if !spliced && (indexed > 0 || list_stale) {
+    if !spliced && (indexed > 0 || list_stale || !gone.is_empty()) {
         // Rebuild + cache the full issues list so /__issues can also serve
         // cache-first, byte-identical to a live build_issues_list. Runs on
         // doc changes AND while the staleness marker is set, so one failed

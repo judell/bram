@@ -87,6 +87,7 @@ const HELPER_OK = {
   __bramFormatToolResult: { reads: ["@clock"], why: "timing for a trace line only" },
   __bramWorklist2Strip: { reads: ["@clock"], why: "cosmetic: 'started 3h ago' (__bramGreenLitAge), hour granularity" },
   liveIds: { reads: ["@clock"], why: "30-minute backstop; the host clears the turn context when the addressed turn ends" },
+  __bramAddressedBlockMessage: { reads: ["@clock"], why: "a declared wait's 'overdue' wording; gateWaitTick is bumped by its Timer while a wait is declared" },
   __bramTipDismissed: { reads: ["@clock", "@storage"], why: "cosmetic: Tips page 'dismissed' label, refreshed on its next render" },
 };
 // Bindings whose helper is a once-only initializer reading storage or the DOM:

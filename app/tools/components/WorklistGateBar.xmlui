@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateCloseTick="{0}" var.gateLastSessionTick="{0}" var.gateReleaseAsk="{[]}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateWaitTick="{0}"var.gateCloseTick="{0}" var.gateLastSessionTick="{0}" var.gateReleaseAsk="{[]}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -132,6 +132,18 @@
        clears on turn end (host detectors), so the row unlocks itself.
        Declared above the start-consequence line, which also reads it. -->
   <PushSource id="gateTurnCtx" subscribe="{window.bramSubscribeTurnContext()}" />
+  <!-- item-waiting-on-background-work: the agent's declared wait (POST
+       /__worklist/wait) holds the same line and the same Commit hold after
+       the turn has ended, until the agent comes back to the item. -->
+  <PushSource id="gateWait" subscribe="{window.bramSubscribeWorklistWait()}" />
+  <!-- The wait line turns "overdue" when its expected end passes, and the
+       hold lapses 30 minutes after that: both are clock facts, so this tick
+       re-evaluates them. Runs only while a wait is declared.
+       https://www.xmlui.org/docs/reference/components/Timer -->
+  <Timer
+    interval="30000"
+    enabled="{window.__bramWaitDeclared(gateWait.value)}"
+    onTick="gateWaitTick = gateWaitTick + 1" />
   <VStack
     when="{window.__bramShowStartConsequence(gateWorklist.value, gateSel.value, gateClaim.value, gateTurnCtx.value)}"
     horizontalAlignment="center"
@@ -323,21 +335,24 @@
   <PushSource id="gateQueue" subscribe="{window.bramSubscribeGateQueue()}" />
   <!-- gate-bar-one-line-while-working: this is the only line while the turn
        works (the start-consequence line steps aside). Plain color, since
-       there is no action to take but wait; width + center so it wraps.
-       https://www.xmlui.org/docs/reference/components/Text -->
-  <HStack
-    when="{!!window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value)}"
+       there is no action to take but wait.
+       item-waiting-on-background-work (Jon, 2026-11-19: "use flush-left style
+       for the long message"): the same layout as the delegated line below,
+       a fit-content Text centred in the bar with its wrapped lines
+       left-aligned.
+       https://www.xmlui.org/docs/howto/know-when-to-use-fit-content -->
+  <VStack
+    when="{!!window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value, gateWait.value, gateWaitTick)}"
     horizontalAlignment="center"
-    gap="$space-2"
     paddingHorizontal="$space-2"
     paddingTop="$space-1">
     <Text
+      width="fit-content"
+      textAlign="left"
       fontSize="$fontSize-sm"
-      width="100%"
-      textAlign="center"
       color="$textColor-secondary"
-      value="{window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value)}" />
-  </HStack>
+      value="{window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value, gateWait.value, gateWaitTick)}" />
+  </VStack>
   <HStack
     when="{!!gateQueue.value}"
     horizontalAlignment="center"
@@ -590,7 +605,7 @@
       <Button
         label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSharedFilesBlocker(gateClaim.value, gateSel.value, gateWorklist.value.items) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSharedFilesBlocker(gateClaim.value, gateSel.value, gateWorklist.value.items) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value, gateWait.value, gateWaitTick) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
         onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     </Tooltip>
     <Tooltip>
@@ -600,7 +615,7 @@
       <Button
         label="{window.__bramGateQueuedLabel('commit', 'Commit', gateQueue.value)}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
+        enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value, gateWait.value, gateWaitTick) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
         onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     </Tooltip>
     <!-- plain-words: shown only when the commit would include lines no item

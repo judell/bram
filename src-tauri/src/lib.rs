@@ -24745,6 +24745,12 @@ fn record_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
                 })
             })
             .unwrap_or_default();
+        // item-waiting-on-background-work: Start/Resume or Drop on a waiting
+        // item ends its declared wait; feedback doesn't (see
+        // turn_kind_ends_wait).
+        if turn_kind_ends_wait(kind) {
+            clear_worklist_wait_ids(app, &ids, kind);
+        }
         emit_turn_context(app, &ids, kind);
         return;
     }
@@ -24762,6 +24768,323 @@ fn cleanup_stale_turn_context<R: tauri::Runtime>(app: &AppHandle<R>) {
                 append_bram_trace_line(app, "turn-context", "op=clear reason=startup-stale");
             }
         }
+    }
+}
+
+// --- item-waiting-on-background-work -----------------------------------------
+// An agent that ends its turn with an item's work still running in the
+// background (a long measurement, a build, a watch) declares the wait, so the
+// pane keeps "the agent is on this; Commit opens when it finishes" instead of
+// falling back to Resume/Commit the moment the turn's claim retires. Kept
+// apart from `.turn-context.json` on purpose: the guards read that file as "an
+// addressed turn is in flight" (#368), and a wait must not change what they
+// allow. Sidecar plus replayable event, like the turn context; the pane reads
+// only the event.
+const WORKLIST_WAIT_REL: &str = ".worklist-wait.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct WorklistWait {
+    #[serde(default)]
+    schema: u32,
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    until_ms: Option<i64>,
+    #[serde(default)]
+    at_ms: i64,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+struct WorklistWaitRequest {
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    until_ms: Option<i64>,
+}
+
+const WORKLIST_WAIT_MAX_IDS: usize = 50;
+const WORKLIST_WAIT_MAX_NOTE: usize = 200;
+
+/// Pure: the wait a request asks for, or why it's refused. An empty `ids`
+/// clears the wait.
+fn worklist_wait_from_request(
+    req: WorklistWaitRequest,
+    now_ms: i64,
+) -> Result<WorklistWait, String> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in req.ids {
+        let id = id.trim().to_string();
+        if id.is_empty() {
+            return Err("ids must be non-empty strings".to_string());
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.len() > WORKLIST_WAIT_MAX_IDS {
+        return Err(format!("at most {} ids", WORKLIST_WAIT_MAX_IDS));
+    }
+    let note: String = req
+        .note
+        .trim()
+        .chars()
+        .take(WORKLIST_WAIT_MAX_NOTE)
+        .collect();
+    if let Some(until) = req.until_ms {
+        if until <= now_ms {
+            return Err("untilMs must be in the future".to_string());
+        }
+    }
+    if ids.is_empty() {
+        return Ok(WorklistWait::default());
+    }
+    Ok(WorklistWait {
+        schema: 1,
+        ids,
+        note,
+        until_ms: req.until_ms,
+        at_ms: now_ms,
+    })
+}
+
+/// Pure: does an addressed turn of this kind end a declared wait on its ids?
+/// Start/Resume (`approved`) and Drop do: the user restarted or abandoned the
+/// work. Feedback (`iterate`) doesn't: it's conversation, and the background
+/// work keeps running. Clearing on feedback released the Commit hold the
+/// moment the user asked a question about a waiting item (live test,
+/// 2026-11-19).
+fn turn_kind_ends_wait(kind: &str) -> bool {
+    matches!(kind, "approved" | "drop")
+}
+
+/// Pure: the wait without `gone`, or None when nothing changed.
+fn worklist_wait_without(wait: &WorklistWait, gone: &[String]) -> Option<WorklistWait> {
+    if !wait.ids.iter().any(|id| gone.contains(id)) {
+        return None;
+    }
+    let ids: Vec<String> = wait
+        .ids
+        .iter()
+        .filter(|id| !gone.contains(id))
+        .cloned()
+        .collect();
+    if ids.is_empty() {
+        return Some(WorklistWait::default());
+    }
+    Some(WorklistWait {
+        ids,
+        ..wait.clone()
+    })
+}
+
+fn read_worklist_wait<R: tauri::Runtime>(app: &AppHandle<R>) -> WorklistWait {
+    project_root(Some(app))
+        .and_then(|root| {
+            std::fs::read_to_string(resource_relative_path(&root, WORKLIST_WAIT_REL)).ok()
+        })
+        .and_then(|s| serde_json::from_str::<WorklistWait>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_worklist_wait<R: tauri::Runtime>(app: &AppHandle<R>, wait: &WorklistWait, reason: &str) {
+    if let Some(root) = project_root(Some(app)) {
+        let path = resource_relative_path(&root, WORKLIST_WAIT_REL);
+        if wait.ids.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else if let Ok(text) = serde_json::to_string(wait) {
+            let _ = std::fs::write(&path, text);
+        }
+    }
+    emit_replayable_payload(app, "worklist-wait-changed", wait);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-wait",
+            &format!(
+                "op={} reason={} ids={} until_ms={}",
+                if wait.ids.is_empty() { "clear" } else { "set" },
+                reason,
+                serde_json::to_string(&wait.ids).unwrap_or_else(|_| "[]".to_string()),
+                wait.until_ms
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        );
+    }
+}
+
+/// Drop `gone` from the declared wait (the agent is back on those items, or
+/// they left the board). No-op, and no event, when none of them were waiting.
+fn clear_worklist_wait_ids<R: tauri::Runtime>(app: &AppHandle<R>, gone: &[String], reason: &str) {
+    if gone.is_empty() {
+        return;
+    }
+    let wait = read_worklist_wait(app);
+    if let Some(next) = worklist_wait_without(&wait, gone) {
+        write_worklist_wait(app, &next, reason);
+    }
+}
+
+/// After the board shrinks: drop waiting ids that are no longer on it.
+fn prune_worklist_wait_to_board<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let wait = read_worklist_wait(app);
+    if wait.ids.is_empty() {
+        return;
+    }
+    let live: HashSet<String> = worklist_file(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v.get("items").and_then(|i| i.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|it| it.get("id").and_then(|x| x.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let gone: Vec<String> = wait
+        .ids
+        .iter()
+        .filter(|id| !live.contains(*id))
+        .cloned()
+        .collect();
+    clear_worklist_wait_ids(app, &gone, "off-board");
+}
+
+/// POST /__worklist/wait {"ids":[…],"note":"…","untilMs":…}: declare that the
+/// agent is waiting on background work for these items; {"ids":[]} clears it.
+fn handle_worklist_wait<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let req: WorklistWaitRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                400,
+                JSON,
+                serde_json::to_vec(&serde_json::json!({ "error": format!("bad body: {}", e) }))
+                    .unwrap_or_default(),
+            )
+        }
+    };
+    match worklist_wait_from_request(req, unix_now_ms()) {
+        Ok(wait) => {
+            write_worklist_wait(app, &wait, "declared");
+            (
+                200,
+                JSON,
+                serde_json::to_vec(&serde_json::json!({ "ok": true, "wait": wait }))
+                    .unwrap_or_default(),
+            )
+        }
+        Err(msg) => (
+            400,
+            JSON,
+            serde_json::to_vec(&serde_json::json!({ "error": msg })).unwrap_or_default(),
+        ),
+    }
+}
+
+// Like cleanup_stale_turn_context: a wait declared before a crash or relaunch
+// belongs to a session that is gone.
+fn cleanup_stale_worklist_wait<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(root) = project_root(Some(app)) {
+        let path = resource_relative_path(&root, WORKLIST_WAIT_REL);
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "worklist-wait", "op=clear reason=startup-stale");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod worklist_wait_tests {
+    use super::{
+        turn_kind_ends_wait, worklist_wait_from_request, worklist_wait_without, WorklistWait,
+        WorklistWaitRequest,
+    };
+
+    #[test]
+    fn feedback_does_not_end_a_wait() {
+        assert!(turn_kind_ends_wait("approved"));
+        assert!(turn_kind_ends_wait("drop"));
+        assert!(!turn_kind_ends_wait("iterate"));
+        assert!(!turn_kind_ends_wait("general"));
+    }
+
+    fn req(ids: &[&str], note: &str, until: Option<i64>) -> WorklistWaitRequest {
+        WorklistWaitRequest {
+            ids: ids.iter().map(|s| s.to_string()).collect(),
+            note: note.to_string(),
+            until_ms: until,
+        }
+    }
+
+    #[test]
+    fn request_trims_dedups_and_stamps() {
+        let w =
+            worklist_wait_from_request(req(&[" a ", "b", "a"], "  a run  ", Some(2_000)), 1_000)
+                .unwrap();
+        assert_eq!(w.ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(w.note, "a run");
+        assert_eq!(w.until_ms, Some(2_000));
+        assert_eq!(w.at_ms, 1_000);
+        assert_eq!(w.schema, 1);
+    }
+
+    #[test]
+    fn empty_ids_clear() {
+        let w = worklist_wait_from_request(req(&[], "ignored", None), 1_000).unwrap();
+        assert_eq!(w, WorklistWait::default());
+    }
+
+    #[test]
+    fn refusals() {
+        assert!(worklist_wait_from_request(req(&["a", " "], "", None), 1_000).is_err());
+        assert!(worklist_wait_from_request(req(&["a"], "", Some(1_000)), 1_000).is_err());
+        let many: Vec<String> = (0..51).map(|i| format!("i{i}")).collect();
+        let many_refs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        assert!(worklist_wait_from_request(req(&many_refs, "", None), 1_000).is_err());
+    }
+
+    #[test]
+    fn note_is_capped() {
+        let long = "x".repeat(500);
+        let w = worklist_wait_from_request(req(&["a"], &long, None), 1).unwrap();
+        assert_eq!(w.note.chars().count(), 200);
+    }
+
+    #[test]
+    fn without_removes_and_empties() {
+        let w = worklist_wait_from_request(req(&["a", "b"], "n", None), 1).unwrap();
+        assert_eq!(worklist_wait_without(&w, &["c".to_string()]), None);
+        let one = worklist_wait_without(&w, &["a".to_string()]).unwrap();
+        assert_eq!(one.ids, vec!["b".to_string()]);
+        assert_eq!(one.note, "n");
+        let none = worklist_wait_without(&one, &["b".to_string()]).unwrap();
+        assert_eq!(none, WorklistWait::default());
+    }
+
+    // The pane reads this shape from the worklist-wait-changed event.
+    #[test]
+    fn wire_shape_is_camel_case() {
+        let w = worklist_wait_from_request(req(&["a"], "n", Some(5)), 1).unwrap();
+        let v = serde_json::to_value(&w).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"schema": 1, "ids": ["a"], "note": "n", "untilMs": 5, "atMs": 1})
+        );
     }
 }
 
@@ -67361,6 +67684,7 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         owned(".host-notes.json", File),
         owned(".needs-you-dismissed.json", File),
         owned(".turn-context.json", File),
+        owned(".worklist-wait.json", File),
         owned(".target-server-pid", File),
         // The mixed-folder answer (STATE_MOVE_REL), read by the next startup.
         owned(".state-move", File),
@@ -99565,6 +99889,7 @@ fn handle_worklist_clear_landed<R: tauri::Runtime>(
         return worklist_json_error(500, format!("write failed: {}", e));
     }
     prune_claim_intervals(app);
+    prune_worklist_wait_to_board(app);
     append_bram_trace_line(
         app,
         "worklist",
@@ -99949,6 +100274,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     // lost their last live owner are now retirable.
     if op == "prune" && !affected.is_empty() {
         prune_claim_intervals(app);
+        prune_worklist_wait_to_board(app);
     }
 
     // Successful mutate is the mechanical completion point for approved/drop
@@ -110114,6 +110440,15 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_plan(app, &buf)
         }
+    } else if path == "__worklist/wait" {
+        // item-waiting-on-background-work: see handle_worklist_wait.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_worklist_wait(app, &buf)
+        }
     } else if path == "__draft/save" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
@@ -112058,6 +112393,7 @@ pub fn run() {
             if state_writable {
                 cleanup_stale_inflight_claim(app.handle());
                 cleanup_stale_turn_context(app.handle());
+                cleanup_stale_worklist_wait(app.handle());
                 // Remove any stale Codex lifecycle intent/result files from a
                 // prior session. Refs #130.
                 cleanup_stale_worklist_intent(app.handle());

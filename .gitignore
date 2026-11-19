@@ -79,6 +79,7 @@ resources/.host-notes.json
 resources/.needs-you-dismissed.json
 resources/.worklist-direct-edit.json
 resources/.turn-context.json
+resources/.worklist-wait.json
 resources/.target-server-pid
 resources/.settings-note
 resources/.state-move

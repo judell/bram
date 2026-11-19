@@ -14538,16 +14538,48 @@ window.bramSubscribeW2Selection = (function () {
     if (Date.now() - (c.atMs || 0) > 30 * 60 * 1000) return [];
     return ids;
   };
-  window.__bramSelectionAddressedBlocked = function (sel, ctx) {
-    var ids = liveIds(ctx);
+  // item-waiting-on-background-work: a wait the agent declared
+  // (POST /__worklist/wait) holds the gate like a running turn does, after
+  // the turn itself has ended. Honored until 30 minutes past its expected
+  // end, the same staleness floor as liveIds, so a lost wait cannot pin
+  // Commit forever.
+  var waitIds = function (wait) {
+    var w = wait || {};
+    var ids = w.ids || [];
+    if (!ids.length) return [];
+    if (w.untilMs && Date.now() > w.untilMs + 30 * 60 * 1000) return [];
+    return ids;
+  };
+  // `waitTick` (WorklistGateBar's gateWaitTick, bumped by a Timer while a
+  // wait is declared) is unused in the body: passing it is what re-evaluates
+  // the clock-dependent wait checks below as time passes.
+  window.__bramWaitDeclared = function (wait) {
+    return !!(wait && wait.ids && wait.ids.length);
+  };
+  window.__bramSelectionAddressedBlocked = function (sel, ctx, wait, waitTick) {
+    var ids = liveIds(ctx).concat(waitIds(wait));
     if (!ids.length) return false;
     return (sel || []).some(function (id) { return ids.indexOf(id) !== -1; });
   };
-  window.__bramAddressedBlockMessage = function (sel, ctx) {
+  window.__bramAddressedBlockMessage = function (sel, ctx, wait, waitTick) {
     var ids = liveIds(ctx);
     var hit = (sel || []).filter(function (id) { return ids.indexOf(id) !== -1; });
-    if (!hit.length) return "";
-    return "The agent is working on " + hit.join(", ") +
+    if (hit.length) {
+      return "The agent is working on " + hit.join(", ") +
+        "; Commit opens when it finishes.";
+    }
+    var wids = waitIds(wait);
+    var whit = (sel || []).filter(function (id) { return wids.indexOf(id) !== -1; });
+    if (!whit.length) return "";
+    var w = wait || {};
+    var what = w.note ? " (" + w.note + ")" : "";
+    if (w.untilMs && Date.now() > w.untilMs) {
+      return "The agent was waiting on " + whit.join(", ") + what +
+        ", expected by " + window.__bramClockTime(w.untilMs) +
+        ". It's overdue: ask the agent, or Drop.";
+    }
+    var by = w.untilMs ? ", expected by " + window.__bramClockTime(w.untilMs) : "";
+    return "The agent is waiting on background work for " + whit.join(", ") + what + by +
       "; Commit opens when it finishes.";
   };
   window.bramSubscribeTurnContext = function () {
@@ -14564,6 +14596,43 @@ window.bramSubscribeW2Selection = (function () {
 window.subscribeTauriEvent("__bramNativeTurnContextUnsub", "turn-context-changed", function (e) {
   window.__bramSetTurnContextFromEvent((e && e.payload) || null);
 });
+
+// item-waiting-on-background-work: the agent's declared wait (ids, note,
+// untilMs), pushed by the host on worklist-wait-changed. The gate bar passes
+// it to __bramAddressedBlockMessage / __bramSelectionAddressedBlocked beside
+// the turn context.
+(function () {
+  var subscribers = new Set();
+  var factory = null;
+  window.__bramWorklistWait = { ids: [] };
+  window.__bramSetWorklistWaitFromEvent = function (payload) {
+    window.__bramWorklistWait = payload || { ids: [] };
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bramSubscribeWorklistWait] subscriber threw:", e); }
+    });
+  };
+  window.bramSubscribeWorklistWait = function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramWorklistWait || null); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+window.subscribeTauriEvent("__bramNativeWorklistWaitUnsub", "worklist-wait-changed", function (e) {
+  window.__bramSetWorklistWaitFromEvent((e && e.payload) || null);
+});
+
+// "8:52 PM"-style local clock time for an epoch-ms instant ("" when absent).
+window.__bramClockTime = function (ms) {
+  if (!ms) return "";
+  try {
+    return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  } catch (e) { return ""; }
+};
 
 // transcript-new-below-badge: pane-wide unseen-below counter. The echo guard
 // made READING stable, which removed the yank's accidental "agent responded"

@@ -137,6 +137,37 @@ returns `POST only`, and an empty body returns
 non-empty `remaining` means the call resolved only part of a multi-id
 claim, not that it failed.
 
+## Declaring a wait on background work
+
+The claim ends with your turn. If the item's work is still running in the
+background when you end it, for example a long measurement, a build, or a
+watch whose result the item still needs, the board would otherwise show
+the item as stopped or ready to commit. The user may then commit half the
+work. Before ending the turn, declare the wait:
+
+```
+{"ids":["<item id>"],"note":"what is running","untilMs":<expected end, epoch ms>}
+```
+
+POST it to `/__worklist/wait`, with the same transport as the other
+worklist routes.
+
+- **What the user sees:** the gate reads "The agent is waiting on
+  background work for `x` (note), expected by …; Commit opens when it
+  finishes.", and Commit holds. Past `untilMs` the line says it's overdue
+  and offers Drop or a message to you. The pane stops honoring a wait 30
+  minutes past `untilMs`.
+- **Name only the items the work is for.** A wait is tied to the ids you
+  list and spreads nowhere else. (Subagents, by contrast, are bound to the
+  whole claim, #478.)
+- **Clear it yourself when the work lands:** post `{"ids":[]}`. It also
+  clears when the user Starts/Resumes (`approved:`) or Drops the item,
+  when the item leaves the board, and at Bram's startup. Feedback
+  (`iterate:`) doesn't clear it: a question about a waiting item is
+  conversation, and the work is still running.
+- **Not for subagents:** Bram already sees them and keeps their items
+  locked.
+
 ## Interval staging and entangled commits
 
 When a commit would stage a path carrying lines attributed to a begun

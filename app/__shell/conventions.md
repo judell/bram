@@ -367,6 +367,8 @@ endings are ordinary:
 `POST /__worklist/end` with `{"ids": [...]}` is an optional early
 release to unlock the board mid-turn.
 
+- **Ending a turn while an item's work still runs in the background** (a measurement, a build, a watch) → declare the wait first; read `.claude/bram-reference/worklist-mechanics.md` (§Declaring a wait on background work).
+
 - **Details of claim vs. authorization, `/__worklist/end` responses** → read `.claude/bram-reference/worklist-mechanics.md` (§The claim and the authorization).
 - **A multi-id claim retires partially (`clear-shrink`, `consume-shrink`, `cleared:false`)** → read `.claude/bram-reference/worklist-mechanics.md` (§Incremental claim and authorization retirement).
 - **A stuck spinner** → read `.claude/bram-reference/diagnostics.md` (§Inflight sentinel failure modes).

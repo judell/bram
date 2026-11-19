@@ -13,6 +13,7 @@
 #   scripts/pane-memory-bisect.sh hello full      # some of them
 #   SETTLE=300 scripts/pane-memory-bisect.sh      # settle seconds (default 180)
 #   DRY=1 scripts/pane-memory-bisect.sh           # build and check copies only
+#   COMPILE=0 scripts/pane-memory-bisect.sh full  # compileScripts off in copies
 #   RUNS=3 scripts/pane-memory-bisect.sh full no-data
 #                                    # repeat, interleaved; prints median and range
 #
@@ -31,9 +32,10 @@
 #   no-header   AppHeader and NavPanel
 #   no-footer   Footer (the composer)
 #
-# Tracing is forced off in every copy (appGlobals.xsVerbose: false) whatever
+# Tracing is forced off in every copy (xmluiConfig.xsVerbose: false) whatever
 # the working tree says, so runs compare with each other. VERBOSE=1 forces it
-# on instead.
+# on instead. COMPILE=0 / COMPILE=1 sets xmluiConfig.compileScripts in every
+# copy; unset, the copy keeps the working tree's value.
 #
 # macOS only (footprint). See docs/developing-bram-reference.md
 # (§Where the pane's memory goes).
@@ -145,6 +147,16 @@ make_variant() {
     "$repo_root/app/tools/config.json" > "$dir/app/tools/config.json"
   grep -q "\"xsVerbose\": *$verbose" "$dir/app/tools/config.json" || {
     echo "$v: could not set xsVerbose to $verbose in the copy's config.json" >&2; exit 3; }
+  case "${COMPILE:-}" in
+    "") ;;
+    0|1)
+      if [ "$COMPILE" = 1 ]; then compile=true; else compile=false; fi
+      cfg="$dir/app/tools/config.json"
+      sed -E "s/(\"compileScripts\"[[:space:]]*:[[:space:]]*)(true|false)/\\1$compile/" "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+      grep -q "\"compileScripts\": *$compile" "$cfg" || {
+        echo "$v: could not set compileScripts to $compile in the copy's config.json" >&2; exit 3; } ;;
+    *) echo "COMPILE must be 0 or 1" >&2; exit 2 ;;
+  esac
   case "$v" in
     shell)
       printf '<!doctype html><html><head><meta charset="utf-8"><title>bisect shell</title></head><body></body></html>\n' \
@@ -176,7 +188,12 @@ run_variant() {
   v=$1; dir="$work/$v"
   before=$(webcontent_pids)
   launched_at=$(date -u +%Y-%m-%dT%H:%M:%S)
-  BRAM_BIN="$dir/bram" "$demo" launch >/dev/null 2>&1
+  # The launcher refuses some states (a binary older than src-tauri/src/lib.rs,
+  # for one); say why instead of ending the run silently under set -e.
+  if ! launch_out=$(BRAM_BIN="$dir/bram" "$demo" launch 2>&1); then
+    printf '%-10s %s\n' "$v" "demo launch refused: $(printf '%s' "$launch_out" | tail -1)"
+    return 0
+  fi
 
   # The renderer: a WebContent process that wasn't there before the launch.
   renderer=""; tries=0

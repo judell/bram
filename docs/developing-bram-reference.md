@@ -269,6 +269,32 @@ page writes nothing to the trace. So the script checks each copy's markup
 (quote-aware tag balance) before launching it, and `DRY=1` builds and checks
 copies without launching.
 
+**`compileScripts` costs about 200 MB in Bram's pane** (2026-11-19).
+`COMPILE=0` or `COMPILE=1` sets `xmluiConfig.compileScripts` in every copy;
+unset, a copy keeps the working tree's value. The full pane, 3 interleaved
+pairs, 180 s settle, tracing off, in MB:
+
+| run | compilation on | compilation off |
+|---|---|---|
+| 1 | 858 | 676 |
+| 2 | 714 | 655 |
+| 3 | 908 | 641 |
+| median | **858** | **655** |
+
+The ranges don't overlap: 24% less with compilation off, and steadier
+between runs. That matches XMLUI's per-binding finding in WebKit (about
+0.11 MB more for a compiled binding than an interpreted one,
+[xmlui-org/xmlui#3969](https://github.com/xmlui-org/xmlui/issues/3969)).
+Compilation was turned on in `f209feca` (2026-08-08) when XMLUI fixed the
+bugs that had made it unsafe, with no speed measurement recorded. Weigh
+any change against a responsiveness check (`scripts/ui-health.py`, then
+`pane-age-health.py`). Run 2's "off" copy may have included unrelated,
+inactive pane code that was being written at the time; the other five
+didn't.
+
+A refused demo launch (for example, a binary older than
+`src-tauri/src/lib.rs`) is reported in the row, not swallowed.
+
 **Windows isn't covered.** The script is macOS-only (`footprint`, the
 WebContent match, the demo launcher's Unix path). What it finds lives in the
 pane's JavaScript and markup, so the fixes carry over, but WebView2 runs

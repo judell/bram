@@ -181,6 +181,65 @@ sluggish pane is fixed by a reload, not a new session. Start a new
 session for the agent's reasons. Use `--build-since` to score a pane change
 against the age curve.
 
+### Where the pane's memory goes
+
+`scripts/pane-memory-bisect.sh` measures the renderer one layer at a time.
+It copies `app/` into a scratch folder in four variants, each beside its own
+`bram` symlink. Bram serves `app/` from next to the path it was launched by
+(`bram_app_root_candidates`), so a demo instance launched through that
+symlink serves the variant, and your pane and the repo's `app/` stay as they
+are. For each variant the script:
+
+- launches the demo instance;
+- checks, through a marker file, that the variant is what's being served;
+- samples the new renderer's `footprint` every 30 s while it settles;
+- stops the demo and prints the median of the last three samples.
+
+```sh
+scripts/pane-memory-bisect.sh                 # shell, hello, no-pages, full
+scripts/pane-memory-bisect.sh hello full
+SETTLE=300 scripts/pane-memory-bisect.sh      # default 180 s per variant
+```
+
+| variant | the pane loads |
+|---|---|
+| `shell` | a blank tools pane: the parent shell and xterm only |
+| `hello` | `<App><Text>hello</Text></App>` with `helpers.js`, `Globals.xs` and the theme |
+| `no-pages` | every always-visible part, the Worklist pane and the composer, but no tab content |
+| `full` | the pane as it is |
+
+The differences between rows say which layer costs what. The script won't
+run while a demo instance is up, so it never stops one you're using.
+
+**Read `footprint`, not RSS.** `ps -o rss` counts memory WebKit has already
+freed but not yet returned to macOS ("reclaimable" in `footprint`). On
+2026-11-18 a demo pane reloaded ten times read 2,713 MB RSS against a
+924 MB footprint. Footprint is what Activity Monitor shows and what memory
+pressure responds to. Keep the Web Inspector closed while measuring: its own
+renderer reached 3.9 GB that day, and attaching it makes the page keep extra
+data.
+
+**Floors, from Safari on 2026-11-18,** which uses the same WebKit renderer:
+a blank page, 13 MB; an XMLUI app with one `<Text>`, 94–193 MB, including
+the 1.34 MB of CSS bundled in `xmlui-standalone.umd.js`; xterm with WebGL,
+67 MB empty and 213 MB with 10,000 lines of scrollback.
+
+**Baseline** (2026-11-18, `e7df16d3` with verbose tracing off, 180 s
+settle; MB):
+
+| variant | footprint | dirty heap | step |
+|---|---|---|---|
+| `shell` | 59 | 28 | |
+| `hello` | 188 | 153 | +129: XMLUI, `helpers.js`, `Globals.xs`, theme |
+| `no-pages` | 482 | 408 | +294: the always-visible parts of `Main.xmlui`, the Worklist pane, the composer |
+| `full` | 627 | 533 | +145: the tabs, including the one shown (the Worklist) |
+
+The largest layer is the always-visible markup, not the tabs and not
+XMLUI. The live pane holds only about 360 DOM elements and 60 MB of live JS
+objects, so this cost is in what that markup does at startup, not in what
+it shows. The next cut is inside that layer. Settle time matters: a 60 s
+smoke test of `hello` read 270 MB, against 188 MB after 180 s.
+
 ### What the agents keep running: the Tasks report
 
 judell/bram#483 asks for a Tasks feature: a repeatable command, once it

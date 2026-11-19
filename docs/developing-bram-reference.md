@@ -319,6 +319,14 @@ for bindings that run hot. Run 2's "off" copy may have included unrelated,
 inactive pane code that was being written at the time; the other five
 didn't.
 
+**Main's build replaced it the same day** (`57bc5f271`, sha256
+`14b0021d…`): XMLUI squash-merged both branches, and every line they added
+is on main. Measured back to back, 3 runs each: main's build 538 MB
+(534–539), the branch bundle 534 and 510 (its third run read nothing). So
+the two are the same. Both sit about 90 MB under the 630 above, measured the
+day before with the same script. Compare bundles within one sitting, not
+against a number from another day.
+
 A refused demo launch (for example, a binary older than
 `src-tauri/src/lib.rs`) is reported in the row, not swallowed.
 

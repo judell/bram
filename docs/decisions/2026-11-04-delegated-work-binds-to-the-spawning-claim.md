@@ -31,3 +31,22 @@ Status: decided 2026-11-04 · revisit when one turn routinely sends different su
 - **A session-wide lock while any subagent runs.** Rejected. It blocks unrelated items, the long-running-work problem from #348 and #368.
 
 **Revisit when:** over-locking from inheritance costs real time (then add per-dispatch declaration alongside it), or Codex, OpenCode or Antigravity expose equivalent start and stop evidence.
+
+## Amendment, 2026-11-19: narrowing from the brief ([#478](https://github.com/judell/bram/issues/478))
+
+**The revisit trigger fired.** One approval covering several items, with one subagent sent to each, bound every subagent to every item. Each row showed every subagent's label, and early release was refused for all of them. Two receipts:
+
+- 2026-11-15 in `~/bram`: "Subagent working: Local file route for browser" on both rows (#478);
+- 2026-11-19 in `~/xmlui`: "Ablation builds for per-instance memory" on `xmlui-churn-combined-state`, which wasn't that subagent's work.
+
+**The amendment: narrow on evidence, never widen.**
+
+1. `SubagentStart` still binds to the whole inheritable claim, so a subagent's items are never left unlocked.
+2. Once the subagent's evidence is readable, the binding narrows to the bound ids its description (`meta.json`) names, or failing that the ids its brief (the transcript's first record) names, matching whole ids only. Naming none, or every bound id, keeps the whole binding. The check runs once per binding, at `SubagentStart`, on `/__inflight` reads, on roster reads, and before a commit, drop or mutate checks bindings. Traced `[delegated] op=narrow … source=description|brief` or `op=narrow-skipped reason=…`.
+3. A narrowed agent that rebinds (a resume) keeps its narrowing.
+4. Ids a narrowing frees behave as unbound: their rows unlock, and with no main turn running they retire from a claim that only bindings held.
+
+**What it doesn't change:** line credit is by claim interval, and the claim holds the union of live bindings. While two narrowed subagents run at once, each one's lines still credit both items. Credit tightens only as bindings release.
+
+**Still rejected:** the declare route. Naming the item in the description or brief is the same information without a call to forget: forgetting it falls back to the whole claim, which errs safe.
+

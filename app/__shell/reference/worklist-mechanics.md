@@ -421,6 +421,13 @@ Parallelize the *work*; serialize the *gates*.
   batch, not independent concurrent claimants. An approved resolve
   consumes the whole record for later resolver reads. Keep lifecycle
   calls in the orchestrator so those effects stay coordinated.
+- **Name the item id in the subagent's description or brief.** A
+  subagent starts bound to every item of the claim it was spawned
+  under; once its description (or, failing that, its brief) names some
+  of those ids, the binding narrows to them, so its row label, the
+  Commit and Drop lock, and early release follow the one item it works
+  on. Naming none, or every id, keeps the whole claim, so forgetting
+  costs over-locking, never safety.
 - Before delegating in parallel, intersect the `files` lists of the
   candidate items. **Non-empty intersection → do not parallelize those
   two**; run them in sequence.

@@ -53179,6 +53179,8 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     let session_text = std::fs::read_to_string(&session_path).unwrap_or_default();
     let now_ms = to_ms(std::time::SystemTime::now());
     let starts = read_subagent_starts(app);
+    // issue-478: a roster tick is when a new brief becomes readable.
+    delegated_narrow_pending(app);
     let bindings = read_delegated_bindings(app);
     let mut agents: Vec<serde_json::Value> = Vec::new();
     for sf in files {
@@ -77929,6 +77931,21 @@ struct DelegatedBinding {
     session_id: String,
     #[serde(rename = "agentType", default)]
     agent_type: String,
+    // issue-478: the binding was checked against the subagent's description
+    // and brief (delegated_narrow_pending). Absent until then.
+    #[serde(
+        rename = "narrowChecked",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    narrow_checked: bool,
+    // The ids it held before narrowing; empty unless it narrowed.
+    #[serde(
+        rename = "narrowedFrom",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    narrowed_from: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -78143,12 +78160,25 @@ impl DelegatedBindings {
         if agent.is_empty() || ids.is_empty() {
             return false;
         }
-        let next = DelegatedBinding {
+        let mut next = DelegatedBinding {
             ids: sorted_id_set(ids.iter()),
             bound_at_ms: now_ms,
             session_id: session_id.to_string(),
             agent_type: agent_type.to_string(),
+            ..Default::default()
         };
+        // issue-478: never widen. A narrowed agent that rebinds (a resume)
+        // keeps only the ids it narrowed to, and stays narrowed.
+        if let Some(prev) = self.bindings.get(agent) {
+            if !prev.narrowed_from.is_empty() {
+                next.ids.retain(|id| prev.ids.contains(id));
+                if next.ids.is_empty() {
+                    return false;
+                }
+                next.narrow_checked = true;
+                next.narrowed_from = prev.narrowed_from.clone();
+            }
+        }
         if self.bindings.get(agent).map(|b| &b.ids) == Some(&next.ids) {
             return false;
         }
@@ -78318,6 +78348,246 @@ fn bind_locked(
     Some(ids)
 }
 
+// --- issue-478: a subagent binds to the item it was briefed on --------------
+//
+// bind_locked binds a subagent to the whole inheritable claim, so nothing it
+// works on is ever left unlocked. When one approval covers several items and
+// each subagent is sent to one, that bound every subagent to every item. So
+// once the evidence is readable, a binding narrows to the ids its subagent's
+// description (meta.json) or brief (the transcript's first record) names.
+// Narrow on evidence, never widen: a brief that names none of the bound ids,
+// or all of them, keeps the whole binding. Checked once per binding
+// (narrow_checked); a rebind of a narrowed agent keeps the narrowing
+// (DelegatedBindings::bind). Amends
+// docs/decisions/2026-11-04-delegated-work-binds-to-the-spawning-claim.md.
+
+#[derive(Clone, Debug, PartialEq)]
+enum NarrowDecision {
+    // The evidence isn't readable yet: check again on a later read.
+    Pending,
+    Narrow {
+        ids: Vec<String>,
+        source: &'static str,
+    },
+    Skip {
+        reason: &'static str,
+    },
+}
+
+fn worklist_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+// The candidate ids `text` names as whole ids: `foo` doesn't match inside
+// `foo-bar` or `my-foo`. Sorted, deduplicated.
+fn item_ids_named(text: &str, candidates: &[String]) -> Vec<String> {
+    let mut named: Vec<String> = Vec::new();
+    for id in candidates {
+        if id.is_empty() {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(pos) = text[from..].find(id.as_str()) {
+            let at = from + pos;
+            let end = at + id.len();
+            let before = text[..at].chars().next_back();
+            let after = text[end..].chars().next();
+            if !before.map_or(false, worklist_id_char) && !after.map_or(false, worklist_id_char) {
+                named.push(id.clone());
+                break;
+            }
+            // `text[at..]` starts with the id's first character, which is
+            // ASCII, so at + 1 is a character boundary.
+            from = at + 1;
+        }
+    }
+    sorted_id_set(named.iter())
+}
+
+// What a binding of `bound` ids narrows to, given the subagent's description
+// and the text of its brief (None: not readable yet). The description is the
+// more deliberate label, so it decides when it names any bound id; the brief
+// decides otherwise.
+fn narrow_decision(
+    bound: &[String],
+    description: Option<&str>,
+    brief: Option<&str>,
+) -> NarrowDecision {
+    let bound = sorted_id_set(bound.iter());
+    if bound.len() <= 1 {
+        return NarrowDecision::Skip {
+            reason: "single-id",
+        };
+    }
+    let judge = |named: Vec<String>, source: &'static str| {
+        if named.len() == bound.len() {
+            NarrowDecision::Skip { reason: "all-ids" }
+        } else {
+            NarrowDecision::Narrow { ids: named, source }
+        }
+    };
+    let from_description = item_ids_named(description.unwrap_or(""), &bound);
+    if !from_description.is_empty() {
+        return judge(from_description, "description");
+    }
+    let Some(brief) = brief else {
+        return NarrowDecision::Pending;
+    };
+    let from_brief = item_ids_named(brief, &bound);
+    if from_brief.is_empty() {
+        return NarrowDecision::Skip { reason: "no-ids" };
+    }
+    judge(from_brief, "brief")
+}
+
+// The first record of a subagent transcript (its brief), once written whole.
+// A brief longer than the read window is matched on the part read.
+fn subagent_brief_text(jsonl_path: &Path) -> Option<String> {
+    const WINDOW: u64 = 64 * 1024;
+    let head = st_read_head(jsonl_path, WINDOW)?;
+    match head.find('\n') {
+        Some(nl) if nl > 0 => Some(head[..nl].to_string()),
+        Some(_) => None,
+        None if head.len() as u64 >= WINDOW => Some(head),
+        None => None,
+    }
+}
+
+// Apply a decision to one binding, as one transaction with the claim
+// reconciliation release_locked does: once no main turn runs and the claim
+// was only bound ids, the ids no binding holds any more retire from it.
+// Returns true when the binding narrowed.
+fn narrow_locked(
+    g: &ClaimGuard,
+    files: &ClaimFiles,
+    fx: &dyn ClaimEffects,
+    agent: &str,
+    decision: &NarrowDecision,
+) -> bool {
+    if *decision == NarrowDecision::Pending {
+        return false;
+    }
+    let mut b = read_delegated_bindings_at(&files.bindings);
+    let before = b.union_ids();
+    let Some(bind) = b.bindings.get_mut(agent) else {
+        return false;
+    };
+    if bind.narrow_checked {
+        return false;
+    }
+    bind.narrow_checked = true;
+    let from = bind.ids.clone();
+    let to: Vec<String> = match decision {
+        NarrowDecision::Narrow { ids, .. } => {
+            sorted_id_set(ids.iter().filter(|id| from.contains(id)))
+        }
+        _ => Vec::new(),
+    };
+    let narrowed = !to.is_empty() && to != from;
+    if narrowed {
+        bind.ids = to.clone();
+        bind.narrowed_from = from.clone();
+    }
+    if !write_delegated_bindings_at(&files.bindings, &b) {
+        return false;
+    }
+    match decision {
+        NarrowDecision::Narrow { source, .. } if narrowed => fx.trace(
+            "delegated",
+            &format!(
+                "op=narrow agent={} from={} to={} source={}",
+                agent,
+                ids_json_str(&from),
+                ids_json_str(&to),
+                source
+            ),
+        ),
+        NarrowDecision::Skip { reason } => fx.trace(
+            "delegated",
+            &format!("op=narrow-skipped agent={} reason={}", agent, reason),
+        ),
+        _ => fx.trace(
+            "delegated",
+            &format!("op=narrow-skipped agent={} reason=no-change", agent),
+        ),
+    }
+    if !narrowed {
+        return false;
+    }
+    let claim = read_inflight_claim_at(&files.claim).unwrap_or_default();
+    if !claim.ids.is_empty() && !fx.main_turn_open() && ids_subset(&claim.ids, &before) {
+        retire_claim_locked(g, files, fx, &claim.ids, Retire::Shrink, "narrow");
+    }
+    fx.signal("inflight-claim-changed");
+    fx.signal("worklist-changed");
+    true
+}
+
+// The subagent's transcript files, found the way the roster finds them.
+fn delegated_subagent_file(
+    sessions_dir: &Path,
+    agent: &str,
+    b: &DelegatedBinding,
+) -> Option<SubagentFile> {
+    let session = sessions_dir.join(format!("{}.jsonl", b.session_id));
+    st_subagent_files(&session)
+        .into_iter()
+        .find(|f| f.agent_id == agent)
+}
+
+// Check every binding not yet checked. Called where the evidence first
+// becomes readable: SubagentStart, the /__inflight read its bind triggers,
+// the roster's reads, and before a commit, drop or mutate checks bindings.
+// Never called with the claim lock held (it takes it per binding).
+fn delegated_narrow_pending<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let bindings = read_delegated_bindings(app);
+    let pending: Vec<(String, DelegatedBinding)> = bindings
+        .bindings
+        .into_iter()
+        .filter(|(_, b)| !b.narrow_checked)
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let Some(files) = claim_files(app) else {
+        return;
+    };
+    let sessions_dir = claude_sessions_dir_lookup(app).ok().map(|l| l.chosen);
+    for (agent, b) in pending {
+        let decision = if sorted_id_set(b.ids.iter()).len() <= 1 {
+            NarrowDecision::Skip {
+                reason: "single-id",
+            }
+        } else if b.session_id.is_empty() || !session_id_is_safe(&b.session_id) {
+            NarrowDecision::Skip {
+                reason: "no-session",
+            }
+        } else {
+            match sessions_dir
+                .as_deref()
+                .and_then(|dir| delegated_subagent_file(dir, &agent, &b))
+            {
+                None => NarrowDecision::Pending,
+                Some(file) => {
+                    let meta = st_read_subagent_meta(&file.dir, &agent);
+                    let description = meta
+                        .as_ref()
+                        .and_then(|m| m.get("description"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let brief = subagent_brief_text(&file.jsonl_path);
+                    narrow_decision(&b.ids, description.as_deref(), brief.as_deref())
+                }
+            }
+        };
+        if decision == NarrowDecision::Pending {
+            continue;
+        }
+        let g = claim_lock();
+        narrow_locked(&g, &files, app, &agent, &decision);
+    }
+}
+
 // Which bindings a release removes.
 enum ReleaseScope<'a> {
     Agents(&'a [String]),
@@ -78426,6 +78696,8 @@ fn delegated_refusal_response<R: tauri::Runtime>(
     requested: &[String],
     category: &str,
 ) -> Option<(u16, &'static str, Vec<u8>)> {
+    // issue-478: an id a subagent wasn't briefed on isn't held by it.
+    delegated_narrow_pending(app);
     let bindings = read_delegated_bindings(app);
     let (ids, agents) = bindings.refusal(requested)?;
     if bram_trace_enabled() {
@@ -78867,6 +79139,9 @@ fn handle_agent_subagent<R: tauri::Runtime>(
                     )
                 })
                 .unwrap_or_default();
+            // issue-478: a resume (and often a first start) can already be
+            // narrowed from its meta and brief.
+            delegated_narrow_pending(app);
             (
                 200,
                 JSON,
@@ -79155,6 +79430,216 @@ mod delegated_binding_tests {
             b.bind(agent, &s(ids), 2, "sess", "general-purpose");
         }
         assert!(write_delegated_bindings_at(&files.bindings, &b));
+    }
+
+    // ---- issue-478: narrowing to the briefed item -------------------------
+
+    #[test]
+    fn item_ids_match_whole_ids_only() {
+        let ids = s(&["foo", "foo-bar", "issue-478-x"]);
+        assert_eq!(
+            item_ids_named("work on foo-bar only", &ids),
+            s(&["foo-bar"])
+        );
+        assert_eq!(
+            item_ids_named("foo, then foo-bar", &ids),
+            s(&["foo", "foo-bar"])
+        );
+        assert!(item_ids_named("my-foo and foo_x and foobar", &ids).is_empty());
+        assert_eq!(item_ids_named("item `foo`.", &ids), s(&["foo"]));
+        assert_eq!(item_ids_named("é foo é", &ids), s(&["foo"]));
+        // JSON-escaped brief text still matches.
+        assert_eq!(
+            item_ids_named(r#"{"content":"Do \"issue-478-x\"\nnow"}"#, &ids),
+            s(&["issue-478-x"])
+        );
+        assert!(item_ids_named("", &ids).is_empty());
+    }
+
+    #[test]
+    fn narrow_decision_narrows_on_evidence_and_skips_otherwise() {
+        let bound = s(&["a-item", "b-item"]);
+        assert_eq!(
+            narrow_decision(&bound, Some("Edits for a-item"), None),
+            NarrowDecision::Narrow {
+                ids: s(&["a-item"]),
+                source: "description"
+            }
+        );
+        // The description names none: wait for the brief.
+        assert_eq!(
+            narrow_decision(&bound, Some("Edits"), None),
+            NarrowDecision::Pending
+        );
+        assert_eq!(
+            narrow_decision(&bound, Some("Edits"), Some("Work on b-item only")),
+            NarrowDecision::Narrow {
+                ids: s(&["b-item"]),
+                source: "brief"
+            }
+        );
+        assert_eq!(
+            narrow_decision(&bound, None, Some("Do the thing")),
+            NarrowDecision::Skip { reason: "no-ids" }
+        );
+        assert_eq!(
+            narrow_decision(&bound, None, Some("a-item and b-item")),
+            NarrowDecision::Skip { reason: "all-ids" }
+        );
+        // A description naming every id decides, whatever the brief says.
+        assert_eq!(
+            narrow_decision(&bound, Some("a-item + b-item"), Some("a-item")),
+            NarrowDecision::Skip { reason: "all-ids" }
+        );
+        assert_eq!(
+            narrow_decision(&s(&["a-item"]), Some("a-item"), None),
+            NarrowDecision::Skip {
+                reason: "single-id"
+            }
+        );
+    }
+
+    fn narrow(files: &ClaimFiles, agent: &str, d: NarrowDecision) -> bool {
+        let g = claim_lock();
+        narrow_locked(&g, files, &Fx::default(), agent, &d)
+    }
+
+    fn bound_ids(files: &ClaimFiles, agent: &str) -> Vec<String> {
+        read_delegated_bindings_at(&files.bindings).bindings[agent]
+            .ids
+            .clone()
+    }
+
+    #[test]
+    fn two_subagents_each_narrow_to_their_item() {
+        let files = temp_files("narrow-two");
+        seed(
+            &files,
+            &["a", "b"],
+            &[("a1", &["a", "b"]), ("a2", &["a", "b"])],
+        );
+        let to = |ids: &[&str]| NarrowDecision::Narrow {
+            ids: s(ids),
+            source: "brief",
+        };
+        assert!(narrow(&files, "a1", to(&["a"])));
+        assert!(narrow(&files, "a2", to(&["b"])));
+        assert_eq!(bound_ids(&files, "a1"), s(&["a"]));
+        assert_eq!(bound_ids(&files, "a2"), s(&["b"]));
+        assert_eq!(
+            read_delegated_bindings_at(&files.bindings).bindings["a1"].narrowed_from,
+            s(&["a", "b"])
+        );
+        // Both items are still held, one by each.
+        assert_eq!(claim_ids(&files), Some(s(&["a", "b"])));
+        // a1 finishing unlocks only its own row.
+        assert_eq!(release(&files, &["a1"], &Fx::default()), 1);
+        assert_eq!(claim_ids(&files), Some(s(&["b"])));
+        let b = read_delegated_bindings_at(&files.bindings);
+        assert!(b.refusal(&s(&["a"])).is_none());
+        assert!(b.refusal(&s(&["b"])).is_some());
+    }
+
+    #[test]
+    fn narrowing_the_only_binding_releases_the_other_ids_from_a_held_claim() {
+        let files = temp_files("narrow-one");
+        seed(&files, &["a", "b"], &[("a1", &["a", "b"])]);
+        assert!(narrow(
+            &files,
+            "a1",
+            NarrowDecision::Narrow {
+                ids: s(&["a"]),
+                source: "description"
+            }
+        ));
+        assert_eq!(claim_ids(&files), Some(s(&["a"])));
+    }
+
+    #[test]
+    fn narrowing_never_widens_and_runs_once() {
+        let files = temp_files("narrow-never-widen");
+        seed(&files, &["a", "b", "c"], &[("a1", &["a", "b"])]);
+        // An id outside the binding is ignored; nothing left means no change.
+        assert!(!narrow(
+            &files,
+            "a1",
+            NarrowDecision::Narrow {
+                ids: s(&["c"]),
+                source: "brief"
+            }
+        ));
+        assert_eq!(bound_ids(&files, "a1"), s(&["a", "b"]));
+        // Checked now: a later decision doesn't apply.
+        assert!(!narrow(
+            &files,
+            "a1",
+            NarrowDecision::Narrow {
+                ids: s(&["a"]),
+                source: "brief"
+            }
+        ));
+        assert_eq!(bound_ids(&files, "a1"), s(&["a", "b"]));
+        // A skip marks it checked without changing ids; Pending changes nothing.
+        let files = temp_files("narrow-skip");
+        seed(&files, &["a", "b"], &[("a1", &["a", "b"])]);
+        assert!(!narrow(&files, "a1", NarrowDecision::Pending));
+        assert!(!read_delegated_bindings_at(&files.bindings).bindings["a1"].narrow_checked);
+        assert!(!narrow(
+            &files,
+            "a1",
+            NarrowDecision::Skip { reason: "no-ids" }
+        ));
+        let got = &read_delegated_bindings_at(&files.bindings).bindings["a1"];
+        assert!(got.narrow_checked);
+        assert_eq!(got.ids, s(&["a", "b"]));
+    }
+
+    #[test]
+    fn a_narrowed_agent_that_rebinds_stays_narrowed() {
+        let mut b = DelegatedBindings::default();
+        b.bind("a1", &s(&["a", "b"]), 1, "sess", "t");
+        let e = b.bindings.get_mut("a1").unwrap();
+        e.ids = s(&["a"]);
+        e.narrowed_from = s(&["a", "b"]);
+        e.narrow_checked = true;
+        // A resume offering the whole claim back rebinds to its own id only.
+        assert!(!b.bind("a1", &s(&["a", "b", "c"]), 2, "sess", "t"));
+        assert_eq!(b.bindings["a1"].ids, s(&["a"]));
+        assert!(b.bindings["a1"].narrow_checked);
+        // An agent never narrowed rebinds as before.
+        b.bind("a2", &s(&["x"]), 1, "sess", "t");
+        assert!(b.bind("a2", &s(&["x", "y"]), 2, "sess", "t"));
+        assert_eq!(b.bindings["a2"].ids, s(&["x", "y"]));
+    }
+
+    #[test]
+    fn an_unnarrowed_binding_keeps_its_wire_shape() {
+        let mut b = DelegatedBindings::default();
+        b.bind("a1", &s(&["x"]), 10, "sess", "t");
+        let v = serde_json::to_value(&b.bindings["a1"]).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"ids":["x"],"boundAtMs":10,"sessionId":"sess","agentType":"t"})
+        );
+        // An old file without the new fields reads as unchecked.
+        let old: DelegatedBinding =
+            serde_json::from_value(serde_json::json!({"ids":["x"],"boundAtMs":1})).unwrap();
+        assert!(!old.narrow_checked && old.narrowed_from.is_empty());
+    }
+
+    #[test]
+    fn the_brief_is_the_first_whole_record() {
+        let dir = temp_bindings_path("brief").with_file_name("");
+        let p = dir.join("agent-x.jsonl");
+        std::fs::write(&p, "{\"brief\":\"a-item\"}\n{\"next\":1}\n").unwrap();
+        assert_eq!(
+            subagent_brief_text(&p).as_deref(),
+            Some("{\"brief\":\"a-item\"}")
+        );
+        // A first record still being written isn't read.
+        std::fs::write(&p, "{\"brief\":\"a-it").unwrap();
+        assert_eq!(subagent_brief_text(&p), None);
+        assert_eq!(subagent_brief_text(&dir.join("missing.jsonl")), None);
     }
 
     fn claim_ids(files: &ClaimFiles) -> Option<Vec<String>> {
@@ -94578,6 +95063,8 @@ fn route_request<R: tauri::Runtime>(
     // `inflight-claim-changed` Tauri event and derives spinner state
     // from the response (`ids` array, `kind`, `claimedAt`).
     if path == "__inflight" {
+        // issue-478: narrow before reading, so the rows and the claim agree.
+        delegated_narrow_pending(app);
         let body = match inflight_claim_file(app) {
             Some(p) => std::fs::read_to_string(&p).unwrap_or_else(|_| "{}".to_string()),
             None => "{}".to_string(),

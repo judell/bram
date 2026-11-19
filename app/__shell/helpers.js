@@ -4719,14 +4719,31 @@ window.__bramDelegatedLabel = function (b) {
 
 // "A subagent (<label>) is still working on <id>" for the tooltips and the
 // gate-bar line. Empty when the selection touches no binding.
+// issue-478: once bindings narrow, different selected items can be held by
+// different subagents, so each holding subagent is named with the selected
+// items it holds. One subagent keeps the original sentence.
 window.__bramDelegatedWhy = function (claim, sel) {
   var id = window.__bramDelegatedBlocker(claim, sel);
   if (!id) return "";
-  var bs = window.__bramDelegatedBindingsFor(claim, [id]);
-  var label = bs.length ? window.__bramDelegatedLabel(bs[0]) : "subagent";
-  var more = bs.length > 1 ? " (+" + (bs.length - 1) + " more)" : "";
-  return "A subagent (" + label + ")" + more + " is still working on " + id +
-    "; it unlocks when the subagent stops.";
+  var chosen = sel || [];
+  var bs = window.__bramDelegatedBindingsFor(claim, chosen);
+  if (bs.length <= 1) {
+    var label = bs.length ? window.__bramDelegatedLabel(bs[0]) : "subagent";
+    return "A subagent (" + label + ") is still working on " + id +
+      "; it unlocks when the subagent stops.";
+  }
+  var parts = bs.map(function (b) {
+    var held = (b.ids || []).filter(function (x) { return chosen.indexOf(x) !== -1; });
+    var label = window.__bramDelegatedLabel(b);
+    // The convention puts the item id in the description ("<id>: what"),
+    // so don't say the id twice.
+    held.forEach(function (x) {
+      if (label.indexOf(x + ":") === 0) label = label.slice(x.length + 1).trim();
+    });
+    return held.join(", ") + " (" + label + ")";
+  });
+  return bs.length + " subagents are still working: " + parts.join("; ") +
+    ". Each item unlocks when its subagent stops.";
 };
 
 // start-waits-while-a-subagent-holds-shared-files: Start and Start & commit

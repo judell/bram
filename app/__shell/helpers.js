@@ -11,7 +11,12 @@
 // retired; voice recording (voiceStart / voiceStop) is the one remaining
 // exception, because the parent shell owns the MediaRecorder pipeline.
 
-window._xsLogs = window._xsLogs || [];
+// No unconditional `window._xsLogs = []` here. XMLUI creates the buffer itself
+// when verbose tracing is on, and its audit pushes write to any array that
+// exists, so pre-creating one let entries pile up with verbose off. With verbose
+// on, XMLUI's trim never evicts its "preserved" kinds, so the buffer has no
+// bound in a long-lived pane: 7,516 entries against a cap of 200 on 2026-11-18
+// (xs-verbose-off-by-default).
 
 // ResizeObserver flood detector (diagnostic, #150 startup unresponsiveness).
 // The browser logs "ResizeObserver loop completed with undelivered
@@ -8160,7 +8165,9 @@ window.__bramStripImageMarkerPrefix = function (text) {
 // comparable across the migration.
 function __bramAppMark(label) {
   try {
-    if (!window._xsLogs) return;
+    // Only while verbose tracing is on, the same condition under which XMLUI
+    // writes this buffer. This push has no cap of its own.
+    if (!window.__xsVerbose || !Array.isArray(window._xsLogs)) return;
     var perfTs = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
     window._xsLogs.push({ kind: "app:mark", ts: Date.now(), label: label, perfTs: perfTs });
   } catch (e) {}

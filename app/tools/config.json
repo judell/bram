@@ -4,7 +4,7 @@
     "readScopedRendering": true
   },
   "appGlobals": {
-    "xsVerbose": true,
+    "xsVerbose": false,
     "xsVerboseLogMax": 200,
     "heartbeatDriftThresholdMs": 250
   },

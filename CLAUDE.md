@@ -192,6 +192,14 @@ AppHeader's profile menu slot — the magnifying-glass icon top-right. It
 shows semantic traces of XMLUI events. Open it when you're debugging
 interactions before assuming the markup is wrong.
 
+Verbose tracing, which feeds the Inspector, is **off by default**
+(`appGlobals.xsVerbose: false` in `app/tools/config.json`). In a pane that
+stays open, XMLUI's trace buffer has no bound, and the time each event takes
+grows with the pane's age. To trace one debugging session, run
+`localStorage.setItem("xmlui:xsVerbose", "true")` in the pane's console and
+reload the pane. Remove the key (`localStorage.removeItem("xmlui:xsVerbose")`)
+when you're done.
+
 ## Architectural background
 
 The deeper narrative — why Tauri, why a static frontend, the gotchas

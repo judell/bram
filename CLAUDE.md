@@ -195,14 +195,19 @@ interactions before assuming the markup is wrong.
 Verbose tracing, which feeds the Inspector, is **off by default**
 (`xmluiConfig.xsVerbose: false` in `app/tools/config.json`). In a pane that
 stays open, XMLUI's trace buffer has no bound, and the time each event takes
-grows with the pane's age. To trace one debugging session, set
-`"xsVerbose": true` under `xmluiConfig` in `app/tools/config.json`, reload
-the pane, and set it back to `false` when you're done.
+grows with the pane's age. To trace one debugging session, run this in
+the Web Inspector console:
 
-XMLUI also honours `localStorage["xmlui:xsVerbose"] = "true"` (vendored since
-the xmlui-org/xmlui#3969 bundle), but in Bram's pane the key didn't survive a
-pane reload on 2026-11-19, and the cause isn't known. Use the config until
-that's explained.
+```js
+document.getElementById('tools-pane').contentWindow.localStorage.setItem("xmlui:xsVerbose", "true")
+```
+
+then **wait about 10 seconds** before reloading the pane. WebKit saves
+`localStorage` asynchronously, and a reload a second or two after setting
+the key loses it (xmlui-org/xmlui#3969). To turn tracing off, `removeItem`
+the key, wait again, and reload. The fallback is setting
+`"xsVerbose": true` under `xmluiConfig` in `app/tools/config.json`, and back
+to `false` when you're done.
 
 ## Architectural background
 

@@ -286,9 +286,28 @@ between runs. That matches XMLUI's per-binding finding in WebKit (about
 0.11 MB more for a compiled binding than an interpreted one,
 [xmlui-org/xmlui#3969](https://github.com/xmlui-org/xmlui/issues/3969)).
 Compilation was turned on in `f209feca` (2026-08-08) when XMLUI fixed the
-bugs that had made it unsafe, with no speed measurement recorded. Weigh
-any change against a responsiveness check (`scripts/ui-health.py`, then
-`pane-age-health.py`). Run 2's "off" copy may have included unrelated,
+bugs that had made it unsafe, with no speed measurement recorded.
+
+**It's off since 2026-11-19, on these speed numbers.** A demo pane was run
+with `BRAM_TEST_DRIVE=1` and driven by two tool-free agent turns through
+`__test/turn` (streaming transcript, status events), then read with
+`ui-health.py`. Two interleaved pairs:
+
+| | run 1 on | run 1 off | run 2 on | run 2 off |
+|---|---|---|---|---|
+| startup to first data request | 0.307 s | 0.184 s | 0.313 s | 0.332 s |
+| projection p50 / p95 (ms) | 105 / 267 | 89 / 170 | 82 / 831 | 110 / 292 |
+| heartbeat drift max | 1,065 ms | 969 ms | 775 ms | 1,075 ms |
+| long tasks | 0 | 0 | 0 | 0 |
+
+Every gauge overlaps. Typing and clicking felt normal to Jon with it off,
+and the pane logs "App started in interpreted script mode". The cost is
+per binding: XMLUI compiles each binding expression in the markup to its
+own function, and WebKit keeps about 0.11 MB per function, which over
+Bram's ~2,000 bindings is the 200 MB above (xmlui-org/xmlui#3969).
+Turning compilation on again would need an app-level speed gain to
+justify it. XMLUI plans interpreted-by-default, then tiered compilation
+for bindings that run hot. Run 2's "off" copy may have included unrelated,
 inactive pane code that was being written at the time; the other five
 didn't.
 

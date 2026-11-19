@@ -1,6 +1,6 @@
 {
   "xmluiConfig": {
-    "compileScripts": true,
+    "compileScripts": false,
     "readScopedRendering": true,
     "xsVerbose": false,
     "xsVerboseLogMax": 200

@@ -240,6 +240,47 @@ objects, so this cost is in what that markup does at startup, not in what
 it shows. The next cut is inside that layer. Settle time matters: a 60 s
 smoke test of `hello` read 270 MB, against 188 MB after 180 s.
 
+**Inside the always-visible layer** (2026-11-19, `RUNS=3`, interleaved,
+tracing forced off, #3969 candidate bundle; MB):
+
+| variant | median | range | vs `full` |
+|---|---|---|---|
+| `full` | 709 | 683–718 | |
+| `no-footer` (the whole bottom dock: Worklist pane, gate bar, composer, banners, sparkline) | 587 | 568–609 | −122 |
+| `no-data` (the 56 top-level `DataSource` / `PushSource` / `ChangeListener`) | 592 | 571–594 | −117 |
+| `no-dialogs` (single run) | 679 | | about −21 |
+| `no-header` (single run) | 689 | | about −11 |
+
+The dock and data steps are outside the noise; the dialogs and header are
+within it. Read `no-data` with care: a binding to a removed source evaluates
+to `undefined`, so every `when=` that depends on it hides its part of the
+header or footer too. The step measures the sources *plus the UI they gate*.
+The payloads themselves are small (the largest route response in a session
+was about 270 KB). What the pane mounts is what it shows (`when="{false}"`
+mounts nothing), so memory tracks how much markup is on screen. The cost per
+component is XMLUI's to measure, and XMLUI is measuring it
+([xmlui-org/xmlui#3969](https://github.com/xmlui-org/xmlui/issues/3969)).
+That issue also confirmed that XMLUI fetches every component named in a
+`<Page>` at startup, mounted or not, so the 16 tabs not being viewed are
+loaded too. Whether that holds memory is still to be measured.
+
+A broken variant reads as a near-empty pane, because XMLUI's markup-error
+page writes nothing to the trace. So the script checks each copy's markup
+(quote-aware tag balance) before launching it, and `DRY=1` builds and checks
+copies without launching.
+
+**Windows isn't covered.** The script is macOS-only (`footprint`, the
+WebContent match, the demo launcher's Unix path). What it finds lives in the
+pane's JavaScript and markup, so the fixes carry over, but WebView2 runs
+Chromium (V8, Blink), so the sizes will differ. The memory is also spread
+over a family of `msedgewebview2.exe` processes, which a measurement has to
+add up: #296's hang showed 5.2, 4.8 and 3 GB across three of them. Before
+porting the script, the cheap check is two Task Manager readings from a
+Windows user's machine: each WebView2 process under Bram, and their total,
+after a fresh launch and after a few hours of use. Held for when it's needed
+(2026-11-19): the main Windows user, on a 16 GB laptop, hasn't reported
+trouble.
+
 ### What the agents keep running: the Tasks report
 
 judell/bram#483 asks for a Tasks feature: a repeatable command, once it

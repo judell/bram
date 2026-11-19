@@ -1167,6 +1167,12 @@ the session; the reminder carries it across.
 
 ## Flagging feedback that drifts from its item
 
+The record it would falsify is the item's audit trail
+(`<state>/feedback-drafts/`, then `feedback-history/`). Don't do the
+drifted work in this turn. Fire on obvious drift only, **once per
+drift**; a tangent that touches the item, or a follow-up about work
+just done, is not drift.
+
 When a turn's item feedback is plainly about something else (a
 different subsystem, bug or project), flag it, say so in one line, and
 stop. **If it's about another item on the board** (most often one a

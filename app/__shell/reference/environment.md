@@ -584,6 +584,13 @@ sessions that both stay put and coordinate.)
 
 ### Name the boundary
 
+Sustained investigation, issue filing and follow-up belong in the
+target project's session: transcripts, the `/__search` index and
+worklist history are scoped by working directory and record work where
+it *runs*. If the user proceeds from here anyway, make any artifact left
+in the target project (issue, doc, commit message) self-contained,
+carrying the evidence inline.
+
 Say which side of the boundary you are on, and scope every claim to it.
 The signature that carries this is not boundary-scoped — it is required
 on every agent-authored forge artifact, in every repo.

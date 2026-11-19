@@ -451,14 +451,9 @@ Two pitfalls:
 
 ### Notice when feedback drifts from its item
 
-Feedback sent with a row ticked is filed to that item's audit trail
-(`<state>/feedback-drafts/`, then `feedback-history/`), so feedback
-about something else makes the record **false**. When a turn's feedback
-is plainly about something else — a different subsystem, bug or
-project — **flag it, say so in one line, and stop**; don't do the work
-in this turn. Fire on obvious drift only, **once per drift**; a tangent
-that touches the item, or a follow-up about work just done, is not
-drift.
+Feedback sent with a row ticked is filed to that item's audit trail, so
+feedback plainly about something else makes the record **false**:
+**flag it, say so in one line, and stop**.
 
 - **Feedback plainly about something else** → read `.claude/bram-reference/worklist-mechanics.md` (§Flagging feedback that drifts from its item) before replying.
 - **Chat that is plainly feedback on an item on the board** (the other direction) → read `.claude/bram-reference/worklist-mechanics.md` (§Chat that should have been feedback).
@@ -566,12 +561,6 @@ narration is the live one-line version.
 When the user pivots to a different project ("let's look at
 ~/other-app"), flag the boundary and offer the choice: a quick
 read-only look from here, or a handoff to that project's own session.
-Sustained investigation, issue filing and follow-up belong in the
-target project's session: transcripts, the `/__search` index and
-worklist history are scoped by working directory and record work where
-it *runs*. If the user proceeds from here anyway, make any
-artifact left in the target project (issue, doc, commit message)
-self-contained, carrying the evidence inline.
 
 **Sessions coordinate on the record.** Don't message another agent
 session unless the user says to for that case. Post on a forge

@@ -152,9 +152,11 @@ work. Before ending the turn, declare the wait:
 POST it to `/__worklist/wait`, with the same transport as the other
 worklist routes.
 
-- **What the user sees:** the gate reads "The agent is waiting on
-  background work for `x` (note), expected by …; Commit opens when it
-  finishes.", and Commit holds. Past `untilMs` the line says it's overdue
+- **What the user sees:** the gate reads "The agent is waiting on `x`
+  (note), expected by …; Commit opens when the wait ends.", and Commit
+  holds. The line doesn't assume a running task, so the note should say
+  what the wait is for: "the compile on/off comparison", "a release build",
+  or "your normal use with compilation off". Past `untilMs` the line says it's overdue
   and offers Drop or a message to you. The pane stops honoring a wait 30
   minutes past `untilMs`.
 - **Name only the items the work is for.** A wait is tied to the ids you

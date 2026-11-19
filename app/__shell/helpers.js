@@ -14580,8 +14580,10 @@ window.bramSubscribeW2Selection = (function () {
         ". It's overdue: ask the agent, or Drop.";
     }
     var by = w.untilMs ? ", expected by " + window.__bramClockTime(w.untilMs, now) : "";
-    return "The agent is waiting on background work for " + whit.join(", ") + what + by +
-      "; Commit opens when it finishes.";
+    // Not "background work": a wait can be on a person too (the first real one
+    // waited on Jon's normal use). The note says what for.
+    return "The agent is waiting on " + whit.join(", ") + what + by +
+      "; Commit opens when the wait ends.";
   };
   window.bramSubscribeTurnContext = function () {
     if (factory) return factory;

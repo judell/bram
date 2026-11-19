@@ -14573,12 +14573,13 @@ window.bramSubscribeW2Selection = (function () {
     if (!whit.length) return "";
     var w = wait || {};
     var what = w.note ? " (" + w.note + ")" : "";
-    if (w.untilMs && Date.now() > w.untilMs) {
+    var now = Date.now();
+    if (w.untilMs && now > w.untilMs) {
       return "The agent was waiting on " + whit.join(", ") + what +
-        ", expected by " + window.__bramClockTime(w.untilMs) +
+        ", expected by " + window.__bramClockTime(w.untilMs, now) +
         ". It's overdue: ask the agent, or Drop.";
     }
-    var by = w.untilMs ? ", expected by " + window.__bramClockTime(w.untilMs) : "";
+    var by = w.untilMs ? ", expected by " + window.__bramClockTime(w.untilMs, now) : "";
     return "The agent is waiting on background work for " + whit.join(", ") + what + by +
       "; Commit opens when it finishes.";
   };
@@ -14626,11 +14627,24 @@ window.subscribeTauriEvent("__bramNativeWorklistWaitUnsub", "worklist-wait-chang
   window.__bramSetWorklistWaitFromEvent((e && e.payload) || null);
 });
 
-// "8:52 PM"-style local clock time for an epoch-ms instant ("" when absent).
-window.__bramClockTime = function (ms) {
+// "8:52 PM"-style local clock time for an epoch-ms instant ("" when absent),
+// naming the day when it isn't today relative to nowMs: "12:00 PM tomorrow",
+// "12:00 PM Friday" within the week, "12:00 PM Nov 27" beyond (Jon,
+// 2026-11-19: a wait until noon tomorrow read as twelve hours overdue).
+// nowMs comes from the caller, so this helper reads no clock of its own.
+window.__bramClockTime = function (ms, nowMs) {
   if (!ms) return "";
   try {
-    return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    var when = new Date(ms);
+    var time = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    if (!nowMs) return time;
+    var dayStart = function (d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+    var days = Math.round((dayStart(when) - dayStart(new Date(nowMs))) / 86400000);
+    if (days === 0) return time;
+    if (days === 1) return time + " tomorrow";
+    if (days === -1) return time + " yesterday";
+    if (days > 1 && days < 7) return time + " " + when.toLocaleDateString([], { weekday: "long" });
+    return time + " " + when.toLocaleDateString([], { month: "short", day: "numeric" });
   } catch (e) { return ""; }
 };
 

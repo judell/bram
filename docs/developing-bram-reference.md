@@ -306,7 +306,15 @@ per binding: XMLUI compiles each binding expression in the markup to its
 own function, and WebKit keeps about 0.11 MB per function, which over
 Bram's ~2,000 bindings is the 200 MB above (xmlui-org/xmlui#3969).
 Turning compilation on again would need an app-level speed gain to
-justify it. XMLUI plans interpreted-by-default, then tiered compilation
+justify it.
+
+**XMLUI's startup-churn bundle** (`2802afdd…`, vendored 2026-11-19: the
+layout resolver touches only the properties a component sets,
+`useCombinedState`'s memo works, and theme classes are shared per component
+type) took the full pane, compilation off, from a median of 655 MB
+(641–676) to **630 MB** (594–644), 3 runs each, about 4%. Their 50-row
+probe app gained 15%; Bram's pane has fewer repeats of any one component,
+so sharing the theme class buys less. XMLUI plans interpreted-by-default, then tiered compilation
 for bindings that run hot. Run 2's "off" copy may have included unrelated,
 inactive pane code that was being written at the time; the other five
 didn't.

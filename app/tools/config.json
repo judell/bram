@@ -1,11 +1,11 @@
 {
   "xmluiConfig": {
     "compileScripts": true,
-    "readScopedRendering": true
+    "readScopedRendering": true,
+    "xsVerbose": false,
+    "xsVerboseLogMax": 200
   },
   "appGlobals": {
-    "xsVerbose": false,
-    "xsVerboseLogMax": 200,
     "heartbeatDriftThresholdMs": 250
   },
   "themes": [

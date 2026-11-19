@@ -193,12 +193,16 @@ shows semantic traces of XMLUI events. Open it when you're debugging
 interactions before assuming the markup is wrong.
 
 Verbose tracing, which feeds the Inspector, is **off by default**
-(`appGlobals.xsVerbose: false` in `app/tools/config.json`). In a pane that
+(`xmluiConfig.xsVerbose: false` in `app/tools/config.json`). In a pane that
 stays open, XMLUI's trace buffer has no bound, and the time each event takes
-grows with the pane's age. To trace one debugging session, run
-`localStorage.setItem("xmlui:xsVerbose", "true")` in the pane's console and
-reload the pane. Remove the key (`localStorage.removeItem("xmlui:xsVerbose")`)
-when you're done.
+grows with the pane's age. To trace one debugging session, set
+`"xsVerbose": true` under `xmluiConfig` in `app/tools/config.json`, reload
+the pane, and set it back to `false` when you're done.
+
+XMLUI also honours `localStorage["xmlui:xsVerbose"] = "true"` (vendored since
+the xmlui-org/xmlui#3969 bundle), but in Bram's pane the key didn't survive a
+pane reload on 2026-11-19, and the cause isn't known. Use the config until
+that's explained.
 
 ## Architectural background
 

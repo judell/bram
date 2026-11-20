@@ -77300,6 +77300,104 @@ fn delegated_subagent_file(
         .find(|f| f.agent_id == agent)
 }
 
+// Why a binding stayed pending: the first of the three lookup steps that
+// came up empty, and the path it tried.
+#[derive(Debug, PartialEq)]
+struct NarrowPendingWhy {
+    reason: &'static str,
+    dir: String,
+}
+
+// The narrowing decision for one unchecked binding, from the sessions
+// directory lookup. The second value names the failed step when the
+// decision is Pending.
+fn delegated_binding_decision(
+    sessions_dir: Result<&Path, &str>,
+    agent: &str,
+    b: &DelegatedBinding,
+) -> (NarrowDecision, Option<NarrowPendingWhy>) {
+    if sorted_id_set(b.ids.iter()).len() <= 1 {
+        return (
+            NarrowDecision::Skip {
+                reason: "single-id",
+            },
+            None,
+        );
+    }
+    if b.session_id.is_empty() || !session_id_is_safe(&b.session_id) {
+        return (
+            NarrowDecision::Skip {
+                reason: "no-session",
+            },
+            None,
+        );
+    }
+    let dir = match sessions_dir {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                NarrowDecision::Pending,
+                Some(NarrowPendingWhy {
+                    reason: "no-sessions-dir",
+                    dir: e.to_string(),
+                }),
+            )
+        }
+    };
+    let session_file = dir.join(format!("{}.jsonl", b.session_id));
+    let Some(file) = delegated_subagent_file(dir, agent, b) else {
+        let (reason, tried) = if session_file.is_file() {
+            ("no-subagent-file", st_session_subagents_dir(&session_file))
+        } else {
+            ("no-session-file", Some(session_file))
+        };
+        return (
+            NarrowDecision::Pending,
+            Some(NarrowPendingWhy {
+                reason,
+                dir: tried.map(|p| p.display().to_string()).unwrap_or_default(),
+            }),
+        );
+    };
+    let meta = st_read_subagent_meta(&file.dir, agent);
+    let description = meta
+        .as_ref()
+        .and_then(|m| m.get("description"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let brief = subagent_brief_text(&file.jsonl_path);
+    (
+        narrow_decision(&b.ids, description.as_deref(), brief.as_deref()),
+        None,
+    )
+}
+
+// Agents whose pending state was already traced this process.
+static NARROW_PENDING_SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn trace_narrow_pending_once<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    agent: &str,
+    session: &str,
+    why: &NarrowPendingWhy,
+) {
+    let first = NARROW_PENDING_SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut set| set.insert(agent.to_string()))
+        .unwrap_or(false);
+    if first {
+        append_bram_trace_line(
+            app,
+            "delegated",
+            &format!(
+                "op=narrow-pending agent={} session={} reason={} dir={}",
+                agent, session, why.reason, why.dir
+            ),
+        );
+    }
+}
+
 // Check every binding not yet checked. Called where the evidence first
 // becomes readable: SubagentStart, the /__inflight read its bind triggers,
 // the roster's reads, and before a commit, drop or mutate checks bindings.
@@ -77317,35 +77415,22 @@ fn delegated_narrow_pending<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(files) = claim_files(app) else {
         return;
     };
-    let sessions_dir = claude_sessions_dir_lookup(app).ok().map(|l| l.chosen);
+    let sessions_dir = claude_sessions_dir_lookup(app)
+        .map(|l| l.chosen)
+        .map_err(|e| e.to_string());
     for (agent, b) in pending {
-        let decision = if sorted_id_set(b.ids.iter()).len() <= 1 {
-            NarrowDecision::Skip {
-                reason: "single-id",
-            }
-        } else if b.session_id.is_empty() || !session_id_is_safe(&b.session_id) {
-            NarrowDecision::Skip {
-                reason: "no-session",
-            }
-        } else {
-            match sessions_dir
-                .as_deref()
-                .and_then(|dir| delegated_subagent_file(dir, &agent, &b))
-            {
-                None => NarrowDecision::Pending,
-                Some(file) => {
-                    let meta = st_read_subagent_meta(&file.dir, &agent);
-                    let description = meta
-                        .as_ref()
-                        .and_then(|m| m.get("description"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    let brief = subagent_brief_text(&file.jsonl_path);
-                    narrow_decision(&b.ids, description.as_deref(), brief.as_deref())
-                }
-            }
-        };
+        let (decision, why) = delegated_binding_decision(
+            sessions_dir
+                .as_ref()
+                .map(|p| p.as_path())
+                .map_err(|e| e.as_str()),
+            &agent,
+            &b,
+        );
         if decision == NarrowDecision::Pending {
+            if let Some(why) = why {
+                trace_narrow_pending_once(app, &agent, &b.session_id, &why);
+            }
             continue;
         }
         let g = claim_lock();
@@ -78363,6 +78448,79 @@ mod delegated_binding_tests {
             s(&["issue-478-x"])
         );
         assert!(item_ids_named("", &ids).is_empty());
+    }
+
+    fn narrow_fixture(name: &str, description: &str, brief: &str) -> (PathBuf, DelegatedBinding) {
+        let root = std::env::temp_dir().join(format!(
+            "bram-narrow-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let subs = root.join(sid).join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        std::fs::write(root.join(format!("{}.jsonl", sid)), "{}\n").unwrap();
+        std::fs::write(subs.join("agent-X.jsonl"), format!("{}\n", brief)).unwrap();
+        std::fs::write(
+            subs.join("agent-X.meta.json"),
+            serde_json::json!({ "description": description }).to_string(),
+        )
+        .unwrap();
+        let b = DelegatedBinding {
+            ids: s(&["a-item", "b-item"]),
+            session_id: sid.to_string(),
+            ..Default::default()
+        };
+        (root, b)
+    }
+
+    #[test]
+    fn binding_decision_narrows_on_description_from_a_real_layout() {
+        let (root, b) = narrow_fixture("desc", "b-item: do the thing", r#"{"c":"brief"}"#);
+        assert!(delegated_subagent_file(&root, "X", &b).is_some());
+        let (d, why) = delegated_binding_decision(Ok(&root), "X", &b);
+        assert_eq!(
+            d,
+            NarrowDecision::Narrow {
+                ids: s(&["b-item"]),
+                source: "description"
+            }
+        );
+        assert!(why.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn binding_decision_falls_back_to_the_brief() {
+        let (root, b) = narrow_fixture("brief", "Edits", r#"{"c":"Work on a-item only"}"#);
+        let (d, _) = delegated_binding_decision(Ok(&root), "X", &b);
+        assert_eq!(
+            d,
+            NarrowDecision::Narrow {
+                ids: s(&["a-item"]),
+                source: "brief"
+            }
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn binding_decision_pending_names_the_missing_step() {
+        let (root, b) = narrow_fixture("pending", "a-item", "{}");
+        let (d, why) = delegated_binding_decision(Ok(&root), "Y", &b);
+        assert_eq!(d, NarrowDecision::Pending);
+        assert_eq!(why.unwrap().reason, "no-subagent-file");
+        let (d, why) = delegated_binding_decision(Ok(&root.join("nope")), "X", &b);
+        assert_eq!(d, NarrowDecision::Pending);
+        assert_eq!(why.unwrap().reason, "no-session-file");
+        let (d, why) = delegated_binding_decision(Err("no HOME"), "X", &b);
+        assert_eq!(d, NarrowDecision::Pending);
+        assert_eq!(why.unwrap().reason, "no-sessions-dir");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

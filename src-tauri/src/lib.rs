@@ -5867,6 +5867,8 @@ fn trace_route_entry<R: tauri::Runtime>(
     query: &str,
     correlation_id: &str,
 ) {
+    // Reset the git accounting for this request, traced or not.
+    let _ = git_acct_take();
     if !bram_trace_enabled() {
         return;
     }
@@ -5907,15 +5909,21 @@ fn trace_route_exit<R: tauri::Runtime>(
     body_size: usize,
     duration_ms: u128,
 ) {
+    let (git_calls, git_ms) = git_acct_take();
     if !bram_trace_enabled() {
         return;
     }
+    let git = if git_calls > 0 {
+        format!(" git_calls={} git_ms={}", git_calls, git_ms)
+    } else {
+        String::new()
+    };
     append_bram_trace_line(
         app,
         "route",
         &format!(
-            "phase=exit method={} path={} status={} body_size={} duration_ms={} correlation_id={}",
-            method, path, status, body_size, duration_ms, correlation_id
+            "phase=exit method={} path={} status={} body_size={} duration_ms={}{} correlation_id={}",
+            method, path, status, body_size, duration_ms, git, correlation_id
         ),
     );
 }
@@ -5937,13 +5945,30 @@ fn project_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf
     resolve_app_root(app).and_then(|app_root| app_root.parent().map(|p| p.to_path_buf()))
 }
 
+// git-time-on-the-route-line: how much of a route's duration was spent in
+// git. Each git_run on the request thread adds to these counters; the route
+// exit line reports them (git_calls=, git_ms=) and resets them. Added
+// 2026-11-20 because the record had no git timings when #475's route got
+// three times cheaper at a relaunch and nothing could say why.
+thread_local! {
+    static GIT_ACCT: std::cell::Cell<(u32, u128)> = std::cell::Cell::new((0u32, 0u128));
+}
+fn git_acct_add(ms: u128) {
+    GIT_ACCT.with(|c| {
+        let (n, t) = c.get();
+        c.set((n + 1, t + ms));
+    });
+}
+fn git_acct_take() -> (u32, u128) {
+    GIT_ACCT.with(|c| c.replace((0, 0)))
+}
+
 fn git_run<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Result<String, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let out = hidden_command("git")
-        .current_dir(&root)
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let t0 = std::time::Instant::now();
+    let out = hidden_command("git").current_dir(&root).args(args).output();
+    git_acct_add(t0.elapsed().as_millis());
+    let out = out.map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
@@ -5957,11 +5982,10 @@ fn git_run<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Result<Strin
 // non-zero exit, returning stdout regardless.
 fn git_run_allow_exit<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Option<String> {
     let root = project_root(Some(app))?;
-    let out = hidden_command("git")
-        .current_dir(&root)
-        .args(args)
-        .output()
-        .ok()?;
+    let t0 = std::time::Instant::now();
+    let out = hidden_command("git").current_dir(&root).args(args).output();
+    git_acct_add(t0.elapsed().as_millis());
+    let out = out.ok()?;
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 

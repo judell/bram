@@ -593,7 +593,7 @@
         label="{window.__bramGateQueuedLabel('start', window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value), gateQueue.value)}"
         size="sm"
         enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSharedFilesBlocker(gateClaim.value, gateSel.value, gateWorklist.value.items) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start')}"
-        onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+        onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, gateClaim.value)" />
     </Tooltip>
     <!-- gate-one-way-to-continue-one-to-finish: dimmed whenever Commit can be
          lit. On a begun `proposed` item both send apply-and-commit, so the row
@@ -606,7 +606,7 @@
         label="{window.__bramGateQueuedLabel('start-commit', window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit', gateQueue.value)}"
         size="sm"
         enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSharedFilesBlocker(gateClaim.value, gateSel.value, gateWorklist.value.items) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value, gateWait.value, gateWaitTick) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'start-commit')}"
-        onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+        onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, gateClaim.value)" />
     </Tooltip>
     <Tooltip>
       <property name="tooltipTemplate">
@@ -616,7 +616,7 @@
         label="{window.__bramGateQueuedLabel('commit', 'Commit', gateQueue.value)}"
         size="sm"
         enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value, gateWait.value, gateWaitTick) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; !window.__bramGateQueuedAs(gateQueue.value, 'commit')}"
-        onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+        onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, gateClaim.value)" />
     </Tooltip>
     <!-- plain-words: shown only when the commit would include lines no item
          wrote; replaces the take line's "including +u -v no item wrote".
@@ -646,7 +646,7 @@
         label="Drop"
         size="sm"
         enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramDelegatedBlocker(gateClaim.value, gateSel.value)}"
-        onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
+        onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, gateClaim.value)" />
     </Tooltip>
   </HStack>
 </Component>

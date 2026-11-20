@@ -3616,7 +3616,7 @@ window.__bramDoRecommended = function (board, claim) {
     // every item apply-and-commit as soon as one isn't applied.
     if (startIds.length && commitIds.length) {
       var ids = commitIds.concat(startIds);
-      var body = window.__bramWithShareMode("", "together", items, commitIds, null);
+      var body = "";
       var r = window.__bramPrepareBatchWorklistActionSubmission({
         items: items,
         selectedIds: ids,
@@ -3630,8 +3630,8 @@ window.__bramDoRecommended = function (board, claim) {
       window.__bramGateGoTranscript();
       return;
     }
-    if (startIds.length) window.__bramGateAct("start", items, startIds, null, claim);
-    if (commitIds.length) window.__bramGateAct("commit", items, commitIds, "together", claim);
+    if (startIds.length) window.__bramGateAct("start", items, startIds, claim);
+    if (commitIds.length) window.__bramGateAct("commit", items, commitIds, claim);
     feedbackSteps.forEach(function (s) {
       window.__bramWorklist2BatchIterate(s.ids, String(s.text));
     });
@@ -3665,7 +3665,7 @@ window.__bramDismissPlan = function () {
     .catch(function () {});
 };
 
-window.__bramGateAct = function (kind, items, sel, shareMode, claim, opt) {
+window.__bramGateAct = function (kind, items, sel, claim, opt) {
   // gate-click-queues-behind-running-turn: `opt.now` delivers a queued click
   // (at turn end, or Commit now) with the composer text it was made with
   // (`opt.text`); `opt.delivery` keeps that delivery from clearing the
@@ -3724,7 +3724,6 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim, opt) {
       kind: kind,
       items: window.__bramPlainCopy(items),
       sel: ids0.slice(),
-      shareMode: shareMode,
       text: String(window.__bramMessageAgentText || ""),
     });
     window.__bramClearComposer();
@@ -3749,7 +3748,6 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim, opt) {
   }
   var body = window.__bramWithStagedImageMarkers(text, "feedback");
   if (kind === "commit" || kind === "start-commit") {
-    body = window.__bramWithShareMode(body, shareMode || "together", items, ids0, null);
   }
   var filter = (kind === "start" || kind === "start-commit") ? "proposed" : "";
   var ids = window.__bramSelectionIds(items, ids0, filter);
@@ -5355,8 +5353,9 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
   var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
   if (picked.length !== chosen.length) return false;
   // gate-withholds-futile-joint-commit-offer: the host enforces this one —
-  // a selection missing a still-begun jointWith partner is refused every
-  // time. Don't offer the guaranteed 409; the gate note names the partner.
+  // a selection missing a started item that shares its files
+  // (commitDependsOn) is refused every time. Don't offer the guaranteed
+  // 409; the gate note names the partner.
   if ((window.__bramSelectionJointMissing(items, sel, claim) || []).length) {
     return false;
   }
@@ -6366,17 +6365,6 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
       var o = (items || []).filter(function (x) { return x && x.id === b; })[0];
       return !!o && (o.commitDependsOn || []).indexOf(item.id) !== -1;
     });
-    // whats-my-sequence-button: a still-begun JOINT partner (lines written
-    // while both items' claims were open) can't commit first either: the
-    // host refuses either one alone (op=refuse-joint-interval), so "commit
-    // that first" on both rows was the same loop (Jon, 2026-11-08, on
-    // log-tells-session-switches and whats-my-sequence-button). Say what's
-    // true: they commit together.
-    var joint = (item.jointWith || []).filter(function (j) {
-      var o = (items || []).filter(function (x) { return x && x.id === j; })[0];
-      return !!o && window.__bramWorklist2Begun(o, claim);
-    });
-    if (joint.length) return withCloses("Commits only together with " + joint.join(", "));
     // issue-419-header-from-membership: superseded. The item did work in its
     // windows (ownLines > 0 above), but membership credits it no line in any
     // of its changed files: another item rewrote them. "Shares its changed
@@ -6845,38 +6833,11 @@ window.__bramSelectionSharedFilePaths = function (items, sel, claim) {
   return out;
 };
 
-// avoid-futile-joint-commit: true once the selection already carries a JOINT
-// capture boundary on a shared path -- read from the host-computed
-// `jointWith` field (see /__worklist's per-item jointWith, same change) on
-// any selected item, rather than predicted from declared files the way
-// __bramSelectionSharesFiles is. A non-empty jointWith on a selected item
-// means that item was approved together with another in one click and its
-// shared-path edits can only be committed jointly (see op=refuse-joint-
-// interval) -- true regardless of whether the OTHER member of that joint
-// set is also part of the current selection, because the foreclosure is a
-// property of the item's history, not of who else is ticked right now.
-window.__bramSelectionJointShared = function (items, sel) {
-  var chosen = sel || [];
-  if (!chosen.length) return false;
-  var list = items || [];
-  var byId = {};
-  for (var i = 0; i < list.length; i++) if (list[i]) byId[list[i].id] = list[i];
-  for (var s = 0; s < chosen.length; s++) {
-    var it = byId[chosen[s]];
-    if (it && it.jointWith && it.jointWith.length) return true;
-  }
-  return false;
-};
-
-// gate-withholds-futile-joint-commit-offer: the still-begun jointWith
-// partners a selection is MISSING — the ids whose absence makes a commit of
-// this selection a guaranteed host refusal (op=refuse-joint-interval, #356:
-// a joint run cannot be split, so a request not covering the
-// whole joint set 409s every time; field case 2026-09-08, "Then we should
-// not offer it!"). A pruned partner does not block — ghosts fall through to
-// whole-file staging host-side. Keys on EVIDENCE (jointWith), so #269's
-// per-item claims retire this check by making the field empty for new
-// records — no policy unwind (the item draft's sunset note).
+// gate-withholds-futile-joint-commit-offer: the started items a selection
+// must also include. The host refuses a commit of an item whose files
+// another started item is also changing (`commitDependsOn`,
+// op=refuse-commit-together), so a selection missing one of them is a
+// guaranteed 409. A pruned partner does not block.
 window.__bramSelectionJointMissing = function (items, sel, claim) {
   var chosen = sel || [];
   var list = items || [];
@@ -6886,9 +6847,8 @@ window.__bramSelectionJointMissing = function (items, sel, claim) {
   for (var s = 0; s < chosen.length; s++) {
     var it = byId[chosen[s]];
     // A commit of an item whose files another started item also changes
-    // (host membership, commitDependsOn) is refused alone, exactly like a
-    // joint run.
-    var jw = ((it && it.jointWith) || []).concat((it && it.commitDependsOn) || []);
+    // (host membership, commitDependsOn) is refused alone.
+    var jw = (it && it.commitDependsOn) || [];
     for (var j = 0; j < jw.length; j++) {
       var partner = byId[jw[j]];
       if (!partner) continue;
@@ -14363,7 +14323,7 @@ window.bramSubscribeW2Selection = (function () {
     });
     notify();
     try {
-      window.__bramGateAct(q.kind, deliveryItems(q), q.sel, q.shareMode, null,
+      window.__bramGateAct(q.kind, deliveryItems(q), q.sel, null,
         { now: true, delivery: true, text: q.text });
     } catch (e) {
       window.__bramIframeTrace("gate-click", {
@@ -18068,25 +18028,6 @@ window.__bramSelectionHasBegunShared = function (items, sel, claim) {
     return item && chosen.indexOf(item.id) !== -1 &&
       window.__bramItemChangedSplit(item, list, claim).sharedDeclared.length > 0;
   });
-};
-
-window.__bramWithShareMode = function (text, mode, items, sel, claim) {
-  // gate-remove-commit-share-radio: no "split" mode any more. The radio that
-  // chose it is gone; its only effect was the split-shared-files hunk
-  // separation #273 froze. `mode`, `items`, `sel`, `claim` are kept for the
-  // call shape.
-  //
-  // retire-selected-only-shared-files-instruction: this used to append
-  // "selected-only-shared-files: isolate the selected items' shared-file
-  // changes from unselected claimants before committing" whenever the
-  // selection shared a file with an unselected begun item. Agents obeyed by
-  // hand: revert the neighbour's lines, commit, restore them (demo gate-425,
-  // 2026-10-06 07:11:18-35Z). That hid the shared lines from the gate — which
-  // since issue-425 decides entanglement by line-level membership, and
-  // since #504 refuses a commit of one owner without the other — and rewrote another item's lines
-  // inside the committing item's claim window. The host owns isolation now;
-  // the body passes through unchanged.
-  return text || "";
 };
 
 // One ROW per entangled path, for the banner's table: { path, disk,

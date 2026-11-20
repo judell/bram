@@ -745,6 +745,67 @@ fn url_answers(url: &str) -> bool {
     })
 }
 
+// The open-app decision, CLI flag over config: None = don't open,
+// Some(None) = open the app's home, Some(Some(route)) = open that route.
+fn resolved_open_app(cli: &LaunchOpts, cfg: &LaunchConfig) -> Option<Option<String>> {
+    cli.open_app.clone().or_else(|| match &cfg.open_app {
+        Some(serde_json::Value::Bool(true)) => Some(None),
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+            Some(Some(s.trim().to_string()))
+        }
+        _ => None,
+    })
+}
+
+// issue-500: Stage Manager puts Bram and the externally opened app in
+// separate stage groups, so switching to one hides the other.
+fn stage_manager_splits_companion(
+    is_macos: bool,
+    stage_manager_on: bool,
+    opens_app: bool,
+    show_target_app: bool,
+) -> bool {
+    is_macos && stage_manager_on && opens_app && !show_target_app
+}
+
+// Whether macOS Stage Manager is on. Any failure reads as off; never
+// changes the setting.
+#[cfg(target_os = "macos")]
+fn stage_manager_enabled() -> bool {
+    hidden_command("defaults")
+        .args(["read", "com.apple.WindowManager", "GloballyEnabled"])
+        .output()
+        .ok()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1")
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stage_manager_enabled() -> bool {
+    false
+}
+
+// issue-500: the status field. Spawns `defaults` only when the other
+// conditions already hold.
+fn stage_manager_splits_companion_now(root: Option<&Path>) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let cfg = root.and_then(load_project_config);
+    let show_target_app = cfg
+        .as_ref()
+        .and_then(|c| c.ui.as_ref())
+        .and_then(|u| u.show_target_app)
+        .unwrap_or(false);
+    let launch = cfg.and_then(|c| c.launch).unwrap_or_default();
+    let cli = CLI_LAUNCH.get().cloned().unwrap_or_default();
+    let opens_app = resolved_open_app(&cli, &launch).is_some();
+    if !opens_app || show_target_app {
+        return false;
+    }
+    stage_manager_splits_companion(true, stage_manager_enabled(), opens_app, show_target_app)
+}
+
 fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Path>) {
     let cli = CLI_LAUNCH.get().cloned().unwrap_or_default();
     let cfg = root
@@ -752,13 +813,7 @@ fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Pat
         .and_then(|c| c.launch)
         .unwrap_or_default();
     let minimized = cli.minimized.or(cfg.minimized).unwrap_or(false);
-    let open_app = cli.open_app.clone().or_else(|| match &cfg.open_app {
-        Some(serde_json::Value::Bool(true)) => Some(None),
-        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
-            Some(Some(s.trim().to_string()))
-        }
-        _ => None,
-    });
+    let open_app = resolved_open_app(&cli, &cfg);
     if !minimized && open_app.is_none() {
         return;
     }
@@ -794,6 +849,13 @@ fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Pat
                 };
                 if url_answers(&url) {
                     let res = app.opener().open_url(url.clone(), None::<String>);
+                    if cfg!(target_os = "macos") {
+                        append_bram_trace_line(
+                            &app,
+                            "launch",
+                            &format!("op=stage-manager on={}", stage_manager_enabled()),
+                        );
+                    }
                     append_bram_trace_line(
                         &app,
                         "launch",
@@ -64536,6 +64598,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // issue-465: inserted after the literal -- the json! macro above is at
     // its recursion limit.
     let mut body = body;
+    body["stageManagerSplitsCompanion"] =
+        json!(stage_manager_splits_companion_now(root.as_deref()));
     body["claudeDocsCurrent"] = json!(claude_docs_current);
     body["menuHookRegistered"] = json!(menu_hook_registered);
     body["setupReasons"] = json!(setup_reasons_list);
@@ -120813,5 +120877,61 @@ mod self_probe_tests {
             loopback_gate_refusal("GET", "__inflight", None, Some(&host), Some(port)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod stage_manager_tests {
+    use super::*;
+
+    #[test]
+    fn stage_manager_splits_only_when_all_conditions_hold() {
+        assert!(stage_manager_splits_companion(true, true, true, false));
+        assert!(!stage_manager_splits_companion(false, true, true, false));
+        assert!(!stage_manager_splits_companion(true, false, true, false));
+        assert!(!stage_manager_splits_companion(true, true, false, false));
+        assert!(!stage_manager_splits_companion(true, true, true, true));
+    }
+
+    fn cfg_open(v: Option<serde_json::Value>) -> LaunchConfig {
+        LaunchConfig {
+            open_app: v,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolved_open_app_cli_wins_over_config() {
+        let cli = LaunchOpts {
+            open_app: Some(Some("/cli".to_string())),
+            ..Default::default()
+        };
+        let cfg = cfg_open(Some(serde_json::json!("/cfg")));
+        assert_eq!(
+            resolved_open_app(&cli, &cfg),
+            Some(Some("/cli".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolved_open_app_reads_config_forms() {
+        let cli = LaunchOpts::default();
+        assert_eq!(
+            resolved_open_app(&cli, &cfg_open(Some(serde_json::json!(true)))),
+            Some(None)
+        );
+        assert_eq!(
+            resolved_open_app(&cli, &cfg_open(Some(serde_json::json!("/x")))),
+            Some(Some("/x".to_string()))
+        );
+        assert_eq!(
+            resolved_open_app(&cli, &cfg_open(Some(serde_json::json!("")))),
+            None
+        );
+        assert_eq!(
+            resolved_open_app(&cli, &cfg_open(Some(serde_json::json!(false)))),
+            None
+        );
+        assert_eq!(resolved_open_app(&cli, &cfg_open(None)), None);
     }
 }

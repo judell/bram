@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}"var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}" var.stageManagerBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -985,6 +985,46 @@
       size="xs"
       tooltip="Dismiss for this session"
       onClick="codexTrustBannerDismissed = true" />
+  </HStack>
+
+  <!-- issue-500-stage-manager-companion-warning (#500): macOS Stage Manager
+       is on and the app opens in the user's own browser, so the two windows
+       can land in separate stages and switching hides one. The host decides
+       (stageManagerSplitsCompanion); Bram never changes the macOS setting.
+       Same session-scoped dismissal as the Codex-trust banner above. -->
+  <APICall
+    id="showAppInsideSave"
+    method="post"
+    url="/__settings"
+    body="{$param}"
+    onSuccess="enhanceStatus.refetch()" />
+  <HStack
+    when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.stageManagerSplitsCompanion &amp;&amp; !stageManagerBannerDismissed}"
+    backgroundColor="$color-warn-100"
+    padding="$space-2"
+    gap="$space-3"
+    wrapContent="true"
+    verticalAlignment="center">
+    <Text fontSize="$fontSize-sm">
+      Stage Manager is on, so the app's browser window may open in its own stage, and switching to it hides Bram.
+      To keep both in view, drag the browser's thumbnail from the strip at the left onto Bram's stage, or show the app inside Bram instead.
+    </Text>
+    <Button
+      label="Show the app inside Bram"
+      size="xs"
+      onClick="showAppInsideSave.execute({ ui: { showTargetApp: true } })" />
+    <Button
+      label="Stage Manager settings…"
+      size="xs"
+      variant="outlined"
+      onClick="openExternal('x-apple.systempreferences:com.apple.Desktop-Settings.extension')" />
+    <SpaceFiller />
+    <Button
+      label="✕"
+      variant="ghost"
+      size="xs"
+      tooltip="Dismiss for this session"
+      onClick="stageManagerBannerDismissed = true" />
   </HStack>
 
   <!-- issue-498-launch-run-command: the repo's .bram.json names a launch

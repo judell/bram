@@ -3427,9 +3427,25 @@ function __bramPlanSteps(board) {
   var plan = board && board.plan;
   return (plan && Array.isArray(plan.steps)) ? plan.steps : [];
 }
-// issue-420: once per plan, so a plan the host served but nobody saw can be
-// told apart from one the host withheld (op=plan-withheld, host side).
+// issue-420: so a plan the host served but nobody saw can be told apart from
+// one the host withheld (op=plan-withheld, host side).
+// issue-496-plan-line-logs-decision: traced from the visibility decision, not
+// from building the line's text. #496's "op=shown" fired when
+// __bramPlanVisible built the text on its way to answering no (the plan's
+// item wasn't ticked), 7 minutes after the post, because the Worklist pane
+// was closed until then. Keyed per plan, op and reason, so each decision
+// change is traced once. Trace de-dup only (check-bound-helpers allowlist).
 var __bramPlanShown = {};
+window.__bramPlanTrace = function (board, steps, op, reason, ticked, missing) {
+  var key = String((board.plan && board.plan.postedAtMs) || "") + "|" + op + "|" + reason;
+  if (__bramPlanShown[key]) return;
+  __bramPlanShown[key] = true;
+  var ids = steps.reduce(function (n, s) { return n + (s.ids || []).length; }, 0);
+  var rec = { op: op, steps: steps.length, ids: ids, ticked: ticked, version: board.plan && board.plan.version };
+  if (reason) rec.reason = reason;
+  if (missing) rec.missing = missing;
+  window.__bramIframeTrace("plan-line", rec);
+};
 // plan-line-shows-feedback-text: the opening of what a feedback step will
 // send, so the line says what the words are. First maxWords (default 8)
 // words, whitespace collapsed, "…" when cut, in curly quotes; "" when empty.
@@ -3452,14 +3468,6 @@ window.__bramPlanLine = function (board) {
       : s.verb === "start" ? "Start" : String(s.verb || "");
     return verb + " " + ids;
   });
-  if (parts.length) {
-    var key = String((board.plan && board.plan.postedAtMs) || "");
-    if (!__bramPlanShown[key]) {
-      __bramPlanShown[key] = true;
-      var ids = steps.reduce(function (n, s) { return n + (s.ids || []).length; }, 0);
-      window.__bramIframeTrace("plan-line", { op: "shown", steps: steps.length, ids: ids, version: board.plan.version });
-    }
-  }
   return parts.length ? "Recommended: " + parts.join(" · ") : "";
 };
 // plan-recommends-feedback-in-one-click: a feedback step's full text goes in
@@ -3503,15 +3511,20 @@ window.__bramShowStartConsequence = function (board, sel, claim, turnCtx) {
   return !!window.__bramStartConsequence(board && board.items, sel, claim);
 };
 window.__bramPlanVisible = function (board, sel) {
-  if ((sel || []).length < 2 || !window.__bramPlanLine(board)) return false;
+  var steps = __bramPlanSteps(board);
+  if (!steps.length) return false;
+  var n = (sel || []).length;
   var ticked = {};
   (sel || []).forEach(function (id) { ticked[id] = true; });
-  var steps = (board && board.plan && board.plan.steps) || [];
-  for (var i = 0; i < steps.length; i++) {
+  var missing = "";
+  for (var i = 0; i < steps.length && !missing; i++) {
     var ids = (steps[i] && steps[i].ids) || [];
-    for (var j = 0; j < ids.length; j++) if (!ticked[ids[j]]) return false;
+    for (var j = 0; j < ids.length; j++) if (!ticked[ids[j]]) { missing = ids[j]; break; }
   }
-  return true;
+  var op = n >= 2 && !missing ? "shown" : "withheld";
+  var reason = n < 2 ? "few-ticked" : missing ? "unticked" : "";
+  window.__bramPlanTrace(board, steps, op, reason, n, reason === "unticked" ? missing : "");
+  return op === "shown";
 };
 // whats-my-sequence-button: what the plan line's Why? button opens: why this
 // order, nothing else. The agent's `why` (Markdown, posted with the plan),

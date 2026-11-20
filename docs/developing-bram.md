@@ -20,7 +20,7 @@ point and evidence. Do not leave a managed project's instructions
 dependent on this repo's unseeded `docs/` directory.
 
 For the architectural map of Bram's Git-backed mechanisms—temporary
-indexes, claim and safety refs, selective commits, linked worktrees,
+indexes, claim and safety refs, linked worktrees,
 scenario branches, and remote-tracking state—see
 [`git-as-infrastructure.md`](git-as-infrastructure.md).
 

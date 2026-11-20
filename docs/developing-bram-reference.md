@@ -659,7 +659,7 @@ copies back.
 ## Hand-testing the Worklist gate
 
 The gate's selection matrix — which buttons light for which combination of
-items, entanglement, and lifecycle state — is exercised by the walkthrough
+items, shared files, and lifecycle state — is exercised by the walkthrough
 in `docs/worklist-gate-walkthrough.md`: a demo-instance board built from
 starters, phase-by-phase expectations, deliberate wedge attempts, and
 teardown trace greps. Born as the 0.5.3 release gate (three findings, all
@@ -917,8 +917,8 @@ judell/bram#367's double-count shape, kept as its regression fixture), `multi-fi
 one listed but untouched, so its files table shows every row state),
 `new-file-left-out` (judell/bram#419: one started item with a new file and
 a tracked file, a second started item that edited that tracked file without
-declaring it; committing the first alone reaches hunk-by-hunk staging with a
-never-tracked file),
+declaring it; committing the first alone is refused, naming the second, because
+it owns lines in the tracked file),
 `chat-edit-in-item-file` (judell/bram#273 — one item edits a file in two
 claim windows with a chat-turn edit to the same file in between, so the
 item's lines and the unowned chat lines sit side by side), and
@@ -929,8 +929,8 @@ one click whose owner of the shared file has since committed and left the
 board, a partner with no changes, and a later, separately approved item on
 the shared file whose commit must not be refused), and `entangled-with-unowned`
 (two begun owners of one file plus a third hunk written with no claim open:
-each row alone predicts only its own hunk, while committing both together
-takes the whole file; Codex's acceptance case for issue-425-retire-replay),
+each row alone is refused, naming the other owner, while committing both
+together takes the whole file, the unowned hunk included; Codex's acceptance case for issue-425-retire-replay),
 and `membership-unanswerable` (judell/bram#437: one begun item declaring a
 file it hasn't created yet, another declaring a new file an ignore rule
 hides; both once failed every membership compute, so the gate refused all

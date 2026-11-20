@@ -61,8 +61,8 @@ What each starter is for:
 |---|---|
 | `dependency` | a commit that only applies on top of another item's uncommitted lines (#430) |
 | `joint-owner-committed` | a same-click pair whose owner has since committed, and a later item that must still commit (#432) |
-| `entangled-with-unowned` | two owners of one file plus a hunk nobody owns: hunk-by-hunk commits, and `unownedTaken` |
-| `new-file-left-out` | hunk-by-hunk staging with a never-tracked file (#419) |
+| `entangled-with-unowned` | two started owners of one file plus a hunk nobody owns |
+| `new-file-left-out` | a started item with a new file, and a tracked file a second started item edited without declaring (#419) |
 | `committed-outside` | a row whose work landed through a plain `git commit` (#406) |
 
 For the button basics (Phases 1, 2, 8), ask the demo's agent for two or
@@ -144,50 +144,40 @@ isn't on screen.
 Then set the key back to `false` and confirm the line goes away while
 every button behaves the same.
 
-## Phase 4: entanglement by owned lines (`entangled-with-unowned`)
+## Phase 4: two owners of one file (`entangled-with-unowned`)
 
-"Entangled" means another begun item **owns lines** in a file the commit
-takes, not merely declares the file (#425).
+A commit takes whole files. When another started item **owns lines** in a
+file the commit takes, not merely declares the file, the gate won't commit
+one owner without the other (#425).
 
 **Do:** tick one owner of the shared file alone.
 
 **Expect:**
-- **Commit** is offered. Its strip's "Will commit" counts only that item's
-  own hunk.
-- Commit it: the commit takes only that item's hunk (hunk-by-hunk
-  staging), and the other owner's lines stay in the worktree.
+- **Commit** is withheld. The row reads *"Commits only together with
+  <other>"*, and the Commit tooltip says it commits only together with it.
 
 **Then:** reset the scenario, tick **both** owners, and Commit.
 
-**Expect:** with both owners ticked there is no outside owner, so the gate
-takes the whole file, the unowned hunk included. The gate says what
-Commit takes for the selection, and the commit response carries
-`unownedTaken` naming the unowned lines (trace
-`op=commit-took-unowned`). Taking unowned lines silently is a finding.
+**Expect:** **Commit** is offered. With both owners ticked there is no
+outside owner, so the gate takes the whole file, the unowned hunk
+included. The commit response carries `unownedTaken` naming the unowned
+lines (trace `op=commit-took-unowned`). Taking unowned lines silently is a
+finding.
 
 ## Phase 5: a commit that depends on another (`dependency`, #430)
 
-**Do:** tick the dependent item alone.
+Same rule. **Do:** tick the dependent (consumer) item alone.
 
-**Expect:** **Commit** withheld, with the reason on the row: *"It commits
-only together with <other>; tick both and commit once."* Tick both and
-Commit: one commit with both items' work.
+**Expect:** **Commit** withheld, with the reason on the row naming
+`prepare`: *"It commits only together with <other>; tick both and commit
+once."* Tick both and Commit: one commit with both items' work.
 
-If the host refuses a dependent commit anyway, the row reads *"Last
-Commit was refused: …"* until HEAD moves, and the trace has
-`op=refuse-interval-dependent`. Seeing that after the pane offered Commit
-means the precheck and the gate disagree: a finding.
-
-## Phase 6: same-click partners (`joint-owner-committed`, #432)
+## Phase 6: a later item on a shared file (`joint-owner-committed`, #432)
 
 **Expect:**
-- The later, separately approved item on the shared file **commits**. A
-  refusal citing the committed owner or a partner with no changes is
-  #432's bug back.
-- For a live same-click pair (approve two items in one click, let both
-  edit one file), ticking one alone withholds Commit with *"Committable
-  together with <partner>"*, and ticking both commits them together. The
-  host's refusal for the forced case traces `op=refuse-joint-interval`.
+- The later, separately approved item on the shared file **commits**, with
+  no refusal. A refusal citing the committed owner or a partner with no
+  changes is #432's bug back.
 
 ## Phase 7: other commit shapes
 
@@ -242,7 +232,7 @@ Each is a deliberate attempt to wedge the UI.
      (double consume);
    - `grep '\[worklist-advance\] op=pending'` → every one has a matching
      `op=cleared` by teardown;
-   - refusals (`op=refuse-joint-interval`, `op=refuse-interval-dependent`,
+   - refusals (`op=refuse-commit-together`,
      `op=refuse-state-drift`, `op=refuse-empty-commit`) → only the ones a
      phase deliberately provoked;
    - `grep -E 'console-error|console-unhandledrejection' | grep -v

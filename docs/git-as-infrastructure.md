@@ -26,7 +26,7 @@ second repository.
 | symbolic `HEAD` | A name for the checked-out branch ref | Normal development; moving `HEAD` moves the branch it names |
 | detached `HEAD` | `HEAD` containing a commit ID directly | Synthetic scenarios, where no ordinary branch should advance |
 | real index | Per-worktree staging state between `HEAD` and the working tree | Ordinary staging and the board's staged/unstaged interpretation |
-| temporary index | An alternate index selected with `GIT_INDEX_FILE` | Whole-tree capture and selective commit construction without disturbing the real index |
+| temporary index | An alternate index selected with `GIT_INDEX_FILE` | Whole-tree capture (claims, scenarios) without disturbing the real index |
 | working tree | Files visible to tools and editors | Pending user and agent changes, including tracked and untracked files |
 | linked worktree | Another checkout sharing the object database and most refs | Isolated agent checkout whose paths Bram maps back to proposal coverage |
 | remote-tracking ref | Local record such as `refs/remotes/origin/main` | Push observation, default-branch ancestry checks, and issue-close eligibility |
@@ -89,9 +89,7 @@ and prevents half of a rename from being silently stranded outside the item.
 Installed copies of canonical files are added as explicit twins where that
 policy applies.
 
-This path uses Git porcelain, so normal commit hooks run. The selective path
-below uses `commit-tree`, so it must enforce important repository gates before
-the plumbing commit rather than assuming a pre-commit hook will run.
+This path uses Git porcelain, so normal commit hooks run.
 
 ## Claim intervals: attribution as boundary trees
 
@@ -178,57 +176,18 @@ ref only after neither adjacent interval has a live Worklist owner. The newest
 boundary is always retained because it is the base of the open interval. Bram
 deletes retired refs lazily after item pruning and updates the sidecar to match.
 
-## Selective commits: Git as a transaction engine
+## Why there is no selective commit
 
-Two begun items can modify the same file without being jointly owned. A
-whole-file commit of one item would absorb the other's pending hunks. When the
-claim ledger supplies separate interval patches, Bram constructs the requested
-commit away from both the working tree and the real index:
-
-```text
-requested interval patches
-          |
-          v
-temporary index seeded from HEAD
-          |
-          +-- git apply --cached --check   (independence proof)
-          +-- git apply --cached           (assemble requested state)
-          +-- git write-tree
-                        |
-                        v
-             git commit-tree -p <old HEAD>
-                        |
-                        v
-                 git update-ref HEAD
-                        |
-                        v
-        refresh committed paths in the real index
-
-working tree: unchanged throughout
-other item's pending hunks: still present
-```
-
-The check is semantic, not a hunk-location heuristic. If an item's patch
-applies to a temporary index seeded from `HEAD`, the item can stand without its
-neighbour. If it does not, the requested state is defined relative to omitted
-work; Bram refuses and asks for the dependency to commit first or for both
-items to commit together.
-
-`--3way` is forbidden for this check. On a real overlap it can write conflict
-markers and still produce a result that plumbing could commit. A refusal is
-safer than manufacturing `<<<<<<<` content under the requested item's message.
-
-`git stash create` is not a substitute for temporary-index capture. It was
-measured to omit untracked files and can return no object for a clean tree.
-Both properties are wrong for a boundary mechanism in which file creation and
-clean snapshots are normal.
-
-After `commit-tree`, `update-ref HEAD` advances either the branch named by a
-symbolic `HEAD` or detached `HEAD` itself. That operation does not refresh the
-real index. Bram therefore resets exactly the committed paths in the real
-index to the new `HEAD`, leaving the working tree untouched. Without that
-step, committed paths can appear spuriously staged (`MM`) and block the next
-approved commit as unrelated staged content.
+Bram used to build a commit from one item's interval patches in a scratch
+index and `git commit-tree`, so one of two items on a shared file could land
+alone. That path was removed on 2026-11-19 with the decision in
+[`decisions/2026-11-19-one-started-item-per-file.md`](decisions/2026-11-19-one-started-item-per-file.md):
+it fired in under 4% of commits (6 of 157 between 2026-11-06 and 11-20, per
+#504). The gate now commits whole files, refuses by name when another
+started item owns lines in a requested file ("commit them together, or Drop
+the other first"), and Start is refused when a started item already declares
+the file. Claim capture and scenario capture still use a temporary index;
+nothing else here changed.
 
 ## Bram's private refs and object reachability
 
@@ -388,9 +347,8 @@ live repository:
 |---|---|---|
 | `read-tree` / `add -A` under `GIT_INDEX_FILE` | fills a unique temporary index and may write objects | seed from known base, scope pathspec, remove temp file |
 | `write-tree` | writes a tree object | retain it immediately through a ref, commit, or both |
-| `commit-tree` | writes a commit object but runs no commit hooks | run repository gates first; supply explicit parent and message |
+| `commit-tree` | writes a commit object (scenario capture, `capture_scenario`) and runs no commit hooks | explicit parent and message; disposable fixture only |
 | `update-ref` | moves or deletes a ref | validated namespace/target; expected-old ID where replacement races matter |
-| path-scoped `reset` after selective commit | refreshes real-index entries from new `HEAD` | only committed paths; never `--hard` in a live project |
 | scenario checkout/reset/clean | deliberately rewrites disposable fixture state | marker, no-remote, exact-toplevel, and process-state exclusions |
 
 ## Invariants and failure patterns
@@ -400,7 +358,7 @@ live repository:
 | Resolve and operate from the exact project toplevel | all Git-backed features | status, refs, or destructive fixture commands target the wrong repository | `project_root` in `src-tauri/src/lib.rs`; `validate_demo` in `scripts/demo_instance.py` |
 | Scope whole-tree capture to the project subtree | claim capture, scenarios | a nested project hashes unrelated enclosing-repository content | `capture_claim_tree`; `capture_tree` |
 | Include untracked, non-ignored files in snapshots | claims, safety, scenarios | file creation becomes unattributed or absent from a fixture | `capture_claim_tree`; `trace-vocabulary.md` § claim and safety refs |
-| Use a unique temporary index and clean it up | claims, selective commits, scenarios | concurrent captures collide or leak staging state | `capture_claim_tree`; `temporary_index` |
+| Use a unique temporary index and clean it up | claims, scenarios | concurrent captures collide or leak staging state | `capture_claim_tree`; `temporary_index` |
 | Keep every durable snapshot reachable | claims, safety, scenarios | Git garbage collection removes a boundary still named in metadata | `record_claim_interval`; `prune_claim_intervals`; `capture_scenario` |
 | Treat ledger insertion order as claim order | claim attribution | same-millisecond boundaries are reordered and ownership shifts | `claim_intervals_partition`; `membership_step_chain` |
 | Compare closed intervals tree-to-tree | claim attribution | current worktree changes contaminate historical ownership | `membership_line_credit`; `trace-vocabulary.md` |

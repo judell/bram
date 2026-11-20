@@ -832,12 +832,11 @@ class StarterBuilder:
         # same file during its own claim window WITHOUT declaring it, as
         # issue-406-chat-commit-everything-ready did with helpers.js. That
         # omission is load-bearing: the pane sees no shared declared path, so
-        # it sends no isolate instruction with the Commit click, while the
-        # host's replay still credits the neighbour with lines there and
-        # routes the author's commit to hunk-by-hunk staging - where a new
-        # file was silently left out of commits 30aa4d0 and fe84674. (With
-        # the path declared by both, the agent isolates by hand and the
-        # commit takes the whole-file path, which stages new files.) The
+        # it sends no isolate instruction with the Commit click, while
+        # membership still credits the neighbour with lines there. The author
+        # alone is now refused, naming the neighbour (commit together, #504);
+        # the gate once built this commit from the author's hunks alone, where a
+        # new file was silently left out of commits 30aa4d0 and fe84674. The
         # author's second window re-edits the new file so it carries two
         # windows of evidence, as in the real case.
         new = f"demo/{prefix}-new.txt"
@@ -978,9 +977,9 @@ class StarterBuilder:
         # and been pruned (its edit is in HEAD; it is not on the board), and
         # partner's edit was reverted (no changes, still begun). A later,
         # separately approved item edits the shared file. Committing `later`
-        # must succeed: the replay re-resolved the joint interval to partner
-        # once owner left the board and refused it (op=refuse-joint-interval
-        # ids=[partner]).
+        # must succeed with no refusal: the old joint-interval check
+        # re-resolved the interval to partner once owner left the board and
+        # refused it (#432).
         shared = f"demo/{prefix}-shared.txt"
         vendor = f"demo/{prefix}-vendor.txt"
         owner, partner, later = f"{prefix}-owner", f"{prefix}-partner", f"{prefix}-later"

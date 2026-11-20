@@ -350,8 +350,8 @@ for Claude. Trace each drain by grepping `[worklist-intent]` in
 
 ## Incremental claim and authorization retirement
 
-A claim can cover more than one id — approving several unentangled
-items in one click writes one claim listing all of them. Resolving just
+A claim can cover more than one id — approving several items that share no file
+in one click writes one claim listing all of them. Resolving just
 one of those ids is normal, not refused: `mutate op:"advance"`,
 `op:"prune"`, and `worklist-commit` (which delegates a prune to the same
 path) each retire exactly the ids they resolved and rewrite the claim
@@ -736,7 +736,7 @@ parentheses name them. Answer with the order for those items, then post it
 as a plan with a `why`. Order by what the board shows:
 
 - commit a committable item before starting one whose `files` overlap it
-  (it would entangle);
+  (they share a file, so the second can't start until the first is committed);
 - finish begun work before starting proposed work;
 - recommend Drop for an item that turned out to need nothing.
 

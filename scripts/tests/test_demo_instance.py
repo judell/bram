@@ -184,9 +184,9 @@ class DemoInstanceTests(unittest.TestCase):
         )
         self.assertTrue(all(item["status"] == "applied" for item in items.values()))
         self.assertEqual(items["new-file-left-out-author"]["files"], [new, shared])
-        # The neighbour edited the shared file without declaring it: declared
-        # sharing would make the pane isolate by hand and skip the
-        # hunk-by-hunk path this fixture exists to reach.
+        # The neighbour edited the shared file without declaring it: a declared
+        # overlap would be refused at Start (#504), and this fixture exists to
+        # reach the undeclared case, where membership credits the lines.
         own = "demo/new-file-left-out-own.txt"
         self.assertEqual(items["new-file-left-out-neighbour"]["files"], [own])
         self.assertEqual(git(self.repo, "ls-files", "--", own), own)

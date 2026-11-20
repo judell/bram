@@ -404,7 +404,6 @@ live repository:
 | Keep every durable snapshot reachable | claims, safety, scenarios | Git garbage collection removes a boundary still named in metadata | `record_claim_interval`; `prune_claim_intervals`; `capture_scenario` |
 | Treat ledger insertion order as claim order | claim attribution | same-millisecond boundaries are reordered and ownership shifts | `claim_intervals_partition`; `membership_step_chain` |
 | Compare closed intervals tree-to-tree | claim attribution | current worktree changes contaminate historical ownership | `membership_line_credit`; `trace-vocabulary.md` |
-| Prove selective independence with `apply --check`, without `--3way` | entangled commit | dependent or conflict-marker content lands under the wrong item | `claim_interval_independence` |
 | Enforce hooks' important guarantees in the gate itself | Worklist commit | a commit lands unformatted when hooks don't run | `handle_worklist_commit`; `developing-bram.md` § formatting |
 | Move refs atomically and account for symbolic or detached `HEAD` | scenarios | branch or detached state diverges from the created commit | `capture_scenario`; `use_scenario` |
 | Keep `refs/bram/*` local unless explicitly transported | claims, safety | private runtime state is mistaken for normal pushed branch history | `trace-vocabulary.md`; normal push refspec behavior |

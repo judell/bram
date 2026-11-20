@@ -197,7 +197,7 @@
        each" radio is gone. For disjoint selections it changed nothing (the
        payload was identical, one worklist-commit, one commit), one approval
        can't yield N commits anyway (#272), and its only live effect was the
-       split-shared-files hunk separation #273 froze. Commit on N ticked items
+       by-hand hunk separation #273 froze. Commit on N ticked items
        makes one commit; __bramStartConsequence says so, and separate commits
        are the serial path: commit one at a time. -->
   <!-- `when` carries the full expression rather than a same-element var:
@@ -214,7 +214,7 @@
     onDidChange="window.__bramW2ResetStartMode()" />
   <!-- gate-withholds-futile-joint-commit-offer, commit side: Commit is still
        withheld when a still-begun same-click partner is unselected (the host
-       would refuse it, op=refuse-joint-interval), but the "Committable
+       would refuse it), but the "Committable
        together with … — select both." line that explained it is gone (Jon,
        2026-11-08: "we can lose this verbiage now"); What's my next move? and
        its plan answer what to tick. -->

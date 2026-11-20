@@ -397,9 +397,8 @@ reported as `unownedTaken`.
 re-POST: check `git log` first and treat what you find as the answer. A
 response saying the commit "ALREADY RAN" is success.
 
-- **Entangled commits, 409 refusals, `op=refuse-joint-interval`, `split-shared-files`** (offer a split only if the user asks for separate commits) → read `.claude/bram-reference/worklist-mechanics.md` (§Commit together; the split, §Serializing entangled items approved together).
+- **A commit is refused because another item is also changing a file** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit together).
 - **A slow or timed-out commit** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit timeouts: never re-POST).
-- **One click approved several items that share files** → read `.claude/bram-reference/worklist-mechanics.md` (§Serializing entangled items approved together).
 - **About to delegate worklist work to subagents** → read `.claude/bram-reference/worklist-mechanics.md` (§Delegating worklist items to subagents).
 
 ### Delegate well-specified edits by default

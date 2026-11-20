@@ -198,8 +198,7 @@ The refusal releases the claim and commits nothing. There are two ways out:
 
 Committing **one of N** is what can absorb a neighbour's work; the gate
 refuses it rather than guess. Don't split a shared file by hand to get
-around the refusal unless the user asks for separate commits (see
-`split-shared-files` below).
+around the refusal unless the user asks for separate commits.
 
 **Commit-gate requirements.** The host verifies approved auth, requires
 every requested id to be `applied` (relaxed to also accept `proposed`
@@ -210,19 +209,6 @@ apply-and-commit triggers (the one-click **Start & commit** and the plain
 **Commit** on a begun `proposed` item) are always available; the widening
 is only in when the pane *offers* the button, not in what the host
 accepts.
-
-**`split-shared-files`.** To commit entangled items one at a time:
-isolate one item's hunks on disk, call `worklist-commit` for that id,
-restore the next item's isolated hunks, and repeat. `git diff` scoped to each item's own hunks
-serves each item's patch, and `git apply --check` (forward
-and reverse) gates each step. **Build-gate every intermediate state
-before committing it**: hunk isolation can produce a tree that compiles
-in neither direction, and a non-building intermediate commit poisons
-`git bisect`. Each successful subset call retires only those ids from
-the authorization and inflight claim; the remaining ids and embedded
-bodies stay live for later commits, and the final call consumes the
-record. A same-click joint interval can't be split this way — see
-*Serializing entangled items approved together*.
 
 ## Commit timeouts: never re-POST
 
@@ -380,10 +366,8 @@ sentinel", that is the one-id case.)
 An unconsumed authorization record retires by the same named subset. Until the
 last id resolves it keeps `consumedAtMs` empty, removes the completed
 ids and their embedded bodies, and traces
-`[auth-record] op=consume-shrink resolved=[...] remaining=[...]`. This
-is load-bearing for `split-shared-files`: one plural Commit approval
-can produce several sequential `worklist-commit` calls without the first
-commit consuming authority for the rest. The original `issuedAtMs` and
+`[auth-record] op=consume-shrink resolved=[...] remaining=[...]`. Named-subset
+retirement still serves sequential commits of one plural approval. The original `issuedAtMs` and
 interrupt flag remain unchanged: TTL still bounds the whole sequence,
 and an interruption blocks publication while allowing reconciliation.
 If an approved resolve has already consumed the whole record, the
@@ -497,98 +481,9 @@ Parallelize the *work*; serialize the *gates*.
   by the guard as unreadable
   (`crossboundary-unparsed:body-file-unreadable`). Write the literal path.
 
-## Serializing entangled items approved together
+## Items that share a file
 
-One gate click can approve multiple items whose `files` intersect. The
-parallel-delegation rule forbids working those concurrently; this is
-the discipline for completing them serially.
-
-- **Complete them strictly in sequence, committing the first before
-  applying the second**, so the shared file never carries two items'
-  hunks. Each commit then stages a clean per-item diff with no hunk
-  surgery, and the second item's changes become exclusive the moment
-  the first commit lands.
-- **A same-click plural approval cannot split its shared files at the
-  gate.** One click writes ONE claim and one capture boundary, so both
-  items' edits to a shared declared path land in a JOINT interval that
-  per-item staging has nothing to stage from. A `split-shared-files`
-  commit of one such id is **refused** (409, `op=refuse-joint-interval`,
-  claim released), naming the joint ids. Commit the joint items
-  **together** (safe — every changed line is accounted for by an id in
-  that commit), or separate the hunks by hand. When per-item commits on
-  a shared file are the goal, approve the items in **separate clicks** and
-  commit the first before applying the second, so the shared file never
-  carries two items' hunks.
-- **The satisfiable third out for an existing joint: the
-  park/drop/re-propose dance.** This is CONTENT surgery, not in-place
-  hand-separation — editing the worktree alone can never clear the
-  refusal, because the joint attribution is recorded, not derived from
-  the diff. In order: (1) the agent parks one item's entire diff (save
-  its patch — `git diff` scoped to its
-  regions — then reverse-apply, keeping the patch file); (2) the user
-  **Drops** that item — the step that dissolves the block, since a
-  dropped partner is no longer begun; (3) commit the surviving item (whole-file, clean; cut a
-  branch first when each item drives its own PR); (4) the agent
-  restores the patch and re-proposes the dropped item under a new id
-  (ids are immutable, and its draft names the dropped one, so the history
-  reads drop → re-propose); (5) the user
-  Starts & commits it under its own fresh boundary. Every line lands
-  under its right id; the cost is one extra Drop and one extra Start.
-  The host's `op=refuse-joint-interval` message names this path; don't
-  undo a correctly parked worktree because the refusal fired before the
-  Drop.
-- **When the gate says "commit together", offer a split as well.** In
-  one line: committing together lands every line; a split gives one
-  commit per item, at the cost of a Drop, a re-proposal and a new
-  approval. Don't present the combined commit as the only answer.
-  Receipt (2026-11-12): `issue-486-token-accounting-instrument` and
-  `task-protocol-filter-sees-url-variables` were refused as a joint
-  pair. Their content didn't overlap, and they were split and committed
-  as `f32644dc` after a Drop and a re-proposal as
-  `task-bram-routes-as-candidates`.
-- **If the user wants the split, first check whether it's clean.**
-  Classify every changed hunk in the shared files by content, using the
-  items' drafts, the names they introduce and their regions, and report
-  one verdict:
-  - **disjoint:** no hunk mixes the items;
-  - **separable by line:** a shared hunk splits line by line;
-  - **interleaved:** a line or construct belongs to both.
-
-  Name the hunks behind the verdict. When the work is interleaved, say
-  so and recommend committing together.
-- **Then separate them, in this order** (the dance above, made
-  concrete):
-  1. Back up every affected file.
-  2. Build the first item's tree as HEAD plus only its hunks.
-  3. Build-gate that tree: format check, build, the item's tests.
-  4. Post a plan of **Drop** on the partner and **Commit** on the first
-     item. Dropping removes the joint partner, so the gate takes the
-     first item alone.
-  5. After the commit, restore the partner's files from the backup and
-     confirm the difference against HEAD is exactly its hunks.
-  6. Propose the partner again under a new id. Ids are immutable, and
-     the dropped one is in the history; it's a chance to name it
-     better.
-  7. Its **Start & commit** lands it.
-- **Don't split with `git add -p` outside the gate.** That skips the
-  gate's checks and the history, and both rows read "Committed outside
-  the Worklist".
-- **A live claim locks row selection**, and the locked selection is
-  where the Commit button lives. The claim retires on its own when your
-  turn ends, so ending the turn to hand the user a commit decision is
-  enough. Only if you hand over the decision and keep working in the
-  same turn, release it early with `POST /__worklist/end` naming the
-  still-claimed ids.
-- **Don't plan to resume the later item on the claim or the
-  authorization record.** Both are single-slot and displaceable: the
-  user's next gate click — typically the very commit being waited
-  for — writes a fresh authorization that displaces the surviving one,
-  and a later `mutate op:"advance"` is denied `id not in auth`. The
-  durable resume state is `begunAtMs` plus the on-disk diff. After the
-  first commit cleans the shared file, the later item's changes are
-  exclusive and the pane's plain **Commit** offer on a begun `proposed`
-  item is the legitimate resume channel; a fresh **Start** click is the
-  fallback when the later item's edits don't exist yet.
+One click can't start items that share a file: Start is refused while another started item declares the same file. A pair started before that rule commits together, or one of them is dropped first. When per-item commits on one file are the goal, approve the items in separate clicks, committing the first before starting the second.
 
 ## Close-on-push and partial landings
 

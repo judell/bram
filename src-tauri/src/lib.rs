@@ -70360,74 +70360,6 @@ fn resolve_interval_path_owner(
     }
 }
 
-// iterate-edits-need-claim-boundaries / ghost-reassignment-inflates-totals:
-// an interval whose recorded owner has left the board (committed and pruned)
-// is a GHOST. One rule, every consumer — runs, totals, the scoped diff that
-// interval staging commits, and the independence check: **a ghost's interval
-// is unowned.** Its surviving lines report as "no item" and ride with the
-// file's next whole-file commit, which is exactly what that row's copy
-// promises. Two cleverer resolutions were tried on 2026-09-04 and both
-// lied: reassigning ghosts to a covering live item polluted staging with
-// stale patches (first live commit attempt: "patch does not apply" ×3),
-// and, kept display-only, inflated the survivor's totals with
-// already-committed content the moment a neighbour committed and pruned
-// ("Will commit +802" against a true ~+290). Each strip is collected by
-// the caller and traced as op=ghost-owner-reassigned (map always →unowned)
-// so the inference stays auditable, never silent.
-struct GhostOwnerIndex {
-    live: std::collections::HashSet<String>,
-}
-
-fn ghost_owner_index<R: tauri::Runtime>(app: &AppHandle<R>) -> GhostOwnerIndex {
-    let mut live = std::collections::HashSet::new();
-    if let Some(path) = worklist_file(app) {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
-                    for item in items {
-                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                            live.insert(id.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    GhostOwnerIndex { live }
-}
-
-impl GhostOwnerIndex {
-    // Returns (effective owner, Some(ghost id) when a strip happened). A
-    // live owner passes through untouched; a ghost becomes unowned.
-    fn strip_ghost(&self, owner: Option<String>) -> (Option<String>, Option<String>) {
-        match owner {
-            Some(id) if !self.live.contains(&id) => (None, Some(id)),
-            other => (other, None),
-        }
-    }
-}
-
-fn trace_ghost_reassignments<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    site: &str,
-    notes: &std::collections::BTreeSet<String>,
-) {
-    if notes.is_empty() {
-        return;
-    }
-    let joined: Vec<&str> = notes.iter().map(|s| s.as_str()).take(6).collect();
-    append_bram_trace_line(
-        app,
-        "claim-interval",
-        &format!(
-            "op=ghost-owner-reassigned site={} n={} map={}",
-            site,
-            notes.len(),
-            joined.join(",")
-        ),
-    );
-}
-
 // issue-395-attribution-diffs-scoped-to-declared-paths: the pathspec of every
 // item's declared files. Today it scopes the claim-boundary capture
 // (`capture_claim_tree`); it was first written for the claim-interval replay's
@@ -70456,33 +70388,6 @@ fn attribution_pathspec(declared: &std::collections::HashMap<String, Vec<String>
         set.insert(format!(":(glob).claude/worktrees/*/{}/**", f));
     }
     set.into_iter().collect()
-}
-
-// avoid-futile-joint-commit: this item's `jointWith` — the other item ids it
-// cannot commit apart from on a shared path, derived from
-// `joint_owners_from_runs` restricted to the item's OWN declared files.
-// Empty when none of its files carry joint work, or when the item is not
-// itself a member of the joint set on a path it merely declares (a declared
-// path with no joint run for THIS id never shows a phantom relationship).
-// Sorted for stable payload output.
-fn item_joint_with(
-    id: &str,
-    files: &[String],
-    joint_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-) -> Vec<String> {
-    let mut out: std::collections::BTreeSet<String> = Default::default();
-    for f in files {
-        if let Some(owners) = joint_owners_by_path.get(f) {
-            if owners.contains(id) {
-                for o in owners {
-                    if o != id {
-                        out.insert(o.clone());
-                    }
-                }
-            }
-        }
-    }
-    out.into_iter().collect()
 }
 
 fn write_claim_intervals_doc(sidecar: &Path, doc: &serde_json::Value) -> bool {
@@ -73602,9 +73507,8 @@ mod membership_acceptance_fixture_tests {
         attributed, chain_credit, commit_all, git, numstat, route, scratch_repo, snap,
     };
     use super::{
-        item_joint_with, membership_conservation_breach, membership_joint_owners, membership_runs,
-        membership_unowned, resolve_interval_path_owner, untracked_declared_paths,
-        IntervalPathOwner,
+        membership_conservation_breach, membership_runs, membership_unowned,
+        resolve_interval_path_owner, untracked_declared_paths, IntervalPathOwner,
     };
 
     // The criteria below are driven through the line rule: a claim-store chain
@@ -73887,18 +73791,6 @@ mod membership_acceptance_fixture_tests {
         // #356 and pre-capture-only work are refusal contracts.  Keep the
         // exact operation names beside the fixture until the integration
         // harness exercises the HTTP gate directly.
-        // issue-425-retire-replay: the joint fact comes from membership.
-        let mut b = super::MembershipPathBuckets::default();
-        b.per_item
-            .insert(vec!["a".to_string(), "b".to_string()], (2, 0));
-        let mut partition = std::collections::BTreeMap::new();
-        partition.insert("shared.txt".to_string(), b);
-        let joint = membership_joint_owners(&partition);
-        assert_eq!(joint["shared.txt"].len(), 2);
-        assert_eq!(
-            item_joint_with("a", &["shared.txt".to_string()], &joint),
-            vec!["b"]
-        );
         let mut declared = std::collections::HashMap::new();
         declared.insert("a".to_string(), vec!["shared.txt".to_string()]);
         declared.insert("b".to_string(), vec!["shared.txt".to_string()]);
@@ -74151,182 +74043,6 @@ mod membership_deletion_matrix_tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
-}
-
-// issue-327 independence: is a claimant's work committable WITHOUT its
-// neighbours'? Decided by measurement, never by heuristic — the fixture's own
-// doc (5fb78fe) records the rule: `git apply --check` is the whole test.
-// Success means the patch applies to a tree lacking the other items' work;
-// failure means the change is defined relative to an earlier item's output and
-// the requested state exists in nobody's record. Hunk-sharing is NOT the test:
-// adjacency merges hunks without creating dependence, and dependence is
-// directional (measured 2026-09-01: bram-ref-namespaces failed against HEAD
-// and applied cleanly after safety-snapshot; safety-snapshot applied alone).
-//
-// All checks run in a throwaway GIT_INDEX_FILE against the HEAD tree — the
-// worktree is never touched. Cost is a few spawns per call, and the route is
-// fetched per expanded file on demand, never on board build.
-fn claim_interval_independence<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    path: &str,
-) -> serde_json::Value {
-    let empty = serde_json::json!({ "items": {} });
-    let Some(root) = project_root(Some(app)) else {
-        return empty;
-    };
-    let Ok(text) = std::fs::read_to_string(resource_relative_path(&root, CLAIM_INTERVALS_REL))
-    else {
-        return empty;
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return empty;
-    };
-    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
-        return empty;
-    };
-    let spawns = std::cell::Cell::new(0usize);
-    let git_out = |args: &[&str], env_idx: Option<&Path>| -> Option<std::process::Output> {
-        spawns.set(spawns.get() + 1);
-        let mut cmd = hidden_command("git");
-        cmd.current_dir(&root).args(args);
-        if let Some(idx) = env_idx {
-            cmd.env("GIT_INDEX_FILE", idx);
-        }
-        cmd.output().ok()
-    };
-    // Per-owner patches for this path, in record order (first appearance).
-    // Owners with several intervals get their patches concatenated; when
-    // claims interleave, that concatenation is relative to intervening work —
-    // the check below then honestly reports the dependence.
-    let ghosts = ghost_owner_index(app);
-    let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
-    let mut order: Vec<String> = Vec::new();
-    let mut patches: std::collections::HashMap<String, String> = Default::default();
-    for (i, rec) in arr.iter().enumerate() {
-        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let ids = rec.get("ids").and_then(|v| v.as_array());
-        let owner = match ids.map(|a| a.len()) {
-            Some(1) => ids.and_then(|a| a[0].as_str()).map(String::from),
-            _ => None,
-        };
-        // Ghost intervals are excluded here for the same reason the scoped
-        // diff excludes them: their stale patches fail apply-checks against
-        // HEAD and would report false dependence. Unowned lines don't take
-        // part in independence — they ride with whole-file commits.
-        let (owner, from) = ghosts.strip_ghost(owner);
-        if let Some(f) = from {
-            ghost_notes.insert(format!("{}→unowned", f));
-        }
-        let Some(owner) = owner else { continue };
-        let next = arr
-            .get(i + 1)
-            .and_then(|r| r.get("ref"))
-            .and_then(|v| v.as_str());
-        let mut args: Vec<&str> = vec!["diff", a];
-        if let Some(b) = next {
-            args.push(b);
-        }
-        args.push("--");
-        args.push(path);
-        let out = git_out(&args, None)
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        if out.trim().is_empty() {
-            continue;
-        }
-        if !patches.contains_key(&owner) {
-            order.push(owner.clone());
-        }
-        patches.entry(owner).or_default().push_str(&out);
-    }
-    // A fresh HEAD-only index, plus the given patches applied in order.
-    // Returns None when a BASE patch fails (base unusable), Some(check result)
-    // otherwise.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let check = |bases: &[&str], candidate: &str| -> Option<bool> {
-        let idx = std::env::temp_dir().join(format!(
-            "bram-indep-index-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_file(&idx);
-        let mut ok = git_out(&["read-tree", "HEAD"], Some(&idx))
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        let pfile = idx.with_extension("patch");
-        for b in bases {
-            if !ok {
-                break;
-            }
-            ok = std::fs::write(&pfile, b).is_ok()
-                && git_out(
-                    &["apply", "--cached", pfile.to_str().unwrap_or("")],
-                    Some(&idx),
-                )
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-        }
-        let result = if !ok {
-            None
-        } else {
-            Some(
-                std::fs::write(&pfile, candidate).is_ok()
-                    && git_out(
-                        &["apply", "--cached", "--check", pfile.to_str().unwrap_or("")],
-                        Some(&idx),
-                    )
-                    .map(|o| o.status.success())
-                    .unwrap_or(false),
-            )
-        };
-        let _ = std::fs::remove_file(&idx);
-        let _ = std::fs::remove_file(&pfile);
-        result
-    };
-    let mut items = serde_json::Map::new();
-    for (pos, id) in order.iter().enumerate() {
-        let patch = &patches[id];
-        if check(&[], patch) == Some(true) {
-            items.insert(id.clone(), serde_json::json!({ "independent": true }));
-            continue;
-        }
-        // Dependent: name the earlier claimant(s) whose work makes it apply.
-        // Singles first (the common adjacency case), then the cumulative
-        // prefix; an unresolvable candidate reports dependence with no names
-        // rather than guessing.
-        let earlier: Vec<&String> = order[..pos].iter().collect();
-        let mut depends_on: Vec<String> = Vec::new();
-        for e in &earlier {
-            if check(&[patches[*e].as_str()], patch) == Some(true) {
-                depends_on.push((*e).clone());
-                break;
-            }
-        }
-        if depends_on.is_empty() && !earlier.is_empty() {
-            let bases: Vec<&str> = earlier.iter().map(|e| patches[*e].as_str()).collect();
-            if check(&bases, patch) == Some(true) {
-                depends_on = earlier.iter().map(|e| (*e).clone()).collect();
-            }
-        }
-        items.insert(
-            id.clone(),
-            serde_json::json!({ "independent": false, "dependsOn": depends_on }),
-        );
-    }
-    trace_ghost_reassignments(app, "independence", &ghost_notes);
-    append_bram_trace_line(
-        app,
-        "claim-interval",
-        &format!(
-            "op=independence path={} claimants={} spawns={}",
-            path,
-            order.len(),
-            spawns.get()
-        ),
-    );
-    serde_json::json!({ "items": items })
 }
 
 // issue-327 hygiene: retire boundaries whose intervals no longer have a live
@@ -93329,28 +93045,6 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
-    // issue-327 independence: measured per-claimant separability for one path,
-    // fetched on demand when a file expander renders its Ownership summary.
-    if path == "__worklist/independence" {
-        let mut fpath = String::new();
-        for pair in query.split('&') {
-            if let Some(v) = pair.strip_prefix("path=") {
-                fpath = percent_decode(v);
-            }
-        }
-        if fpath.is_empty() {
-            return (
-                400,
-                "application/json; charset=utf-8",
-                br#"{"error":"path required"}"#.to_vec(),
-            );
-        }
-        let body =
-            serde_json::to_vec(&claim_interval_independence(app, &fpath)).unwrap_or_default();
-        return (200, "application/json; charset=utf-8", body);
-    }
-
-    // /__worklist — same shape as /resources/worklist.json but enriched
     // per item with change activity (changedFiles / changeSummary, rung 1)
     // and a `diff` field whenever the item's files carry uncommitted
     // changes (rung 2: evidence follows disk state, not status — TO APPLY
@@ -93997,41 +93691,6 @@ fn route_request<R: tauri::Runtime>(
                                         .map(|(p, a, r)| {
                                             serde_json::json!({ "path": p, "added": a, "removed": r })
                                         })
-                                        .collect(),
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            // avoid-futile-joint-commit: per-item `jointWith` — the other item
-            // ids a declared path's joint attribution ties this one to, so the
-            // pane (and its RadioGroup split option) can rule out a per-item
-            // commit BEFORE the user clicks it and hits op=refuse-joint-interval.
-            // Runs over every item with declared files, not only begun ones:
-            // a joint run only ever exists on a path a begun item's capture
-            // touched, so an unbegun item's files simply never match.
-            // issue-432: from membership, the model the gate's refusal now
-            // reads, so pane and gate agree.
-            let joint_owners_by_path = wc_partition
-                .as_ref()
-                .map(membership_joint_owners)
-                .unwrap_or_default();
-            if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
-                for item in items.iter_mut() {
-                    let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
-                        continue;
-                    };
-                    let files = worklist_item_files(item);
-                    let joint_with = item_joint_with(&id, &files, &joint_owners_by_path);
-                    if !joint_with.is_empty() {
-                        if let Some(obj) = item.as_object_mut() {
-                            obj.insert(
-                                "jointWith".to_string(),
-                                serde_json::Value::Array(
-                                    joint_with
-                                        .into_iter()
-                                        .map(serde_json::Value::String)
                                         .collect(),
                                 ),
                             );
@@ -100176,74 +99835,6 @@ fn membership_entangling_owners(
     out
 }
 
-// issue-432: the same-click joint refusal (#356), decided by membership — the
-// model the gate already routes by — instead of the replay's joint runs. A
-// membership joint entry is a `per_item` key with more than one member and
-// nonzero lines; members are begun items that declare the path, and lines
-// already committed are not in the diff, so a joint whose owner committed
-// (#432) or a partner with no changes there has nothing to charge. Refuse
-// only when the entry holds a REQUESTED id and an outside begun id: a joint
-// entry with no requested member is someone else's, and interval staging
-// already leaves it alone. Returns the entry's members (sorted).
-fn membership_joint_refusal(
-    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
-    path: &str,
-    requested_ids: &[String],
-    begun_outside: &std::collections::HashSet<String>,
-) -> Option<Vec<String>> {
-    let m = partition.get(path)?;
-    m.per_item.iter().find_map(|(members, (a, r))| {
-        let joint = members.len() > 1 && a + r > 0;
-        let has_requested = members.iter().any(|x| requested_ids.contains(x));
-        let has_outside = members.iter().any(|x| begun_outside.contains(x));
-        (joint && has_requested && has_outside).then(|| members.clone())
-    })
-}
-
-// issue-432: membership's joint owners per path, in the shape
-// `joint_owners_from_runs` returns, so the board's `jointWith` and the
-// gate's refusal reason from one model.
-fn membership_joint_owners(
-    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let mut out: std::collections::HashMap<String, std::collections::HashSet<String>> =
-        Default::default();
-    for (path, m) in partition {
-        for (members, (a, r)) in &m.per_item {
-            if members.len() > 1 && a + r > 0 {
-                out.entry(path.clone())
-                    .or_default()
-                    .extend(members.iter().cloned());
-            }
-        }
-    }
-    out
-}
-
-// issue-432: when the joint set was approved, for the refusal message — the
-// latest claim interval whose ids are exactly these members.
-fn joint_click_at_ms(project_root: &Path, members: &[String]) -> Option<i64> {
-    let text =
-        std::fs::read_to_string(resource_relative_path(&project_root, CLAIM_INTERVALS_REL)).ok()?;
-    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let mut want: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
-    want.sort();
-    doc.get("intervals")?
-        .as_array()?
-        .iter()
-        .filter(|iv| {
-            let mut ids: Vec<&str> = iv
-                .get("ids")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
-                .unwrap_or_default();
-            ids.sort();
-            ids == want
-        })
-        .filter_map(|iv| iv.get("atMs").and_then(|v| v.as_i64()))
-        .max()
-}
-
 // issue-425-gate-routes-by-membership: lines a whole-file commit takes that
 // membership credits to NO item (chat-turn edits, edits between windows, a
 // neighbour's lines on a path it does not declare). Disclosed, not refused
@@ -100449,6 +100040,62 @@ mod gate_routes_by_membership_tests {
         let got =
             membership_entangling_owners(&p, &["a.rs".to_string()], &["A".to_string()], &begun);
         assert_eq!(got, vec![("a.rs".to_string(), "B".to_string())]);
+    }
+
+    // issue-504: the one refusal covers a jointly owned line. The partition's
+    // only candidate is a two-member `per_item` key, both members in `owners`.
+    fn joint_partition() -> BTreeMap<String, MembershipPathBuckets> {
+        let mut b = bucket(&["A", "B"], (3, 0), (0, 0));
+        b.per_item
+            .insert(vec!["A".to_string(), "B".to_string()], (3, 0));
+        let mut p = BTreeMap::new();
+        p.insert("shared.rs".to_string(), b);
+        p
+    }
+
+    fn begun_set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn joint_line_requesting_one_member_names_the_other() {
+        let p = joint_partition();
+        let got = membership_entangling_owners(
+            &p,
+            &["shared.rs".to_string()],
+            &["A".to_string()],
+            &begun_set(&["B"]),
+        );
+        assert_eq!(got, vec![("shared.rs".to_string(), "B".to_string())]);
+        let msg = commit_together_refusal_message(&["B".to_string()], &["shared.rs".to_string()]);
+        assert_eq!(
+            msg,
+            "B is also changing shared.rs. Commit them together, or Drop B first."
+        );
+    }
+
+    #[test]
+    fn joint_line_requesting_both_members_is_not_refused() {
+        let p = joint_partition();
+        let got = membership_entangling_owners(
+            &p,
+            &["shared.rs".to_string()],
+            &["A".to_string(), "B".to_string()],
+            &begun_set(&[]),
+        );
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn joint_line_whose_other_member_is_gone_is_not_refused_issue_432() {
+        let p = joint_partition();
+        let got = membership_entangling_owners(
+            &p,
+            &["shared.rs".to_string()],
+            &["A".to_string()],
+            &begun_set(&[]),
+        );
+        assert!(got.is_empty());
     }
 
     #[test]
@@ -100954,78 +100601,6 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             begun.then(|| id.to_string())
         })
         .collect();
-    {
-        let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        for path in &files {
-            // issue-356: same-click plural approvals share one capture
-            // boundary, so their lines on a shared path are JOINT and interval
-            // staging cannot split them; the honest answer is the 409.
-            // issue-432: decided by membership (the model the gate routes by
-            // below), not the replay's joint runs — the replay re-resolved a
-            // joint interval from whoever declared the path NOW, so once its
-            // owner committed and was pruned it charged the other partner
-            // (with no changes, not declaring the path) and refused an item
-            // that was never in the click.
-            if let Some(members) = membership_joint_refusal(&partition, path, &ids, &begun_outside)
-            {
-                let partners: Vec<String> = members
-                    .iter()
-                    .filter(|m| !requested.contains(m.as_str()))
-                    .cloned()
-                    .collect();
-                let when = project_root(Some(app))
-                    .and_then(|root| joint_click_at_ms(&root, &members))
-                    .map(|at| {
-                        let mins = (unix_now_ms() - at).max(0) / 60_000;
-                        if mins < 1 {
-                            "just now".to_string()
-                        } else if mins < 120 {
-                            format!("{} min ago", mins)
-                        } else {
-                            format!("{} h ago", mins / 60)
-                        }
-                    });
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    &format!(
-                        "op=refuse-joint-interval path={} ids=[{}] source=membership",
-                        path,
-                        members.join(",")
-                    ),
-                );
-                release_claim_on_commit_refusal(
-                    app,
-                    &ids,
-                    &format!(
-                        "it was started together with {}; commit them together",
-                        partners.join(" and ")
-                    ),
-                );
-                // avoid-futile-joint-commit: name the joint ids and the honest
-                // outs. "Separate the hunks by hand" stays out: no hand edit
-                // produces a per-item interval to stage from.
-                return worklist_json_error(
-                    409,
-                    format!(
-                        "commit refused: {} carries work jointly attributed to [{}], which \
-                         were approved together in one click{} and so share a single capture \
-                         boundary; their edits to this path cannot be split per item after \
-                         the fact. Commit [{}] together — every line is accounted for. Or Drop \
-                         [{}] (park its changes first if you want them back: save its patch, \
-                         reverse-apply it, and re-propose it after this commit) — a dropped \
-                         partner no longer blocks. Per-item commits on a shared path require \
-                         approving each item in a SEPARATE click, before any of them begins.",
-                        path,
-                        members.join(", "),
-                        when.map(|w| format!(" ({})", w)).unwrap_or_default(),
-                        members.join(", "),
-                        partners.join(", ")
-                    ),
-                );
-            }
-        }
-    }
     // Another started item that owns lines in a requested file: the gate
     // commits whole files, so it would take that item's work. Refuse and name
     // the owner; committing both together or dropping the other is the way out.
@@ -101162,8 +100737,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             // 2026-09-09: four POSTs at 1.00s spacing for one request,
             // while a sibling 409 refusal the same session got exactly
             // one. Joins the route's existing 4xx refusal family
-            // (refuse-empty-commit, refuse-joint-interval,
-            // refuse-entangled).
+            // (refuse-empty-commit, refuse-entangled).
             if e.contains("ignored by one of your .gitignore")
                 || e.contains("Use -f if you really want to add them")
             {
@@ -114123,9 +113697,7 @@ mod claim_interval_tests {
 
 #[cfg(test)]
 mod claim_interval_prune_tests {
-    use super::{
-        claim_intervals_partition, prune_store_then_refs, GhostOwnerIndex, PruneStoreOutcome,
-    };
+    use super::{claim_intervals_partition, prune_store_then_refs, PruneStoreOutcome};
     use serde_json::json;
     use std::collections::HashSet;
 
@@ -114274,42 +113846,10 @@ mod claim_interval_prune_tests {
         assert!(retire.is_empty());
         assert_eq!(keep.len(), 1);
     }
-
-    fn ghost_idx(live: &[&str]) -> GhostOwnerIndex {
-        GhostOwnerIndex {
-            live: live.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
-    #[test]
-    fn live_owner_passes_through_untouched() {
-        let idx = ghost_idx(&["A"]);
-        assert_eq!(idx.strip_ghost(Some("A".into())), (Some("A".into()), None));
-        assert_eq!(idx.strip_ghost(None), (None, None));
-    }
-
-    // ghost-reassignment-inflates-totals: a departed owner strips to unowned
-    // EVERYWHERE — never reassigned to a surviving item. Both cleverer
-    // resolutions lied in production the day they shipped: stale ghost
-    // patches broke staging ("patch does not apply" ×3), and display-only
-    // reassignment inflated a survivor's totals with already-committed
-    // content (+802 against a true ~+290).
-    #[test]
-    fn ghost_strips_to_unowned() {
-        let idx = ghost_idx(&["B"]);
-        assert_eq!(
-            idx.strip_ghost(Some("dead".into())),
-            (None, Some("dead".into()))
-        );
-    }
 }
 
 #[cfg(test)]
 mod claim_attribution_tests {
-    use super::{
-        item_joint_with, membership_joint_owners, membership_joint_refusal, MembershipPathBuckets,
-    };
-
     // joint-interval-files-disambiguation: per-(interval, path) resolution.
     #[test]
     fn joint_interval_resolves_by_sole_declarer_and_stays_joint_otherwise() {
@@ -114354,125 +113894,6 @@ mod claim_attribution_tests {
             resolve_interval_path_owner(&ids[..1], "anything.txt", &declared),
             IntervalPathOwner::Single(ref s) if s == "a"
         ));
-    }
-
-    // avoid-futile-joint-commit: joint_owners_from_runs / item_joint_with feed
-    // both the board's `jointWith` field and (indirectly, same logic) the
-    // commit-time op=refuse-joint-interval refusal, so this pins the shape
-    // both depend on: a path with an itemIds run ties its members together,
-    // a path with a plain itemId run ties nobody, and an item's jointWith
-    // never mentions a path it doesn't itself declare.
-    // issue-432: the same-click joint refusal reads membership. Builds a
-    // one-path partition from (members, lines) entries.
-    fn joint_partition(
-        entries: &[(&[&str], (usize, usize))],
-    ) -> std::collections::BTreeMap<String, MembershipPathBuckets> {
-        let mut m = MembershipPathBuckets::default();
-        for (members, counts) in entries {
-            let key: Vec<String> = members.iter().map(|s| s.to_string()).collect();
-            m.owners.extend(key.iter().cloned());
-            m.per_item.insert(key, *counts);
-        }
-        let mut p = std::collections::BTreeMap::new();
-        p.insert("Globals.xs".to_string(), m);
-        p
-    }
-
-    fn set(ids: &[&str]) -> std::collections::HashSet<String> {
-        ids.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn strs(ids: &[&str]) -> Vec<String> {
-        ids.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn joint_refusal_ignores_a_replay_only_partner_issue_432() {
-        // #432: membership credits Globals.xs to spec-token-terms alone; the
-        // replay's stale one-member joint [revendor] has no counterpart here.
-        let p = joint_partition(&[(&["spec-token-terms"], (5, 1))]);
-        assert_eq!(
-            membership_joint_refusal(
-                &p,
-                "Globals.xs",
-                &strs(&["spec-token-terms"]),
-                &set(&["revendor-xmlui-runtime"]),
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn joint_refusal_fires_for_a_requested_member_with_a_begun_partner() {
-        // criterion 6 / #356: committing one member of a same-click joint alone.
-        let p = joint_partition(&[(&["a", "b"], (3, 0))]);
-        assert_eq!(
-            membership_joint_refusal(&p, "Globals.xs", &strs(&["a"]), &set(&["b"])),
-            Some(strs(&["a", "b"]))
-        );
-        // Committing the whole joint set together is fine.
-        assert_eq!(
-            membership_joint_refusal(&p, "Globals.xs", &strs(&["a", "b"]), &set(&[])),
-            None
-        );
-    }
-
-    #[test]
-    fn joint_refusal_skips_a_joint_the_request_is_not_in() {
-        let p = joint_partition(&[(&["b", "c"], (3, 0)), (&["a"], (2, 0))]);
-        assert_eq!(
-            membership_joint_refusal(&p, "Globals.xs", &strs(&["a"]), &set(&["b", "c"])),
-            None
-        );
-    }
-
-    #[test]
-    fn joint_refusal_and_joint_with_skip_an_empty_joint_entry() {
-        let p = joint_partition(&[(&["a", "b"], (0, 0))]);
-        assert_eq!(
-            membership_joint_refusal(&p, "Globals.xs", &strs(&["a"]), &set(&["b"])),
-            None
-        );
-        assert!(membership_joint_owners(&p).is_empty());
-        let p = joint_partition(&[(&["a", "b"], (1, 0))]);
-        let owners = membership_joint_owners(&p);
-        assert_eq!(
-            item_joint_with("a", &strs(&["Globals.xs"]), &owners),
-            vec!["b"]
-        );
-    }
-
-    #[test]
-    fn joint_with_reflects_only_declared_shared_paths() {
-        // issue-425-retire-replay: from membership, as the board serves it.
-        let mut shared = MembershipPathBuckets::default();
-        shared
-            .per_item
-            .insert(vec!["a".to_string(), "b".to_string()], (4, 0));
-        let mut solo = MembershipPathBuckets::default();
-        solo.per_item.insert(vec!["a".to_string()], (2, 0));
-        let mut partition = std::collections::BTreeMap::new();
-        partition.insert("shared.xmlui".to_string(), shared);
-        partition.insert("solo.xmlui".to_string(), solo);
-        let joint = membership_joint_owners(&partition);
-
-        // "a" declares both files: the joint one names "b" back; the
-        // single-owner one names nobody.
-        let a_files = vec!["shared.xmlui".to_string(), "solo.xmlui".to_string()];
-        assert_eq!(item_joint_with("a", &a_files, &joint), vec!["b"]);
-
-        // "b" declares only the shared file.
-        let b_files = vec!["shared.xmlui".to_string()];
-        assert_eq!(item_joint_with("b", &b_files, &joint), vec!["a"]);
-
-        // "c" declares the shared PATH but is not a member of that path's
-        // joint set (e.g. it merely lists the file in `files`, with no
-        // captured interval there) — no phantom relationship.
-        let c_files = vec!["shared.xmlui".to_string()];
-        assert!(item_joint_with("c", &c_files, &joint).is_empty());
-
-        // An item that declares neither file has nothing to report.
-        assert!(item_joint_with("a", &[], &joint).is_empty());
     }
 }
 

@@ -785,25 +785,28 @@ fn stage_manager_enabled() -> bool {
     false
 }
 
-// issue-500: the status field. Spawns `defaults` only when the other
-// conditions already hold.
+// issue-500-stage-manager-banner-plain-words: set once Bram has actually
+// opened the app in the browser with Stage Manager on, so the banner
+// describes something that happened, not a configuration that might
+// (Jon, 2026-11-20: a banner about a browser window that never opened
+// "makes no sense").
+static STAGE_MANAGER_OPENED_APP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// issue-500: the status field. True after a Stage Manager open (above)
+// while the app is still not shown inside Bram, so "Show the app inside
+// Bram" clears it.
 fn stage_manager_splits_companion_now(root: Option<&Path>) -> bool {
-    if !cfg!(target_os = "macos") {
+    let opened = STAGE_MANAGER_OPENED_APP.load(std::sync::atomic::Ordering::Relaxed);
+    if !opened {
         return false;
     }
-    let cfg = root.and_then(load_project_config);
-    let show_target_app = cfg
-        .as_ref()
-        .and_then(|c| c.ui.as_ref())
+    let show_target_app = root
+        .and_then(load_project_config)
+        .and_then(|c| c.ui)
         .and_then(|u| u.show_target_app)
         .unwrap_or(false);
-    let launch = cfg.and_then(|c| c.launch).unwrap_or_default();
-    let cli = CLI_LAUNCH.get().cloned().unwrap_or_default();
-    let opens_app = resolved_open_app(&cli, &launch).is_some();
-    if !opens_app || show_target_app {
-        return false;
-    }
-    stage_manager_splits_companion(true, stage_manager_enabled(), opens_app, show_target_app)
+    stage_manager_splits_companion(cfg!(target_os = "macos"), opened, opened, show_target_app)
 }
 
 fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Path>) {
@@ -850,11 +853,17 @@ fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Pat
                 if url_answers(&url) {
                     let res = app.opener().open_url(url.clone(), None::<String>);
                     if cfg!(target_os = "macos") {
+                        let on = stage_manager_enabled();
                         append_bram_trace_line(
                             &app,
                             "launch",
-                            &format!("op=stage-manager on={}", stage_manager_enabled()),
+                            &format!("op=stage-manager on={}", on),
                         );
+                        if on && res.is_ok() {
+                            STAGE_MANAGER_OPENED_APP
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            emit_replayable_signal(&app, "enhance-status-changed");
+                        }
                     }
                     append_bram_trace_line(
                         &app,
@@ -120891,6 +120900,13 @@ mod stage_manager_tests {
         assert!(!stage_manager_splits_companion(true, false, true, false));
         assert!(!stage_manager_splits_companion(true, true, false, false));
         assert!(!stage_manager_splits_companion(true, true, true, true));
+    }
+
+    // issue-500-stage-manager-banner-plain-words: no banner until Bram has
+    // actually opened the app with Stage Manager on (no test sets the flag).
+    #[test]
+    fn stage_manager_banner_waits_for_an_actual_open() {
+        assert!(!stage_manager_splits_companion_now(None));
     }
 
     fn cfg_open(v: Option<serde_json::Value>) -> LaunchConfig {

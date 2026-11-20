@@ -988,44 +988,52 @@
   </HStack>
 
   <!-- issue-500-stage-manager-companion-warning (#500): macOS Stage Manager
-       is on and the app opens in the user's own browser, so the two windows
-       can land in separate stages and switching hides one. The host decides
-       (stageManagerSplitsCompanion); Bram never changes the macOS setting.
-       Same session-scoped dismissal as the Codex-trust banner above. -->
+       is on and Bram has just opened the app in the user's own browser, so
+       macOS shows the two one at a time. The host decides
+       (stageManagerSplitsCompanion, set only after a real open);
+       Bram never changes the macOS setting. Same session-scoped dismissal
+       as the Codex-trust banner above.
+       issue-500-stage-manager-banner-plain-words: no Stage Manager
+       vocabulary ("stage", "group" name nothing visible on screen) and no
+       drag advice (grouping piles the windows on top of each other; Jon,
+       2026-11-20). Text and ✕ share a row, with the text star-sized so the
+       ✕ can't wrap away from it:
+       https://www.xmlui.org/docs/howto/keep-a-star-sized-element-from-collapsing -->
   <APICall
     id="showAppInsideSave"
     method="post"
     url="/__settings"
     body="{$param}"
     onSuccess="enhanceStatus.refetch()" />
-  <HStack
+  <VStack
     when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.stageManagerSplitsCompanion &amp;&amp; !stageManagerBannerDismissed}"
     backgroundColor="$color-warn-100"
     padding="$space-2"
-    gap="$space-3"
-    wrapContent="true"
-    verticalAlignment="center">
-    <Text fontSize="$fontSize-sm">
-      Stage Manager is on, so the app's browser window may open in its own stage, and switching to it hides Bram.
-      To keep both in view, drag the browser's thumbnail from the strip at the left onto Bram's stage, or show the app inside Bram instead.
-    </Text>
-    <Button
-      label="Show the app inside Bram"
-      size="xs"
-      onClick="showAppInsideSave.execute({ ui: { showTargetApp: true } })" />
-    <Button
-      label="Stage Manager settings…"
-      size="xs"
-      variant="outlined"
-      onClick="openExternal('x-apple.systempreferences:com.apple.Desktop-Settings.extension')" />
-    <SpaceFiller />
-    <Button
-      label="✕"
-      variant="ghost"
-      size="xs"
-      tooltip="Dismiss for this session"
-      onClick="stageManagerBannerDismissed = true" />
-  </HStack>
+    gap="$space-2">
+    <HStack verticalAlignment="start" gap="$space-3">
+      <Text width="*" fontSize="$fontSize-sm">
+        Bram opened your app in the browser. Stage Manager is on, so macOS shows Bram and the browser one at a time, not side by side.
+        To see both at once, show the app inside Bram, or turn off Stage Manager.
+      </Text>
+      <Button
+        label="✕"
+        variant="ghost"
+        size="xs"
+        tooltip="Dismiss for this session"
+        onClick="stageManagerBannerDismissed = true" />
+    </HStack>
+    <HStack gap="$space-3" wrapContent="true">
+      <Button
+        label="Show the app inside Bram"
+        size="xs"
+        onClick="showAppInsideSave.execute({ ui: { showTargetApp: true } })" />
+      <Button
+        label="Turn off Stage Manager…"
+        size="xs"
+        variant="outlined"
+        onClick="openExternal('x-apple.systempreferences:com.apple.Desktop-Settings.extension')" />
+    </HStack>
+  </VStack>
 
   <!-- issue-498-launch-run-command: the repo's .bram.json names a launch
        command ("launch": {"run": ...}) that hasn't been decided on this

@@ -53,235 +53,70 @@ doing:
 
 ## Code organization (helpers.js / Globals.xs / window)
 
-Iframe-side code spans four surfaces. The rules below describe where
-each kind of code should live, and how XMLUI markup calls into it.
+Iframe-side code spans four surfaces; these rules say where each kind of code lives.
 
 ### The surfaces
 
-- **`app/__shell/helpers.js`** — real JavaScript. Async, `fetch`,
-  `setTimeout`, `postMessage`, tauri event listeners — anything the
-  XMLUI expression engine can't host directly. Functions live on
-  `window` (see naming below) and are reached from XMLUI markup as
-  `window.foo(...)`. Rebuild-required; see *Build vs. hot-reload
-  boundary*.
-- **`app/tools/Globals.xs`** — XMLUI's expression engine context.
-  Holds xs-scope module state (vars whose readers/writers all live in
-  xs) and the few helpers whose proximity to that state earns them a
-  place here. Engine restrictions: no async/await, no setTimeout, no
-  fetch, no Promise chaining outside DataSource. Top-level
-  `function foo(...)` declarations auto-hoist onto `window.foo` —
-  but that binding is engine-scoped: it makes `foo` bare-callable
-  from XMLUI attribute expressions and lets an xs name shadow a
-  helpers.js export, yet the function is NOT reliably reachable as
-  `window.foo(...)` from real-JS contexts in helpers.js. Live
-  receipt (2026-08-20): a helpers.js click path calling
-  `window.initCloseIssueState(...)` failed with "is not a function"
-  though the xs declaration existed; the fix was a self-contained
-  helpers.js replica. Code that must be callable from both sides
-  lives in helpers.js, never in Globals.xs.
-- **`window.*`** — the shared namespace. helpers.js writes here
-  explicitly; `Globals.xs` writes here implicitly via hoisting. The
-  `__bram*` prefix exists to give helpers.js a collision-safe space
-  when an xs-side counterpart of the same name would otherwise hoist
-  over it.
-- **`.xmlui` files** — markup. Attribute handlers (`onClick`,
-  `onDidChange`, `onLoaded`, etc.) and binding expressions
-  (`value="{...}"`, `when="{...}"`) are tiny expressions, not
-  hosting environments for code.
+- **`app/__shell/helpers.js`**: real JavaScript (async, `fetch`, timers, tauri events). Functions live on `window`; markup calls `window.foo(...)`.
+- **`app/tools/Globals.xs`**: the expression engine's context. No async/await, setTimeout, fetch, or Promise chaining outside DataSource. Top-level `function foo` auto-hoists onto `window.foo`: bare-callable from attribute expressions and able to shadow a helpers.js export, but NOT reliably reachable as `window.foo(...)` from helpers.js. Code callable from both sides lives in helpers.js.
+- **`window.*`**: the shared namespace; the `__bram*` prefix gives helpers.js a collision-safe space.
+- **`.xmlui` files**: markup; handlers and bindings are tiny expressions.
 
 ### Where each kind of code goes
 
-- **Pure functions** (sync, no XMLUI component state, no
-  engine-hostile primitives) → `window.foo` in `helpers.js`. XMLUI
-  markup calls them as `window.foo(...)`.
-- **Shims for outside-sandbox operations** (async, fetch, setTimeout,
-  postMessage, tauri events) → also `window.foo` in `helpers.js`,
-  because the engine can't host them. Markup calls them as
-  `window.foo(...)`.
-- **xs-only code** → `Globals.xs`, but only when the function
-  genuinely needs xs (touches xs-scope module state directly, or is a
-  very hot binding-string callee where the `window.` prefix is
-  measurably annoying enough to justify the cost).
-- **XMLUI attribute handlers** → a single function call:
-  `onClick="window.foo(...)"` (or `onClick="foo(...)"` if `foo` is an
-  xs function). Never multi-statement bodies, never multi-line arrow
-  bodies, never object-literal blobs. See *Failure modes* below.
+- **Pure functions** and **outside-sandbox shims** → `window.foo` in `helpers.js`.
+- **xs-only code** → `Globals.xs`, only when it touches xs-scope module state directly or is a very hot binding callee.
+- **XMLUI attribute handlers** → a single function call: `onClick="window.foo(...)"`. Never multi-statement bodies, multi-line arrow bodies, or object-literal blobs.
 
 ### When and why do we need delegators?
 
-A *delegator* is `function foo(...) { return window.__bramFoo(...); }`
-in `Globals.xs`. Its only purpose is to let XMLUI markup write the
-bare name `foo(...)` instead of `window.__bramFoo(...)`.
+A *delegator* is `function foo(...) { return window.__bramFoo(...); }` in `Globals.xs`, letting markup write `foo(...)`.
 
-**Default: don't add one.** Call helpers as `window.foo(...)` from
-XMLUI markup. This includes inside arrow-function bodies passed to
-`subscribeTauriEvent` / `onDidChange` / `onLoaded` etc. — the engine
-analyzes the *qualified* `window.foo` member access without trouble.
-
-**Add a delegator only when** (a) the function is called many times
-in attribute expressions where the seven-character `window.` prefix
-is genuinely annoying, and (b) the name doesn't already exist on the
-bare `window` surface. Each delegator we add hoists `function foo`
-onto `window.foo`, expanding the collision-prone surface — the
-exchange rate has to be worth it.
-
-The `Globals.xs` of today has zero delegators — the fossil set from a
-prior model was pared away during the host-route migrations. The rule
-above governs whether any new one earns its place.
+**Default: don't add one.** Call `window.foo(...)` from markup, including inside arrow bodies. **Add one only when** the function is called many times in attribute expressions and the name isn't already on the bare `window` surface; each one widens the collision surface.
 
 ### The `__bram*` namespace prefix
 
-`__bramFoo` on `window` defends a helpers.js export against being
-clobbered by a `function foo` declaration in `Globals.xs` (which
-would auto-hoist onto `window.foo`). It is **not** a blanket rule
-for every helpers.js name — bare-name window helpers
-(`toShell`, `toTurn`, `logToHost`, `openExternal`, `sendKeys`,
-`captureScreenshot`, etc.) are fine as long as no `Globals.xs`
-declaration shadows them.
+`__bramFoo` defends a helpers.js export against a same-named `function foo` in `Globals.xs`. It is **not** a blanket rule: bare-name helpers (`toShell`, `toTurn`, etc.) are fine when no `Globals.xs` declaration shadows them.
 
-The discipline:
-
-- If a name has a matching `Globals.xs` delegator → name the helper
-  `window.__bramFoo`. The delegator body is
-  `return window.__bramFoo(...)`; no collision.
-- If a name lives only in `helpers.js` → bare `window.foo` is fine.
-  No prefix required.
+- A name with a matching `Globals.xs` delegator → name the helper `window.__bramFoo`.
+- A name living only in `helpers.js` → bare `window.foo`.
 
 ### Failure modes that informed these rules
 
-Learned from real incidents; each is a hard rule, not a preference:
+Each is a hard rule, not a preference:
 
-- **Attribute expressions stay a single function call.**
-  Multi-statement / multi-arrow-body / object-literal blobs in
-  handler attributes are the anti-pattern that produced the
-  hour-long "parser quirk" hunts. When an XMLUI surface throws a
-  weird error and the markup has an inline ternary / `&&` chain /
-  multi-statement arrow — the bug is the inline expression, not the
-  parser. Extract to a `window.foo` helper first.
-- **Bare names inside arrow bodies silently abort analysis.** In an
-  arrow body passed to `subscribeTauriEvent` / `onDidChange` /
-  `onLoaded`, a bare `foo` with no xs declaration silently kills the
-  registration AND every statement after it in the same handler —
-  the symptom surfaces as an unrelated component failing to mount.
-  Call qualified: `window.foo()`. (Top-level attribute positions
-  tolerate bare names; arrow bodies are the trap.)
-- **xs `function foo` hoists over `window.foo`.** helpers.js loads
-  first; a same-named xs declaration then clobbers the helper with
-  the xs-bound version. If the xs function was a delegator calling
-  `window.foo(...)`, it now calls itself — infinite recursion,
-  swallowed silently by trace try/catch, presenting as hung
-  handlers. Fix: name the helper `window.__bramFoo` (when an xs
-  delegator exists) or remove the xs declaration entirely.
-- **helpers.js top-level *calls* must follow their definitions.**
-  The file runs top-to-bottom; a load-time throw
-  (`window.X is not a function`) aborts everything after it,
-  breaking features unrelated to the edit (menu, voice,
-  talk-session). Function *definitions* referencing later names are
-  fine; top-level *invocations* are not.
-- **`ExpandableItem` expansion state is uncontrolled and positional.**
-  Inside an `Items` loop, when the list shrinks (a Worklist prune),
-  the component instances are reused by position, so an expansion
-  opened on row 3 silently transfers to whatever item now occupies
-  row 3. Fix: controlled expansion keyed by item id — a `when`-gated
-  body plus an explicit chevron/header toggle writing an id-keyed
-  map (the Worklist rows are the live pattern). Filed upstream as an
-  ask; until then, never rely on `ExpandableItem`'s own state in
-  loops whose membership changes.
+- **Attribute expressions stay a single function call.** A weird error from markup with an inline ternary / `&&` chain / multi-statement arrow is the inline expression, not the parser. Extract to a `window.foo` helper first.
+- **Bare names inside arrow bodies silently abort analysis.** In an arrow body passed to `subscribeTauriEvent` / `onDidChange` / `onLoaded`, a bare `foo` with no xs declaration kills the registration and every statement after it. Call qualified: `window.foo()`.
+- **xs `function foo` hoists over `window.foo`.** A same-named xs declaration clobbers the helper (a delegator then calls itself). Name the helper `window.__bramFoo` or remove the xs declaration.
+- **helpers.js top-level *calls* must follow their definitions.** A load-time throw aborts everything after it; definitions referencing later names are fine.
+- **`ExpandableItem` state is uncontrolled and positional.** In an `Items` loop whose membership changes, use controlled expansion keyed by item id.
 
 ### Post-edit verification ritual
 
-After ANY iframe-side change (`.xmlui`, `Globals.xs`, `helpers.js`):
-grep `console-error|console-unhandledrejection` in
-`resources/bram-traces/bram-trace.log` once the pane has reloaded.
-Zero matches is the pass condition; any match is triaged before
-reading anything else from the trace. When the edit touched a binding or a
-helper it calls, also run `node scripts/check-bound-helpers.mjs` (see
-*Displayed state lives in XMLUI, not on `window`*).
+After ANY iframe-side change (`.xmlui`, `Globals.xs`, `helpers.js`): grep `console-error|console-unhandledrejection` in `.bram/bram-traces/bram-trace.log` once the pane has reloaded. Zero matches is the pass condition; any match is triaged before reading anything else from the trace. When the edit touched a binding or a helper it calls, also run `node scripts/check-bound-helpers.mjs`.
 
 #### Known noise: the ResizeObserver loop
 
-One message is exempt:
-`ResizeObserver loop completed with undelivered notifications.` Exclude
-it from the grep (`| grep -v ResizeObserver`) and don't triage it.
-Everything else still counts.
+One message is exempt: `ResizeObserver loop completed with undelivered notifications.` Exclude it from the grep (`| grep -v ResizeObserver`) and don't triage it. Everything else still counts.
 
-It is a known XMLUI-side warning that Bram can't fix. It comes from
-[virtua](https://github.com/inokawa/virtua), the virtualizer under XMLUI's
-`List`: its per-row item resizers measure in the same frame they observe.
-Virtualized scrolling alone produces it, with no Bram markup involved.
-The record:
+Trace vocabulary: [trace-vocabulary.md](trace-vocabulary.md).
 
-- #275 §A2 measured it at about 204 a day, all from virtualized `List`s,
-  and traced it to Bram's initial scaffold (`b4abf0f`).
-- [xmlui-org/xmlui#3830](https://github.com/xmlui-org/xmlui/issues/3830)
-  was closed as wontfix: a bare React + virtua fixture with no XMLUI code
-  reproduces it, on virtua 0.48.8 and 0.52.7 alike.
-- We have not filed it on virtua. Jon doesn't know their policy on
-  AI-assisted contributions and won't present this work as his own.
-
-This keeps coming back. It reappeared during the `issue-425-retire-replay`
-demo check on 2026-10-12: 20 lines in the demo's trace, and 142 in the
-working instance's trace that day, starting before any pane edit.
-
-**Removing this exemption.** XMLUI's
-`xmlui/tests/isolation/virtua-ro/` specs
-([`f6369d9`](https://github.com/xmlui-org/xmlui/commit/f6369d98cc1917edc6acd13c2f970f300a1c9184))
-are marked `test.fail()`, so they turn red when a virtua release fixes the
-loop. When that lands and Bram's vendored XMLUI picks it up, delete this
-subsection and the pointer to it in `worklist-gate-walkthrough.md`.
-
-For the registered trace categories, subkinds, fields, and their diagnostic
-purpose, consult the on-demand
-[trace vocabulary](trace-vocabulary.md) while reading the log.
-
-Why this is non-negotiable: the xs engine **silently rejects
-assignments to member expressions** from inside function bodies it
-evaluates — `window.X = value` in a Globals.xs function fails with a
-scope error that only the trace sees, while the calling pipeline
-just stops. (Top-level `window.X = ...` statements in Globals.xs are
-fine — the file loader parses those, not the expression engine.)
-Workaround: define the setter in helpers.js (real JS) and call it as
-a function from xs.
+The xs engine **silently rejects assignments to member expressions** inside function bodies (`window.X = value` in a Globals.xs function; only the trace sees the error). Top-level statements are fine. Define the setter in helpers.js and call it from xs.
 
 ### Displayed state lives in XMLUI, not on `window`
 
-Functions live on `window` because they reach the outside world: `fetch`,
-the PTY, Tauri events, timers, the DOM. That isn't a choice, since the xs
-sandbox can't host them. Keeping *displayed* state on `window` is a choice,
-and it's the one that defeats XMLUI's tracking (Jon, 2026-11-16).
+Keeping *displayed* state on `window` defeats XMLUI's tracking (Jon, 2026-11-16).
 
-- **State the pane displays lives in XMLUI state:** a `var.` for one
-  component and its children, a global (a top-level var in `Globals.xs`)
-  across components, a DataSource or PushSource for anything from the host.
-  The PushSource is the declarative bridge from outside.
-- **A helper called from a binding reads only its arguments.** No
-  `window.__bram*` data, helpers.js module variables, storage, or clock.
-  Pass the value in, or pass the tick that changes with it.
+- **State the pane displays lives in XMLUI state:** a `var.` for one component and its children, a global (a top-level var in `Globals.xs`) across components, a DataSource or PushSource for anything from the host.
+- **A helper called from a binding reads only its arguments.** No `window.__bram*` data, helpers.js module variables, storage, or clock. Pass the value in, or the tick that changes with it.
 
-Why it matters: the pane runs with XMLUI's `readScopedRendering` on
-(`f5c8d84a`). A container re-renders only when values its bindings read
-from XMLUI state change, so a binding whose helper reads `window` state
-goes stale, and it looks like an unrelated bug ("the warning didn't clear").
-Before the switch, such bindings were refreshed incidentally whenever
-anything else in their container rendered.
-
-**The check:** `node scripts/check-bound-helpers.mjs`. It walks every
-helper reached from a display binding through helpers.js and fails on a
-read that isn't in its allowlist. Each allowlist entry gives its reason:
-caches filled from the same payload, trace de-dup, memos keyed by input,
-initializers, ticks already passed. `--list` prints them all. The known
-debt is the gate's close map (`window.__bramW2CloseMap`, patched with
-`gateCloseTick`), whose declarative fix is a `Globals.xs` global.
+**The check:** `node scripts/check-bound-helpers.mjs` fails on any helper read not in its allowlist; `--list` prints the allowlist.
 
 ### Peer-pattern check before designing
 
-Before introducing a new mechanism in the pane, grep 2–3 peer
-components for how they handle the same shape of problem, and run
-`xmlui_search_howto` for the operative concept. If every other
-reactive surface uses the same pattern and the misbehaving component
-hand-rolls something different, the outlier is almost certainly
-where the bug lives — refit to the canonical pattern before adding
-instrumentation.
+Before introducing a new mechanism in the pane, grep 2–3 peer components for the same problem and run `xmlui_search_howto`. If peers share one pattern and the misbehaving component hand-rolls another, the outlier is where the bug lives: refit to the canonical pattern before adding instrumentation.
+
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Code organization](developing-bram-reference.md#receipts-code-organization).
 
 ## Warning color is earned
 
@@ -292,355 +127,104 @@ Commits tab", "Try the switch again from Sessions"); a line that can't
 name one isn't a warning. Detail only an agent or a developer can use
 stays in the trace, not on the surface.
 
-The receipt: the Log once colored a commit line orange for "lines no
-item owned … that's disclosed, not hidden, but worth a look". Nobody
-could tell what it meant or do anything about it. The clause is gone,
-and the Log's eight warning sites were checked against this rule: two
-kept the color (a failed push, a switch that didn't start), and the
-rest went plain.
+**The same rule governs the Status tab** (Jon, 2026-11-12: "There's no point in warning me without offering an action"):
 
-**The same rule governs the Status tab** (Jon, 2026-11-12: "There's no point
-in warning me without offering an action"):
-
-- A `warn` or `error` row carries an `action` in plain words ("Run Setup",
-  "Relaunch Bram", "Rebuild Bram (make build-debug)"); the pane shows it under
-  the detail.
-- A signal with no action for the user reports `none`, shown as **N/A**. Its
-  detail stays in the row's text and the trace. N/A means "no verdict", not
-  "fine".
+- A `warn` or `error` row carries an `action` in plain words ("Run Setup", "Relaunch Bram"); the pane shows it under the detail.
+- A signal with no action reports `none`, shown as **N/A** ("no verdict", not "fine").
 - `ok` means a known good state, never "nothing wrong that we noticed".
-- The host enforces it: `enforce_status_actions` demotes any warn/error row
-  without an action to `none` (and traces `[status] op=warn-without-action`),
-  and `status_rows_missing_action` is what the unit tests assert on. Add the
-  `action` where the row is built.
-- Compare like with like: the `.claude/bram-reference` check in the source
-  repo compares against the unstamped source bytes, because `build.rs` writes
-  them unstamped; comparing against Setup's stamped seed made it warn forever
-  about a condition that wasn't real.
+- The host enforces it: `enforce_status_actions` demotes any warn/error row without an action to `none`; add the `action` where the row is built.
+
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Warning color](developing-bram-reference.md#receipts-warning-color).
 
 ## Rust: typed data, not hand-read JSON
 
 Data inside the host is typed (Jon, 2026-11-11, a standing rule):
 
-- **Structs for shapes.** `#[derive(Serialize, Deserialize)]`, with
-  `#[serde(rename_all = "camelCase")]` to keep the wire shape and
-  `#[serde(default)]` for optional fields. Not a `serde_json::Value` read
-  one field at a time (`v.get("kind").and_then(|v| v.as_str())…`,
-  `v["offer"].as_bool()`).
-- **Enums for closed sets of codes** (outcomes, obstacles, kinds), so the
-  compiler rejects an unknown value and every `match` is checked.
-- **`Value` only where the shape isn't ours,** such as a provider's
-  transcript record or a CLI's output. Build JSON only where a route
-  answers.
+- **Structs for shapes** (`#[derive(Serialize, Deserialize)]`, `#[serde(rename_all = "camelCase")]`, `#[serde(default)]` for optional fields), not a `serde_json::Value` read one field at a time.
+- **Enums for closed sets of codes.**
+- **`Value` only where the shape isn't ours** (a provider's transcript record, a CLI's output). Build JSON only where a route answers.
 - **A Tauri command takes the typed struct as its parameter.**
-- **When a struct replaces a `Value`, keep the wire shape byte-identical,**
-  and pin it with a test, because the pane and other tests read it. Serde's
-  error text differs from hand-written errors, so check whether anything
-  matches the old text.
+- **When a struct replaces a `Value`, keep the wire shape byte-identical** and pin it with a test; check whether anything matches serde's old error text.
 
-New code follows the rule. Old code converts when an item touches it, not
-in sweeps. The receipt: `queue_pty_intent_inner` spends about 40 lines
-extracting five fields that one derived struct and an enum replace. On
-2026-11-11, `lib.rs` had about 960 such field reads and 101 files parsed to
-an untyped `Value`, against 16 parsed to a struct. The audit is on
-[#487](https://github.com/judell/bram/issues/487).
+New code follows the rule; old code converts when an item touches it, not in sweeps.
+
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Rust typed data](developing-bram-reference.md#receipts-rust-typed-data).
 
 ## Paths: write for Windows too
 
-Bram runs on Windows, and path code that only the Mac's `cargo test` has
-seen fails there.
+Path code that only the Mac's `cargo test` has seen fails on Windows.
 
-- **Recognize an absolute path by `starts_with('/')` or
-  `Path::is_absolute()`, never by a leading `/` alone.** `C:\…` is absolute
-  on Windows. `/no/such` is not `is_absolute()` there, so keep the `/` test
-  too wherever Unix-shaped strings can appear (fixtures, ledgers written on
-  a Mac).
-- **Compare paths after folding `\` to `/`, and treat a drive-letter root
-  (`C:`) as case-insensitive,** as Windows filesystems are. Where an agent's
-  shell command can supply the path, accept the Git Bash spelling
-  `/c/Users/…` as `C:/Users/…`.
-- **Build fixture paths and URIs the way the real producer writes them on
-  each platform.** Antigravity writes `file:///C:/Users/jon/bram` on
-  Windows, not `file://C:\Users\…` formatted around a Windows path.
-- **A pure function over path strings gets tests with Windows spellings
-  that run on every platform:** plain strings, no `#[cfg(windows)]`. Then
-  the Mac's `cargo test` catches what only a Windows run would find.
+- **Recognize an absolute path by `starts_with('/')` or `Path::is_absolute()`, never by a leading `/` alone;** keep the `/` test wherever Unix-shaped strings can appear (fixtures, ledgers).
+- **Compare paths after folding `\` to `/`, treat a drive-letter root (`C:`) as case-insensitive,** and accept the Git Bash spelling `/c/Users/…` as `C:/Users/…`.
+- **Build fixture paths and URIs the way the real producer writes them**.
+- **Test path functions with Windows spellings on every platform:** plain strings, no `#[cfg(windows)]`.
 
-The receipts are the v0.8.8 Windows burndown
-([#491](https://github.com/judell/bram/issues/491), fixed in `30a6ef39`).
-Each passed on the Mac and failed only on Windows:
-
-- `token_accounting::resolve_read_path` gave up on any backslash and matched
-  only a `<root>/` prefix, so no Windows read was made relative: 20 files
-  appeared twice in the Files table, and `lib.rs` coverage counted 1 read of
-  about 130.
-- `search_index::mark_missing_sources` selected only `path LIKE '/%'`, so on
-  Windows a session whose transcript was gone was never marked gone.
-- The Antigravity summaries test built `file://{root}`, a shape agy never
-  writes on Windows.
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Paths](developing-bram-reference.md#receipts-paths).
 
 ## Client storage: decision vs. focus
 
-The pane's browser storage splits into two classes, and picking the wrong
-one is a recurring bug shape, not a style nit — file each new persisted key
-under the right one before writing it.
+File each new persisted key under the right class before writing it.
 
-- **decision** (persists across sessions) → `localStorage`. A choice the
-  user would be annoyed to re-make: sort order, a dismissed-forever notice,
-  an opt-in/opt-out toggle.
-- **focus** (dies with the session) → `sessionStorage`. Where the user
-  *was*: scroll position, which row was expanded, an in-progress draft, a
-  pending operation.
+- **decision** (persists across sessions) → `localStorage`: a choice the user would be annoyed to re-make (sort order, a dismissed-forever notice, an opt-in toggle).
+- **focus** (dies with the session) → `sessionStorage`: where the user *was* (scroll position, expanded row, an in-progress draft, a pending operation).
 
-**Default to focus when unsure.** The failure modes are asymmetric. A
-wrongly-session-scoped decision costs the user one re-click next launch —
-annoying, self-correcting, over in a second. A wrongly-persisted focus key
-resurrects stale state long after its context is gone, and it does not
-present as a storage mistake — it presents as a bug in whatever surface it
-resurfaces in (a pane that opens pre-expanded to rows nobody asked about, a
-banner that can never be seen again, an operation that appears to silently
-replay). The reader debugging that surface has no reason to suspect
-`localStorage` first.
+**Default to focus when unsure:** a wrongly-persisted focus key resurrects stale state as a bug elsewhere.
 
-**The test:** ask whether the value describes what the user is *looking at
-right now* (focus — session) or what the user *decided, once, going
-forward* (decision — persisted). If the answer would still make sense
-read aloud a week later without the session that wrote it ("I want the
-newest-first sort", "I've dismissed this notice") it's a decision. If it
-would sound stale or confusing read aloud later ("row 3 is expanded",
-"there's a pending delete") it's focus.
+**The test:** would the value still make sense read aloud a week later without the session that wrote it? Decision. Would it sound stale ("row 3 is expanded")? Focus.
 
-**Worked example, and why this is written down rather than left to
-intuition:** commit `30033d8` moved `bram.updateBannerDismissedVersion`
-from `localStorage` to `sessionStorage` — the reasoning comment sits at
-`app/__shell/helpers.js` around lines 12047–12061. The X on the update
-banner reads like a dismissal, which is the decision shape, and issue
-#271's own audit table had guessed exactly that. The considered answer was
-the opposite: the X means "not now, this session," and persisting it made
-a single click a permanent, cross-instance forfeiture of the update
-prompt with no undo short of editing storage by hand. A key that looks
-like a decision at a glance can still be focus once you ask what the user
-meant by the click — that's the whole reason to run the test explicitly
-instead of pattern-matching the key's name.
-
-When moving a key between stores, check whether the old value needs
-clearing: `localStorage` and `sessionStorage` are separate stores under
-the same origin, so a stale value left in the old store is never read
-again once every read/write site points at the new one — it is inert
-clutter, not a shadowing hazard. Commits `6fa9fd8` and `30033d8` both
-relied on exactly this and did no migration; do the same unless a
-specific read site still reaches into the old store (grep for it — don't
-assume).
+When moving a key between stores, grep for any read site still reaching into the old store; no migration is needed otherwise.
 
 ### Scope persisted keys by project
 
-`localStorage` is **one store shared by every Bram window** on the machine.
-It's one app (`org.xmlui.bram`) with one WebKit store, whichever project each
-window serves. So every persisted key needs a second question after decision
-vs. focus: **is it about this project, or about the user?**
+`localStorage` is **one store shared by every Bram window**. After decision vs. focus, ask: **is it about this project, or about the user?**
 
-- **About the user** (a preference that holds in any project, such as
-  `bram.turnCompleteBeep` or a dismissed notice): an unscoped key is right.
-- **About this project** (its saved tab, the unsent message-box draft, and
-  anything naming its items, sessions or files): suffix the key with the
-  project. Use `window.__bramProjectScopedKey(base)` in `helpers.js`, which
-  returns `base + ":" + projectKey`, or null when the project isn't known. On
-  null, neither read nor write: never fall back to the shared slot. `main.js`
-  sets `window.__bramProjectKey` (from `/__app-info`) before the pane loads,
-  so the helper works synchronously.
-- **Don't migrate an unscoped project key's old value** unless you know which
-  project wrote it. A one-shot migration hands the value to whichever project
-  reads first, and that is the leak itself.
+- **About the user:** an unscoped key.
+- **About this project** (its saved tab, the unsent draft, anything naming its items, sessions or files): scope it with `window.__bramProjectScopedKey(base)` in `helpers.js`. On null (project unknown), neither read nor write; never fall back to the shared slot.
+- **Don't migrate an unscoped project key's old value** unless you know which project wrote it.
 
-The receipts:
-
-- #279: the saved tab. Two windows fought over one slot.
-- `message-draft-bleeds-across-bram-windows`, 2026-09-29: a draft dictated
-  and sent in `~/bram-studio` reappeared unsent in `~/bram`'s box after a
-  relaunch, and went to the wrong agent.
-- The draft is also the case #271's audit singled out as "must survive"
-  (unsent prose the user can't redo). That's why it stays in `localStorage`,
-  scoped, rather than moving to `sessionStorage`. That move was tried first,
-  and it would have dropped drafts on every relaunch.
-
-The unscoped keys were audited against this rule on 2026-10-31. Two project
-keys turned up, `bram.worklistSubmittedMessage` and `…Kind`, but nothing read
-them, so they were deleted, not scoped. When a key looks misfiled, check first
-that something reads it. `bram.dismissedAgentIds` stays unscoped: agent ids are
-unique per dispatch, so windows only share its cap of 500.
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Client storage](developing-bram-reference.md#receipts-client-storage).
 
 ## Push over polling
 
-Do NOT add `pollIntervalInSeconds` to XMLUI DataSources for
-freshness. Drive refetch from events or actions, by tier:
+Do NOT add `pollIntervalInSeconds` to XMLUI DataSources. Drive refetch from events or actions:
 
-- **Local action** (e.g. posting a comment): bump a reactive var the
-  DataSource depends on (a `refreshTick` in queryParams), or call
-  `.refetch()` in the action's `onSuccess` — refresh exactly when it
-  changed, not on a timer.
-- **Cross-component / host state**: subscribe with a `PushSource` on
-  `window.bramSubscribeTauriEvent('<event>')` (`git-status-changed`,
-  `worklist-changed`, `talk-session-changed`, …) and refetch on its
-  tick — the established pattern across the pane.
-- **Remote state with no filesystem trigger** (e.g. forge issue edits
-  by others): the poll does NOT move to the client and is NOT
-  replaced by a manual Refresh button. Relocate it to the Rust host —
-  a background thread polls, computes a result signature, and
-  synthesizes a Tauri event (`issues-changed` is the precedent) only
-  on change; the client subscribes and refetches. The host often
-  piggybacks on work it already does (the search indexer fetches
-  issues anyway).
+- **Local action:** bump a reactive var the DataSource depends on (a `refreshTick` in queryParams), or call `.refetch()` in `onSuccess`.
+- **Cross-component / host state:** a `PushSource` on `window.bramSubscribeTauriEvent('<event>')`.
+- **Remote state with no filesystem trigger:** the poll is NOT moved to the client or replaced by a Refresh button. A Rust host thread polls, computes a signature, and synthesizes a Tauri event (`issues-changed` is the precedent) only on change.
 
 ## Perf diagnosis ordering
 
-**Timeline first, semantic probes second.** When the pane feels slow,
-record a browser Timeline (Safari Web Inspector → Timelines, Frames
-view) before reaching for Bram's semantic instruments. The Timeline's
-Script / Layout / Paint split is the cheap first partition and names
-the fix class directly: Layout-dominated frames point at DOM size and
-forced reflow (virtualize, bound the region), Script-dominated frames
-point at evaluation work — and only then is the eval-trace probe
-(which binding? which handler?) the right drill.
+**Timeline first, semantic probes second.** When the pane feels slow, record a browser Timeline (Safari Web Inspector → Timelines, Frames view) before Bram's semantic instruments. Layout-dominated frames mean DOM size and forced reflow (virtualize, bound the region); Script-dominated frames mean evaluation work, and only then is the eval-trace probe the right drill.
 
-Receipt: the 2026-07-31 search-typing-lag hunt fixed three script-side
-layers (describe pacing, projection tail-scoping, eval confinement)
-before a Timeline recording named Layout as the felt cost —
-virtualization (69be17a) was the fix a day-one recording would have
-named immediately. The probe still earned its keep by falsifying the
-eval theory decisively, and it remains irreplaceable where Timelines
-can't go (hard freezes, remote machines, semantic attribution) — but
-the ordering lesson stands: category attribution before semantic
-attribution.
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Perf diagnosis ordering](developing-bram-reference.md#receipts-perf-diagnosis-ordering).
 
 ## Build vs. reload boundary
 
-**Settled 2026-08-26 (the helpers.js-needs-rebuild mantra was wrong,
-and launch mode is the variable.)** Bram registers its own `tauri`
-scheme handler, which serves every `app/**` asset through
-`serve_app_file` (`lib.rs`) — and that function prefers an **on-disk
-`app/` root**, falling back to the `include_dir!` embedded tree only
-when no candidate directory exists. The candidate that fires under the
-documented launch is `exe_dir/app`: launching via the **`./bram`
-symlink at the repo root** keeps the executable's parent at the repo
-root, where the live source `app/` sits. The symlink is load-bearing.
+**Launch mode is the variable.** `serve_app_file` (`lib.rs`) prefers an on-disk `app/` root, falling back to the embedded tree only when none exists. The **`./bram` symlink at the repo root** puts the live source `app/` beside the executable; it is load-bearing.
 
-So, **when launched via `./bram` at the repo root**:
+**When launched via `./bram`:**
 
 | path | rule |
 |---|---|
-| `app/tools/**` | Served from disk per request. Pane reload picks up edits AND new files. (Auto-reload only when `ui.toolsPaneHotReload` is on; otherwise reload the pane manually.) |
-| `app/__shell/**` (incl. `helpers.js`) | Served from disk per request. Pane reload re-fetches and re-executes it. No rebuild. Proven three ways on 2026-08-26: source chain, a live pane-reload observation, and a loopback probe showing a pre-edit process serving post-edit bytes. |
-| `app/vendor/**` | Served from disk per request. `cp` the new build, reload the pane. No rebuild. |
-| `app/main.js`, `app/index.html`, `app/styles.css` | Served from disk, but the parent window doesn't reload with the tools iframe — **relaunch the app** to re-execute them. Still no rebuild. |
-| `src-tauri/**` | **Rebuild + relaunch.** The only genuinely rebuild-gated path. |
+| `app/tools/**` | Served from disk. Pane reload picks up edits AND new files (auto-reload only when `ui.toolsPaneHotReload` is on; otherwise reload the pane). |
+| `app/__shell/**` (incl. `helpers.js`) | Served from disk. Pane reload re-executes it. No rebuild. |
+| `app/vendor/**` | Served from disk. `cp` the new build, reload the pane. |
+| `app/main.js`, `app/index.html`, `app/styles.css` | Served from disk, but the parent window doesn't reload: **relaunch the app**. No rebuild. |
+| `src-tauri/**` | **Rebuild + relaunch.** The only rebuild-gated path. |
 
-**When launched any other way** — the raw `target/debug/bram` binary,
-or an installed bundle with no adjacent `app/` directory — no disk
-candidate exists and everything serves from the **embedded** tree
-baked at the last `cargo build` of the binary actually running. There
-the old mantra is true: rebuild + relaunch for any `app/**` change,
-and a running process keeps its launch-time embedded tree regardless
-of later builds. This is also why `cargo build` still matters even
-for pure-JS changes you validated via reload: it refreshes the
-embedded fallback that installed binaries will serve.
+**Launched any other way** (raw `target/debug/bram`, an installed bundle), everything serves from the **embedded** tree baked at the last `cargo build`: rebuild + relaunch for any `app/**` change. A markup-only edit followed by `cargo build` recompiles nothing, so trust the `tb.ps1` preflight (`bram --embedded-app-hash` vs `bram --hash-app-dir <path>`), not the build's exit status. For subtle shell-runtime changes, relaunch fully.
 
-**And one sharper fact inside that mode (#332):** `include_dir!`
-embeds all of `app/` while `build.rs` declares `rerun-if-changed` for
-exactly one file under it (the loose-ends skill). So a markup-only
-edit followed by `cargo build` recompiles nothing, and a raw-binary
-launch silently serves markup from an older vintage. This is
-deliberate — watching `app/` wholesale would recompile a ~55k-line
-crate on every `.xmlui` edit, for a path the documented `./bram`
-launch serves from disk anyway, and release builds run from clean
-checkouts so shipped binaries always embed fresh. The staleness is
-made legible instead: `bram --embedded-app-hash` prints the baked
-tree's content hash, `bram --hash-app-dir <path>` hashes a checkout
-with the same algorithm, `/__app-info` reports `embeddedAppHash` and
-`servingEmbedded`, and `tb.ps1` compares the two hashes in its
-preflight and warns `STALE EMBEDDED app/` on mismatch. When testing
-`app/**` behavior through a raw-binary launch, trust that preflight,
-not the build's exit status.
+**Always `cargo build` (debug), never `cargo build --release`, when validating changes.** Don't suggest `cargo run` either. Always launch the `./bram` symlink, not an installed/older app.
 
-Residual caution, kept on purpose: a pane reload re-executes
-`helpers.js` in the iframe, but long-lived listeners, pre-XMLUI
-globals, and parent-window state can carry stale behavior across a
-reload. For subtle shell-runtime changes, a full relaunch remains the
-clean-room validation even though the bytes were already fresh.
+**Build through `scripts/build.sh`** (debug build, logged to `.bram/build-log.jsonl`). On Windows, use `powershell -NoProfile -File scripts\build.ps1`.
 
-**Always `cargo build` (debug), never `cargo build --release`, when
-validating changes** — debug builds are seconds, release builds are
-minutes, and release is for shipping. Don't suggest `cargo run`
-either. And always launch the `./bram` symlink at the repo root, not
-an installed/older app — both for fresh code and because the symlink
-is what makes disk serving resolve at all.
-
-**Build through `scripts/build.sh`**, the same debug build with a
-record: output and exit status pass through, and each build appends a
-line to `resources/build-log.jsonl` (gitignored). The line has its
-duration, HEAD and whether it moved, `src-tauri/` lines changed since
-the last logged build, other `cargo`/`rustc` processes running, load,
-and the caller. `scripts/build-timings.sh` times synthetic edits on a
-quiet tree; this log catches the slow real builds it can't (#452:
-2m55s and 1m38s builds the same day the synthetic rows read 25–34 s).
-Read it by sorting on `seconds` and looking at the slow rows' context.
-On Windows, build through `scripts/build.ps1`
-(`powershell -NoProfile -File scripts\build.ps1`): it runs VsDevCmd
-itself, builds the `x86_64-pc-windows-msvc` target the Windows launch
-uses, and logs the same line with `platform: "windows"`.
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Build vs. reload boundary](developing-bram-reference.md#receipts-build-vs-reload-boundary).
 
 ### Formatting is enforced, so run `cargo fmt`
 
-`src-tauri/` was normalized in `d94a3b9`, and `.github/workflows/fmt.yml`
-runs `cargo fmt --check` on every push and pull request. Formatting is
-no longer something to remember: run `cargo fmt` before you commit and
-the check passes. `src-tauri/rustfmt.toml` pins
-`style_edition = "2021"`, so your rustfmt and CI's agree even across
-toolchain updates.
+`.github/workflows/fmt.yml` runs `cargo fmt --check` on every push and pull request; run `cargo fmt` before you commit. `src-tauri/rustfmt.toml` pins `style_edition = "2021"`. The gate enforces it too: a `worklist-commit` that stages any `.rs` runs `cargo fmt --check` on the worktree first and refuses (409 `op=refuse-unformatted-rust`, claim released) if it is dirty.
 
-And now it is enforced at the gate, not just in CI
-(worklist-commit-refuses-unformatted-rust). When a `worklist-commit`
-in the source repo stages any `.rs`, the route runs `cargo fmt --check`
-on the worktree first and refuses (409 `op=refuse-unformatted-rust`,
-claim released) if it is dirty — so an unformatted Rust commit cannot
-land through the gate whether or not anyone ran `cargo fmt`. The gate
-commits whole files from the worktree, so the worktree check is the only
-path and covers it completely. The recurrence that motivated this
-(`c2ff3e6a` committed without `cargo fmt`; CI failed on that tip; the
-earlier one-shot fix `811ceaa` cleaned the drift but did not stop the
-next one) is why the discipline moved from "remember" to "cannot".
-
-That check is deliberately its own workflow. `build.yml` is
-`workflow_dispatch`-only because the Tauri matrix builds are expensive;
-a fmt check needs no system dependencies and no compilation, so it can
-afford to run per push — which is the only place it prevents drift
-rather than discovering it during a release.
-
-The sweep is listed in `.git-blame-ignore-revs`, and you can register
-it locally:
-
-```sh
-git config blame.ignoreRevsFile .git-blame-ignore-revs
-```
-
-GitHub's blame view honours the file already, with no configuration.
-
-Do not expect it to do much for `d94a3b9` specifically. Measured after
-the fact: of 53,930 lines in `lib.rs`, only **8** blame to the sweep at
-all — git's own diff pairing already carries reformatted lines back to
-the commit that wrote the code — and those 8 do not move even under an
-explicit `--ignore-rev`, because the sweep left them with no predecessor
-line to reassign to. The blame-churn objection to reformatting a large
-file turned out to be much smaller than it is usually assumed to be.
-The file is here as standing hygiene for the next sweep, not because
-this one needed rescuing.
-
-Before the sweep this section said the opposite — *never* run the
-formatter, because on an unnormalized tree it rewrote 247 regions of
-code nobody had touched, and the commit gate stages whole declared
-files, so a 12-line fix would ship as a 900-line diff under your item's
-id. That is what normalizing bought: the rule stopped depending on
-anyone remembering it. The cross-machine coordination that landing it
-required is on judell/bram#322.
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Formatting](developing-bram-reference.md#receipts-formatting).
 
 ## Moved from the seeded conventions
 

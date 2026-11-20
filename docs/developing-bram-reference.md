@@ -539,6 +539,15 @@ transcript kept growing after that survey, and an independent count of its
 unique non-synthetic message ids gives the same 793. Its 550 subagent calls
 and 73.2M cache-read tokens match exactly.
 
+**Second baseline (2026-11-19, before the instruction trim; window 2026-11-13 to 11-20, 64 sessions, `bram --token-accounting ~/bram --since 2026-11-13T00:00:00Z`):**
+
+- The instruction load the `CLAUDE.md` chain imports, as `constrained.instructionBytes` reports it: `conventions.md` 44,272 bytes (about 11,100 tokens by the report's own estimate), `developing-bram.md` 38,879 bytes before the trim in `developing-bram-rules-only` and 20,060 after, `CLAUDE.md` 10,867, `AGENTS.md` 6,722.
+- Floor (context at a session's first call), p50: `claude-opus-5-5` 79,657 over 10 sessions (min 76,847); `claude-fable-5-1` 84,158; `claude-fable-5` 78,173; `gpt-6-astra` 19,757; Antigravity's `Gemini 4 Neon (High)` 23,217; OpenCode's `tidepool-alpha-free` 41,757. For Opus the report splits the floor into about 35,900 native (same provider, other models), 32,700 project and 11,100 conventions.
+- Uncached tokens per call, p50: 787 on `claude-opus-5-5`, 1,426 on `claude-fable-5-1`.
+- `src-tauri/src/lib.rs` now: 119,544 lines, 31,476 inside test modules (26%, 221 spans). In the window, agents read it in 7 sessions: 70 `Read` calls for 339 KB (26 main-thread, 44 subagent) against 1.6 MB through the shell; 1,644 of the lines read were test lines; `Read` and shell together touched 17.8% of the file's lines.
+
+The comparison this baseline exists for: after the trim has been live for a week of new sessions, the Claude floor should fall by roughly the trimmed bytes' token count (18,819 bytes, about 4,700 tokens at the report's 4 bytes per token), visible in `floorParts.project`; after tests leave `lib.rs`, `libRsNow.testLines` goes to near zero and the per-session bytes read from it should fall. Compare the same window length, by model.
+
 ### Measuring build time, not guessing at it
 
 `scripts/build-timings.sh` prints the four numbers a build-time claim
@@ -1165,3 +1174,305 @@ end of the screen where a live prompt puts its footer. Pin the specimen
 whole in a test, along with a near-miss: a reply that merely quotes the text,
 followed by the composer's chrome, must not match. Record the CLI version in
 the comment beside the markers.
+
+## Receipts behind the rules
+
+One section per rule in `developing-bram.md`, holding the stories, numbers, dates and shas that explain why it exists. Read when a rule is questioned.
+
+### Receipts: Code organization
+
+Backs the rules in *Code organization*: the surfaces, delegators, failure modes, post-edit ritual and displayed state.
+
+**The surfaces (xs hoisting).** Top-level `function foo(...)` declarations in `Globals.xs` auto-hoist onto `window.foo`, but that binding is engine-scoped: it makes `foo` bare-callable from XMLUI attribute expressions and lets an xs name shadow a helpers.js export, yet the function is NOT reliably reachable as `window.foo(...)` from real-JS contexts in helpers.js. Live receipt (2026-08-20): a helpers.js click path calling `window.initCloseIssueState(...)` failed with "is not a function" though the xs declaration existed; the fix was a self-contained helpers.js replica. Code that must be callable from both sides lives in helpers.js, never in Globals.xs.
+
+**Delegators.** The `Globals.xs` of today has zero delegators — the fossil set from a prior model was pared away during the host-route migrations. The rule governs whether any new one earns its place.
+
+**Failure modes: attribute expressions.** Multi-statement / multi-arrow-body / object-literal blobs in handler attributes are the anti-pattern that produced the hour-long "parser quirk" hunts. When an XMLUI surface throws a weird error and the markup has an inline ternary / `&&` chain / multi-statement arrow, the bug is the inline expression, not the parser.
+
+**Failure modes: bare names.** In an arrow body passed to `subscribeTauriEvent` / `onDidChange` / `onLoaded`, a bare `foo` with no xs declaration silently kills the registration AND every statement after it in the same handler; the symptom surfaces as an unrelated component failing to mount. Top-level attribute positions tolerate bare names; arrow bodies are the trap.
+
+**Failure modes: hoisting.** helpers.js loads first; a same-named xs declaration then clobbers the helper with the xs-bound version. If the xs function was a delegator calling `window.foo(...)`, it now calls itself: infinite recursion, swallowed silently by trace try/catch, presenting as hung handlers. Fix: name the helper `window.__bramFoo` (when an xs delegator exists) or remove the xs declaration entirely.
+
+**Failure modes: load order.** The file runs top-to-bottom; a load-time throw (`window.X is not a function`) aborts everything after it, breaking features unrelated to the edit (menu, voice, talk-session). Function *definitions* referencing later names are fine; top-level *invocations* are not.
+
+**Failure modes: `ExpandableItem`.**
+
+- **`ExpandableItem` expansion state is uncontrolled and positional.**
+  Inside an `Items` loop, when the list shrinks (a Worklist prune),
+  the component instances are reused by position, so an expansion
+  opened on row 3 silently transfers to whatever item now occupies
+  row 3. Fix: controlled expansion keyed by item id — a `when`-gated
+  body plus an explicit chevron/header toggle writing an id-keyed
+  map (the Worklist rows are the live pattern). Filed upstream as an
+  ask; until then, never rely on `ExpandableItem`'s own state in
+  loops whose membership changes.
+
+**Post-edit ritual: why the ResizeObserver message is exempt.**
+
+It is a known XMLUI-side warning that Bram can't fix. It comes from
+[virtua](https://github.com/inokawa/virtua), the virtualizer under XMLUI's
+`List`: its per-row item resizers measure in the same frame they observe.
+Virtualized scrolling alone produces it, with no Bram markup involved.
+The record:
+
+- #275 §A2 measured it at about 204 a day, all from virtualized `List`s,
+  and traced it to Bram's initial scaffold (`b4abf0f`).
+- [xmlui-org/xmlui#3830](https://github.com/xmlui-org/xmlui/issues/3830)
+  was closed as wontfix: a bare React + virtua fixture with no XMLUI code
+  reproduces it, on virtua 0.48.8 and 0.52.7 alike.
+- We have not filed it on virtua. Jon doesn't know their policy on
+  AI-assisted contributions and won't present this work as his own.
+
+This keeps coming back. It reappeared during the `issue-425-retire-replay`
+demo check on 2026-10-12: 20 lines in the demo's trace, and 142 in the
+working instance's trace that day, starting before any pane edit.
+
+**Removing this exemption.** XMLUI's
+`xmlui/tests/isolation/virtua-ro/` specs
+([`f6369d9`](https://github.com/xmlui-org/xmlui/commit/f6369d98cc1917edc6acd13c2f970f300a1c9184))
+are marked `test.fail()`, so they turn red when a virtua release fixes the
+loop. When that lands and Bram's vendored XMLUI picks it up, delete this
+subsection and the pointer to it in `worklist-gate-walkthrough.md`.
+
+**Displayed state: why it matters.**
+
+Why it matters: the pane runs with XMLUI's `readScopedRendering` on
+(`f5c8d84a`). A container re-renders only when values its bindings read
+from XMLUI state change, so a binding whose helper reads `window` state
+goes stale, and it looks like an unrelated bug ("the warning didn't clear").
+Before the switch, such bindings were refreshed incidentally whenever
+anything else in their container rendered.
+
+**Displayed state: the check's allowlist and known debt.**
+
+Each allowlist entry gives its reason: caches filled from the same payload, trace de-dup, memos keyed by input, initializers, ticks already passed. debt is the gate's close map (`window.__bramW2CloseMap`, patched with
+`gateCloseTick`), whose declarative fix is a `Globals.xs` global.
+
+### Receipts: Warning color
+
+Backs *Warning color is earned* and its Status-tab rule.
+
+The receipt: the Log once colored a commit line orange for "lines no
+item owned … that's disclosed, not hidden, but worth a look". Nobody
+could tell what it meant or do anything about it. The clause is gone,
+and the Log's eight warning sites were checked against this rule: two
+kept the color (a failed push, a switch that didn't start), and the
+rest went plain.
+
+- Compare like with like: the `.claude/bram-reference` check in the source
+  repo compares against the unstamped source bytes, because `build.rs` writes
+  them unstamped; comparing against Setup's stamped seed made it warn forever
+  about a condition that wasn't real.
+
+### Receipts: Rust typed data
+
+Backs *Rust: typed data, not hand-read JSON*.
+
+in sweeps. The receipt: `queue_pty_intent_inner` spends about 40 lines
+extracting five fields that one derived struct and an enum replace. On
+2026-11-11, `lib.rs` had about 960 such field reads and 101 files parsed to
+an untyped `Value`, against 16 parsed to a struct. The audit is on
+[#487](https://github.com/judell/bram/issues/487).
+
+### Receipts: Paths
+
+Backs *Paths: write for Windows too*.
+
+The receipts are the v0.8.8 Windows burndown
+([#491](https://github.com/judell/bram/issues/491), fixed in `30a6ef39`).
+Each passed on the Mac and failed only on Windows:
+
+- `token_accounting::resolve_read_path` gave up on any backslash and matched
+  only a `<root>/` prefix, so no Windows read was made relative: 20 files
+  appeared twice in the Files table, and `lib.rs` coverage counted 1 read of
+  about 130.
+- `search_index::mark_missing_sources` selected only `path LIKE '/%'`, so on
+  Windows a session whose transcript was gone was never marked gone.
+- The Antigravity summaries test built `file://{root}`, a shape agy never
+  writes on Windows.
+
+### Receipts: Client storage
+
+Backs *Client storage: decision vs. focus* and *Scope persisted keys by project*.
+
+**Default to focus when unsure.** The failure modes are asymmetric. A
+wrongly-session-scoped decision costs the user one re-click next launch —
+annoying, self-correcting, over in a second. A wrongly-persisted focus key
+resurrects stale state long after its context is gone, and it does not
+present as a storage mistake — it presents as a bug in whatever surface it
+resurfaces in (a pane that opens pre-expanded to rows nobody asked about, a
+banner that can never be seen again, an operation that appears to silently
+replay). The reader debugging that surface has no reason to suspect
+`localStorage` first.
+
+**Worked example, and why this is written down rather than left to
+intuition:** commit `30033d8` moved `bram.updateBannerDismissedVersion`
+from `localStorage` to `sessionStorage` — the reasoning comment sits at
+`app/__shell/helpers.js` around lines 12047–12061. The X on the update
+banner reads like a dismissal, which is the decision shape, and issue
+#271's own audit table had guessed exactly that. The considered answer was
+the opposite: the X means "not now, this session," and persisting it made
+a single click a permanent, cross-instance forfeiture of the update
+prompt with no undo short of editing storage by hand. A key that looks
+like a decision at a glance can still be focus once you ask what the user
+meant by the click — that's the whole reason to run the test explicitly
+instead of pattern-matching the key's name.
+
+When moving a key between stores, check whether the old value needs
+clearing: `localStorage` and `sessionStorage` are separate stores under
+the same origin, so a stale value left in the old store is never read
+again once every read/write site points at the new one — it is inert
+clutter, not a shadowing hazard. Commits `6fa9fd8` and `30033d8` both
+relied on exactly this and did no migration; do the same unless a
+specific read site still reaches into the old store (grep for it — don't
+assume).
+
+The receipts:
+
+- #279: the saved tab. Two windows fought over one slot.
+- `message-draft-bleeds-across-bram-windows`, 2026-09-29: a draft dictated
+  and sent in `~/bram-studio` reappeared unsent in `~/bram`'s box after a
+  relaunch, and went to the wrong agent.
+- The draft is also the case #271's audit singled out as "must survive"
+  (unsent prose the user can't redo). That's why it stays in `localStorage`,
+  scoped, rather than moving to `sessionStorage`. That move was tried first,
+  and it would have dropped drafts on every relaunch.
+
+The unscoped keys were audited against this rule on 2026-10-31. Two project
+keys turned up, `bram.worklistSubmittedMessage` and `…Kind`, but nothing read
+them, so they were deleted, not scoped. When a key looks misfiled, check first
+that something reads it. `bram.dismissedAgentIds` stays unscoped: agent ids are
+unique per dispatch, so windows only share its cap of 500.
+
+### Receipts: Perf diagnosis ordering
+
+Backs *Perf diagnosis ordering*.
+
+Receipt: the 2026-07-31 search-typing-lag hunt fixed three script-side
+layers (describe pacing, projection tail-scoping, eval confinement)
+before a Timeline recording named Layout as the felt cost —
+virtualization (69be17a) was the fix a day-one recording would have
+named immediately. The probe still earned its keep by falsifying the
+eval theory decisively, and it remains irreplaceable where Timelines
+can't go (hard freezes, remote machines, semantic attribution) — but
+the ordering lesson stands: category attribution before semantic
+attribution.
+
+### Receipts: Build vs. reload boundary
+
+Backs *Build vs. reload boundary*.
+
+**Settled 2026-08-26 (the helpers.js-needs-rebuild mantra was wrong,
+and launch mode is the variable.)** Bram registers its own `tauri`
+scheme handler, which serves every `app/**` asset through
+`serve_app_file` (`lib.rs`) — and that function prefers an **on-disk
+`app/` root**, falling back to the `include_dir!` embedded tree only
+when no candidate directory exists. The candidate that fires under the
+documented launch is `exe_dir/app`: launching via the **`./bram`
+symlink at the repo root** keeps the executable's parent at the repo
+root, where the live source `app/` sits. The symlink is load-bearing.
+
+Proof for the `app/__shell/**` row: Proven three ways on 2026-08-26: source chain, a live pane-reload observation, and a loopback probe showing a pre-edit process serving post-edit bytes.
+
+**When launched any other way** — the raw `target/debug/bram` binary,
+or an installed bundle with no adjacent `app/` directory — no disk
+candidate exists and everything serves from the **embedded** tree
+baked at the last `cargo build` of the binary actually running. There
+the old mantra is true: rebuild + relaunch for any `app/**` change,
+and a running process keeps its launch-time embedded tree regardless
+of later builds. This is also why `cargo build` still matters even
+for pure-JS changes you validated via reload: it refreshes the
+embedded fallback that installed binaries will serve.
+
+**And one sharper fact inside that mode (#332):** `include_dir!`
+embeds all of `app/` while `build.rs` declares `rerun-if-changed` for
+exactly one file under it (the loose-ends skill). So a markup-only
+edit followed by `cargo build` recompiles nothing, and a raw-binary
+launch silently serves markup from an older vintage. This is
+deliberate — watching `app/` wholesale would recompile a ~55k-line
+crate on every `.xmlui` edit, for a path the documented `./bram`
+launch serves from disk anyway, and release builds run from clean
+checkouts so shipped binaries always embed fresh. The staleness is
+made legible instead: `bram --embedded-app-hash` prints the baked
+tree's content hash, `bram --hash-app-dir <path>` hashes a checkout
+with the same algorithm, `/__app-info` reports `embeddedAppHash` and
+`servingEmbedded`, and `tb.ps1` compares the two hashes in its
+preflight and warns `STALE EMBEDDED app/` on mismatch. When testing
+`app/**` behavior through a raw-binary launch, trust that preflight,
+not the build's exit status.
+
+Residual caution, kept on purpose: a pane reload re-executes
+`helpers.js` in the iframe, but long-lived listeners, pre-XMLUI
+globals, and parent-window state can carry stale behavior across a
+reload. For subtle shell-runtime changes, a full relaunch remains the
+clean-room validation even though the bytes were already fresh.
+
+**Build through `scripts/build.sh`**, the same debug build with a
+record: output and exit status pass through, and each build appends a
+line to `resources/build-log.jsonl` (gitignored). The line has its
+duration, HEAD and whether it moved, `src-tauri/` lines changed since
+the last logged build, other `cargo`/`rustc` processes running, load,
+and the caller. `scripts/build-timings.sh` times synthetic edits on a
+quiet tree; this log catches the slow real builds it can't (#452:
+2m55s and 1m38s builds the same day the synthetic rows read 25–34 s).
+Read it by sorting on `seconds` and looking at the slow rows' context.
+On Windows, build through `scripts/build.ps1`
+(`powershell -NoProfile -File scripts\build.ps1`): it runs VsDevCmd
+itself, builds the `x86_64-pc-windows-msvc` target the Windows launch
+uses, and logs the same line with `platform: "windows"`.
+
+### Receipts: Formatting
+
+Backs *Formatting is enforced, so run `cargo fmt`*.
+
+`src-tauri/` was normalized in `d94a3b9`, and `.github/workflows/fmt.yml`
+runs `cargo fmt --check` on every push and pull request. Formatting is
+no longer something to remember: run `cargo fmt` before you commit and
+the check passes. `src-tauri/rustfmt.toml` pins
+`style_edition = "2021"`, so your rustfmt and CI's agree even across
+toolchain updates.
+
+And now it is enforced at the gate, not just in CI
+(worklist-commit-refuses-unformatted-rust). When a `worklist-commit`
+in the source repo stages any `.rs`, the route runs `cargo fmt --check`
+on the worktree first and refuses (409 `op=refuse-unformatted-rust`,
+claim released) if it is dirty — so an unformatted Rust commit cannot
+land through the gate whether or not anyone ran `cargo fmt`. The gate
+commits whole files from the worktree, so the worktree check is the only
+path and covers it completely. The recurrence that motivated this
+(`c2ff3e6a` committed without `cargo fmt`; CI failed on that tip; the
+earlier one-shot fix `811ceaa` cleaned the drift but did not stop the
+next one) is why the discipline moved from "remember" to "cannot".
+
+That check is deliberately its own workflow. `build.yml` is
+`workflow_dispatch`-only because the Tauri matrix builds are expensive;
+a fmt check needs no system dependencies and no compilation, so it can
+afford to run per push — which is the only place it prevents drift
+rather than discovering it during a release.
+
+The sweep is listed in `.git-blame-ignore-revs`, and you can register
+it locally:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+GitHub's blame view honours the file already, with no configuration.
+
+Do not expect it to do much for `d94a3b9` specifically. Measured after
+the fact: of 53,930 lines in `lib.rs`, only **8** blame to the sweep at
+all — git's own diff pairing already carries reformatted lines back to
+the commit that wrote the code — and those 8 do not move even under an
+explicit `--ignore-rev`, because the sweep left them with no predecessor
+line to reassign to. The blame-churn objection to reformatting a large
+file turned out to be much smaller than it is usually assumed to be.
+The file is here as standing hygiene for the next sweep, not because
+this one needed rescuing.
+
+Before the sweep this section said the opposite — *never* run the
+formatter, because on an unnormalized tree it rewrote 247 regions of
+code nobody had touched, and the commit gate stages whole declared
+files, so a 12-line fix would ship as a 900-line diff under your item's
+id. That is what normalizing bought: the rule stopped depending on
+anyone remembering it. The cross-machine coordination that landing it
+required is on judell/bram#322.

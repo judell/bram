@@ -45,7 +45,7 @@ independently of it.** That was the open question this inventory existed to
 answer, and the answer is no.
 
 Which consumers are live depends on the turn. Two samples from
-`scripts/turn-state-probe.sh` make the distinction concrete.
+`scripts/archive/turn-state-probe.sh` make the distinction concrete.
 
 An ordinary message turn — no approved item in flight:
 
@@ -121,7 +121,7 @@ every gate releases.** That is the cheapest way to produce the condition
 deliberately, and it exercises the shared root rather than each consumer's
 plumbing.
 
-`scripts/turn-state-probe.sh` samples all four inputs at once and prints what
+`scripts/archive/turn-state-probe.sh` samples all four inputs at once and prints what
 each consumer derives. It is read-only and takes no arguments; `--watch` samples
 on an interval, since the observation that matters is a transition or its
 absence.

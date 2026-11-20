@@ -1,11 +1,13 @@
 # Renaming a worklist item — design plan
 
+*History: moved here 2026-11-19. A September 2026 design plan for #276, which closed 2026-09-21; the "pre-implementation" status below is as of writing, and the issue is the record of what shipped.*
+
 Status: **design, pre-implementation.** This document is the deliverable of
 the `issue-276-worklist-rename-design` worklist item. It decomposes
 judell/bram#276 into an inventory, three candidate semantics, and a
 recommendation. **No product code ships from this item** — implementation
 is proposed from this plan afterward, each piece with its own gate, the
-same design-first treatment `docs/needs-you-inbox.md` gave #338.
+same design-first treatment `docs/history/needs-you-inbox.md` gave #338.
 
 ## The two defects, restated precisely
 
@@ -121,7 +123,7 @@ contradicts row 9's routing use (`needs_you_reminder_row`'s
 `starts_with("reminder-")` check would need to resolve the alias *before*
 testing the prefix, or a reminder renamed away from the prefix keeps
 routing to the inbox lane under its old alias forever, which is precisely
-the kind of stale-signal bug Requirement 0 in `docs/needs-you-inbox.md`
+the kind of stale-signal bug Requirement 0 in `docs/history/needs-you-inbox.md`
 was written to prevent). Aliasing solves the "back-references break" fear
 the current conventions.md line names ("renaming breaks back-references
 for marginal benefit") at the cost of making every future id lookup a

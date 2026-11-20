@@ -14221,7 +14221,7 @@ window.bramSubscribeW2Selection = (function () {
 // (see __bramW2ResetStartMode), when the agent's turn ends (the honest
 // all-clear), and by TTL so a forgotten first click cannot green-light a
 // commit minutes later. Interim guard only — the structural fix is the
-// executing-window serialization in docs/per-item-claims.md §3.
+// executing-window serialization in docs/history/per-item-claims.md §3.
 (function () {
   var subscribers = new Set();
   var factory = null;

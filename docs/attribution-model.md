@@ -1,5 +1,7 @@
 # The attribution model: replay-positional vs. HEAD-diff membership
 
+*History: the line-ownership model that #504 retired on 2026-11-19; kept because the decision notes cite it.*
+
 > **Status (2026-10-13):** decided and done. HEAD-diff membership is Bram's
 > only ownership model. The replay-positional model this document argues
 > against was deleted in `d785e69` (#425 step 6). The order actually taken

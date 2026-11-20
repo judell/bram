@@ -1,5 +1,7 @@
 # Parallel prototyping notes
 
+*History: moved here 2026-11-19. September 2026 run notes for track 2 of #404, which closed 2026-10-28; superseded by the one-started-item-per-file policy of #504.*
+
 A running log of what we learn when parallel work is driven through chat
 rather than through the gate buttons: an orchestrating agent, subagents in
 worktrees, a shared preview, then branches and PRs. This is track 2 of

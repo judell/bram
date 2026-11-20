@@ -83,7 +83,7 @@
     </HStack>
 
     <!-- Progress annotation while the freshness / reconciliation check runs
-         (docs/needs-you-inbox.md): a blank inbox must read as *verifying*,
+         (docs/history/needs-you-inbox.md): a blank inbox must read as *verifying*,
          never as "nothing waiting" — that false negative is the one signal
          this surface exists to prevent. -->
     <Text when="{!lanesReady}" color="$textColor-secondary">

@@ -1,6 +1,8 @@
 # Per-item claims: evidence from one gate click
 
-Companion to [`attribution-model.md`](attribution-model.md). That document
+*History: moved here 2026-11-19. A September 2026 design; superseded by #504 (one started item per file; same-tree hunk separation retired), which made per-item claim evidence for shared files unnecessary.*
+
+Companion to [`attribution-model.md`](../attribution-model.md). That document
 decided *how attribution should be computed* (HEAD-diff membership over
 retained interval evidence). This one designs the remaining structural gap
 that no computation can close: **a one-click plural approval writes one claim

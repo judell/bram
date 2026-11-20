@@ -1,5 +1,7 @@
 # Post-2.17 assessment — consolidate before 2.18
 
+*History: moved here 2026-11-19. A dated assessment (2026-07-06) taken before v0.2.18; its findings were acted on in that release and it has no live successor.*
+
 **Date:** 2026-07-06. **Question:** before releasing v0.2.18, is another
 consolidation warranted, and can 2.18 reduce rather than grow the line
 count? **Method:** three research passes (redesign-doc review, git
@@ -122,7 +124,7 @@ When these are quiet, execute the table top-down.
 - **2026-07-06 — tranche 3a executed** (`d8ad622`, −64 net): the
   dead-only half of candidate #4 — bounce heuristics end to end and
   write-only iframe landing state. Kept, with evidence recorded in the
-  esc-resend phase-4 execution ledger (`docs/esc-resend-redesign.md`,
+  esc-resend phase-4 execution ledger (`docs/history/esc-resend-redesign.md`,
   the authoritative per-item record for candidate #4): capture scrapers
   (their `send-capture` traces did live forensic work twice that same
   day), `awaitingResponse` (the live submit-button gate; its

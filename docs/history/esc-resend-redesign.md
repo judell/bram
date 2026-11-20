@@ -1,5 +1,7 @@
 # Esc / strand / resend redesign — plan of record
 
+*History: moved here 2026-11-19. A July 2026 plan of record, implemented through phase 4; current behavior lives in the host's send ledger and `docs/turn-transport-redesign.md`.*
+
 ## Current status
 
 Implemented through phase 4's substantive cleanup tranches as of

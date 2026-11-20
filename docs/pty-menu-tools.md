@@ -88,7 +88,7 @@ succession hazards:
   same-shape menus back-to-back would otherwise merge and hide the
   second.
 
-- **Usage:** `scripts/pty-menu-timeline.py` (live), `--all` (every
+- **Usage:** `scripts/archive/pty-menu-timeline.py` (live), `--all` (every
   rotated log), or explicit paths.
 - **Use when:** investigating whether menus interfere with each other in
   time (e.g. "is a second menu dropped when it follows the first

@@ -1,5 +1,7 @@
 # Fanout
 
+*History: moved here 2026-11-19. A June 2026 conceptual explainer; superseded by the code itself (`subscribeTauriEvent` and the PushSource pattern in `app/__shell/helpers.js`) and the "Push over polling" rule in `docs/developing-bram.md`.*
+
 Fanout = **one source event reaches N destinations.**
 
 It's necessary the moment you have one emitter and more than one

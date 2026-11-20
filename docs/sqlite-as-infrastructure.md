@@ -1,5 +1,7 @@
 # SQLite as Bram infrastructure
 
+*Status 2026-11-19: still current. The state-mirror plan it describes is the live plan in `authorization.md` (§Target grant semantics, §Migration discipline) and #454, which is open.*
+
 Bram uses SQLite in three different roles: full-text search, a transitional
 mirror of Worklist lifecycle state, and a read-only query bridge for target
 apps. Those roles share a database engine but not an authority model. Treating

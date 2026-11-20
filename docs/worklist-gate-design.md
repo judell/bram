@@ -1,5 +1,7 @@
 # The Worklist gate
 
+*History: the gate's vocabulary and surface design still describe the Worklist's verbs and states, but the commit staging and interval parts predate #504 (whole files, one started item per file). For the current hand-testing procedure see `developing-bram-reference.md` §Hand-testing the Worklist gate.*
+
 The design of the surface where work is approved. This is the **maintained**
 copy: the vocabulary originated in an external tutorial gist (v4), which the
 markup still cites (`app/tools/components/Worklist.xmlui`), but a gist cannot be

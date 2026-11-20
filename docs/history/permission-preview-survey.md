@@ -1,5 +1,7 @@
 # Agent-pane interaction & display survey (Claude)
 
+*History: moved here 2026-11-19. A June 2026 survey; superseded by the shipped permission-menu and Transcript surfaces, documented in `docs/menu.md` and the `pty-menu-*` docs.*
+
 How Bram presents what the agent does — and how it could be a richer surface
 than the terminal for both **interaction** (approving gated actions in the
 permission menu) and **display** (reviewing what the agent ran and produced in

@@ -1,5 +1,7 @@
 # The "Needs You" inbox — design plan
 
+*History: moved here 2026-11-19. An October 2026 design plan for #338 (closed 2026-09-05); the inbox shipped as `app/tools/components/Inbox.xmlui` with the host's `NeedsYouLane`, documented in `docs/apis.md` §15.*
+
 Status: **design, pre-implementation.** This document is the deliverable of
 the `needs-you-inbox-design` worklist item (#338). It translates Julia's
 design into a Bram-grounded implementation plan and decomposes a v1. No

@@ -1,6 +1,6 @@
 # Finish crediting each item's own lines; freeze same-tree hunk separation
 
-Status: decided 2026-09-24 · one exception taken 2026-10-12 (`f225f1a`) · revisit on field demand
+Status: problem 2 superseded by [2026-11-19-one-started-item-per-file.md](2026-11-19-one-started-item-per-file.md) (2026-11-19); problem 1 stands · decided 2026-09-24 · one exception taken 2026-10-12 (`f225f1a`)
 
 **Question:** #273 bundled two problems. Is the git accounting needed for both worth it?
 

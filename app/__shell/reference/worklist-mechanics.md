@@ -118,6 +118,13 @@ Authorization and execution are separate records:
   every turn's work attributed, and the gate is locked exactly while
   something is running.
 
+**One started item per file.** Start, Start & commit and a plan's
+`start` step are refused for an item whose `files` overlap (equal path,
+or a directory covering a file) those of any started item still on the
+board (`applied`, or `begunAtMs` set), and a single click starting items
+that overlap each other starts none. Nothing is written when refused.
+Commit or Drop the item in the way, or send the change to it as feedback.
+
 On the ordinary apply path, `resolve` is unnecessary because the host
 sets the claim at approval time. If the installed provider instructions
 require resolve, use that flow and capture its response. An approved
@@ -478,9 +485,11 @@ Parallelize the *work*; serialize the *gates*.
   Other providers don't bind yet, so for them the old advice stands:
   commit delegated items together.
 - **Start also refuses on shared files.** The gate refuses Start and
-  Start & commit on an item whose `files` overlap those of an item a
-  running subagent holds (`refuse-shared-files-busy`); start it after the
-  busy item is committed.
+  Start & commit on an item whose `files` overlap those of any started
+  item still on the board. When a running subagent holds that item the
+  op is `refuse-shared-files-busy`; otherwise
+  `refuse-shared-files-started`. Start it after the busy item is
+  committed.
 - **The pane's view.** Running subagents appear as buttons; the user
   activates one to follow its transcript. The roster reads running /
   waiting / finished, and a resumed subagent reads running again

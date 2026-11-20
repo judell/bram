@@ -644,15 +644,17 @@ Every agent's guard **denies** unsigned forge writes; sign by default.
   informational only; if ambiguous, ask one focused question.
 - **Hold the commit while a related item is still being started.** If an
   `approved:` covers a committable item and a not-yet-begun `proposed`
-  item on the same surface (feature + tuning, fix + follow-up), apply
-  the proposed item only and leave the first uncommitted, so the user
-  verifies the combination and approves one commit.
-- **Warn when a new item would entangle a committable item.** Before
-  proposing or applying an item, intersect its `files` with those of
-  begun items (`applied`, or `proposed` with `begunAtMs`); overlap is
-  the risk of entanglement. Say so only when X is ready to commit:
-  "X touches the same file; committing it first keeps the two commits
-  separate." Don't auto-block.
+  item on the same surface (feature + tuning, fix + follow-up) that share
+  no file, apply the proposed item only and leave the first uncommitted,
+  so the user verifies the combination and approves one commit. If they
+  share a file, the second can't start until the first is committed (the
+  next rule); say so instead.
+- **One started item per file.** Start, Start & commit and a plan's
+  `start` step are refused while another started item (`applied`, or
+  `proposed` with `begunAtMs`) declares a shared file. Before proposing
+  an item, intersect its `files` with those of started items and say so.
+  The way out: Commit or Drop that item, or send the change as feedback
+  on it.
 - **Suggest a branch when isolation helps** — broad, risky,
   exploratory, multi-commit, review-before-main or
   issue-close-sensitive work, especially over unrelated changes. Explain

@@ -30,6 +30,7 @@ Status: decided YYYY-MM-DD · revisit <when>
 
 ## Index
 
+- [2026-11-19 — One started item per file at a time; same-tree hunk separation is retired, not frozen](2026-11-19-one-started-item-per-file.md)
 - [2026-11-15 — After Setup, the pane tells each agent's user what they need to do, in Bram's words](2026-11-15-agent-reload-after-setup.md)
 - [2026-11-11 — Why commits take lines no item owned: a census, and what to fix first](2026-11-unowned-lines.md)
 - [2026-11-06 — The Transcript session-menu experiment is dropped; switching stays on the Sessions tab for now](2026-11-06-sessions-menu-experiment-dropped.md)

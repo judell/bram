@@ -4773,33 +4773,55 @@ window.__bramDeclaredCovers = function (declared, path) {
   var d = String(declared).replace(/\/+$/, "");
   return path === d || String(path).indexOf(d + "/") === 0;
 };
+// issue-504-one-started-item-per-file: the busy set is every item that has
+// begun (host-stamped begunAtMs, or applied) and is still on the board, plus
+// anything a live subagent is bound to; two selected not-yet-begun items that
+// share a file block each other. Mirrors the host's
+// shared_files_started_conflicts. Returns {id, busy, files, subagent, mutual}.
+window.__bramItemStarted = function (item) {
+  if (!item) return false;
+  return item.status === "applied" || (typeof item.begunAtMs === "number" && item.begunAtMs > 0);
+};
 window.__bramSharedFilesBlock = function (claim, sel, items) {
   var chosen = sel || [];
   var list = items || [];
+  if (!chosen.length) return null;
   var bound = [];
   window.__bramDelegatedBindings(claim).forEach(function (b) {
     (b.ids || []).forEach(function (id) {
       if (bound.indexOf(id) === -1) bound.push(id);
     });
   });
-  if (!bound.length || !chosen.length) return null;
-  function filesOf(id) {
-    return window.__bramDeclaredFiles(list.filter(function (x) { return x.id === id; })[0]);
+  var busyIds = bound.slice();
+  list.forEach(function (it) {
+    if (it && it.id && window.__bramItemStarted(it) && busyIds.indexOf(it.id) === -1) busyIds.push(it.id);
+  });
+  function itemOf(id) { return list.filter(function (x) { return x.id === id; })[0]; }
+  function filesOf(id) { return window.__bramDeclaredFiles(itemOf(id)); }
+  function sharedOf(mine, theirs) {
+    var shared = [];
+    mine.forEach(function (x) {
+      theirs.forEach(function (y) {
+        var hit = window.__bramDeclaredCovers(x, y) ? y : (window.__bramDeclaredCovers(y, x) ? x : "");
+        if (hit && shared.indexOf(hit) === -1) shared.push(hit);
+      });
+    });
+    return shared.sort();
   }
   for (var i = 0; i < chosen.length; i++) {
-    if (bound.indexOf(chosen[i]) !== -1) continue;
+    if (busyIds.indexOf(chosen[i]) !== -1) continue;
     var mine = filesOf(chosen[i]);
     if (!mine.length) continue;
-    for (var j = 0; j < bound.length; j++) {
-      var theirs = filesOf(bound[j]);
-      var shared = [];
-      mine.forEach(function (x) {
-        theirs.forEach(function (y) {
-          var hit = window.__bramDeclaredCovers(x, y) ? y : (window.__bramDeclaredCovers(y, x) ? x : "");
-          if (hit && shared.indexOf(hit) === -1) shared.push(hit);
-        });
-      });
-      if (shared.length) return { id: chosen[i], busy: bound[j], files: shared.sort() };
+    for (var j = 0; j < busyIds.length; j++) {
+      var shared = sharedOf(mine, filesOf(busyIds[j]));
+      if (shared.length) {
+        return { id: chosen[i], busy: busyIds[j], files: shared, subagent: bound.indexOf(busyIds[j]) !== -1, mutual: false };
+      }
+    }
+    for (var k = 0; k < chosen.length; k++) {
+      if (chosen[k] === chosen[i] || busyIds.indexOf(chosen[k]) !== -1) continue;
+      var both = sharedOf(mine, filesOf(chosen[k]));
+      if (both.length) return { id: chosen[i], busy: chosen[k], files: both, subagent: false, mutual: true };
     }
   }
   return null;
@@ -4811,8 +4833,16 @@ window.__bramSharedFilesBlocker = function (claim, sel, items) {
 window.__bramSharedFilesWhy = function (claim, sel, items) {
   var b = window.__bramSharedFilesBlock(claim, sel, items);
   if (!b) return "";
-  return b.id + " waits for " + b.busy + ": a subagent is still changing the same files. Start " +
-    b.id + " after " + b.busy + " is committed.";
+  if (b.mutual) {
+    return b.id + " and " + b.busy + " both change " + b.files.join(", ") +
+      ". Start one, and start the other after the first is committed.";
+  }
+  if (b.subagent) {
+    return b.id + " waits for " + b.busy + ": a subagent is still changing the same files. Start " +
+      b.id + " after " + b.busy + " is committed.";
+  }
+  return b.files.join(", ") + " is being changed by " + b.busy +
+    ". Commit or Drop that item first, or send this change as feedback on it.";
 };
 
 // The gate-bar line: the same-item reason first, else the shared-files one.
@@ -7239,33 +7269,12 @@ window.__bramStartConsequence = function (items, sel, claim) {
   // whats-my-sequence-button).
   if (begun.length && unbegun.length) return "";
 
-  // All unbegun: Start is lit, and the consequence of clicking it is the
-  // one thing worth saying -- and only when the items share files.
-  //
-  // avoid-futile-joint-commit: this used to say "you can later choose to
-  // commit together or ask the agent to separate them" -- a false promise.
-  // Starting a shared file TOGETHER, in one click, writes one claim and one
-  // capture boundary, so the shared lines land as a JOINT interval with no
-  // per-item interval to separate later (field-tested 2026-09-07: a
-  // same-click approval on Main.xmlui refused a per-item commit three
-  // times, "separate the hunks by hand" included, because there was no
-  // hand-separable interval to find). The permanent consequence is named
-  // instead, with the actual out: start them in separate clicks.
-  if (!begun.length) {
-    if (!n) return "";
-    var sharedPaths = window.__bramSelectionSharedFilePaths(items, sel, claim);
-    var what = sharedPaths.length === 1 ? sharedPaths[0] : n + " files";
-    // issue-404-serial-gate-bar-first-cut: consequence plus the dependable
-    // alternative, with no talk of clicks (how claims are recorded is
-    // Bram's business). "Start and commit one before starting the other" is
-    // the reliable meaning of "separately" now that same-tree hunk
-    // separation is frozen (#273).
-    return (
-      "These share " + what + ". Started together, they'll be committed " +
-      "together. To commit them separately, start and commit one before " +
-      "starting the other."
-    );
-  }
+  // All unbegun: nothing to say. issue-504-one-started-item-per-file: unstarted
+  // items that share a file can no longer be started together (the gate
+  // refuses, and the shared-files line names the file and the way out), so the
+  // old "started together, they'll be committed together" consequence from
+  // issue-404-serial-gate-bar-first-cut has no case left.
+  if (!begun.length) return "";
 
   // All begun. gate-note-planned-overlap-is-not-a-change: the one thing
   // worth saying first is "nothing to commit", for begun items with no

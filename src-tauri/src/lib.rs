@@ -79095,6 +79095,150 @@ fn shared_files_busy_refusal<R: tauri::Runtime>(
     ))
 }
 
+// issue-504-one-started-item-per-file: the general rule. An item that has
+// begun (host-stamped begunAtMs, or status applied) and is still on the board
+// owns its declared files; Start on another item declaring any of them is
+// refused, whether or not a subagent holds the first. Requested items that
+// overlap each other are refused too (`mutual`).
+#[derive(Debug, PartialEq)]
+struct StartedFilesConflict {
+    id: String,
+    busy: String,
+    files: Vec<String>,
+    mutual: bool,
+}
+
+fn worklist_item_has_begun(item: &serde_json::Value) -> bool {
+    item.get("begunAtMs").is_some()
+        || item.get("status").and_then(|v| v.as_str()) == Some("applied")
+}
+
+fn started_item_id(item: &serde_json::Value) -> &str {
+    item.get("id").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+// Pure decision. One conflict per requested item that is not itself begun:
+// the first begun item (other than itself) sharing a file, else the first
+// other requested not-begun item sharing a file.
+fn shared_files_started_conflicts(
+    requested: &[String],
+    items: &[serde_json::Value],
+) -> Vec<StartedFilesConflict> {
+    let find = |id: &str| items.iter().find(|it| started_item_id(it) == id);
+    let mut out = Vec::new();
+    for id in requested {
+        let Some(me) = find(id) else { continue };
+        if worklist_item_has_begun(me) {
+            continue;
+        }
+        let mine = worklist_item_declared_paths(me);
+        if mine.is_empty() {
+            continue;
+        }
+        let mut hit: Option<StartedFilesConflict> = None;
+        for other in items {
+            let oid = started_item_id(other);
+            if oid.is_empty() || oid == id || !worklist_item_has_begun(other) {
+                continue;
+            }
+            let shared = declared_shared_paths(&mine, &worklist_item_declared_paths(other));
+            if !shared.is_empty() {
+                hit = Some(StartedFilesConflict {
+                    id: id.clone(),
+                    busy: oid.to_string(),
+                    files: shared,
+                    mutual: false,
+                });
+                break;
+            }
+        }
+        if hit.is_none() {
+            for oid in requested {
+                if oid == id {
+                    continue;
+                }
+                let Some(other) = find(oid) else { continue };
+                if worklist_item_has_begun(other) {
+                    continue;
+                }
+                let shared = declared_shared_paths(&mine, &worklist_item_declared_paths(other));
+                if !shared.is_empty() {
+                    hit = Some(StartedFilesConflict {
+                        id: id.clone(),
+                        busy: oid.clone(),
+                        files: shared,
+                        mutual: true,
+                    });
+                    break;
+                }
+            }
+        }
+        out.extend(hit);
+    }
+    out
+}
+
+fn shared_files_started_message(c: &StartedFilesConflict) -> String {
+    let files = c.files.join(", ");
+    if c.mutual {
+        format!(
+            "{} and {} both change {}, so neither was started. Start one, and start the other after the first is committed.",
+            c.id, c.busy, files
+        )
+    } else {
+        format!(
+            "{} is being changed by {}. Commit or Drop that item first, or send this change as feedback on it.",
+            files, c.busy
+        )
+    }
+}
+
+fn worklist_doc_items<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_json::Value> {
+    worklist_file(app)
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|doc| doc.get("items").and_then(|v| v.as_array().cloned()))
+        .unwrap_or_default()
+}
+
+// Start / Start & commit refusal for any started item sharing a file, or
+// None. The live-subagent case keeps its own message and trace op.
+fn shared_files_started_refusal<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    requested: &[String],
+) -> Option<(String, serde_json::Value)> {
+    if let Some(r) = shared_files_busy_refusal(app, requested) {
+        return Some(r);
+    }
+    let items = worklist_doc_items(app);
+    let c = shared_files_started_conflicts(requested, &items)
+        .into_iter()
+        .next()?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-authorize",
+            &format!(
+                "op=refuse-shared-files-started ids={} busy={} files={}",
+                ids_json_str(requested),
+                ids_json_str(&[c.busy.clone()]),
+                ids_json_str(&c.files)
+            ),
+        );
+    }
+    let message = shared_files_started_message(&c);
+    Some((
+        message.clone(),
+        serde_json::json!({
+            "error": message,
+            "op": "refuse-shared-files-started",
+            "ids": [c.id],
+            "busy": [c.busy],
+            "files": c.files,
+        }),
+    ))
+}
+
 // The agent exited to the shell: the session that spawned the bindings is
 // gone, and nothing will send their SubagentStop.
 // Called from the PTY read path, so the common case (no bindings) is one
@@ -80315,6 +80459,78 @@ mod delegated_binding_tests {
         let got = shared_files_busy_conflicts(&s(&["a"]), &bound, &items);
         assert_eq!(got[0].2, s(&["app/tools/x.xmlui"]));
         assert!(shared_files_busy_conflicts(&s(&["b"]), &bound, &items).is_empty());
+    }
+
+    fn started_items() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"id": "begun", "status": "proposed", "begunAtMs": 5, "files": ["src/a.rs", "docs/"]}),
+            serde_json::json!({"id": "applied", "status": "applied", "files": ["b.rs"]}),
+            serde_json::json!({"id": "eq", "status": "proposed", "files": ["src/a.rs"]}),
+            serde_json::json!({"id": "under", "status": "proposed", "files": ["docs/x.md"]}),
+            serde_json::json!({"id": "over", "status": "proposed", "files": ["src/"]}),
+            serde_json::json!({"id": "free", "status": "proposed", "files": ["z.rs"]}),
+            serde_json::json!({"id": "m1", "status": "proposed", "files": ["m.rs"]}),
+            serde_json::json!({"id": "m2", "status": "proposed", "files": ["m.rs"]}),
+        ]
+    }
+
+    #[test]
+    fn shared_files_started_equal_path_and_directories() {
+        let items = started_items();
+        let got = shared_files_started_conflicts(&s(&["eq"]), &items);
+        assert_eq!(
+            got,
+            vec![StartedFilesConflict {
+                id: "eq".into(),
+                busy: "begun".into(),
+                files: s(&["src/a.rs"]),
+                mutual: false
+            }]
+        );
+        // a declared directory covers a file under it
+        let got = shared_files_started_conflicts(&s(&["under"]), &items);
+        assert_eq!(got[0].files, s(&["docs/x.md"]));
+        // a file inside a declared directory of the requester
+        let got = shared_files_started_conflicts(&s(&["over"]), &items);
+        assert_eq!(got[0].busy, "begun");
+        assert_eq!(got[0].files, s(&["src/a.rs"]));
+        assert!(shared_files_started_conflicts(&s(&["free"]), &items).is_empty());
+    }
+
+    #[test]
+    fn shared_files_started_applied_counts_and_begun_requester_is_not_its_own_conflict() {
+        let mut items = started_items();
+        items.push(serde_json::json!({"id": "onb", "status": "proposed", "files": ["b.rs"]}));
+        let got = shared_files_started_conflicts(&s(&["onb"]), &items);
+        assert_eq!(got[0].busy, "applied");
+        assert!(shared_files_started_conflicts(&s(&["begun"]), &items).is_empty());
+        assert!(shared_files_started_conflicts(&s(&["applied"]), &items).is_empty());
+    }
+
+    #[test]
+    fn shared_files_started_requested_ids_overlapping_each_other() {
+        let items = started_items();
+        let got = shared_files_started_conflicts(&s(&["m1", "m2"]), &items);
+        assert_eq!(got.len(), 2);
+        assert!(got[0].mutual);
+        assert_eq!(got[0].files, s(&["m.rs"]));
+        assert!(shared_files_started_message(&got[0]).contains("m.rs"));
+        // alone, neither conflicts
+        assert!(shared_files_started_conflicts(&s(&["m1"]), &items).is_empty());
+    }
+
+    #[test]
+    fn shared_files_started_message_names_row_and_file() {
+        let c = StartedFilesConflict {
+            id: "x".into(),
+            busy: "other-item".into(),
+            files: s(&["src/a.rs"]),
+            mutual: false,
+        };
+        assert_eq!(
+            shared_files_started_message(&c),
+            "src/a.rs is being changed by other-item. Commit or Drop that item first, or send this change as feedback on it."
+        );
     }
 
     #[test]
@@ -88404,7 +88620,7 @@ fn record_worklist_action_authorization<R: tauri::Runtime>(
     // is written, so the running item's approval isn't displaced.
     let start_ids = worklist_start_gate_ids(&payload);
     if !start_ids.is_empty() {
-        if let Some((message, _)) = shared_files_busy_refusal(&app, &start_ids) {
+        if let Some((message, _)) = shared_files_started_refusal(&app, &start_ids) {
             return Err(message);
         }
     }
@@ -97430,6 +97646,36 @@ fn validate_worklist_plan_steps(
             clean_steps.push(serde_json::json!({ "verb": verb, "ids": ids }));
         }
     }
+    // issue-504-one-started-item-per-file: a start step on a file another
+    // started item declares (or another start step in this plan declares) is
+    // refused, as Start is at the gate.
+    if has_start {
+        let start_ids: Vec<String> = steps
+            .iter()
+            .filter(|s| plan_step_verb(s) == "start")
+            .flat_map(|s| {
+                s.get("ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_else(Vec::new)
+            })
+            .collect();
+        let items: Vec<serde_json::Value> = doc
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if let Some(c) = shared_files_started_conflicts(&start_ids, &items)
+            .into_iter()
+            .next()
+        {
+            return Err(shared_files_started_message(&c));
+        }
+    }
     Ok((clean_steps, summary_parts))
 }
 
@@ -97521,6 +97767,26 @@ mod validate_worklist_plan_steps_tests {
             {"verb": "feedback", "ids": ["d"], "text": "x"}
         ]));
         assert!(fb.unwrap_err().contains("separate plans"));
+    }
+
+    // issue-504-one-started-item-per-file
+    #[test]
+    fn start_step_on_a_shared_file_is_refused() {
+        let b = json!({"version": 3, "items": [
+            {"id": "busy", "status": "proposed", "begunAtMs": 1, "files": ["src/a.rs"]},
+            {"id": "x", "status": "proposed", "files": ["src/a.rs"]},
+            {"id": "y", "status": "proposed", "files": ["m.rs"]},
+            {"id": "z", "status": "proposed", "files": ["m.rs"]},
+            {"id": "free", "status": "proposed", "files": ["q.rs"]}
+        ]});
+        let check = |steps: serde_json::Value| {
+            super::validate_worklist_plan_steps(steps.as_array().unwrap(), &b).map(|(s, _)| s)
+        };
+        let err = check(json!([{"verb": "start", "ids": ["x"]}])).unwrap_err();
+        assert!(err.contains("src/a.rs is being changed by busy"), "{err}");
+        let err = check(json!([{"verb": "start", "ids": ["y", "z"]}])).unwrap_err();
+        assert!(err.contains("m.rs"), "{err}");
+        assert!(check(json!([{"verb": "start", "ids": ["free"]}])).is_ok());
     }
 }
 

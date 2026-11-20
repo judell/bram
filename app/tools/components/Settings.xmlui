@@ -301,6 +301,26 @@
             <Text fontSize="$fontSize-sm" color="$textColor-secondary"
               value="{window.__bramCompanionPageUrl(companionAppInfo.value, openAppPage.value)}" />
           </HStack>
+          <!-- launch.placement: false (off), "left" or "right". Bram fills that
+               half of its screen when it opens the app in the browser. -->
+          <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+            <Button icon="info" size="xs" variant="ghost" tooltip="About Make room for the app's window"
+              onClick="infoTitle = 'Make room for the app window'; infoBody = window.__bramCompanionText(companionApp.value, 'placementInfo'); settingInfoDialog.open()" />
+            <Text fontSize="$fontSize-sm" value="Make room for the app's window" />
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramCompanionText(companionApp.value, 'placementTag')}" />
+          </HStack>
+          <RadioGroup
+            id="placementMode"
+            paddingLeft="$space-6"
+            enabled="{openAppMode.value !== 'off'}"
+            initialValue="{window.__bramCompanionText(companionApp.value, 'placementMode')}"
+            onDidChange="(v) => saveSettings.execute(window.__bramPlacementSetting(v))">
+            <Option value="off" label="Off" />
+            <Option value="left" label="Bram on the left" />
+            <Option value="right" label="Bram on the right" />
+          </RadioGroup>
+          <Text when="{openAppMode.value === 'off'}" paddingLeft="$space-6" fontSize="$fontSize-sm" color="$textColor-secondary"
+            value="Turn on Open the app at launch first." />
           </VStack>
         </VStack>
       </VStack>

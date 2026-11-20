@@ -4054,7 +4054,7 @@ window.settingsInfoBodies = {
   page:
     "Settings for this project. They're saved on this computer in `.bram/settings.json`, over the repo's committed `.bram.json`, so changing one here affects only you.\n\nMost changes save as soon as you make them; agent and retention changes need **Save**.\n\nEach section opens when you click its name. The **i** buttons explain each section and setting.",
   companionApp:
-    "The app this repo is, or carries: Bram Studio's editor, a sketch IDE, or Bram's own site preview. Its settings split in two.\n\n## From the repo\n\nWhat the app's makers set for everyone who clones it, in the committed `.bram.json`: its **name** (`greeting.name`), its first-run **greeting** file and whether it offers **Orient me** (`greeting.file`, `greeting.orientMe`), the **prompts** a page can stage in the message box (`prompts`), and the **launch command** and **stop command** (`launch.run`, `launch.stop`). Each says where it came from. They aren't edited here: **Propose a change…** puts a request in the message box, and the agent proposes a Worklist item changing `.bram.json`, which you commit like any change. A value that comes from this computer's `.bram/settings.json` says so.\n\nThe launch command runs once each time Bram opens, from the project folder, and Bram doesn't stop it when it quits; it should return quickly and reuse what's already running. Its output goes to `.bram/bram-traces/launch-run.log`, and Status shows how its last run went. The stop command runs when you turn the run switch off, to stop what the launch command started.\n\n## For this computer\n\nYour preferences, saved in `.bram/settings.json` over the repo's defaults; each says the repo's default when you've changed it.\n\n**Run the launch command each time Bram opens.** Turning it on also allows the command on this computer and runs it right away; off, it never runs, and turning it off runs the stop command if there is one. When a repo's command hasn't been allowed here yet, Bram asks once with a banner; **Don't allow** turns this off. *Default: on when the repo names a command.*\n\n**Start Bram minimized** (`launch.minimized`). *Default: off.*\n\n**Show the app inside Bram** (`ui.showTargetApp`): the embedded preview pane. *Default: off.*\n\n**Open the app when Bram opens** (`launch.openApp`): off, the app's home page, or a specific page, typed as its path (`/architecture`). *Default: off.*",
+    "The app this repo is, or carries: Bram Studio's editor, a sketch IDE, or Bram's own site preview. Its settings split in two.\n\n## From the repo\n\nWhat the app's makers set for everyone who clones it, in the committed `.bram.json`: its **name** (`greeting.name`), its first-run **greeting** file and whether it offers **Orient me** (`greeting.file`, `greeting.orientMe`), the **prompts** a page can stage in the message box (`prompts`), and the **launch command** and **stop command** (`launch.run`, `launch.stop`). Each says where it came from. They aren't edited here: **Propose a change…** puts a request in the message box, and the agent proposes a Worklist item changing `.bram.json`, which you commit like any change. A value that comes from this computer's `.bram/settings.json` says so.\n\nThe launch command runs once each time Bram opens, from the project folder, and Bram doesn't stop it when it quits; it should return quickly and reuse what's already running. Its output goes to `.bram/bram-traces/launch-run.log`, and Status shows how its last run went. The stop command runs when you turn the run switch off, to stop what the launch command started.\n\n## For this computer\n\nYour preferences, saved in `.bram/settings.json` over the repo's defaults; each says the repo's default when you've changed it.\n\n**Run the launch command each time Bram opens.** Turning it on also allows the command on this computer and runs it right away; off, it never runs, and turning it off runs the stop command if there is one. When a repo's command hasn't been allowed here yet, Bram asks once with a banner; **Don't allow** turns this off. *Default: on when the repo names a command.*\n\n**Start Bram minimized** (`launch.minimized`). *Default: off.*\n\n**Show the app inside Bram** (`ui.showTargetApp`): the embedded preview pane. *Default: off.*\n\n**Open the app when Bram opens** (`launch.openApp`): off, the app's home page, or a specific page, typed as its path (`/architecture`). *Default: off.*\n\n**Make room for the app's window** (`launch.placement`): Bram fills the left or right half of its screen when it opens the app in your browser. It doesn't move the browser's window. *Default: off.*",
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
@@ -20197,6 +20197,11 @@ window.__bramCompanionSource = function (f, words) {
   return "default";
 };
 
+// The body Settings saves for the placement choice: off is stored as false.
+window.__bramPlacementSetting = function (v) {
+  return { launch: { placement: v === "left" || v === "right" ? v : false } };
+};
+
 window.__bramCompanionText = function (view, key, extra) {
   var v = view || {};
   var onOff = function (b) { return b ? "on" : "off"; };
@@ -20232,6 +20237,9 @@ window.__bramCompanionText = function (view, key, extra) {
   if (key === "openAppTag") {
     return "(" + openWords(v.openApp && v.openApp.value) + "; " + window.__bramCompanionSource(v.openApp, openWords) + ")";
   }
+  if (key === "placementTag") {
+    return "(" + (v.placement && v.placement.value || "off") + "; " + window.__bramCompanionSource(v.placement, function (x) { return x || "off"; }) + ")";
+  }
   // Long explanations, for the info dialogs (Markdown).
   if (key === "runInfo") {
     var lv = extra || {};
@@ -20253,6 +20261,9 @@ window.__bramCompanionText = function (view, key, extra) {
   if (key === "openAppInfo") {
     return "Opens the app in your default browser when Bram starts, once it's being served.\n\n- **Off**: nothing opens.\n- **Home page**: " + (base || "the app's address") + ".\n- **A specific page**: a path on that address, such as `/architecture`" + (base ? " (" + base.replace(/\/$/, "") + "/architecture)" : "") + ".\n\n" + whose(v.openApp, openWords) + saved("launch.openApp");
   }
+  if (key === "placementInfo") {
+    return "Makes room for the app beside Bram when Bram opens it in your browser: Bram fills the left or right half of its screen, leaving the other half free. Bram doesn't move the browser's window; drag it to the free half \u2014 on macOS 15 and later it tiles there, on Windows Snap does. Skipped when Bram starts minimized.\n\n" + whose(v.placement, function (x) { return x || "off"; }) + saved("launch.placement");
+  }
   if (key === "fromRepoInfo") {
     return "What the app's makers set for everyone who clones this repo, in its committed `.bram.json`. Each row says where its value came from. They aren't edited here: **Propose a change…** puts a request in the message box; finish it and send it, and the agent proposes a Worklist item that edits `.bram.json`, which you commit like any change. Bram never writes that tracked file itself.";
   }
@@ -20262,6 +20273,7 @@ window.__bramCompanionText = function (view, key, extra) {
   if (key === "homeLabel") {
     return base ? "Home page (" + base + ")" : "Home page";
   }
+  if (key === "placementMode") return (v.placement && v.placement.value) || "off";
   if (key === "openMode") return (v.openApp && v.openApp.value && v.openApp.value.mode) || "off";
   if (key === "openPage") return (v.openApp && v.openApp.value && v.openApp.value.page) || "";
   return "";

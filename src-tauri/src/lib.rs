@@ -668,6 +668,53 @@ struct LaunchConfig {
     // this computer allowed `run`; never at quit.
     #[serde(default)]
     stop: Option<String>,
+    // issue-499: which half of its screen Bram takes when it opens the app
+    // in the browser: "left" or "right"; absent or false is off.
+    #[serde(default)]
+    placement: Option<serde_json::Value>,
+}
+
+// issue-499: the half of the screen Bram fills, leaving the other for the
+// app's window in the browser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    Left,
+    Right,
+}
+
+impl Placement {
+    fn as_str(self) -> &'static str {
+        match self {
+            Placement::Left => "left",
+            Placement::Right => "right",
+        }
+    }
+}
+
+// "left" / "right" (any case); false, absent or anything else is off.
+fn parse_placement(v: &serde_json::Value) -> Option<Placement> {
+    match v.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "left" => Some(Placement::Left),
+        "right" => Some(Placement::Right),
+        _ => None,
+    }
+}
+
+// The half of a work area Bram takes, in physical pixels. The halves tile
+// the area exactly: left gets floor(w/2), right gets the rest, starting
+// where left ends.
+fn placement_rect(
+    area_x: i32,
+    area_y: i32,
+    area_w: u32,
+    area_h: u32,
+    side: Placement,
+) -> (i32, i32, u32, u32) {
+    let left_w = area_w / 2;
+    match side {
+        Placement::Left => (area_x, area_y, left_w, area_h),
+        Placement::Right => (area_x + left_w as i32, area_y, area_w - left_w, area_h),
+    }
 }
 
 // repo-authored-first-run-greeting: `.bram.json` "greeting". `file` is the
@@ -691,18 +738,29 @@ struct LaunchOpts {
     minimized: Option<bool>,
     // Some(None): open the app's own URL; Some(Some(route)): open that route.
     open_app: Option<Option<String>>,
+    placement: Option<Placement>,
 }
 
 static CLI_LAUNCH: OnceLock<LaunchOpts> = OnceLock::new();
 
 fn is_launch_flag(arg: &str) -> bool {
-    arg == "--minimized" || arg == "--open-app" || arg.starts_with("--open-app=")
+    arg == "--minimized"
+        || arg == "--open-app"
+        || arg.starts_with("--open-app=")
+        || arg == "--placement"
+        || arg.starts_with("--placement=")
 }
 
 fn parse_launch_flags(args: &[String]) -> LaunchOpts {
     let mut opts = LaunchOpts::default();
-    for a in args.iter().skip(1) {
-        if a == "--minimized" {
+    for (i, a) in args.iter().enumerate().skip(1) {
+        if a == "--placement" {
+            opts.placement = args
+                .get(i + 1)
+                .and_then(|v| parse_placement(&serde_json::Value::String(v.clone())));
+        } else if let Some(side) = a.strip_prefix("--placement=") {
+            opts.placement = parse_placement(&serde_json::Value::String(side.to_string()));
+        } else if a == "--minimized" {
             opts.minimized = Some(true);
         } else if a == "--open-app" {
             opts.open_app = Some(None);
@@ -809,6 +867,61 @@ fn stage_manager_splits_companion_now(root: Option<&Path>) -> bool {
     stage_manager_splits_companion(cfg!(target_os = "macos"), opened, opened, show_target_app)
 }
 
+// issue-499: move and size Bram's own main window to a half of its current
+// monitor's work area. The browser's window is never touched. Failure is
+// traced and the app opens anyway.
+fn place_main_window<R: tauri::Runtime>(app: &AppHandle<R>, side: Placement) {
+    let placed = (|| -> Result<(i32, i32, u32, u32), &'static str> {
+        let w = app.get_webview_window("main").ok_or("no-window")?;
+        let mon = w.current_monitor().ok().flatten().ok_or("no-monitor")?;
+        let area = mon.work_area();
+        let (x, y, ww, hh) = placement_rect(
+            area.position.x,
+            area.position.y,
+            area.size.width,
+            area.size.height,
+            side,
+        );
+        if w.is_maximized().unwrap_or(false) {
+            let _ = w.unmaximize();
+        }
+        // set_size sets the INNER size; take off the frame (title bar,
+        // borders) so the OUTER window fills the half and doesn't run under
+        // the Dock or taskbar.
+        let (dw, dh) = match (w.outer_size(), w.inner_size()) {
+            (Ok(o), Ok(i)) => (
+                o.width.saturating_sub(i.width),
+                o.height.saturating_sub(i.height),
+            ),
+            _ => (0, 0),
+        };
+        w.set_size(tauri::PhysicalSize::new(
+            ww.saturating_sub(dw),
+            hh.saturating_sub(dh),
+        ))
+        .map_err(|_| "set-size-failed")?;
+        w.set_position(tauri::PhysicalPosition::new(x, y))
+            .map_err(|_| "set-position-failed")?;
+        Ok((x, y, ww, hh))
+    })();
+    let line = match placed {
+        Ok((x, y, w, h)) => format!(
+            "op=placement side={} rect={},{},{},{} ok=true",
+            side.as_str(),
+            x,
+            y,
+            w,
+            h
+        ),
+        Err(reason) => format!(
+            "op=placement side={} ok=false reason={}",
+            side.as_str(),
+            reason
+        ),
+    };
+    append_bram_trace_line(app, "launch", &line);
+}
+
 fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Path>) {
     let cli = CLI_LAUNCH.get().cloned().unwrap_or_default();
     let cfg = root
@@ -817,6 +930,13 @@ fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Pat
         .unwrap_or_default();
     let minimized = cli.minimized.or(cfg.minimized).unwrap_or(false);
     let open_app = resolved_open_app(&cli, &cfg);
+    // issue-499: minimized wins; a minimized window can't be placed.
+    let placement = if minimized {
+        None
+    } else {
+        cli.placement
+            .or_else(|| cfg.placement.as_ref().and_then(parse_placement))
+    };
     if !minimized && open_app.is_none() {
         return;
     }
@@ -851,6 +971,9 @@ fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Pat
                     None => base.clone(),
                 };
                 if url_answers(&url) {
+                    if let Some(side) = placement {
+                        place_main_window(&app, side);
+                    }
                     let res = app.opener().open_url(url.clone(), None::<String>);
                     if cfg!(target_os = "macos") {
                         let on = stage_manager_enabled();
@@ -905,7 +1028,7 @@ fn parse_cli_flags() {
     match args[1].as_str() {
         "-h" | "--help" => {
             println!(
-                "Usage: bram [PROJECT_DIR] [--minimized] [--open-app[=<route>]]\n\n\
+                "Usage: bram [PROJECT_DIR] [--minimized] [--open-app[=<route>]] [--placement left|right]\n\n\
                  Tauri shell that pairs a terminal with an XMLUI surface.\n\n\
                  Arguments:\n  \
                    [PROJECT_DIR]    Path to the XMLUI project to load (defaults to current directory)\n\n\
@@ -913,6 +1036,8 @@ fn parse_cli_flags() {
                    --minimized          Start with the Bram window minimized\n  \
                    --open-app[=<route>] Once the target app is served, open it in the system\n                       \
                    browser, optionally at a route (e.g. /architecture)\n  \
+                   --placement left|right  When opening the app, Bram fills that half of its\n                       \
+                   screen (the browser's window is not moved)\n  \
                    -h, --help           Print this help and exit\n  \
                    -V, --version        Print version and exit\n\n\
                  A project can set the same in .bram.json:\n  \
@@ -45108,6 +45233,14 @@ enum OpenAppMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PlacementMode {
+    Off,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenAppChoice {
     mode: OpenAppMode,
@@ -45136,6 +45269,7 @@ struct CompanionAppView {
     // The person at this computer.
     minimized: CompanionField<bool>,
     open_app: CompanionField<OpenAppChoice>,
+    placement: CompanionField<PlacementMode>,
     show_target_app: CompanionField<bool>,
 }
 
@@ -45209,6 +45343,14 @@ fn companion_open_app(v: &serde_json::Value) -> OpenAppChoice {
     }
 }
 
+fn companion_placement(v: &serde_json::Value) -> PlacementMode {
+    match parse_placement(v) {
+        Some(Placement::Left) => PlacementMode::Left,
+        Some(Placement::Right) => PlacementMode::Right,
+        None => PlacementMode::Off,
+    }
+}
+
 fn companion_app_view_from(
     root: &serde_json::Value,
     local: &serde_json::Value,
@@ -45278,6 +45420,13 @@ fn companion_app_view_from(
                 mode: OpenAppMode::Off,
                 page: None,
             },
+        ),
+        placement: companion_field(
+            root,
+            local,
+            "/launch/placement",
+            companion_placement,
+            PlacementMode::Off,
         ),
         show_target_app: companion_field(
             root,
@@ -45419,6 +45568,7 @@ mod companion_app_tests {
             v.run.source,
             v.minimized.source,
             v.open_app.source,
+            v.placement.source,
             v.show_target_app.source,
         ] {
             assert_eq!(s, ConfigSource::Default);
@@ -45433,6 +45583,40 @@ mod companion_app_tests {
         assert_eq!(m(json!("/architecture")), OpenAppMode::Page);
         assert_eq!(m(json!(false)), OpenAppMode::Off);
         assert_eq!(m(json!("")), OpenAppMode::Off);
+    }
+
+    #[test]
+    fn placement_spellings_round_trip() {
+        use serde_json::json;
+        assert_eq!(parse_placement(&json!("left")), Some(Placement::Left));
+        assert_eq!(parse_placement(&json!("Right")), Some(Placement::Right));
+        assert_eq!(parse_placement(&json!(false)), None);
+        assert_eq!(parse_placement(&json!(true)), None);
+        assert_eq!(parse_placement(&json!("middle")), None);
+        assert_eq!(parse_placement(&json!(null)), None);
+        // The pane saves off as false; it reads back as off.
+        let cfg = merge_settings_into_config(json!({}), &json!({"launch": {"placement": false}}));
+        assert_eq!(parse_placement(&cfg["launch"]["placement"]), None);
+        assert_eq!(cfg["launch"]["placement"], json!(false));
+        let cfg = merge_settings_into_config(cfg, &json!({"launch": {"placement": "left"}}));
+        assert_eq!(
+            parse_placement(&cfg["launch"]["placement"]),
+            Some(Placement::Left)
+        );
+    }
+
+    #[test]
+    fn placement_in_the_companion_view() {
+        use serde_json::json;
+        let local = json!({ "launch": { "placement": "right" } });
+        let v = companion_app_view_from(&studio(), &local, "bram-studio");
+        assert_eq!(v.placement.value, PlacementMode::Right);
+        assert_eq!(v.placement.source, ConfigSource::Local);
+        let w = serde_json::to_value(&v).unwrap();
+        assert_eq!(w["placement"]["value"], json!("right"));
+        let off = companion_app_view_from(&studio(), &json!({"launch": {"placement": false}}), "x");
+        assert_eq!(off.placement.value, PlacementMode::Off);
+        assert_eq!(off.placement.source, ConfigSource::Local);
     }
 
     #[test]
@@ -121090,6 +121274,57 @@ mod stage_manager_tests {
             open_app: v,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn placement_rect_even_width() {
+        assert_eq!(
+            placement_rect(0, 0, 1600, 900, Placement::Left),
+            (0, 0, 800, 900)
+        );
+        assert_eq!(
+            placement_rect(0, 0, 1600, 900, Placement::Right),
+            (800, 0, 800, 900)
+        );
+    }
+
+    #[test]
+    fn placement_rect_odd_width_tiles_exactly() {
+        let l = placement_rect(0, 0, 1601, 900, Placement::Left);
+        let r = placement_rect(0, 0, 1601, 900, Placement::Right);
+        assert_eq!(l, (0, 0, 800, 900));
+        assert_eq!(r, (800, 0, 801, 900));
+        assert_eq!(l.0 + l.2 as i32, r.0);
+        assert_eq!(l.2 + r.2, 1601);
+    }
+
+    #[test]
+    fn placement_rect_nonzero_origin() {
+        assert_eq!(
+            placement_rect(-1920, 25, 1920, 1055, Placement::Left),
+            (-1920, 25, 960, 1055)
+        );
+        assert_eq!(
+            placement_rect(-1920, 25, 1920, 1055, Placement::Right),
+            (-960, 25, 960, 1055)
+        );
+    }
+
+    #[test]
+    fn placement_cli_flag_and_config() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_launch_flags(&args(&["bram", "--placement", "left"])).placement,
+            Some(Placement::Left)
+        );
+        assert_eq!(
+            parse_launch_flags(&args(&["bram", "--placement=right"])).placement,
+            Some(Placement::Right)
+        );
+        assert_eq!(
+            parse_launch_flags(&args(&["bram", "--placement=up"])).placement,
+            None
+        );
     }
 
     #[test]

@@ -216,6 +216,11 @@ capability.
 
 ## Interval staging and entangled commits
 
+*Retired 2026-11-19: the gate commits whole files and refuses a commit of
+one owner without the other, by name (#504,
+`docs/decisions/2026-11-19-one-started-item-per-file.md`). The history
+below is kept as written.*
+
 Interval staging (#327) made entangled commits safe. The #336
 whole-file withholding, and the #337 selection-scoping that softened
 it, both retired into interval staging.

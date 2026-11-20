@@ -955,10 +955,10 @@ class StarterBuilder:
 
     def starter_entangled_with_unowned(self, prefix: str) -> None:
         # issue-425-retire-replay (Codex review): two begun owners of one file
-        # plus a third hunk nobody owns. Each row alone is interval-staged and
-        # predicts only its own hunk; committing both together leaves no
-        # outside owner, so the gate takes the whole file, unowned hunk
-        # included. The per-row numbers then don't add up to the commit.
+        # plus a third hunk nobody owns. Each row alone is refused (the other
+        # owner is also changing the file, #504); committing both together
+        # leaves no outside owner, so the gate takes the whole file, unowned
+        # hunk included.
         path = f"demo/{prefix}.txt"
         a, b = f"{prefix}-top", f"{prefix}-bottom"
         self.item(a, path, "The top line is unchanged.", "The top line identifies item A.")

@@ -602,12 +602,9 @@ And now it is enforced at the gate, not just in CI
 in the source repo stages any `.rs`, the route runs `cargo fmt --check`
 on the worktree first and refuses (409 `op=refuse-unformatted-rust`,
 claim released) if it is dirty — so an unformatted Rust commit cannot
-land through the gate whether or not anyone ran `cargo fmt`, and whether
-it goes through whole-file or interval staging. A git pre-commit hook
-would NOT cover the interval path: it commits via `git commit-tree`,
-which runs no hooks. The worktree check is inductively sufficient — a
-clean worktree keeps the reconstructed interval tree clean because
-prior gated commits kept HEAD clean. The recurrence that motivated this
+land through the gate whether or not anyone ran `cargo fmt`. The gate
+commits whole files from the worktree, so the worktree check is the only
+path and covers it completely. The recurrence that motivated this
 (`c2ff3e6a` committed without `cargo fmt`; CI failed on that tip; the
 earlier one-shot fix `811ceaa` cleaned the drift but did not stop the
 next one) is why the discipline moved from "remember" to "cannot".

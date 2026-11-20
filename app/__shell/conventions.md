@@ -72,9 +72,7 @@ Skip the worklist only in these contexts, never because the change is
   sent with ⌘Enter / Ctrl+Enter, which adds "Just do it and commit.").
   The host forwards the **entire turn text including the prefix**. Skip
   propose-first, make the change directly, write no worklist item, and
-  commit only if the turn asks. A direct commit to a file a begun item
-  already changed **strands** that item: commit the item first, or
-  re-anchor it (§Opt-out plumbing).
+  commit only if the turn asks.
 - **Correcting code you just wrote in the current iteration.** Fixing a
   typo or off-by-one from your last turn is iteration on in-progress
   work, not a fresh change request.
@@ -390,19 +388,16 @@ records any ticked issue closes. **Closing is fully automatic — do
 nothing**: there is no close route to call and no close step to tell
 the user to run. Closes fire on the user's next **Push**.
 
-The pane offers Commit on any begun item with changes. **Entangled**
-means another begun item **owns lines** (not just declares the path)
-in a file the commit takes; a line belongs to the item whose work
-interval last wrote it, or to none. Entangled requests stage only their
-own hunks; others take files whole, reporting unowned lines as
-`unownedTaken`. Committing them **together** is safe; **one of N** is
-risky.
+The gate commits whole files. If another started item is also changing
+one of the files, it refuses the commit and names that item: commit them
+together, or Drop the other. Lines no item wrote ride along and are
+reported as `unownedTaken`.
 
 **`worklist-commit` is single-shot per approval.** On a timeout, never
 re-POST: check `git log` first and treat what you find as the answer. A
 response saying the commit "ALREADY RAN" is success.
 
-- **Entangled commits, 409 refusals, `op=refuse-joint-interval`, `split-shared-files`** (offer a split only if the user asks for separate commits) → read `.claude/bram-reference/worklist-mechanics.md` (§Interval staging and entangled commits; the split, §Serializing entangled items approved together).
+- **Entangled commits, 409 refusals, `op=refuse-joint-interval`, `split-shared-files`** (offer a split only if the user asks for separate commits) → read `.claude/bram-reference/worklist-mechanics.md` (§Commit together; the split, §Serializing entangled items approved together).
 - **A slow or timed-out commit** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit timeouts: never re-POST).
 - **One click approved several items that share files** → read `.claude/bram-reference/worklist-mechanics.md` (§Serializing entangled items approved together).
 - **About to delegate worklist work to subagents** → read `.claude/bram-reference/worklist-mechanics.md` (§Delegating worklist items to subagents).

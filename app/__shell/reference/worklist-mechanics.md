@@ -16,11 +16,10 @@ are honored. The user-facing contract is identical for every agent.
 `iterate:`, but it authorizes a direct edit rather than a lifecycle
 transition; the PreToolUse hook allows the edits.
 
-**A direct commit strands a begun item.** When a direct commit changes a
-file a begun item has already changed, the item's own patch no longer
-applies to HEAD, and its row names the commit. Commit the item first, or
-re-anchor it afterwards (`POST /__worklist/reanchor {"ids": [...]}`,
-accepted once the file's uncommitted lines are all that item's).
+**A direct commit changes what an item has left.** When a direct commit
+takes some of a file a begun item has also changed, the item's whole-file
+diff against the new HEAD is simply what remains of its work. Nothing is
+re-anchored; the item commits what is left, or Drop it if nothing is.
 
 - **Claude, prose opt-out.** Claude's guard matches `_OPT_OUT_PATTERNS`
   against `transcript_path` on every `PreToolUse` and allows inline.
@@ -177,42 +176,30 @@ worklist routes.
 - **Not for subagents:** Bram already sees them and keeps their items
   locked.
 
-## Interval staging and entangled commits
+## Commit together
 
-When a commit would stage a path carrying lines attributed to a begun
-item *outside the request* — decided by line-level membership (each
-changed line credited to the claim window that last wrote it), not by
-which items merely declare the path — `worklist-commit` doesn't refuse — it
-stages only the requested items' OWN hunks: their claim-interval
-patches applied to a scratch index seeded from `HEAD`, committed via
-`git commit-tree` + `update-ref`, with the worktree and the real index
-**never touched**. The neighbour's uncommitted work stays in the
-worktree (`git diff HEAD` then shows exactly it). The commit is
-hunk-exact, preserving per-item authorship in git history (trace:
-`op=entangled-interval-stage` then `op=interval-staged`).
+The gate commits whole files only. When a commit would take a file that
+another started item also changes (membership credits that item with
+lines in a requested path, whether or not it merely declares the path),
+`worklist-commit` refuses with a 409 and names it:
 
-Order-independence is decided by git, not enforced: the interval patch
-is gated with `git apply --check` against the HEAD-seeded index.
-Success means any order is fine; failure means the requested item's
-change is *defined relative to* another begun item's work not in the
-request, and the response names the item to commit first. `--3way` is
-deliberately not used (it writes conflict markers and succeeds).
+> `<owner>` is also changing `<file>`. Commit them together, or Drop
+> `<owner>` first.
 
-The **409 refusal survives only** when an entangled item has NO claim
-interval to stage from — work predating the capture phase, or done
-with no claim live (the `no-interval` fallback). Then commit the items
-together (safe: every line is accounted for by an id in that commit) or
-separate the hunks by hand.
+Trace: `op=refuse-commit-together ids=… owners=… paths=… source=membership`.
+The refusal releases the claim and commits nothing. There are two ways out:
 
-So the pane offers Commit on any begun item with changes of its own
-(exclusive or shared), and the strip's `unique:` figure is what a
-commit takes on a contended path.
+- **Commit both together**, in one `worklist-commit` with both ids. Every
+  changed line is accounted for by an id in that commit, so nothing is
+  taken under the wrong name. The pane offers Commit on such an item only
+  with its partner ticked, and says "Commits only together with X".
+- **Drop the other item** (park its changes first if you want them back),
+  then commit this one. A dropped item no longer owns lines.
 
-**The dangerous default is the opposite of the intuition:** committing
-all N entangled items **together** is safe — every changed line is
-accounted for by an id in that commit — while committing **one of N**
-is what can absorb a neighbour's work. Separation is the risky
-operation, not aggregation.
+Committing **one of N** is what can absorb a neighbour's work; the gate
+refuses it rather than guess. Don't split a shared file by hand to get
+around the refusal unless the user asks for separate commits (see
+`split-shared-files` below).
 
 **Commit-gate requirements.** The host verifies approved auth, requires
 every requested id to be `applied` (relaxed to also accept `proposed`
@@ -226,8 +213,8 @@ accepts.
 
 **`split-shared-files`.** To commit entangled items one at a time:
 isolate one item's hunks on disk, call `worklist-commit` for that id,
-restore the next item's isolated hunks, and repeat. The interval-diff
-route serves each item's own patch, and `git apply --check` (forward
+restore the next item's isolated hunks, and repeat. `git diff` scoped to each item's own hunks
+serves each item's patch, and `git apply --check` (forward
 and reverse) gates each step. **Build-gate every intermediate state
 before committing it**: hunk isolation can produce a tree that compiles
 in neither direction, and a non-building intermediate commit poisons
@@ -529,19 +516,18 @@ the discipline for completing them serially.
   claim released), naming the joint ids. Commit the joint items
   **together** (safe — every changed line is accounted for by an id in
   that commit), or separate the hunks by hand. When per-item commits on
-  a shared file are the goal, approve the items in **separate clicks**:
-  each gets its own claim and boundary, and interval staging splits
-  them correctly.
+  a shared file are the goal, approve the items in **separate clicks** and
+  commit the first before applying the second, so the shared file never
+  carries two items' hunks.
 - **The satisfiable third out for an existing joint: the
   park/drop/re-propose dance.** This is CONTENT surgery, not in-place
   hand-separation — editing the worktree alone can never clear the
   refusal, because the joint attribution is recorded, not derived from
   the diff. In order: (1) the agent parks one item's entire diff (save
-  its patch — the interval-diff route or `git diff` scoped to its
+  its patch — `git diff` scoped to its
   regions — then reverse-apply, keeping the patch file); (2) the user
   **Drops** that item — the step that dissolves the block, since a
-  dropped partner is no longer begun and staging then follows current
-  content; (3) commit the surviving item (whole-file, clean; cut a
+  dropped partner is no longer begun; (3) commit the surviving item (whole-file, clean; cut a
   branch first when each item drives its own PR); (4) the agent
   restores the patch and re-proposes the dropped item under a new id
   (ids are immutable, and its draft names the dropped one, so the history
@@ -649,21 +635,16 @@ the discipline for completing them serially.
   carries the same bytes). `closesIssues` is the *offer* that makes the
   gate render the tick and stays set even when the user unticks, so
   narrating from it reports intent as outcome.
-- **Partial landings.** An interval-staged commit stages only the lines
-  the requested item's claim intervals attribute. Work the item owns but
-  that was edited in *unclaimed time* (no claim live, e.g. a redo after
-  the item had already advanced) has no interval and stays in the
-  worktree. The success body then carries `residualPaths: [{path,
-  owner}]` for each declared path with leftover diffs — `owner` naming
-  the begun neighbour whose staying work accounts for them (normal,
-  nothing to do) or `"unowned"` — and `retained: [ids]` for requested
-  items with unowned residue, which the host does **not** prune: the row
-  stays on the board with its changes, and the pane's Commit offer (a
-  fresh gate click) is the resume channel. If `retained` is non-empty,
-  say in one sentence which item still has changes and that it stays on
-  the board, instead of announcing completion. A `residualPaths` entry
-  owned by another item is normal; don't mention it. Don't re-POST: the
-  approval is consumed and the claim released.
+- **Partial landings.** The commit takes whole files, so the only thing it
+  can leave out is a declared path git has never tracked (see *Untracked
+  residue* below). The success body then carries `residualPaths: [{path,
+  owner: "unowned", untracked: true}]` and `retained: [ids]` for the
+  requested items, which the host does **not** prune: the row stays on
+  the board, and the pane's Commit offer (a fresh gate click) is the
+  resume channel. If `retained` is non-empty, say in one sentence which
+  item still has changes and that it stays on the board, instead of
+  announcing completion. Don't re-POST: the approval is consumed and the
+  claim released.
 - **Skipped files.** A declared path that matches nothing on disk or in
   the index is skipped, not refused, so a commit that includes a
   deletion still goes through. A deletion already staged is still
@@ -684,9 +665,9 @@ the discipline for completing them serially.
   nothing.
 - **Write the commit message from the prediction, not from memory.**
   Before posting `worklist-commit`, read the item's `willCommit` from
-  `GET /__worklist`: it follows the gate's routing (whole-file on every
-  declared path unless another begun item owns lines on one of them,
-  then the item's own hunks on all of them). `willCommitUnowned`
+  `GET /__worklist`: it is the whole-file take on every declared path.
+  If another begun item owns lines on one of them, the gate refuses the
+  commit (see *Commit together*) and the row carries `commitDependsOn`. `willCommitUnowned`
   (`[{path, added, removed}]`) lists the lines no item wrote that a
   whole-file commit would take; say so in the message. An agent that
   wrote "the new file and the top hunk only" before a whole-file commit
@@ -694,20 +675,18 @@ the discipline for completing them serially.
   case this prevents.
 - **Committing several items at once: read the selection's prediction,
   not the rows.** Each item's `willCommit` assumes it commits alone. The
-  gate routes the whole request at once, so together the items can
-  commit differently: two owners of one file, committed together, leave
-  no outside owner, and the gate takes the file whole, including lines
-  neither row counted. For a commit of more than one id, read
+  gate looks at the whole request at once: two owners of one file,
+  committed together, leave no outside owner, and the gate takes the file
+  whole, including lines neither row counted. For a commit of more than one id, read
   `GET /__worklist/will-commit?ids=<id1>,<id2>`:
   - `mode: "whole-file"`: `added` / `removed` for the files taken whole,
     plus `unowned: [{path, added, removed}]`, the lines no item wrote that
     ride along (the success body's `unownedTaken` will name the same).
-  - `mode: "interval"`: the selection's own lines, `added` / `removed`,
-    with `entangledWith` naming the outside owners whose lines stay.
-  - `dependentPaths` present: the combined patch doesn't apply alone, and
-    the gate will refuse; `entangledWith` names whose work it depends on.
-  - `ready: false` or `stale: true`: membership isn't current yet; read
-    again in a moment.
+  - `entangledWith` present, with `ready: false`: another started item
+    outside the selection also changes these files, and the gate will
+    refuse; `entangledWith` names it. Tick it too, or Drop it.
+  - `ready: false` with no `entangledWith`, or `stale: true`: membership
+    isn't current yet; read again in a moment.
 
   Write the message from that answer. Summing the rows' `willCommit` is
   the mistake this prevents (Codex's review of issue-425-retire-replay:
@@ -723,14 +702,13 @@ the discipline for completing them serially.
   the commit (it is still untracked). It always comes with
   `"owner":"unowned"` and the item in `retained`. Tell the user which
   files were left out and that the row is still on the board. This check
-  runs after every commit, not only interval-staged ones. **Here the
-  Commit offer is not yet a working resume channel:** while another begun
-  item is still credited with lines in one of the item's files, a second
-  Commit is refused ("entirely shared with another begun item and it has
-  no claim interval to stage from"), and that reason is misleading. Say
-  so rather than sending the user to click Commit, and ask how they want
-  the left-out files landed (a direct commit of exactly those files, at
-  the user's direction, is what has worked). Tracked on judell/bram#419.
+  runs after every commit. **Here the Commit offer is not yet a working
+  resume channel:** while another begun item is still credited with lines
+  in one of the item's files, a second Commit is refused (see *Commit
+  together*). Say so rather than sending the user to click Commit, and ask
+  how they want the left-out files landed (a direct commit of exactly those
+  files, at the user's direction, is what has worked). Tracked on
+  judell/bram#419.
 - **`[bram: …]` notes** are host-written, e.g. `[bram: the queued close
   of #21 (commit 94f7666) was withdrawn … it will NOT fire on Push, and
   #21 stays open]`. They ride only plain message turns, never
@@ -867,27 +845,12 @@ as a plan with a `why`. Order by what the board shows:
 - finish begun work before starting proposed work;
 - recommend Drop for an item that turned out to need nothing.
 
-**A stuck item: "What's my next move? (a)".** The button also shows with
-one item ticked when that item can't be committed as it stands: a commit
-outside the Worklist changed one of its files after it began (the row's
-`commitStrandedBy`), or edits outside any item sit between its own changes
-(`commitCheckFailedPaths` with no `commitDependsOn`, #478). Answer in chat
-with one move the user can take; there is no plan for a single item.
-
-- **If a re-anchor will work, offer it:** "I'll update it to apply to the
-  latest commit," then, on the user's go-ahead, `POST /__worklist/reanchor
-  {"ids": ["a"]}`. The route refuses unless the file's uncommitted lines
-  are all this item's, so check `GET /__worklist` first: no other begun
-  item changing the file, and no edits outside any item in it.
-- **If another item is also changing the file,** the move is "commit X
-  first" or "commit them together", whichever the board allows.
-- **If edits outside any item are in the way,** offer to remove them or
-  give them their own item, and say which edits (file, a line or two of
-  what they are). The user decides.
-- If the re-anchor is refused anyway, say so plainly and give the next of
-  these; never send the user to a button that won't work.
-- Keep engine words out of the answer: not "stranded", "re-anchor",
-  "interval" or "membership". Say what the user will see change.
+**One item ticked.** The **What's my next move?** button shows only when
+two or more items are ticked. A single item that shares a file with
+another started item reads "Commits only together with X" on its row
+(`commitDependsOn`): the move is to commit them together, or Drop the
+other. Keep engine words out of the answer: not "interval" or
+"membership". Say what the user will see change.
 
 **Look for delegation.** When two or more ticked items can be worked at once,
 say so in the answer and in the plan's `why`. Both lead with the batches as
@@ -1007,11 +970,10 @@ need an authorized continuation with a claim, normally feedback on the
 item. Apply-and-commit turns have no intermediate advance.
 
 Unowned lines can ride with a later whole-file commit, disclosed as
-`unownedTaken`; an entangled commit uses the membership partition and
-can leave residual work. Neither outcome makes unrelated chat edits
+`unownedTaken`; a commit never takes another started item's lines (the gate
+refuses; see Commit together). Neither outcome makes unrelated chat edits
 belong to the item. Inspect what the gate will commit, and say in plain
-words if an item stays on the board; see Interval staging and entangled
-commits.
+words if an item stays on the board.
 
 With the user's explicit go-ahead for an outside-gate recovery commit,
 clear the landed rows using the verified cleanup path described above.

@@ -3550,22 +3550,10 @@ window.__bramSequenceQuestion = "What's my next move?";
 // The button sits in the plan line's slot: shown when two or more items are
 // ticked (Jon, 2026-11-08: a sequence only matters then) and no plan is
 // showing (a posted plan is the answer, with its own Why?).
-// Also shown for exactly one ticked item that can't be committed as it
-// stands (stranded by an outside commit, or its change doesn't apply on its
-// own): the plain-words text there ends "Click What's my next move?".
 window.__bramShowSequenceButton = function (board, sel) {
   var ids = sel || [];
   if (window.__bramPlanVisible(board, sel)) return false;
-  if (ids.length > 1) return true;
-  if (ids.length !== 1) return false;
-  var its = (board && board.items) || [];
-  for (var i = 0; i < its.length; i++) {
-    if (its[i] && its[i].id === ids[0]) {
-      return (its[i].commitStrandedBy || []).length > 0 ||
-        (its[i].commitCheckFailedPaths || []).length > 0;
-    }
-  }
-  return false;
+  return ids.length > 1;
 };
 // next-move-button-inline-and-quiet (Jon, 2026-11-08: "at the end of the
 // line above it"): which row carries the button. The gate's consequence
@@ -5146,11 +5134,6 @@ window.__bramWorklist2StripTooltip = function (item, claim, items) {
       return window.__bramOwnedPhrase(ownedPaths, true, true);
     }
   }
-  // gate-names-the-outside-commit-that-strands-an-item: the strip's
-  // "Stranded by" expands to what happened and the way out.
-  if (item && (item.commitStrandedBy || []).length) {
-    return window.__bramStrandedSentence(item.commitStrandedBy, item.commitDependsOn, true, false);
-  }
   var split = window.__bramItemChangedSplit(item, items, claim);
   // For a committable row, the terse label dropped the on-disk total, the
   // shared paths, the plan denominator and the last-change time; the tooltip
@@ -5293,8 +5276,8 @@ window.__bramSelectionAllNeedStart = function (items, sel, claim) {
 // three surfaces agree by construction rather than by coincidence.
 // unowned-lines-postmortem-fixes: what a whole-file commit of `item` would
 // take that membership credits to no item. Only paths with no begun claimant
-// outside the selection, since an entangled path is interval-staged and takes
-// only the item's own hunks.
+// outside the selection, since the gate refuses a commit of such a path until
+// the other owner is in the selection (#504).
 window.__bramItemTakeableUnowned = function (item, items, claim, coSelected) {
   var out = { added: 0, removed: 0, paths: [] };
   var m = window.__bramBoardMembership();
@@ -5318,27 +5301,6 @@ window.__bramItemTakeableUnowned = function (item, items, claim, coSelected) {
   return out;
 };
 
-// issue-478-name-the-blocker: the item's own changes don't apply alone
-// (commitCheckFailedPaths, no commitDependsOn, not stranded). When membership
-// shows lines in a failing path that no item owns, say so in plain words;
-// "" when it can't be told, so callers keep their older sentence. `code`
-// wraps names for Markdown (the tooltip); the row strip passes false.
-window.__bramOutsideEditsBlockerSentence = function (item, code) {
-  if (!item) return "";
-  var failed = item.commitCheckFailedPaths || [];
-  if (!failed.length || (item.commitDependsOn || []).length || (item.commitStrandedBy || []).length) return "";
-  var m = window.__bramBoardMembership();
-  if (!m || !m.byPath) return "";
-  var hit = failed.filter(function (p) {
-    var un = m.byPath[p] && m.byPath[p].unowned;
-    return !!un && ((Number(un.added) || 0) + (Number(un.removed) || 0)) > 0;
-  });
-  if (!hit.length) return "";
-  var q = function (s) { return code ? "`" + s + "`" : s; };
-  return "Edits made outside any item in " + hit.map(q).join(", ") +
-    " are in the way. Click " + (code ? "**What's my next move?**" : "What's my next move?");
-};
-
 // unowned-lines-postmortem-fixes: the Commit button's tooltip names the
 // failing check when it is withheld. With only the scope listed, a disabled
 // Commit left the user (and the agent) guessing (2026-10-09).
@@ -5359,15 +5321,6 @@ window.__bramGateCommitWhyNot = function (items, sel, claim, ctx) {
     var it = list.filter(function (x) { return x.id === chosen[i]; })[0];
     if (!it) continue;
     if (!window.__bramWorklist2Begun(it, claim)) return it.id + " hasn't been started; use Start first.";
-    if ((it.commitStrandedBy || []).length) {
-      return window.__bramStrandedSentence(it.commitStrandedBy, it.commitDependsOn, true, false);
-    }
-    if ((it.commitCheckFailedPaths || []).length) {
-      var outsideWhy = window.__bramOutsideEditsBlockerSentence(it, true);
-      if (outsideWhy) return outsideWhy;
-      return it.id + " can't be committed as it stands (" + it.commitCheckFailedPaths.join(", ") +
-        "). Click **What's my next move?**";
-    }
   }
   // issue-438: nothing git can see, but a declared file is on disk behind an
   // ignore rule. Name it and the two ways out. The remedy is its own
@@ -5401,9 +5354,7 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
   var list = items || [];
   var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
   if (picked.length !== chosen.length) return false;
-  // gate-withholds-futile-joint-commit-offer: the issue-327 rationale below
-  // (entangled is committable via interval staging) has exactly one
-  // exception, and the host enforces it — a JOINT run cannot be staged, so
+  // gate-withholds-futile-joint-commit-offer: the host enforces this one —
   // a selection missing a still-begun jointWith partner is refused every
   // time. Don't offer the guaranteed 409; the gate note names the partner.
   if ((window.__bramSelectionJointMissing(items, sel, claim) || []).length) {
@@ -5418,18 +5369,12 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     // items were both offered a button that would land one item's work
     // under the other's id. Begun-ness is trivially true for applied items.
     if (!window.__bramWorklist2Begun(it, claim)) return false;
-    // issue-430: the host's precheck says this item's patch does not apply to
-    // HEAD on its own, and names no begun item it depends on.
-    if ((it.commitCheckFailedPaths || []).length && !(it.commitDependsOn || []).length) return false;
-    // issue-327: exclusivity is no longer required to OFFER Commit. The host
-    // now interval-stages an entangled item's own hunks (scratch index, HEAD
-    // parent, worktree untouched), so a shared path is committable — the
-    // neighbour's uncommitted work simply stays in the worktree. What remains
-    // required is that the item has CHANGES of its own to commit (exclusive OR
-    // shared); a begun item with nothing on disk is not committable. The host
-    // still refuses a genuinely dependent commit (git apply --check fails) and
-    // names the item to commit first, so offering here is safe — the #336
-    // withholding and the #337 selection-scoping both retire into this.
+    // A file another started item also changes is not a reason to withhold
+    // here: commitDependsOn (read by __bramSelectionJointMissing above) holds
+    // the offer back until the other owner is in the selection, and the host
+    // refuses a commit of one without the other. What is required here is that
+    // the item has CHANGES of its own to commit; a begun item with nothing on
+    // disk is not committable.
     var split = window.__bramItemChangedSplit(it, list, claim, chosen);
     if (!split.exclusive.length && !split.shared.length) {
       // unowned-lines-postmortem-fixes: lines no item wrote, on a file this
@@ -5452,30 +5397,6 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     }
   }
   return true;
-};
-
-// gate-names-the-outside-commit-that-strands-an-item: the sentence for an
-// item whose patch no longer applies because a commit outside the Worklist
-// changed its file after it began (host: commitStrandedBy, strandedBy). It
-// names the file and the commit, then the way out: together with the file's
-// other owners when there are any, or a re-anchor by the agent. `code` wraps
-// names for Markdown; `plural` phrases it for a selection.
-window.__bramStrandedSentence = function (stranded, others, code, plural) {
-  var list = stranded || [];
-  if (!list.length) return "";
-  var c = list[0];
-  var path = (c.paths || [])[0] || "a declared file";
-  var q = function (s) { return code ? "`" + s + "`" : s; };
-  var more = list.length > 1
-    ? " and " + (list.length - 1) + " more commit" + (list.length > 2 ? "s" : "")
-    : "";
-  // One sentence plus the button to press; the Tooltip wraps it on its own.
-  return (
-    (plural ? "Can't commit as they stand: " : "Can't commit as it stands: ") +
-    q(path) + " changed in " + q(c.short || c.sha) + more +
-    (plural ? " after these began." : " after this began.") +
-    " Click " + (code ? "**What's my next move?**" : "What's my next move?")
-  );
 };
 
 // #336: the begun items this one shares CHANGED paths with -- the claimants
@@ -5799,17 +5720,13 @@ window.__bramSelectionIdsParam = function (sel) {
 };
 
 window.__bramSelectionTakeLine = function (pred, sel, board) {
-  if (!pred || !pred.ready || pred.stale || (sel || []).length < 2) return "";
+  if (!pred || pred.stale || (sel || []).length < 2) return "";
   // Only this selection's answer, computed under the board's current state.
   if ((pred.ids || []).slice().sort().join(",") !== sel.slice().sort().join(",")) return "";
   if (!board || !board.membershipStateKey || pred.stateKey !== board.membershipStateKey) return "";
-  if ((pred.dependentPaths || []).length) {
-    if ((pred.strandedBy || []).length) {
-      return window.__bramStrandedSentence(pred.strandedBy, [], false, true);
-    }
-    return "These build on " + window.__bramNameList(pred.entangledWith || []) +
-      "'s changes. Tick " + window.__bramNameList(pred.entangledWith || []) +
-      " too, or commit it first.";
+  if ((pred.entangledWith || []).length) {
+    var others = window.__bramNameList(pred.entangledWith);
+    return others + (pred.entangledWith.length > 1 ? " are" : " is") + " also changing these files. Tick " + others + " too to commit them together.";
   }
   // Ordinary commits say nothing here. Lines outside any item are disclosed
   // by the (i) next to Commit (__bramSelectionOutsideEdits), not in this line.
@@ -5837,7 +5754,6 @@ window.__bramSelectionOutsideEdits = function (pred, sel, board) {
   if (!pred || !pred.ready || pred.stale || (sel || []).length < 2) return null;
   if ((pred.ids || []).slice().sort().join(",") !== sel.slice().sort().join(",")) return null;
   if (!board || !board.membershipStateKey || pred.stateKey !== board.membershipStateKey) return null;
-  if ((pred.dependentPaths || []).length) return null;
   if (pred.mode !== "whole-file") return null;
   var un = pred.unowned || [];
   if (!un.length) return null;
@@ -6361,9 +6277,8 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
       // TAKE (whole files, whoever wrote them) and how far the work has got
       // against its own plan -- "1 of 2 planned" is the signal that a commit
       // now would be committing something unfinished.
-      // issue-327: lead with what a commit actually TAKES. Interval staging
-      // commits the item's own hunks, so the headline is the host's willCommit
-      // (issue-425-retire-replay: staged from the item's patch). On a contended path that is less than
+      // issue-327: lead with what a commit actually TAKES, the host's willCommit
+      // (whole-file since #504). On a contended path that is less than
       // the file total, which is shown as "on disk" context; for an
       // unentangled item the two are equal and it reads as it always did. The
       // old dual-number collapses into one honest figure. Items predating
@@ -6401,9 +6316,8 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
       // the redesign is the drawing-board item.
       // The one committable branch: here (and only here) the close reads as
       // the claim it is — the gate is about to offer the tick.
-      // issue-425-retire-replay (Codex review): when the host's precheck
-      // found the item's patch can't apply alone (commitDependsOn), the gate
-      // would refuse it, so the number is the item's own lines, not a promise.
+      // The gate refuses this item alone while another started item owns
+      // lines in its files (commitDependsOn), so no number is promised.
       if ((item.commitDependsOn || []).length) {
         return withCloses("Commits only together with " + item.commitDependsOn.join(", "), true);
       }
@@ -6445,20 +6359,8 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, agentSt
         notCredited.length ? window.__bramNotCreditedPhrase(notCredited, false, false) : "No changes yet",
       );
     }
-    // gate-names-the-outside-commit-that-strands-an-item: name the commit
-    // that stranded it, never the neighbour the host would otherwise blame.
-    var strandedBy = item.commitStrandedBy || [];
-    if (strandedBy.length) {
-      return withCloses(
-        window.__bramStrandedSentence(strandedBy, item.commitDependsOn, false, false),
-      );
-    }
-    // issue-478-name-the-blocker: edits made outside any item in a failing path.
-    var outsideStrip = window.__bramOutsideEditsBlockerSentence(item, false);
-    if (outsideStrip) return withCloses(outsideStrip);
     var blockers = window.__bramItemShareBlockers(item, items, claim);
-    // gate-names-the-outside-commit-that-strands-an-item: two items whose
-    // patches each depend on the other's lines can't be ordered. "Commit that
+    // Two items that each depend on the other's lines can't be ordered. "Commit that
     // first" on both rows was the loop Jon hit on 2026-11-02; say what's true.
     var mutual = blockers.length > 0 && blockers.every(function (b) {
       var o = (items || []).filter(function (x) { return x && x.id === b; })[0];
@@ -6969,7 +6871,7 @@ window.__bramSelectionJointShared = function (items, sel) {
 // gate-withholds-futile-joint-commit-offer: the still-begun jointWith
 // partners a selection is MISSING — the ids whose absence makes a commit of
 // this selection a guaranteed host refusal (op=refuse-joint-interval, #356:
-// a joint run cannot be interval-staged, so a request not covering the
+// a joint run cannot be split, so a request not covering the
 // whole joint set 409s every time; field case 2026-09-08, "Then we should
 // not offer it!"). A pruned partner does not block — ghosts fall through to
 // whole-file staging host-side. Keys on EVIDENCE (jointWith), so #269's
@@ -6983,9 +6885,9 @@ window.__bramSelectionJointMissing = function (items, sel, claim) {
   var missing = [];
   for (var s = 0; s < chosen.length; s++) {
     var it = byId[chosen[s]];
-    // issue-430: a patch that only applies on top of another begun item's
-    // uncommitted lines (host precheck, commitDependsOn) is refused alone,
-    // exactly like a joint run.
+    // A commit of an item whose files another started item also changes
+    // (host membership, commitDependsOn) is refused alone, exactly like a
+    // joint run.
     var jw = ((it && it.jointWith) || []).concat((it && it.commitDependsOn) || []);
     for (var j = 0; j < jw.length; j++) {
       var partner = byId[jw[j]];
@@ -18180,8 +18082,8 @@ window.__bramWithShareMode = function (text, mode, items, sel, claim) {
   // selection shared a file with an unselected begun item. Agents obeyed by
   // hand: revert the neighbour's lines, commit, restore them (demo gate-425,
   // 2026-10-06 07:11:18-35Z). That hid the shared lines from the gate — which
-  // since #327 interval-stages them itself, and since issue-425 decides
-  // entanglement by line-level membership — and rewrote another item's lines
+  // since issue-425 decides entanglement by line-level membership, and
+  // since #504 refuses a commit of one owner without the other — and rewrote another item's lines
   // inside the committing item's claim window. The host owns isolation now;
   // the body passes through unchanged.
   return text || "";

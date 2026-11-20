@@ -55,8 +55,7 @@ index or working files while constructing the snapshot.
 |---|---|---|---|
 | Worklist change summaries | status, diffs, `HEAD`, real index | `resources/worklist.json` | `worklist_change_index` |
 | Ordinary Worklist commit | path-scoped `add -A`, staged-file checks, `commit` | authorization, audit, worklist history | `handle_worklist_commit` |
-| Claim attribution | temporary index, trees, `refs/bram/claims/*`, tree-to-tree diffs | `.claim-intervals.json` | `capture_claim_tree`, `membership_line_credit`, `claim_interval_diff` |
-| Selective entangled commit | interval patches, `apply --check`, temporary index, `write-tree`, `commit-tree`, `update-ref` | claim ledger and Worklist declarations | `interval_stage_commit` |
+| Claim attribution | temporary index, trees, `refs/bram/claims/*`, tree-to-tree diffs | `.claim-intervals.json` | `capture_claim_tree`, `membership_line_credit`, `membership_step_chain` |
 | Safety snapshot | temporary index, tree, `refs/bram/safety/*` | operator-chosen ref name | documented in `trace-vocabulary.md` |
 | Synthetic scenarios | trees, commits, `scenario/*` branches, detached checkout, mixed reset | scenario metadata committed in the branch | `scripts/demo_instance.py` |
 | Agent worktree coverage | linked-worktree path convention | proposal file declarations and guard authorization | `worktree_coverage_target` |
@@ -147,11 +146,12 @@ must sum to the diff (the conservation tripwire). A positional replay of
 interval edit scripts did this job until `d785e69`;
 [`attribution-model.md`](attribution-model.md) records why it was replaced.
 
-**What interval staging still uses.** Committing one of several items that
-own lines in the same file (hunk-by-hunk staging, frozen since 2026-09-24)
-builds its patch from the item's own interval diffs (`claim_interval_diff`),
-applied to a scratch index from `HEAD`. Membership decides whether a commit
-goes that way. The intervals still supply the patch.
+**Commits are whole-file.** Committing one of several items that own lines
+in the same file is refused, naming the other item
+([`decisions/2026-11-19-one-started-item-per-file.md`](decisions/2026-11-19-one-started-item-per-file.md),
+#504): the items commit together, or one is dropped. Hunk-by-hunk staging
+from interval diffs, frozen on 2026-09-24, was removed with that decision.
+Membership still decides whether a commit is refused.
 
 Ownership has several intentionally honest edge cases:
 
@@ -162,7 +162,7 @@ Ownership has several intentionally honest edge cases:
   joint items to commit together or the human to separate the work.
 - Work before the first recorded boundary is unattributed.
 - An interval whose item no longer exists is a ghost. Bram does not splice its
-  stale patch into a later selective commit; surviving content travels with a
+  stale patch into a later commit; surviving content travels with a
   later whole-file commit.
 - An interval records what an item did at that point in the timeline. Later
   work may overwrite it, so attribution is not a promise that every attributed
@@ -400,14 +400,13 @@ live repository:
 | Resolve and operate from the exact project toplevel | all Git-backed features | status, refs, or destructive fixture commands target the wrong repository | `project_root` in `src-tauri/src/lib.rs`; `validate_demo` in `scripts/demo_instance.py` |
 | Scope whole-tree capture to the project subtree | claim capture, scenarios | a nested project hashes unrelated enclosing-repository content | `capture_claim_tree`; `capture_tree` |
 | Include untracked, non-ignored files in snapshots | claims, safety, scenarios | file creation becomes unattributed or absent from a fixture | `capture_claim_tree`; `trace-vocabulary.md` § claim and safety refs |
-| Use a unique temporary index and clean it up | claims, selective commits, scenarios | concurrent captures collide or leak staging state | `capture_claim_tree`; `interval_stage_commit`; `temporary_index` |
+| Use a unique temporary index and clean it up | claims, selective commits, scenarios | concurrent captures collide or leak staging state | `capture_claim_tree`; `temporary_index` |
 | Keep every durable snapshot reachable | claims, safety, scenarios | Git garbage collection removes a boundary still named in metadata | `record_claim_interval`; `prune_claim_intervals`; `capture_scenario` |
 | Treat ledger insertion order as claim order | claim attribution | same-millisecond boundaries are reordered and ownership shifts | `claim_intervals_partition`; `membership_step_chain` |
-| Compare closed intervals tree-to-tree | claim attribution | current worktree changes contaminate historical ownership | `membership_line_credit`; `claim_interval_diff`; `trace-vocabulary.md` |
-| Prove selective independence with `apply --check`, without `--3way` | entangled commit | dependent or conflict-marker content lands under the wrong item | `claim_interval_independence`; `interval_stage_commit` |
-| Refresh only committed real-index paths after moving `HEAD` | selective commit | phantom staged entries block or contaminate the next commit | `interval_stage_commit` |
-| Enforce hooks' important guarantees before `commit-tree` | selective commit | plumbing bypasses formatting or policy checks | `handle_worklist_commit`; `developing-bram.md` § formatting |
-| Move refs atomically and account for symbolic or detached `HEAD` | selective commits, scenarios | branch or detached state diverges from the created commit | `interval_stage_commit`; `capture_scenario`; `use_scenario` |
+| Compare closed intervals tree-to-tree | claim attribution | current worktree changes contaminate historical ownership | `membership_line_credit`; `trace-vocabulary.md` |
+| Prove selective independence with `apply --check`, without `--3way` | entangled commit | dependent or conflict-marker content lands under the wrong item | `claim_interval_independence` |
+| Enforce hooks' important guarantees in the gate itself | Worklist commit | a commit lands unformatted when hooks don't run | `handle_worklist_commit`; `developing-bram.md` § formatting |
+| Move refs atomically and account for symbolic or detached `HEAD` | scenarios | branch or detached state diverges from the created commit | `capture_scenario`; `use_scenario` |
 | Keep `refs/bram/*` local unless explicitly transported | claims, safety | private runtime state is mistaken for normal pushed branch history | `trace-vocabulary.md`; normal push refspec behavior |
 | Translate only managed worktree coverage paths | guard | legitimate edits are denied or unrelated paths become authorized | `worktree_coverage_target`; `coverage_verdict` in `src-tauri/src/guard_policy.rs` |
 | Observe loose refs, packed refs, and `HEAD`, then recompute | push/default-branch UI | out-of-band Git changes remain invisible | `start_git_head_watch`; `out-of-band-actions.md` |
@@ -419,7 +418,7 @@ live repository:
 
 - [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs): `git_run`,
   `worklist_change_index`, `handle_worklist_commit`, claim capture and membership,
-  interval staging, ref watching, default-branch resolution, and issue-close
+  ref watching, default-branch resolution, and issue-close
   reconciliation.
 - [`src-tauri/src/guard_policy.rs`](../src-tauri/src/guard_policy.rs):
   `worktree_coverage_target` and `coverage_verdict`.

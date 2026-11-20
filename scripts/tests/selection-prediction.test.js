@@ -78,14 +78,23 @@ assert.strictEqual(key(board("", false), sel), "", "no key until membership has 
 assert.strictEqual(key(board("K", false), ["top"]), "", "one item: the row says it");
 
 // 2. Only a fresh answer, for this selection, under the board's key.
-const ok = line(answer(), sel, board("K", false));
-assert.match(ok, /\+3 −3/);
-assert.match(ok, /no item wrote/);
-assert.strictEqual(line(answer(), ["bottom", "top"], board("K", false)), ok, "order-insensitive");
-assert.strictEqual(line(answer({ stale: true }), sel, board("K", false)), "", "stale answer");
-assert.strictEqual(line(answer({ stateKey: "K-old" }), sel, board("K", false)), "", "other state");
-assert.strictEqual(line(answer({ ids: ["top", "other"] }), sel, board("K", false)), "", "other selection");
-assert.strictEqual(line(answer(), sel, board("", false)), "", "board has no key");
-assert.strictEqual(line(answer({ ready: false }), sel, board("K", false)), "", "not ready");
+// An ordinary whole-file answer says nothing here (plain words, 910a574e):
+// lines no item wrote are disclosed by the (i) next to Commit instead.
+assert.strictEqual(line(answer(), sel, board("K", false)), "", "ordinary answer is silent");
+// One started item outside the selection also changing a file: the gate
+// would refuse (#504), so the line names it and the way out.
+const held = answer({ ready: false, entangledWith: ["other"] });
+const ok = line(held, sel, board("K", false));
+assert.match(ok, /other is also changing these files/);
+assert.match(ok, /Tick other too to commit them together/);
+assert.strictEqual(line(held, ["bottom", "top"], board("K", false)), ok, "order-insensitive");
+assert.match(
+  line(answer({ ready: false, entangledWith: ["a", "b"] }), sel, board("K", false)),
+  /a and b are also changing/,
+);
+assert.strictEqual(line(answer({ stale: true, entangledWith: ["other"] }), sel, board("K", false)), "", "stale answer");
+assert.strictEqual(line(answer({ stateKey: "K-old", entangledWith: ["other"] }), sel, board("K", false)), "", "other state");
+assert.strictEqual(line(answer({ ids: ["top", "other"], entangledWith: ["x"] }), sel, board("K", false)), "", "other selection");
+assert.strictEqual(line(held, sel, board("", false)), "", "board has no key");
 
 console.log("selection-prediction: all assertions passed");

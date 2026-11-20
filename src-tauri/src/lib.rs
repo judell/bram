@@ -70485,767 +70485,12 @@ fn item_joint_with(
     out.into_iter().collect()
 }
 
-// issue-327 scoped diff (worklist-file-ownership-view): one scope's own patch
-// for one path. A scope is a single item id — the concatenation of
-// `git diff <a> <b> -- <path>` over the intervals that item solely owns, each
-// a plain single-owner diff (the Gerrit patch-set / GitHub per-commit
-// convention: scope, don't annotate) — or "__unattributed", the intervals
-// owned by no single item (multi-id claims). Work predating the first capture
-// belongs to no interval, so it appears only in the combined diff; this route
-// reports what the claim store records and never guesses.
-//
-// Computed lazily per request rather than carried in the board payload — the
-// #323 lesson: a scope is opened by a click, so its cost is paid on that
-// click, not on every board build.
-fn claim_interval_diff<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    scope: &str,
-    path: &str,
-) -> serde_json::Value {
-    let empty = serde_json::json!({ "patch": "", "intervals": 0 });
-    let Some(root) = project_root(Some(app)) else {
-        return empty;
-    };
-    let Ok(text) = std::fs::read_to_string(resource_relative_path(&root, CLAIM_INTERVALS_REL))
-    else {
-        return empty;
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return empty;
-    };
-    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
-        return empty;
-    };
-    let ghosts = ghost_owner_index(app);
-    let declared = worklist_declared_files(app);
-    let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
-    let mut patch = String::new();
-    // fix-patch-composition-for-repeated-paths: the same per-interval
-    // sections that get concatenated into `patch`, kept individually and in
-    // record order. `git apply --cached --reverse` does not compose when a
-    // patch carries more than one `diff --git a/<path> b/<path>` section for
-    // the same path (docs/attribution-model.md §4, case 5) — it silently
-    // reverses only the last one. Exposing the sections lets a caller that
-    // needs to undo this candidate's work reverse them one at a time instead
-    // of relying on one `git apply` over the concatenation.
-    let mut sections: Vec<String> = Vec::new();
-    let mut matched = 0usize;
-    let mut spawns = 0usize;
-    for (i, rec) in arr.iter().enumerate() {
-        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        // Same ownership rule as the attribution replay, per PATH (joint-
-        // interval-files-disambiguation): a multi-id claim's path declared by
-        // exactly one of its ids scopes to that id; declared by several or
-        // none, it stays out of every single-item scope (__unattributed
-        // collects it). Ghost intervals are deliberately NOT reassigned here
-        // (unlike the runs): their patches span old trees whose content may
-        // already be in HEAD, so pulling one into an item's commit patch can
-        // never apply — the first live attempt failed on exactly this
-        // ("patch does not apply" across three files, 2026-09-04 22:1x). A
-        // ghost's surviving lines ride with the file's next WHOLE-FILE
-        // commit, which is what the Ownership "no item" row promises.
-        let ids: Vec<String> = rec
-            .get("ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let owner = match resolve_interval_path_owner(&ids, path, &declared) {
-            IntervalPathOwner::Single(id) => Some(id),
-            _ => None,
-        };
-        let (owner, from) = ghosts.strip_ghost(owner);
-        if let Some(f) = from {
-            ghost_notes.insert(format!("{}→unowned", f));
-        }
-        let wanted = match &owner {
-            Some(id) => id == scope,
-            None => scope == "__unattributed",
-        };
-        if !wanted {
-            continue;
-        }
-        let next = arr
-            .get(i + 1)
-            .and_then(|r| r.get("ref"))
-            .and_then(|v| v.as_str());
-        // The open interval (no successor) diffs against the working tree.
-        let mut args: Vec<&str> = vec!["diff", a];
-        if let Some(b) = next {
-            args.push(b);
-        }
-        args.push("--");
-        args.push(path);
-        spawns += 1;
-        let out = hidden_command("git")
-            .current_dir(&root)
-            .args(&args)
-            .output();
-        if let Ok(o) = out {
-            let s = String::from_utf8_lossy(&o.stdout);
-            if !s.trim().is_empty() {
-                matched += 1;
-                patch.push_str(&s);
-                sections.push(s.into_owned());
-            }
-        }
-    }
-    trace_ghost_reassignments(app, "scoped-diff", &ghost_notes);
-    append_bram_trace_line(
-        app,
-        "claim-interval",
-        &format!(
-            "op=scoped-diff scope={} path={} intervals={} spawns={}",
-            scope, path, matched, spawns
-        ),
-    );
-    // issue-273-membership-engine-observe: the spawn count rides the return so
-    // the membership engine's own `op=membership spawns=` figure can include
-    // the diffs this call ran on its behalf (the CLAIM_ATTR_SPAWNS discipline:
-    // a cost asserted rather than measured is how a path quietly pays full
-    // price). Additive — both prior consumers read only `patch`/`intervals`.
-    // `sections` is additive too (fix-patch-composition-for-repeated-paths):
-    // every existing consumer reads only `patch`/`intervals`/`spawns`, which
-    // stay byte-identical to before.
-    serde_json::json!({ "patch": patch, "intervals": matched, "spawns": spawns, "sections": sections })
-}
-
-// issue-327 interval staging: commit the requested items' OWN hunks by
-// applying their interval patches to a scratch index seeded from HEAD and
-// issue-430-dependent-commit-offer: the combined interval patch for `ids`,
-// built the way the commit builds it, shared by `interval_stage_commit` and
-// `interval_commit_precheck` so the pane's offer and the gate cannot drift.
-// Each requested id's own hunks across its files. A per-path chunk ALREADY IN
-// HEAD (reverse-applies cleanly against the HEAD-seeded index) is skipped
-// rather than accumulated — issue-364's resume case: an item retained after a
-// partial commit still has its intervals on record, and re-deriving the
-// committed patch would fail the order-independence gate with a misleading
-// "defined relative to another item's work". With every chunk already applied,
-// the honest answer is the no-interval refusal.
-fn interval_build_patch<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    ids: &[String],
-    item_files: &std::collections::HashMap<String, Vec<String>>,
-    git_idx: &dyn Fn(&[&str]) -> Result<String, String>,
-    pfile: &std::path::Path,
-) -> (String, Vec<String>) {
-    let pfile_chk = pfile.to_string_lossy().to_string();
-    let mut patch = String::new();
-    let mut committed: Vec<String> = Vec::new();
-    for id in ids {
-        for path in item_files.get(id).cloned().unwrap_or_default() {
-            // gate-names-the-outside-commit-that-strands-an-item: a verified
-            // re-anchor replaces the window patch for this path (see
-            // reanchor_override_patch; a stale record falls through).
-            if let Some(p) = reanchor_override_patch(app, id, &path) {
-                patch.push_str(&p);
-                if !committed.contains(&path) {
-                    committed.push(path);
-                }
-                continue;
-            }
-            let d = claim_interval_diff(app, id, &path);
-            let Some(p) = d.get("patch").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if p.trim().is_empty() {
-                continue;
-            }
-            // issue-430 (problem 4): a chunk that CREATES the file cannot be
-            // already in HEAD unless HEAD has the path. #430's trace logged
-            // `interval-already-applied` for an untracked new file, #419's
-            // signature for a declared new file left out of a commit.
-            let creates = patch_creates_file(p);
-            let in_head =
-                !creates || git_idx(&["cat-file", "-e", &format!("HEAD:{}", path)]).is_ok();
-            if in_head
-                && std::fs::write(pfile, p).is_ok()
-                && git_idx(&["apply", "--cached", "--check", "--reverse", &pfile_chk]).is_ok()
-            {
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    &format!(
-                        "op=interval-already-applied path={} creates={} sections={}",
-                        path,
-                        creates,
-                        p.matches("diff --git ").count()
-                    ),
-                );
-                continue;
-            }
-            patch.push_str(p);
-            if !committed.contains(&path) {
-                committed.push(path);
-            }
-        }
-    }
-    (patch, committed)
-}
-
-// `git diff --numstat` lines → path → (added, removed). Binary files report
-// "-\t-" and count as (0, 0).
-fn parse_numstat_take(text: &str) -> std::collections::BTreeMap<String, (usize, usize)> {
-    let mut out = std::collections::BTreeMap::new();
-    for line in text.lines() {
-        let mut parts = line.splitn(3, '\t');
-        let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
-        };
-        let path = p.trim().trim_matches('"').to_string();
-        if path.is_empty() {
-            continue;
-        }
-        out.insert(path, (a.parse().unwrap_or(0), r.parse().unwrap_or(0)));
-    }
-    out
-}
-
-fn patch_creates_file(patch: &str) -> bool {
-    patch
-        .lines()
-        .any(|l| l.starts_with("new file mode") || l == "--- /dev/null")
-}
-
-fn interval_dependent_refusal(git_err: &str) -> String {
-    format!(
-        "commit refused: the requested item's interval patch does not apply to HEAD — its \
-         change is defined relative to another begun item's work not in this request. Commit \
-         that item first, or approve both together. (git apply: {})",
-        git_err
-    )
-}
-
-// The paths `git apply --check` names as failing: "error: patch failed:
-// <path>:<line>" and "error: <path>: patch does not apply".
-fn git_apply_failed_paths(err: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in err.split(['\n', '|']) {
-        let l = line.trim();
-        let path = if let Some(rest) = l.strip_prefix("error: patch failed: ") {
-            rest.rsplit_once(':').map(|(p, _)| p.to_string())
-        } else if let Some(rest) = l.strip_prefix("error: ") {
-            rest.strip_suffix(": patch does not apply")
-                .map(String::from)
-        } else {
-            None
-        };
-        if let Some(p) = path {
-            if !out.contains(&p) {
-                out.push(p);
-            }
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod issue_430_tests {
-    use super::{git_apply_failed_paths, parse_numstat_take, patch_creates_file};
-
-    // issue-425-retire-replay: the entangled take is read from numstat.
-    #[test]
-    fn numstat_take_parses_text_binary_and_quoted_paths() {
-        let t = parse_numstat_take("3\t1\ta.txt\n-\t-\timg.png\n2\t0\t\"dir/b c.txt\"\n\n");
-        assert_eq!(t.get("a.txt"), Some(&(3, 1)));
-        assert_eq!(t.get("img.png"), Some(&(0, 0)));
-        assert_eq!(t.get("dir/b c.txt"), Some(&(2, 0)));
-        assert_eq!(t.len(), 3);
-    }
-
-    #[test]
-    fn failed_paths_parse_the_issue_430_error() {
-        // The git half of #430's refusal, verbatim.
-        let e = "error: patch failed: Main.xmlui:62\nerror: Main.xmlui: patch does not apply\nerror: patch failed: Globals.xs:380\nerror: Globals.xs: patch does not apply\nerror: patch failed: layout.json:7\nerror: layout.json: patch does not apply";
-        assert_eq!(
-            git_apply_failed_paths(e),
-            vec!["Main.xmlui", "Globals.xs", "layout.json"]
-        );
-        assert!(git_apply_failed_paths("fatal: something else").is_empty());
-        assert_eq!(
-            git_apply_failed_paths("error: patch failed: dir/a b.txt:3"),
-            vec!["dir/a b.txt"]
-        );
-    }
-
-    #[test]
-    fn creation_chunks_are_recognized() {
-        let create = "diff --git a/s.sh b/s.sh\nnew file mode 100755\nindex 0000000..23d2ecc\n--- /dev/null\n+++ b/s.sh\n@@ -0,0 +1 @@\n+x\n";
-        assert!(patch_creates_file(create));
-        let modify = "diff --git a/s.sh b/s.sh\n--- a/s.sh\n+++ b/s.sh\n@@ -1 +1 @@\n-x\n+y\n";
-        assert!(!patch_creates_file(modify));
-    }
-}
-
-// gate-names-the-outside-commit-that-strands-an-item: when an entangled
-// item's interval patch no longer applies to HEAD, the cause is not always
-// another begun item's uncommitted work (issue-430's dependency case). On
-// 2026-11-02 two direct commits (skip-worklist turns, their own lines staged)
-// changed files two applied items had already changed; each item's patch then
-// failed against HEAD, the host blamed the other item (`commitDependsOn`), and
-// the pane drew a loop with every Commit dim ("I can't find any way to light
-// up a commit button"). These helpers name the commits that stranded the
-// item: commits since it began, touching the failing paths, that the
-// Worklist's gate did not make.
-#[derive(Clone, Debug, PartialEq)]
-struct StrandingCommit {
-    sha: String,
-    subject: String,
-    paths: Vec<String>,
-}
-
-// Pure attribution over `git log --format=%x00%H%x09%s --name-only` output:
-// one NUL-led record per commit, its touched paths under the header. A commit
-// counts when it touched one of `paths` (a declared directory covers its
-// files) and `is_gate` says the Worklist did not make it. Newest first, as
-// git lists them.
-fn stranding_commits_from_log(
-    log: &str,
-    paths: &[String],
-    is_gate: &dyn Fn(&str) -> bool,
-) -> Vec<StrandingCommit> {
-    let mut out = Vec::new();
-    for record in log.split('\0').filter(|r| !r.trim().is_empty()) {
-        let mut lines = record.lines();
-        let Some(head) = lines.next() else { continue };
-        let Some((sha, subject)) = head.split_once('\t') else {
-            continue;
-        };
-        let sha = sha.trim();
-        if sha.is_empty() || is_gate(sha) {
-            continue;
-        }
-        let touched: Vec<String> = lines
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && paths.iter().any(|p| declared_covers(p, l)))
-            .collect();
-        if touched.is_empty() {
-            continue;
-        }
-        out.push(StrandingCommit {
-            sha: sha.to_string(),
-            subject: subject.trim().to_string(),
-            paths: touched,
-        });
-    }
-    out
-}
-
-fn outside_commits_touching<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    since_ms: i64,
-    paths: &[String],
-) -> Vec<StrandingCommit> {
-    if paths.is_empty() {
-        return Vec::new();
-    }
-    let since = format!("--since=@{}", since_ms / 1000);
-    let mut args = vec![
-        "log",
-        "--format=%x00%H%x09%s",
-        "--name-only",
-        since.as_str(),
-        "--",
-    ];
-    args.extend(paths.iter().map(|p| p.as_str()));
-    let Ok(out) = git_run(app, &args) else {
-        return Vec::new();
-    };
-    stranding_commits_from_log(&out, paths, &|sha| is_gate_sha(app, sha))
-}
-
-fn stranding_json(list: &[StrandingCommit]) -> serde_json::Value {
-    serde_json::Value::Array(
-        list.iter()
-            .map(|c| {
-                serde_json::json!({
-                    "sha": c.sha,
-                    "short": c.sha.chars().take(7).collect::<String>(),
-                    "subject": c.subject,
-                    "paths": c.paths,
-                })
-            })
-            .collect(),
-    )
-}
-
-// Per item, keyed on HEAD, the item's start and the failing paths: the board
-// is served many times a minute and this answer moves only when a commit
-// lands or the failing set changes.
-fn stranded_by_cached<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    id: &str,
-    begun_ms: i64,
-    paths: &[String],
-    head: &str,
-) -> Vec<StrandingCommit> {
-    static CACHE: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<String, (String, Vec<StrandingCommit>)>>,
-    > = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
-    let key = format!("{}|{}|{}", head, begun_ms, paths.join(","));
-    if let Ok(g) = cache.lock() {
-        if let Some((k, r)) = g.get(id) {
-            if *k == key {
-                return r.clone();
-            }
-        }
-    }
-    let r = outside_commits_touching(app, begun_ms, paths);
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!(
-                "op=stranded-by item={} commits={} paths={}",
-                id,
-                r.iter()
-                    .map(|c| c.sha.chars().take(7).collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                paths.join(",")
-            ),
-        );
-    }
-    if let Ok(mut g) = cache.lock() {
-        g.insert(id.to_string(), (key, r.clone()));
-    }
-    r
-}
-
-// Re-anchor (`POST /__worklist/reanchor`): a stranded item's way back to a
-// commit of its own, without rewriting history. A record under `reanchors` in
-// the claim-intervals sidecar says: for this item and path, at this HEAD and
-// this file content, `git diff HEAD -- path` IS the item's patch. The handler
-// writes one only when membership credits the path's every uncommitted line
-// to the item alone (`reanchor_refusal_reason`), which is exactly when that
-// diff carries nobody else's work. `interval_build_patch` uses the record in
-// place of the window patch while HEAD and the file's bytes still match; a
-// later commit or edit makes it stale and the window patch is used again
-// (the status quo, never a wrong take). Prune drops records of pruned items.
-const REANCHORS_KEY: &str = "reanchors";
-static REANCHOR_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn claim_intervals_doc<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Option<(std::path::PathBuf, serde_json::Value)> {
-    let root = project_root(Some(app))?;
-    let sidecar = resource_relative_path(&root, CLAIM_INTERVALS_REL);
-    let text = std::fs::read_to_string(&sidecar).ok()?;
-    let doc = serde_json::from_str::<serde_json::Value>(&text).ok()?;
-    Some((sidecar, doc))
-}
-
 fn write_claim_intervals_doc(sidecar: &Path, doc: &serde_json::Value) -> bool {
     let Ok(body) = serde_json::to_string_pretty(doc) else {
         return false;
     };
     let tmp = sidecar.with_extension("json.tmp");
     std::fs::write(&tmp, format!("{}\n", body)).is_ok() && std::fs::rename(&tmp, sidecar).is_ok()
-}
-
-fn prune_reanchor_records(
-    doc: &mut serde_json::Value,
-    live: &std::collections::HashSet<String>,
-) -> usize {
-    let Some(arr) = doc.get_mut(REANCHORS_KEY).and_then(|v| v.as_array_mut()) else {
-        return 0;
-    };
-    let before = arr.len();
-    arr.retain(|r| {
-        r.get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| live.contains(id))
-            .unwrap_or(false)
-    });
-    before - arr.len()
-}
-
-// Pure, and only a courtesy: when membership credits another begun item with
-// lines on the path, name it, since the way out is then a joint commit, not a
-// re-anchor. The soundness decision itself is `reanchor_verified_blob`, not
-// membership. Membership's removed-line attribution is computed against
-// HEAD, and the outside commit that strands an item moves HEAD, so in
-// exactly the stranded case it reports the item's own deletions as unowned
-// (the first live probe: `unowned-lines:+0-3` on a file only the item had
-// touched).
-fn reanchor_refusal_reason(b: &MembershipPathBuckets, id: &str) -> Option<String> {
-    let others: Vec<&str> = b
-        .owners
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|o| *o != id)
-        .collect();
-    if !others.is_empty() {
-        return Some(format!("other-owners:{}", others.join("+")));
-    }
-    None
-}
-
-// The proof that `git diff HEAD -- path` is exactly this item's work: the
-// item's own window patch for the path, applied to HEAD's copy of the file,
-// must reproduce the worktree file byte for byte. Then the worktree differs
-// from HEAD on that path by the item's windows and nothing else: no other
-// item's lines, no unowned lines, no drift. The apply is tried with normal
-// context, then one line, then none: the stranding commit changed the lines
-// around the item's hunks, so the context is what fails, and line numbers
-// still place the hunks; a misplacement cannot pass the equality. Returns
-// the blob the item's work produced on HEAD (equal to the worktree's) or
-// None with a reason.
-fn reanchor_verified_blob<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    path: &str,
-    own_patch: &str,
-    worktree_blob: &str,
-) -> Result<String, String> {
-    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let idx = std::env::temp_dir().join(format!(
-        "bram-reanchor-index-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let pfile = idx.with_extension("patch");
-    if std::fs::write(&pfile, own_patch).is_err() {
-        return Err("patch-write-failed".to_string());
-    }
-    let git_idx = |args: &[&str]| -> Result<String, String> {
-        let out = hidden_command("git")
-            .current_dir(&root)
-            .env("GIT_INDEX_FILE", &idx)
-            .args(args)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let pfile_s = pfile.to_string_lossy().to_string();
-    let mut last = String::from("apply-failed");
-    let mut found: Option<String> = None;
-    for ctx in [None, Some("-C1"), Some("-C0")] {
-        let _ = std::fs::remove_file(&idx);
-        if git_idx(&["read-tree", "HEAD"]).is_err() {
-            last = "scratch-index-failed".to_string();
-            break;
-        }
-        let mut args: Vec<&str> = vec!["apply", "--cached"];
-        if let Some(c) = ctx {
-            args.push(c);
-        }
-        args.push(&pfile_s);
-        if git_idx(&args).is_err() {
-            continue;
-        }
-        // "100644 <blob> 0	<path>"
-        let staged = git_idx(&["ls-files", "--stage", "--", path]).unwrap_or_default();
-        let blob = staged.split_whitespace().nth(1).unwrap_or("").to_string();
-        if blob == worktree_blob {
-            found = Some(blob);
-            break;
-        }
-        last = "not-only-this-items-work".to_string();
-    }
-    let _ = std::fs::remove_file(&idx);
-    let _ = std::fs::remove_file(&pfile);
-    found.ok_or(last)
-}
-
-fn reanchor_override_patch<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    id: &str,
-    path: &str,
-) -> Option<String> {
-    let (_, doc) = claim_intervals_doc(app)?;
-    let rec = doc
-        .get(REANCHORS_KEY)
-        .and_then(|v| v.as_array())?
-        .iter()
-        .find(|r| {
-            r.get("id").and_then(|v| v.as_str()) == Some(id)
-                && r.get("path").and_then(|v| v.as_str()) == Some(path)
-        })?
-        .clone();
-    let head_rec = rec.get("head").and_then(|v| v.as_str())?.to_string();
-    let blob_rec = rec.get("blob").and_then(|v| v.as_str())?.to_string();
-    let head = git_run(app, &["rev-parse", "HEAD"])
-        .ok()?
-        .trim()
-        .to_string();
-    if head != head_rec {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!("op=reanchor-stale id={} path={} reason=head", id, path),
-        );
-        return None;
-    }
-    let blob = git_run(app, &["hash-object", "--", path])
-        .ok()?
-        .trim()
-        .to_string();
-    if blob != blob_rec {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!("op=reanchor-stale id={} path={} reason=blob", id, path),
-        );
-        return None;
-    }
-    let mut patch = git_run(app, &["diff", "--no-color", "HEAD", "--", path]).ok()?;
-    if patch.trim().is_empty() {
-        return None;
-    }
-    if !patch.ends_with('\n') {
-        patch.push('\n');
-    }
-    append_bram_trace_line(
-        app,
-        "worklist-commit",
-        &format!("op=reanchor-used id={} path={}", id, path),
-    );
-    Some(patch)
-}
-
-#[cfg(test)]
-mod stranding_tests {
-    use super::{
-        prune_reanchor_records, reanchor_refusal_reason, stranding_commits_from_log,
-        MembershipPathBuckets, StrandingCommit,
-    };
-
-    const LOG: &str = "\0aaaa111\tDirect commit to arch\n\norientation/arch.js\nREADME.md\n\
-                       \0bbbb222\tGate commit of a sibling\n\norientation/arch.js\n\
-                       \0cccc333\tUnrelated\n\ndocs/x.md\n";
-
-    #[test]
-    fn names_outside_commits_and_skips_gate_commits() {
-        let paths = vec!["orientation/arch.js".to_string()];
-        let got = stranding_commits_from_log(LOG, &paths, &|sha| sha == "bbbb222");
-        assert_eq!(
-            got,
-            vec![StrandingCommit {
-                sha: "aaaa111".to_string(),
-                subject: "Direct commit to arch".to_string(),
-                paths: vec!["orientation/arch.js".to_string()],
-            }]
-        );
-    }
-
-    #[test]
-    fn a_declared_directory_covers_its_files() {
-        let paths = vec!["orientation".to_string()];
-        let got = stranding_commits_from_log(LOG, &paths, &|_| false);
-        let shas: Vec<&str> = got.iter().map(|c| c.sha.as_str()).collect();
-        assert_eq!(shas, vec!["aaaa111", "bbbb222"]);
-        assert_eq!(got[0].paths, vec!["orientation/arch.js".to_string()]);
-    }
-
-    #[test]
-    fn no_touching_commit_means_a_genuine_dependency() {
-        let paths = vec!["src/other.rs".to_string()];
-        assert!(stranding_commits_from_log(LOG, &paths, &|_| false).is_empty());
-    }
-
-    fn bucket(owners: &[&str]) -> MembershipPathBuckets {
-        let mut b = MembershipPathBuckets::default();
-        for o in owners {
-            b.owners.insert(o.to_string());
-        }
-        b
-    }
-
-    #[test]
-    fn reanchor_names_other_owners_and_nothing_else() {
-        assert_eq!(reanchor_refusal_reason(&bucket(&["a"]), "a"), None);
-        // Membership's own-line counts are not consulted: in the stranded
-        // case they misreport the item's deletions as unowned.
-        let mut partial = bucket(&["a"]);
-        partial.per_item.insert(vec!["a".to_string()], (3, 0));
-        partial.universe = (3, 3);
-        assert_eq!(reanchor_refusal_reason(&partial, "a"), None);
-        assert_eq!(
-            reanchor_refusal_reason(&bucket(&["a", "b"]), "a").as_deref(),
-            Some("other-owners:b")
-        );
-        assert_eq!(reanchor_refusal_reason(&bucket(&[]), "a"), None);
-    }
-
-    #[test]
-    fn prune_drops_records_of_items_no_longer_on_the_board() {
-        let mut doc = serde_json::json!({
-            "intervals": [],
-            "reanchors": [
-                {"id": "live", "path": "a.txt"},
-                {"id": "gone", "path": "b.txt"},
-                {"path": "no-id.txt"}
-            ]
-        });
-        let live: std::collections::HashSet<String> = ["live".to_string()].into_iter().collect();
-        assert_eq!(prune_reanchor_records(&mut doc, &live), 2);
-        assert_eq!(doc["reanchors"].as_array().map(|a| a.len()), Some(1));
-        let mut none = serde_json::json!({"intervals": []});
-        assert_eq!(prune_reanchor_records(&mut none, &live), 0);
-    }
-}
-
-// issue-430-dependent-commit-offer: precheck results keyed by (HEAD, take,
-// interval paths), so the Worklist's frequent recompute runs git only when
-// something moved.
-fn commit_precheck_cached<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    id: &str,
-    declared: &[String],
-    key: &str,
-) -> Result<std::collections::BTreeMap<String, (usize, usize)>, Vec<String>> {
-    type Take = std::collections::BTreeMap<String, (usize, usize)>;
-    static CACHE: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<String, (String, Result<Take, Vec<String>>)>>,
-    > = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
-    if let Ok(g) = cache.lock() {
-        if let Some((k, r)) = g.get(id) {
-            if k == key {
-                return r.clone();
-            }
-        }
-    }
-    let mut files: std::collections::HashMap<String, Vec<String>> = Default::default();
-    files.insert(id.to_string(), declared.to_vec());
-    let pre_started = std::time::Instant::now();
-    let r = interval_commit_precheck(app, &[id.to_string()], &files);
-    let pre_ms = pre_started.elapsed().as_millis();
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!(
-                "op=commit-precheck item={} ms={} result={}",
-                id,
-                pre_ms,
-                match &r {
-                    Ok(take) => {
-                        let (a, rm) = take
-                            .values()
-                            .fold((0, 0), |acc, v| (acc.0 + v.0, acc.1 + v.1));
-                        format!("applies take=+{}-{}", a, rm)
-                    }
-                    Err(p) => format!("dependent paths={}", p.join(",")),
-                }
-            ),
-        );
-    }
-    if let Ok(mut g) = cache.lock() {
-        g.insert(id.to_string(), (key.to_string(), r.clone()));
-    }
-    r
 }
 
 // issue-430: the last commit refusal per item, shown on its row until HEAD
@@ -71281,343 +70526,6 @@ fn last_commit_refusal_for(id: &str, head: &str) -> Option<(i64, String)> {
     }
 }
 
-// issue-430-dependent-commit-offer: the gate's own order-independence check,
-// run ahead of the click on a scratch index (worktree and real index never
-// touched). Ok(()) when committing `ids` alone would apply; Err(failing paths)
-// when the patch is defined relative to work not in the request. A request
-// with nothing to stage is Ok here; the gate's no-interval refusal covers it.
-// issue-425-retire-replay: on success, also returns what the commit would
-// take per path, (added, removed) from `git diff --cached --numstat HEAD`
-// after applying the patch to the scratch index. That is the staged result,
-// so an item that created a file and later rewrote it counts the file once,
-// as the commit will, not once per interval section.
-fn interval_commit_precheck<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    ids: &[String],
-    item_files: &std::collections::HashMap<String, Vec<String>>,
-) -> Result<std::collections::BTreeMap<String, (usize, usize)>, Vec<String>> {
-    let Some(root) = project_root(Some(app)) else {
-        return Ok(Default::default());
-    };
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let idx = std::env::temp_dir().join(format!(
-        "bram-precheck-index-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let pfile = idx.with_extension("patch");
-    let git_idx = |args: &[&str]| -> Result<String, String> {
-        let out = hidden_command("git")
-            .current_dir(&root)
-            .env("GIT_INDEX_FILE", &idx)
-            .args(args)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let result = (|| {
-        if git_idx(&["read-tree", "HEAD"]).is_err() {
-            return Ok(Default::default());
-        }
-        let (patch, _) = interval_build_patch(app, ids, item_files, &git_idx, &pfile);
-        if patch.trim().is_empty() || std::fs::write(&pfile, &patch).is_err() {
-            return Ok(Default::default());
-        }
-        // A real apply, not --check: the index is scratch, and the applied
-        // state is what the take is read from. Fails exactly when --check would.
-        if let Err(e) = git_idx(&["apply", "--cached", &pfile.to_string_lossy()]) {
-            return Err(git_apply_failed_paths(&e));
-        }
-        let numstat =
-            git_idx(&["diff", "--cached", "--numstat", "--no-renames", "HEAD"]).unwrap_or_default();
-        Ok(parse_numstat_take(&numstat))
-    })();
-    let _ = std::fs::remove_file(&idx);
-    let _ = std::fs::remove_file(&pfile);
-    result
-}
-
-// committing that tree — the worktree and the real index are NEVER touched.
-// This is what makes committing one entangled item safe while another begun
-// item's uncommitted work remains in shared files: whole-file staging takes
-// the neighbour's hunks, interval staging takes only what claim_interval_diff
-// attributes to the requested ids.
-//
-// Order-independence is decided by git, not enforced: `git apply --check`
-// against the HEAD-seeded index fails when a requested item's patch is defined
-// relative to another begun item's work not in this request (the dependency
-// case), and the caller reports it. Returns (sha, committed_paths) or an error
-// the handler surfaces (falling back to whole-file staging only when there is
-// genuinely no interval to stage).
-fn interval_stage_commit<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    ids: &[String],
-    message: &str,
-    item_files: &std::collections::HashMap<String, Vec<String>>,
-) -> Result<(String, Vec<String>), String> {
-    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let idx = std::env::temp_dir().join(format!(
-        "bram-commit-index-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let pfile = idx.with_extension("patch");
-    let _ = std::fs::remove_file(&idx);
-    let git_idx = |args: &[&str]| -> Result<String, String> {
-        let out = hidden_command("git")
-            .current_dir(&root)
-            .env("GIT_INDEX_FILE", &idx)
-            .args(args)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let cleanup = || {
-        let _ = std::fs::remove_file(&idx);
-        let _ = std::fs::remove_file(&pfile);
-    };
-    if let Err(e) = git_idx(&["read-tree", "HEAD"]) {
-        cleanup();
-        return Err(format!("scratch index seed failed: {}", e));
-    }
-    let (patch, committed) = interval_build_patch(app, ids, item_files, &git_idx, &pfile);
-    if patch.trim().is_empty() {
-        cleanup();
-        return Err("no-interval".to_string());
-    }
-    if let Err(e) = std::fs::write(&pfile, &patch) {
-        cleanup();
-        return Err(format!("patch write failed: {}", e));
-    }
-    let pfile_s = pfile.to_string_lossy().to_string();
-    // The order-independence gate. `--3way` is deliberately NOT used: on
-    // genuinely overlapping edits it writes conflict markers and succeeds,
-    // which would commit `<<<<<<<` under an item's id.
-    if let Err(e) = git_idx(&["apply", "--cached", "--check", &pfile_s]) {
-        cleanup();
-        return Err(interval_dependent_refusal(&e));
-    }
-    if let Err(e) = git_idx(&["apply", "--cached", &pfile_s]) {
-        cleanup();
-        return Err(format!("interval apply failed after check passed: {}", e));
-    }
-    let tree = match git_idx(&["write-tree"]) {
-        Ok(t) => t,
-        Err(e) => {
-            cleanup();
-            return Err(format!("write-tree failed: {}", e));
-        }
-    };
-    let head = match git_run(app, &["rev-parse", "HEAD"]) {
-        Ok(s) => s.trim().to_string(),
-        Err(e) => {
-            cleanup();
-            return Err(e);
-        }
-    };
-    // commit-tree ignores the index (it takes a tree + parent), so no
-    // GIT_INDEX_FILE — it must use the real repo, and it never touches the
-    // worktree or the real index.
-    let sha =
-        match worklist_git_lock_retry(app, &["commit-tree", &tree, "-p", &head, "-m", message]) {
-            Ok(s) => s.trim().to_string(),
-            Err(e) => {
-                cleanup();
-                return Err(format!("commit-tree failed: {}", e));
-            }
-        };
-    if let Err(e) = worklist_git_lock_retry(app, &["update-ref", "HEAD", &sha]) {
-        cleanup();
-        return Err(format!("update-ref failed: {}", e));
-    }
-    cleanup();
-    // issue-357: update-ref moved HEAD but the REAL index still holds
-    // pre-commit blobs for every path this commit touched, so each reads
-    // `MM` in git status and the next plain worklist-commit refuses on
-    // "unrelated files are staged" — phantom staging with zero real work
-    // (live case: bd4f3d8 then the #355 commit, refused on a clean-worktree
-    // guard_policy.rs). Refresh exactly the committed paths — the automated
-    // form of the manual `git reset -- <paths>` recovery; the worktree (the
-    // neighbour's uncommitted hunks) is untouched. Failure is traced, not
-    // fatal: the commit is already real, and the stale index is a hazard
-    // the next commit's refusal names.
-    {
-        let mut args: Vec<&str> = vec!["reset", "-q", "--"];
-        args.extend(committed.iter().map(|s| s.as_str()));
-        if let Err(e) = worklist_git_lock_retry(app, &args) {
-            append_bram_trace_line(
-                app,
-                "worklist-commit",
-                &format!(
-                    "op=interval-index-refresh-failed detail={}",
-                    e.replace(['\n', '\r'], " ")
-                ),
-            );
-        }
-    }
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!(
-                "op=interval-staged sha={} files={} ids={}",
-                &sha[..sha.len().min(7)],
-                committed.len(),
-                ids.len()
-            ),
-        );
-    }
-    Ok((sha, committed))
-}
-
-// issue-364 residual disclosure: after an interval-staged commit, the
-// requested items' declared files may still carry worktree diffs vs the
-// fresh HEAD. Lines attributed to another begun item are the NORMAL
-// interval-staging outcome (the neighbour's work staying put); lines owned
-// by nobody — or by the requested item itself, or jointly with it — mean
-// the requested item's work is probably incomplete: it was edited in
-// unclaimed time, no interval captured it, and the old behavior (plain
-// success + unconditional prune) orphaned it with its owner erased
-// (field case: 10fdd12, then bcb2a7e absorbing the orphan). These two
-// pure functions classify the residue; the route discloses it in the
-// response and withholds the prune for items with unowned residue.
-
-// The residual content of a `git diff HEAD -- <path>` patch, resolved to
-// worktree coordinates by walking each hunk's BODY: `added` holds the
-// worktree line number of every `+` line (the changed content attribution
-// can actually place — the first cut classified the header's whole new-side
-// range and its context lines, unowned by construction, misread benign
-// neighbour residue as unowned in the live acceptance run), and
-// `pure_deletion_hunk` marks any hunk that removes lines without adding —
-// deleted content has no worktree line to attribute, so it classifies
-// unowned. Deletions paired with additions (ordinary modifications) ride
-// their `+` lines.
-struct ResidualLines {
-    added: Vec<usize>,
-    pure_deletion_hunk: bool,
-}
-
-fn diff_residual_lines(patch: &str) -> ResidualLines {
-    let mut added: Vec<usize> = Vec::new();
-    let mut pure_deletion_hunk = false;
-    let mut new_line = 0usize;
-    let mut in_hunk = false;
-    let mut hunk_plus = 0usize;
-    let mut hunk_minus = 0usize;
-    let close_hunk = |plus: &mut usize, minus: &mut usize, flag: &mut bool| {
-        if *minus > 0 && *plus == 0 {
-            *flag = true;
-        }
-        *plus = 0;
-        *minus = 0;
-    };
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("@@ ") {
-            if in_hunk {
-                close_hunk(&mut hunk_plus, &mut hunk_minus, &mut pure_deletion_hunk);
-            }
-            in_hunk = true;
-            new_line = rest
-                .split_whitespace()
-                .find(|t| t.starts_with('+'))
-                .map(|t| {
-                    let spec = &t[1..];
-                    spec.split_once(',')
-                        .map(|(s, _)| s)
-                        .unwrap_or(spec)
-                        .parse()
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if let Some(_) = line.strip_prefix('+') {
-            added.push(new_line);
-            new_line += 1;
-            hunk_plus += 1;
-        } else if line.starts_with('-') {
-            hunk_minus += 1;
-        } else if line.starts_with("diff ") || line.starts_with("index ") {
-            close_hunk(&mut hunk_plus, &mut hunk_minus, &mut pure_deletion_hunk);
-            in_hunk = false;
-        } else {
-            // Context line (or "\ No newline at end of file", which does
-            // not advance either side — but misadvancing by one on the
-            // final line of a hunk cannot add a phantom `+`).
-            if !line.starts_with('\\') {
-                new_line += 1;
-            }
-        }
-    }
-    if in_hunk {
-        close_hunk(&mut hunk_plus, &mut hunk_minus, &mut pure_deletion_hunk);
-    }
-    ResidualLines {
-        added,
-        pure_deletion_hunk,
-    }
-}
-
-// Classify one path's residual `+` lines against its attribution runs.
-// Returns "unowned" when ANY residual line is not accounted to a begun
-// item outside the request — the withholding condition — else the
-// comma-joined owner ids (the benign neighbours whose work is staying).
-// Fail-safe direction: a line covered by no run, a pure-deletion hunk,
-// a run owned by a requested or non-begun item, and a joint run with any
-// requested/non-begun member all classify as unowned; the cost of a
-// false positive is an item left on the board with a Commit offer.
-fn residual_owner_label(
-    residual: &ResidualLines,
-    runs: &[serde_json::Value],
-    begun_outside: &std::collections::HashSet<String>,
-) -> String {
-    if residual.pure_deletion_hunk {
-        return "unowned".to_string();
-    }
-    let mut owners: std::collections::BTreeSet<String> = Default::default();
-    'line: for &l in &residual.added {
-        for run in runs {
-            let s = run.get("startLine").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let e = run.get("endLine").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            if l < s || l > e {
-                continue;
-            }
-            if let Some(owner) = run.get("itemId").and_then(|v| v.as_str()) {
-                if begun_outside.contains(owner) {
-                    owners.insert(owner.to_string());
-                    continue 'line;
-                }
-                return "unowned".to_string();
-            }
-            if let Some(members) = run.get("itemIds").and_then(|v| v.as_array()) {
-                let member_ids: Vec<&str> = members.iter().filter_map(|m| m.as_str()).collect();
-                if !member_ids.is_empty() && member_ids.iter().all(|m| begun_outside.contains(*m)) {
-                    for m in member_ids {
-                        owners.insert(m.to_string());
-                    }
-                    continue 'line;
-                }
-                return "unowned".to_string();
-            }
-        }
-        return "unowned".to_string();
-    }
-    owners.into_iter().collect::<Vec<_>>().join(",")
-}
-
 // issue-419: declared paths git has never tracked. `git diff HEAD -- <path>`
 // prints nothing for a never-tracked file, so the tracked-file residual pass
 // cannot see a new file the commit left out. `ls-files --others` can.
@@ -71646,113 +70554,6 @@ fn untracked_declared_paths(root: &std::path::Path, declared: &[String]) -> Vec<
         .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect()
-}
-
-#[cfg(test)]
-mod residual_disclosure_tests {
-    use super::{diff_residual_lines, residual_owner_label, ResidualLines};
-
-    fn begun(ids: &[&str]) -> std::collections::HashSet<String> {
-        ids.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn lines(added: &[usize]) -> ResidualLines {
-        ResidualLines {
-            added: added.to_vec(),
-            pure_deletion_hunk: false,
-        }
-    }
-
-    #[test]
-    fn body_walk_counts_only_plus_lines_not_context() {
-        // The live acceptance run's failure mode: a one-line modification
-        // with context lines around it. Only line 2 is a `+`.
-        let patch = "@@ -1,5 +1,5 @@\n shared-1\n-shared-2\n+shared-2 (n)\n shared-3\n shared-4\n";
-        let r = diff_residual_lines(patch);
-        assert_eq!(r.added, vec![2]);
-        assert!(!r.pure_deletion_hunk);
-    }
-
-    #[test]
-    fn multi_hunk_line_numbers_track_headers() {
-        let patch =
-            "@@ -1,3 +1,4 @@\n a\n+new-two\n b\n c\n@@ -10,2 +11,3 @@\n j\n+new-twelve\n k\n";
-        assert_eq!(diff_residual_lines(patch).added, vec![2, 12]);
-    }
-
-    #[test]
-    fn pure_deletion_hunk_is_flagged() {
-        let patch = "@@ -5,4 +5,3 @@\n a\n-gone\n b\n c\n";
-        let r = diff_residual_lines(patch);
-        assert!(r.added.is_empty());
-        assert!(r.pure_deletion_hunk);
-    }
-
-    #[test]
-    fn residue_fully_owned_by_outside_begun_item_is_benign() {
-        let runs = vec![serde_json::json!({"startLine": 10, "endLine": 20, "itemId": "n"})];
-        assert_eq!(
-            residual_owner_label(&lines(&[12, 13, 14]), &runs, &begun(&["n"])),
-            "n"
-        );
-    }
-
-    #[test]
-    fn uncovered_line_is_unowned() {
-        let runs = vec![serde_json::json!({"startLine": 10, "endLine": 20, "itemId": "n"})];
-        assert_eq!(
-            residual_owner_label(&lines(&[19, 22]), &runs, &begun(&["n"])),
-            "unowned"
-        );
-    }
-
-    #[test]
-    fn no_runs_at_all_is_unowned() {
-        assert_eq!(
-            residual_owner_label(&lines(&[1, 2]), &[], &begun(&["n"])),
-            "unowned"
-        );
-    }
-
-    #[test]
-    fn requested_or_nonbegun_owner_is_unowned() {
-        // The owner is NOT in begun_outside (it is the requested item, or
-        // never begun): its residue means the request's own work stayed
-        // behind — the exact 10fdd12 shape.
-        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 9, "itemId": "x"})];
-        assert_eq!(
-            residual_owner_label(&lines(&[2, 3]), &runs, &begun(&["n"])),
-            "unowned"
-        );
-    }
-
-    #[test]
-    fn deletion_only_residue_is_unowned() {
-        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 99, "itemId": "n"})];
-        let r = ResidualLines {
-            added: vec![],
-            pure_deletion_hunk: true,
-        };
-        assert_eq!(residual_owner_label(&r, &runs, &begun(&["n"])), "unowned");
-    }
-
-    #[test]
-    fn joint_run_all_outside_begun_is_benign_and_names_members() {
-        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 9, "itemIds": ["a", "b"]})];
-        assert_eq!(
-            residual_owner_label(&lines(&[2, 3]), &runs, &begun(&["a", "b"])),
-            "a,b"
-        );
-    }
-
-    #[test]
-    fn joint_run_with_requested_member_is_unowned() {
-        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 9, "itemIds": ["a", "x"]})];
-        assert_eq!(
-            residual_owner_label(&lines(&[2, 3]), &runs, &begun(&["a"])),
-            "unowned"
-        );
-    }
 }
 
 // issue-273-membership-engine-observe: the HEAD-diff MEMBERSHIP engine
@@ -75042,7 +73843,7 @@ mod membership_acceptance_fixture_tests {
     }
 
     #[test]
-    fn criterion_5_entangled_staging_fixture_preserves_line_exactness() {
+    fn criterion_5_entangled_fixture_preserves_line_exactness() {
         // #336's two-item entangled shape: item a appends two lines, item b
         // appends one after it, in the same file. Each item's credit is its
         // exact line-level contribution -- positions included -- and the
@@ -75587,15 +74388,7 @@ fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
         })
         .unwrap_or_default();
     let (keep, retire) = claim_intervals_partition(&intervals, &live);
-    let reanchors_dropped = prune_reanchor_records(&mut doc, &live);
     if retire.is_empty() {
-        if reanchors_dropped > 0 && write_claim_intervals_doc(&sidecar, &doc) {
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!("op=prune-reanchors removed={}", reanchors_dropped),
-            );
-        }
         // The ORDINARY steady state, not a fault: every boundary still bounds a
         // live interval. Emitted so that the presence of a prune line means "the
         // sweep ran" -- silence here was indistinguishable from the sweep never
@@ -76150,10 +74943,9 @@ fn clear_active_sentinel<R: tauri::Runtime>(app: &AppHandle<R>) {
     // What that costs is ATTRIBUTION, not a dimmed row. `record_claim_interval`
     // runs on claim write and on claim clear — the clear deliberately before the
     // file is removed, so the boundary's left edge is the prior claim. The
-    // claim's lifetime IS the attribution interval that `claim_interval_diff`
-    // reads to decide which hunks belong to which item, and that interval
-    // staging then commits on. A claim preserved across agent silence widens the
-    // window in which changes are credited to that item.
+    // claim's lifetime IS the attribution interval that membership reads to
+    // decide which lines belong to which item. A claim preserved across agent
+    // silence widens the window in which changes are credited to that item.
     //
     // Field receipt: a claim lived from 17:23:42 (`skip-clear ...
     // approved-claim-live`, this path refusing) to 19:26:31 (`clear-at-turn-end`
@@ -94507,29 +93299,6 @@ fn route_request<R: tauri::Runtime>(
         return serve_needs_you(app);
     }
 
-    // issue-327 scoped diff: serve one scope's interval patch for one path,
-    // fetched lazily when the Diff tab's scope selector leaves "All changes".
-    if path == "__worklist/interval-diff" {
-        let mut id = String::new();
-        let mut fpath = String::new();
-        for pair in query.split('&') {
-            if let Some(v) = pair.strip_prefix("id=") {
-                id = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("path=") {
-                fpath = percent_decode(v);
-            }
-        }
-        if id.is_empty() || fpath.is_empty() {
-            return (
-                400,
-                "application/json; charset=utf-8",
-                br#"{"error":"id and path required"}"#.to_vec(),
-            );
-        }
-        let body = serde_json::to_vec(&claim_interval_diff(app, &id, &fpath)).unwrap_or_default();
-        return (200, "application/json; charset=utf-8", body);
-    }
-
     // issue-425-retire-replay (Codex review): what committing the ticked
     // items TOGETHER would take. Per-row willCommit assumes each item commits
     // alone; a selection can route differently (both owners of a file
@@ -95089,34 +93858,16 @@ fn route_request<R: tauri::Runtime>(
         // is deleted). The pane reads runs from `membership.byPath[*].runs`.
         {
             // will-commit-matches-the-button: per begun item, the headline
-            // number computed the way worklist-commit EXECUTES — per path,
-            // whole-file stat where this item is the only begun claimant
-            // (unattributed lines ride along), its own interval take where
-            // the path is entangled. The old header summed interval patches
-            // across all paths and undercounted the button (live case
-            // 2026-09-04: "Will commit +185 −1" while an exclusive
-            // Inbox.xmlui alone carried +32 −15 its commit would take).
-            // issue-425-gate-routes-by-membership: the prediction must follow
-            // the routing the gate now uses. The gate decides entanglement by
-            // line-level membership, REQUEST-WIDE: if any declared path has
-            // lines a begun outside item owns, every path is interval-staged;
-            // otherwise every path is taken whole-file, unowned lines included.
-            // Routing this per path from the replay (as before) predicted an
-            // interval take the gate no longer makes — the gate-425-r2 demo,
-            // 2026-10-06, whose agent wrote its message from that expectation.
+            // number is what worklist-commit takes: whole files, each path's
+            // own added/removed counts. A file another started item also
+            // changes is refused at the gate, and the pane reads that from
+            // `commitDependsOn` below.
             // Display tolerates a stale partition; with none, no take is
             // served and the pane says ownership is pending.
             let wc_partition = membership_partition(app).map(|(p, _)| p);
             // issue-430: the HEAD the precheck cache and refusal records key on.
             let wc_head = git_run(app, &["rev-parse", "HEAD"])
                 .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            // issue-425-retire-replay: part of the precheck key below; the
-            // interval patch is built from this record.
-            let wc_intervals_raw = project_root(Some(app))
-                .and_then(|r| {
-                    std::fs::read_to_string(resource_relative_path(&r, CLAIM_INTERVALS_REL)).ok()
-                })
                 .unwrap_or_default();
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
                 // Begun the way the gate counts it (handle_worklist_commit's
@@ -95159,85 +93910,18 @@ fn route_request<R: tauri::Runtime>(
                             }
                             _ => Vec::new(),
                         };
-                    // issue-425-retire-replay: an entangled item is
-                    // interval-staged, so its take is what that staging
-                    // produces: the precheck applies the same patch to a
-                    // scratch index and reads the result's numstat. Keyed on
-                    // what the patch is built from (HEAD, the claim record,
-                    // the item's current per-file diffs), so a serve re-runs
-                    // git only when one of them moved. When the patch doesn't
-                    // apply (issue-430's dependent case) the gate refuses;
-                    // the strip then shows membership's own lines for the item.
-                    let precheck: Option<
-                        Result<std::collections::BTreeMap<String, (usize, usize)>, Vec<String>>,
-                    > = if item_entangled == Some(true) {
-                        use std::hash::{Hash, Hasher};
-                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                        wc_intervals_raw.hash(&mut h);
-                        // The real content, never the display-capped
-                        // `diffByFile` (Codex review: a capped placeholder can
-                        // survive an edit unchanged).
-                        if let Some(idx) = change_index.as_ref() {
-                            precheck_content_hash(idx, &declared).hash(&mut h);
-                        }
-                        declared.hash(&mut h);
-                        // A re-anchor changes what the patch is built from
-                        // without moving HEAD or the file (same bytes, new
-                        // base), so it has to move the key itself.
-                        REANCHOR_EPOCH
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                            .hash(&mut h);
-                        let key = format!("{}|{:016x}", wc_head, h.finish());
-                        Some(commit_precheck_cached(app, &id, &declared, &key))
-                    } else {
-                        None
-                    };
-                    let own_lines = |path: &str| -> (usize, usize) {
-                        wc_partition
-                            .as_ref()
-                            .and_then(|p| p.get(path))
-                            .and_then(|b| b.per_item.get(&vec![id.clone()]))
-                            .copied()
-                            .unwrap_or((0, 0))
-                    };
                     let Some(records) = item.get_mut("changedFiles").and_then(|v| v.as_array_mut())
                     else {
                         continue;
                     };
                     let mut wc = (0usize, 0usize);
-                    let mut interval_paths: Vec<String> = Vec::new();
-                    // issue-273: paths whose interval-take was forced not by
-                    // another begun item (entanglement) but by residue no
-                    // claim ever covered — tracked separately so the trace
-                    // line names which reason applied, and summed below into
-                    // a per-item figure the strip can render.
                     for rec in records.iter_mut() {
-                        let Some(path) = rec.get("path").and_then(|v| v.as_str()).map(String::from)
-                        else {
-                            continue;
-                        };
-                        // No partition: nothing is entangled, and no take is
-                        // served (below); the pane says ownership is pending.
-                        let entangled = item_entangled.unwrap_or(false);
-                        // issue-273 postscript: the residue-driven interval
-                        // branch (and its two successor corrections) were
-                        // withdrawn the same evening they shipped — three
-                        // renders, three different wrong numbers. Whole-file
-                        // on non-entangled paths is the honest pre-existing
-                        // behavior until the attribution model itself is
-                        // re-grounded (see the drawing-board design item).
-                        let (a, r) = if entangled {
-                            interval_paths.push(path.clone());
-                            match &precheck {
-                                Some(Ok(take)) => take.get(&path).copied().unwrap_or((0, 0)),
-                                Some(Err(_)) | None => own_lines(&path),
-                            }
-                        } else {
-                            (
-                                rec.get("added").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-                                rec.get("removed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-                            )
-                        };
+                        // The gate commits whole files, so the take is the
+                        // file's whole-file count.
+                        let (a, r) = (
+                            rec.get("added").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                            rec.get("removed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        );
                         wc.0 += a;
                         wc.1 += r;
                         // The per-row take, so the CHANGES column can show the
@@ -95252,76 +93936,37 @@ fn route_request<R: tauri::Runtime>(
                             }
                         }
                     }
-                    if !interval_paths.is_empty() {
-                        let line = format!(
-                            "op=will-commit item={} take=+{}-{} interval_paths={}",
-                            id,
-                            wc.0,
-                            wc.1,
-                            interval_paths.join(",")
-                        );
-                        append_bram_trace_line(app, "claim-interval", &line);
-                    }
-                    // issue-430-dependent-commit-offer: an entangled item is
-                    // interval-staged, and the gate refuses a patch that does
-                    // not apply to HEAD on its own. The precheck above ran that
-                    // same check, so the pane can withhold the single-item
-                    // Commit and name what it depends on.
-                    let depends_on: Option<(Vec<String>, Vec<String>)> = match &precheck {
-                        Some(Err(failing)) => {
-                            let owners: Vec<String> = wc_partition
-                                .as_ref()
-                                .map(|p| {
-                                    let outside: std::collections::HashSet<String> =
-                                        begun.iter().filter(|b| **b != id).cloned().collect();
-                                    let mut o: Vec<String> = Vec::new();
-                                    for (path, owner) in membership_entangling_owners(
-                                        p,
-                                        &declared,
-                                        &[id.clone()],
-                                        &outside,
-                                    ) {
-                                        if (failing.is_empty() || failing.contains(&path))
-                                            && !o.contains(&owner)
-                                        {
-                                            o.push(owner);
-                                        }
-                                    }
-                                    o
-                                })
-                                .unwrap_or_default();
-                            Some((owners, failing.clone()))
-                        }
-                        _ => None,
+                    // The started items that own lines in this item's files:
+                    // the gate refuses a commit of one without them, so the
+                    // pane withholds the single-item Commit and names them.
+                    let depends_on: Vec<String> = if item_entangled == Some(true) {
+                        wc_partition
+                            .as_ref()
+                            .map(|p| {
+                                let outside: std::collections::HashSet<String> =
+                                    begun.iter().filter(|b| **b != id).cloned().collect();
+                                let mut o: std::collections::BTreeSet<String> = Default::default();
+                                for (_path, owner) in membership_entangling_owners(
+                                    p,
+                                    &declared,
+                                    &[id.clone()],
+                                    &outside,
+                                ) {
+                                    o.insert(owner);
+                                }
+                                o.into_iter().collect()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
                     };
-                    // gate-names-the-outside-commit-that-strands-an-item: a
-                    // failing patch may be stranded by a commit made outside
-                    // the gate after the item began, not by a sibling's
-                    // uncommitted lines. Name those commits so the pane can
-                    // say what happened instead of "commit that first".
-                    let stranded: Vec<StrandingCommit> =
-                        match (&depends_on, item.get("begunAtMs").and_then(|v| v.as_i64())) {
-                            (Some((_, failing)), Some(begun_ms)) if begun_ms > 0 => {
-                                let paths: Vec<String> = if failing.is_empty() {
-                                    declared.to_vec()
-                                } else {
-                                    failing.clone()
-                                };
-                                stranded_by_cached(app, &id, begun_ms, &paths, &wc_head)
-                            }
-                            _ => Vec::new(),
-                        };
                     let refusal = last_commit_refusal_for(&id, &wc_head);
                     if let Some(obj) = item.as_object_mut() {
-                        if let Some((owners, failing)) = &depends_on {
-                            obj.insert("commitDependsOn".to_string(), serde_json::json!(owners));
+                        if !depends_on.is_empty() {
                             obj.insert(
-                                "commitCheckFailedPaths".to_string(),
-                                serde_json::json!(failing),
+                                "commitDependsOn".to_string(),
+                                serde_json::json!(depends_on),
                             );
-                        }
-                        if !stranded.is_empty() {
-                            obj.insert("commitStrandedBy".to_string(), stranding_json(&stranded));
                         }
                         if let Some((at_ms, reason)) = &refusal {
                             obj.insert(
@@ -99427,33 +98072,6 @@ fn ensure_no_unrelated_staged_files(
     }
 }
 
-// issue-425-retire-replay: what the precheck cache key hashes for an item:
-// the full `git diff HEAD` body of each declared tracked path, and the bytes
-// of each declared untracked one. Never the display-capped `diffByFile`, whose
-// placeholders (generated files, patches over 200 KB) can survive an edit.
-fn precheck_content_hash(idx: &WorklistChangeIndex, declared: &[String]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    let mut covered: Vec<&String> = idx
-        .head_diff_by_path
-        .keys()
-        .chain(idx.status_by_path.keys())
-        .filter(|p| declared.iter().any(|d| declared_covers(d, p)))
-        .collect();
-    covered.sort();
-    covered.dedup();
-    for p in covered {
-        p.hash(&mut h);
-        match idx.head_diff_by_path.get(p) {
-            Some(body) => body.hash(&mut h),
-            None => std::fs::read(idx.root.join(p))
-                .unwrap_or_default()
-                .hash(&mut h),
-        }
-    }
-    h.finish()
-}
-
 // count-changed-files-rung1: per-item change activity derived from disk.
 // Returns (changedFiles, changeSummary) for the /__worklist payload — one
 // record per listed file plus roll-up totals, with display labels computed
@@ -99500,52 +98118,6 @@ struct WorklistChangeIndex {
     // Display-only disk listings; never used as commit pathspecs or membership input.
     ignored_entries: std::collections::HashMap<String, WorklistIgnoredEntry>,
     spawns: usize,
-}
-
-#[cfg(test)]
-mod precheck_content_hash_tests {
-    use super::{cap_patch, precheck_content_hash, WorklistChangeIndex};
-    use std::collections::HashMap;
-
-    fn idx(path: &str, body: &str) -> WorklistChangeIndex {
-        let mut head = HashMap::new();
-        head.insert(path.to_string(), body.to_string());
-        WorklistChangeIndex {
-            root: std::env::temp_dir(),
-            status_by_path: HashMap::new(),
-            counts: HashMap::new(),
-            hunks_by_path: HashMap::new(),
-            diff_by_path: HashMap::new(),
-            head_diff_by_path: head,
-            ignored_paths: std::collections::HashSet::new(),
-            ignored_entries: std::collections::HashMap::new(),
-            spawns: 0,
-        }
-    }
-
-    // Codex review of issue-425-retire-replay: two edits to a generated file
-    // cap to the same placeholder, so a key built from the capped patch would
-    // not change. The content hash must.
-    #[test]
-    fn edits_hidden_by_the_display_cap_still_change_the_key() {
-        let path = "app/vendor/bundle.min.js";
-        let before = "@@ -1 +1 @@\n-a\n+b\n";
-        let after = "@@ -1 +1 @@\n-a\n+c\n";
-        assert_eq!(
-            cap_patch(path, before.to_string()),
-            cap_patch(path, after.to_string())
-        );
-        let declared = vec![path.to_string()];
-        assert_ne!(
-            precheck_content_hash(&idx(path, before), &declared),
-            precheck_content_hash(&idx(path, after), &declared)
-        );
-        // Undeclared paths don't move it.
-        assert_eq!(
-            precheck_content_hash(&idx(path, before), &["other.txt".to_string()]),
-            precheck_content_hash(&idx(path, after), &["other.txt".to_string()])
-        );
-    }
 }
 
 // worklist-new-directory-entry-counts-zero: -uall so a wholly untracked
@@ -100334,42 +98906,6 @@ fn item_interval_changed_paths<R: tauri::Runtime>(
     }
 }
 
-// issue-497: the 409 text for `no-interval`. `owners` are the begun items
-// whose lines share the requested files; `landed` are the owners (with a
-// short SHA) already verified as committed outside the Worklist.
-fn no_interval_refusal_message(
-    requested: &[String],
-    owners: &[String],
-    landed: &[(String, String)],
-) -> String {
-    if !landed.is_empty() {
-        let who = owners.join(" and ");
-        let looks: Vec<String> = landed
-            .iter()
-            .map(|(o, sha)| format!("{} looks already committed ({})", o, sha))
-            .collect();
-        return format!(
-            "commit refused: {}'s changes are all in files that {} is also changing, and \
-             there's no record of which lines are whose. {}: clear it from the Worklist, then \
-             commit again.",
-            requested.join(", "),
-            who,
-            looks.join(" and ")
-        );
-    }
-    let mut msg = "commit refused: this item's changes are entirely shared with another begun \
-                   item and it has no claim interval to stage from (work predating the capture \
-                   phase). Commit them together, or separate the hunks by hand."
-        .to_string();
-    if !owners.is_empty() {
-        msg.push_str(&format!(
-            " Also changing these files: {}.",
-            owners.join(", ")
-        ));
-    }
-    msg
-}
-
 fn worklist_item_landed<R: tauri::Runtime>(
     app: &AppHandle<R>,
     item: &serde_json::Value,
@@ -100739,179 +99275,6 @@ fn landed_seen_cell() -> &'static Mutex<HashSet<String>> {
 // at call time and prunes nothing else; the pane's "Clear them" button and an
 // agent asked in chat ("clear those") both use it. Ids that aren't landed are
 // refused and listed.
-// gate-names-the-outside-commit-that-strands-an-item: `POST
-// /__worklist/reanchor { ids }`. For each begun item whose interval patch no
-// longer applies to HEAD, record a re-anchor for every failing declared path
-// whose uncommitted lines membership credits to that item alone (see
-// REANCHORS_KEY). Nothing in the worktree, the index or history moves; the
-// next precheck and commit build that path's chunk from `git diff HEAD`. 409
-// with every refusal named when nothing could be re-anchored. Authorization:
-// none beyond the loopback gate. It grants nothing and commits nothing; it
-// changes only how an already-begun item's own lines are cut into a patch,
-// under a condition the commit re-verifies.
-fn handle_worklist_reanchor<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    body: &[u8],
-) -> (u16, &'static str, Vec<u8>) {
-    let _mutate_guard = worklist_mutate_cell().lock();
-    let req: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => return worklist_json_error(400, format!("invalid JSON: {}", e)),
-    };
-    let ids = worklist_json_ids(&req, "ids");
-    if ids.is_empty() {
-        return worklist_json_error(400, "ids[] required");
-    }
-    let items: Vec<serde_json::Value> = worklist_file(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("items").and_then(|i| i.as_array()).cloned())
-        .unwrap_or_default();
-    let Some((partition, _fresh)) = membership_partition(app) else {
-        return worklist_json_error(503, "membership has no partition yet; retry shortly");
-    };
-    let head = match git_run(app, &["rev-parse", "HEAD"]) {
-        Ok(h) => h.trim().to_string(),
-        Err(e) => return worklist_json_error(500, format!("rev-parse HEAD failed: {}", e)),
-    };
-    let short: String = head.chars().take(7).collect();
-    let mut recorded: Vec<serde_json::Value> = Vec::new();
-    let mut refused: Vec<serde_json::Value> = Vec::new();
-    let mut new_records: Vec<serde_json::Value> = Vec::new();
-    let now = unix_now_ms();
-    let refuse = |id: &str, path: &str, reason: &str, refused: &mut Vec<serde_json::Value>| {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!(
-                "op=reanchor id={} path={} head={} outcome=refused reason={}",
-                id,
-                if path.is_empty() { "-" } else { path },
-                short,
-                reason
-            ),
-        );
-        refused.push(serde_json::json!({ "id": id, "path": path, "reason": reason }));
-    };
-    for id in &ids {
-        let Some(item) = items
-            .iter()
-            .find(|i| i.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
-        else {
-            refuse(id, "", "unknown-item", &mut refused);
-            continue;
-        };
-        let begun = item.get("status").and_then(|v| v.as_str()) == Some("applied")
-            || item.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
-        if !begun {
-            refuse(id, "", "not-begun", &mut refused);
-            continue;
-        }
-        let files = worklist_item_files(item);
-        let mut fmap: std::collections::HashMap<String, Vec<String>> = Default::default();
-        fmap.insert(id.clone(), files.clone());
-        let failing = match interval_commit_precheck(app, &[id.clone()], &fmap) {
-            Ok(_) => {
-                refuse(id, "", "already-applies", &mut refused);
-                continue;
-            }
-            Err(f) => f,
-        };
-        let candidates: Vec<String> = partition
-            .keys()
-            .filter(|p| files.iter().any(|d| declared_covers(d, p)))
-            .filter(|p| failing.is_empty() || failing.contains(p))
-            .cloned()
-            .collect();
-        if candidates.is_empty() {
-            refuse(id, "", "no-failing-path", &mut refused);
-            continue;
-        }
-        for path in candidates {
-            let Some(bucket) = partition.get(&path) else {
-                continue;
-            };
-            if let Some(reason) = reanchor_refusal_reason(bucket, id) {
-                refuse(id, &path, &reason, &mut refused);
-                continue;
-            }
-            if git_run(app, &["cat-file", "-e", &format!("HEAD:{}", path)]).is_err() {
-                refuse(id, &path, "untracked", &mut refused);
-                continue;
-            }
-            let blob = match git_run(app, &["hash-object", "--", &path]) {
-                Ok(b) => b.trim().to_string(),
-                Err(_) => {
-                    refuse(id, &path, "hash-failed", &mut refused);
-                    continue;
-                }
-            };
-            let own_patch = claim_interval_diff(app, id, &path)
-                .get("patch")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if own_patch.trim().is_empty() {
-                refuse(id, &path, "no-window-patch", &mut refused);
-                continue;
-            }
-            if let Err(reason) = reanchor_verified_blob(app, &path, &own_patch, &blob) {
-                refuse(id, &path, &reason, &mut refused);
-                continue;
-            }
-            append_bram_trace_line(
-                app,
-                "worklist-commit",
-                &format!(
-                    "op=reanchor id={} path={} head={} outcome=recorded",
-                    id, path, short
-                ),
-            );
-            new_records.push(serde_json::json!({
-                "id": id, "path": path, "head": head, "blob": blob, "atMs": now,
-            }));
-            recorded.push(serde_json::json!({ "id": id, "path": path }));
-        }
-    }
-    if !new_records.is_empty() {
-        let Some((sidecar, mut doc)) = claim_intervals_doc(app) else {
-            return worklist_json_error(500, "claim-intervals sidecar unreadable");
-        };
-        let mut arr: Vec<serde_json::Value> = doc
-            .get(REANCHORS_KEY)
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        // One record per (id, path): a repeat re-anchor replaces the old one.
-        arr.retain(|r| {
-            !new_records
-                .iter()
-                .any(|n| n.get("id") == r.get("id") && n.get("path") == r.get("path"))
-        });
-        arr.extend(new_records);
-        if let Some(obj) = doc.as_object_mut() {
-            obj.insert(REANCHORS_KEY.to_string(), serde_json::Value::Array(arr));
-        }
-        if !write_claim_intervals_doc(&sidecar, &doc) {
-            return worklist_json_error(500, "claim-intervals sidecar write failed");
-        }
-        REANCHOR_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        emit_replayable_signal(app, "worklist-changed");
-    }
-    let status = if recorded.is_empty() { 409 } else { 200 };
-    let body = serde_json::json!({
-        "ok": !recorded.is_empty(),
-        "head": short,
-        "reanchored": recorded,
-        "refused": refused,
-    });
-    (
-        status,
-        "application/json; charset=utf-8",
-        serde_json::to_vec(&body).unwrap_or_default(),
-    )
-}
-
 fn handle_worklist_clear_landed<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -101515,7 +99878,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
 // items. The agent supplies ids + message; the host verifies approved auth,
 // stages only the approved files, commits only those pathspecs, then prunes via
 // the same mutate path used by the legacy agent-driven commit flow.
-// commit-refusal-clears-claim: a commit refused by interval staging did no
+// commit-refusal-clears-claim: a refused commit did no
 // work and consumed no authorization, but the approval click already raised
 // the inflight sentinel — so the refusal used to leave the row spinning and
 // its selection locked, recoverable only by a manual POST /__worklist/end
@@ -101657,10 +100020,11 @@ fn gate_membership_observe<R: tauri::Runtime>(
 // display, as for willCommit), begun = `applied` or `begunAtMs`, and
 // `membership_entangling_owners` over the selection's declared files with
 // every begun item outside the selection as a possible owner.
-// - entangled -> interval staging: the precheck's staged numstat for the
-//   whole selection, or the paths whose combined patch doesn't apply;
-// - otherwise -> whole files: each changed declared path's HEAD-diff universe,
-//   plus the unowned lines that ride along (what `unownedTaken` will report).
+// - entangled -> the gate refuses ("commit them together"): not ready, with
+//   `entangledWith` naming the other owners;
+// - either way the take is whole files: each changed declared path's HEAD-diff
+//   universe, plus the unowned lines that ride along (what `unownedTaken`
+//   will report).
 fn worklist_selection_prediction<R: tauri::Runtime>(
     app: &AppHandle<R>,
     ids: &[String],
@@ -101670,9 +100034,6 @@ fn worklist_selection_prediction<R: tauri::Runtime>(
     };
     let mut begun: std::collections::HashSet<String> = Default::default();
     let mut files_map: std::collections::HashMap<String, Vec<String>> = Default::default();
-    // The earliest start among the requested items bounds the outside-commit
-    // search (gate-names-the-outside-commit-that-strands-an-item).
-    let mut since_ms: Option<i64> = None;
     if let Some(wf) = worklist_file(app) {
         if let Some(doc) = std::fs::read_to_string(&wf)
             .ok()
@@ -101694,13 +100055,6 @@ fn worklist_selection_prediction<R: tauri::Runtime>(
                 }
                 if ids.iter().any(|r| r == id) {
                     files_map.insert(id.to_string(), worklist_item_files(it));
-                    if let Some(b) = it
-                        .get("begunAtMs")
-                        .and_then(|v| v.as_i64())
-                        .filter(|b| *b > 0)
-                    {
-                        since_ms = Some(since_ms.map_or(b, |s: i64| s.min(b)));
-                    }
                 }
             }
         }
@@ -101715,36 +100069,13 @@ fn worklist_selection_prediction<R: tauri::Runtime>(
         let mut entangled_with: Vec<String> = owners.into_iter().map(|(_, o)| o).collect();
         entangled_with.sort();
         entangled_with.dedup();
-        return match interval_commit_precheck(app, ids, &files_map) {
-            Ok(take) => {
-                let (a, r) = take
-                    .values()
-                    .fold((0, 0), |acc, v| (acc.0 + v.0, acc.1 + v.1));
-                serde_json::json!({
-                    "ready": true, "stale": !fresh, "stateKey": state_key, "mode": "interval",
-                    "added": a, "removed": r, "entangledWith": entangled_with,
-                })
-            }
-            Err(paths) => {
-                let stranded = match since_ms {
-                    Some(s) => outside_commits_touching(
-                        app,
-                        s,
-                        if paths.is_empty() {
-                            &requested_files
-                        } else {
-                            &paths
-                        },
-                    ),
-                    None => Vec::new(),
-                };
-                serde_json::json!({
-                    "ready": true, "stale": !fresh, "stateKey": state_key, "mode": "interval",
-                    "dependentPaths": paths, "entangledWith": entangled_with,
-                    "strandedBy": stranding_json(&stranded),
-                })
-            }
-        };
+        // The gate commits whole files and refuses this selection as it
+        // stands: the answer is the whole-file take, not ready, naming who
+        // else is changing these files.
+        let mut v = selection_whole_file_json(&partition, fresh, state_key, &requested_files);
+        v["ready"] = serde_json::json!(false);
+        v["entangledWith"] = serde_json::json!(entangled_with);
+        return v;
     }
     selection_whole_file_json(&partition, fresh, state_key, &requested_files)
 }
@@ -101818,10 +100149,10 @@ mod selection_prediction_tests {
 }
 
 // issue-425-gate-routes-by-membership: the begun items OUTSIDE the request
-// that membership credits with lines on a requested path. Non-empty routes
-// the whole request to interval staging (staging is request-wide: one
-// entangled path sends every requested file through interval patches). A
-// replay "owner" with no lines here routes nothing — the 21-of-21 #419 shape.
+// that membership credits with lines on a requested path. Non-empty makes the
+// gate refuse the commit ("commit them together"), since a whole-file commit
+// would take that item's lines. A replay "owner" with no lines here refuses
+// nothing — the 21-of-21 #419 shape.
 fn membership_entangling_owners(
     partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
     requested_files: &[String],
@@ -102121,6 +100452,59 @@ mod gate_routes_by_membership_tests {
     }
 
     #[test]
+    fn commit_together_message_names_the_owner_and_the_file() {
+        let m = commit_together_refusal_message(
+            &["disjoint-entanglement-bottom".to_string()],
+            &["demo/disjoint-entanglement.txt".to_string()],
+        );
+        assert_eq!(
+            m,
+            "disjoint-entanglement-bottom is also changing demo/disjoint-entanglement.txt. \
+             Commit them together, or Drop disjoint-entanglement-bottom first."
+        );
+        let two = commit_together_refusal_message(
+            &["B".to_string(), "C".to_string()],
+            &["a.rs".to_string(), "b.rs".to_string()],
+        );
+        assert_eq!(
+            two,
+            "B and C are also changing a.rs, b.rs. Commit them together, or Drop B and C first."
+        );
+        // Plain words: none of the internal terms reach the user.
+        for word in ["entangle", "interval", "claim"] {
+            assert!(!two.contains(word));
+        }
+    }
+
+    #[test]
+    fn selecting_both_owners_leaves_no_outside_owner_to_refuse() {
+        // Committing the two items together: each is in the request, so
+        // neither counts as an outside owner and the gate takes the files.
+        let mut p = BTreeMap::new();
+        p.insert("a.rs".to_string(), bucket(&["A", "B"], (10, 0), (10, 0)));
+        let begun: HashSet<String> = ["A".to_string(), "B".to_string()].into_iter().collect();
+        let both = vec!["A".to_string(), "B".to_string()];
+        let outside: HashSet<String> = begun
+            .iter()
+            .filter(|b| !both.contains(b))
+            .cloned()
+            .collect();
+        assert!(
+            membership_entangling_owners(&p, &["a.rs".to_string()], &both, &outside).is_empty()
+        );
+        let only_a = vec!["A".to_string()];
+        let outside: HashSet<String> = begun
+            .iter()
+            .filter(|b| !only_a.contains(b))
+            .cloned()
+            .collect();
+        assert_eq!(
+            membership_entangling_owners(&p, &["a.rs".to_string()], &only_a, &outside).len(),
+            1
+        );
+    }
+
+    #[test]
     fn replay_only_neighbour_does_not_entangle() {
         // #419's 21-of-21 shape: the neighbour is begun and declares the path
         // but owns no lines, so membership does not list it as an owner.
@@ -102304,6 +100688,21 @@ fn gate_state_drift(
         .collect()
 }
 
+// The 409 text when a commit would take another started item's lines. The
+// gate commits whole files, so the two ways out are to commit the items
+// together or to Drop the other one.
+fn commit_together_refusal_message(owners: &[String], paths: &[String]) -> String {
+    let who = owners.join(" and ");
+    let verb = if owners.len() == 1 { "is" } else { "are" };
+    format!(
+        "{} {} also changing {}. Commit them together, or Drop {} first.",
+        who,
+        verb,
+        paths.join(", "),
+        who
+    )
+}
+
 fn handle_worklist_commit<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -102461,12 +100860,9 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     };
     // worklist-commit-refuses-unformatted-rust: keep EVERY commit fmt-clean at
     // the gate, so CI's Format check cannot regress from a commit made without
-    // `cargo fmt` (c2ff3e6a) or via interval staging (which uses commit-tree
-    // and so bypasses any git pre-commit hook). Source repo only, and only
-    // when the commit touches Rust. Gating on the WORKTREE is inductively
-    // sufficient: a clean worktree means the isolated hunks are clean, and
-    // prior gated commits kept HEAD clean, so the reconstructed interval tree
-    // is clean too. Fail-closed + release the claim (commit-refusal-clears-
+    // `cargo fmt` (c2ff3e6a). Source repo only, and only when the commit
+    // touches Rust. The commit is the whole files as they sit in the worktree,
+    // so checking the worktree is the whole check. Fail-closed + release the claim (commit-refusal-clears-
     // claim shape) so `cargo fmt` + retry is the fix. No cargo on PATH → do
     // not block (CI stays the backstop).
     if let Some(root) = project_root(Some(app)) {
@@ -102490,26 +100886,9 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             }
         }
     }
-    // issue-336: host-side exclusivity backstop. The pane withholds Commit on
-    // entanglement, but non-pane callers (the Codex intent transport, a
-    // hand-built curl) reach this route without that check, and staging is
-    // whole-file. Refuse when a path this commit stages carries LINES
-    // ATTRIBUTED to a begun item outside the request — the precise dangerous
-    // condition. Deliberately attribution-based rather than declared-files
-    // based: a blunt declared-overlap refusal would break the sanctioned
-    // serialize-entangled flow (committing the first item while the second is
-    // begun but has written nothing), while an owner with attributed lines in
-    // a staged path is positive evidence the commit would take work that is
-    // not this item's. Unattributed lines stay uncaught, honestly — the
-    // attribution machinery never guesses.
-    // issue-327: when a staged path carries lines attributed to a begun item
-    // OUTSIDE this request, whole-file staging would take that item's work.
-    // This used to be a hard 409 (issue-336's interim guard). Now it triggers
-    // INTERVAL STAGING: commit only the requested items' own hunks via a
-    // scratch index, leaving the neighbour's uncommitted work in the worktree.
-    // The 409 survives only as the fallback when there is genuinely no interval
-    // to stage (work predating capture) — the honest baseline.
-    let mut needs_interval_stage = false;
+    // The gate commits whole files only. A commit that would take another
+    // started item's lines is refused below (commit-together), decided by
+    // membership.
     // issue-425-gate-routes-by-membership: the worktree snapshot comes
     // FIRST, so any edit after it — even one membership then sees — shows up
     // as drift at staging instead of being absorbed. Twins are included
@@ -102647,27 +101026,39 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             }
         }
     }
-    // issue-425-gate-routes-by-membership: entangled iff membership credits
-    // lines on a requested path to a begun item outside the request. Routing
-    // stays request-wide: one entangled path interval-stages every file.
-    let mut entangling_owners: Vec<String> = Vec::new();
-    for (path, owner) in
-        membership_entangling_owners(&partition, &requested_files, &ids, &begun_outside)
-    {
-        entangling_owners.push(owner.to_string());
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "worklist-commit",
-                &format!(
-                    "op=entangled-interval-stage path={} owner={} source=membership",
-                    path, owner
-                ),
-            );
-        }
-        needs_interval_stage = true;
+    // Another started item that owns lines in a requested file: the gate
+    // commits whole files, so it would take that item's work. Refuse and name
+    // the owner; committing both together or dropping the other is the way out.
+    let entangling =
+        membership_entangling_owners(&partition, &requested_files, &ids, &begun_outside);
+    if !entangling.is_empty() {
+        let mut owners: Vec<String> = entangling.iter().map(|(_, o)| o.clone()).collect();
+        owners.sort();
+        owners.dedup();
+        let mut paths: Vec<String> = entangling.iter().map(|(p, _)| p.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!(
+                "op=refuse-commit-together ids={} owners={} paths={} source=membership",
+                ids.join(","),
+                owners.join(","),
+                paths.join(",")
+            ),
+        );
+        release_claim_on_commit_refusal(
+            app,
+            &ids,
+            &format!(
+                "{} is also changing the same files; commit them together",
+                owners.join(" and ")
+            ),
+        );
+        return worklist_json_error(409, commit_together_refusal_message(&owners, &paths));
     }
-    // issue-327: per-id declared files, for the interval-staging patch builder.
+    // Per-id declared files, for the untracked-file check after the commit.
     let mut item_files_map: std::collections::HashMap<String, Vec<String>> = Default::default();
     for id in &ids {
         if let Some(item) = items
@@ -102678,384 +101069,298 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         }
     }
 
-    // issue-366: HEAD before either staging path runs, for the universal
-    // no-op-commit backstop below. A commit that does not move HEAD created
-    // nothing; recording the prior sha as the item's commit (and pruning the
-    // item, and possibly queuing a close bound to a stranger's commit) is the
-    // misattribution family's quietest member. Both staging paths converge on
-    // the check, so no future path can reintroduce the lie.
+    // issue-366: HEAD before staging runs, for the no-op-commit backstop
+    // below. A commit that does not move HEAD created nothing; recording the
+    // prior sha as the item's commit (and pruning the item, and possibly
+    // queuing a close bound to a stranger's commit) is the misattribution
+    // family's quietest member.
     let head_before = git_run(app, &["rev-parse", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    // issue-327: interval-staged commit (entangled subset) or whole-file
-    // commit (the default). Both produce `sha` + `committed_paths` and
-    // converge on the shared post-commit tail below.
+    // The whole-file commit produces `sha` + `committed_paths` for the
+    // post-commit tail below.
     let sha: String;
     let committed_paths: Vec<String>;
     // commit-reports-skipped-files: listed paths that matched nothing on disk
     // or in the index, so this commit doesn't carry them. Reported in the
     // response; the trace line alone hid a vanished `.bram.json` (bram-studio,
     // 2026-11-15).
-    let mut skipped_files: Vec<String> = Vec::new();
-    if needs_interval_stage {
-        match interval_stage_commit(app, &ids, message, &item_files_map) {
-            Ok((s, cp)) => {
-                sha = s;
-                committed_paths = cp;
-            }
-            Err(e) if e == "no-interval" => {
-                // issue-497: name the row in the way, and say when it has
-                // already landed (the fix is then to clear it).
-                entangling_owners.sort();
-                entangling_owners.dedup();
-                let mut landed_owners: Vec<(String, String)> = Vec::new();
-                for owner in &entangling_owners {
-                    let Some(owner_item) = items
-                        .iter()
-                        .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(owner.as_str()))
-                    else {
-                        continue;
-                    };
-                    if let Some(info) = worklist_item_landed(
-                        app,
-                        owner_item,
-                        &worklist_item_declared_paths(owner_item),
-                        None,
-                    ) {
-                        landed_owners.push((owner.clone(), info.sha.chars().take(7).collect()));
-                    }
-                }
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        app,
-                        "worklist-commit",
-                        &format!(
-                            "op=refuse-no-interval ids={} owners={} landed={}",
-                            ids.join(","),
-                            entangling_owners.join(","),
-                            landed_owners
-                                .iter()
-                                .map(|(o, s)| format!("{}@{}", o, s))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        ),
-                    );
-                }
-                let reason = if entangling_owners.is_empty() {
-                    "its changes can't be separated from another item's; commit them together"
-                        .to_string()
-                } else {
-                    format!(
-                        "its changes can't be separated from {}'s; commit them together",
-                        entangling_owners.join(", ")
-                    )
-                };
-                release_claim_on_commit_refusal(app, &ids, &reason);
-                return worklist_json_error(
-                    409,
-                    no_interval_refusal_message(&ids, &entangling_owners, &landed_owners),
-                );
-            }
-            Err(e) => {
-                // issue-430: this refusal was untraced; the trace ended at the
-                // staging lines.
-                let failing = git_apply_failed_paths(&e);
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        app,
-                        "worklist-commit",
-                        &format!(
-                            "op=refuse-interval-dependent ids={} paths={}",
-                            ids.join(","),
-                            failing.join(",")
-                        ),
-                    );
-                }
-                release_claim_on_commit_refusal(
-                    app,
-                    &ids,
-                    "it builds on another item's uncommitted changes; commit that item first, or both together",
-                );
-                return worklist_json_error(409, e);
-            }
-        }
-    } else {
-        // Whole-file staging: the default path, unchanged. Auto-stage
-        // installed twins of listed canonicals, then git add + git commit
-        // scoped to the item's files.
-        for twin in installed_twins_for(&files) {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    &format!("op=auto-stage-twin path={}", twin),
-                );
-            }
-            files.push(twin);
-        }
-
-        // issue-308: phase progress. A large commit (85 files, >2 min in the
-        // field report) is indistinguishable from a wedged one to a caller
-        // watching a blocked HTTP request, and the route was previously silent
-        // between entry and completion. These three lines — staging,
-        // committing, committed — put the phase edges in the trace so "still
-        // working" and "stuck" can be told apart without touching git state.
-        // Counts and the short sha only; never file contents.
+    let skipped_files: Vec<String>;
+    // Whole-file staging: auto-stage
+    // installed twins of listed canonicals, then git add + git commit
+    // scoped to the item's files.
+    for twin in installed_twins_for(&files) {
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
                 "worklist-commit",
-                &format!("op=staging files={}", files.len()),
+                &format!("op=auto-stage-twin path={}", twin),
             );
         }
+        files.push(twin);
+    }
 
-        let staged_before = match git_staged_files(app) {
-            Ok(files) => files,
-            Err(e) => return worklist_json_error(500, e),
-        };
-        if let Err(e) = ensure_no_unrelated_staged_files(&staged_before, &files) {
-            return worklist_json_error(400, e);
-        }
-
-        // Stage per-file, tolerating paths git cannot match at all — even
-        // with `-A`, a pathspec that matches neither the working tree nor
-        // the index (never tracked, or its deletion already committed)
-        // fails the whole add. A stale worklist `files` entry aborted
-        // delete-phase tranche 1's commit four times this way
-        // (worklist-commit-stage-deletions, 2026-07-06). Unmatched paths
-        // are skipped and traced; every other add failure still aborts,
-        // and the staged_after emptiness guard below still refuses a
-        // commit where nothing staged.
-        let mut skipped_unmatched: Vec<String> = Vec::new();
-        for file in &files {
-            let add_args = worklist_commit_add_args(std::slice::from_ref(file));
-            let add_refs: Vec<&str> = add_args.iter().map(|a| a.as_str()).collect();
-            if let Err(e) = worklist_git_lock_retry(app, &add_refs) {
-                if index_lock_gave_up(&e) {
-                    // Files staged earlier in this loop stay staged; the
-                    // next attempt re-adds them and is idempotent.
-                    return worklist_json_error(
-                        500,
-                        format!(
-                            "git add failed: {}. Nothing was committed; files this request already staged stay staged, and a retry picks them up.",
-                            e.trim()
-                        ),
-                    );
-                }
-                if e.contains("did not match any files") {
-                    skipped_unmatched.push(file.clone());
-                    continue;
-                }
-                // issue-373: a path git refuses to stage because .gitignore
-                // excludes it is a CLIENT error — the user fixes it by
-                // correcting the item's `files` list — not a server fault.
-                // Returning 500 made the documented curl (`--retry 3
-                // --retry-delay 1`) silently re-POST the refusal three more
-                // times, because curl retries 5xx and not 4xx. Measured
-                // 2026-09-09: four POSTs at 1.00s spacing for one request,
-                // while a sibling 409 refusal the same session got exactly
-                // one. Joins the route's existing 4xx refusal family
-                // (refuse-empty-commit, refuse-joint-interval,
-                // refuse-entangled).
-                if e.contains("ignored by one of your .gitignore")
-                    || e.contains("Use -f if you really want to add them")
-                {
-                    if bram_trace_enabled() {
-                        append_bram_trace_line(
-                            app,
-                            "worklist-commit",
-                            &format!("op=refuse-ignored-path path={}", file),
-                        );
-                    }
-                    return worklist_json_error(
-                        409,
-                        format!(
-                            "this item declares `{}`, which git will not stage because .gitignore excludes it. Correct the item's files list and retry; nothing was committed.",
-                            file
-                        ),
-                    );
-                }
-                return worklist_json_error(500, format!("git add failed: {}", e.trim()));
-            }
-        }
-        if !skipped_unmatched.is_empty() && bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "worklist-commit",
-                &format!("op=skip-unmatched files={:?}", skipped_unmatched),
-            );
-        }
-        let staged_after = match git_staged_files(app) {
-            Ok(files) => files,
-            Err(e) => return worklist_json_error(500, e),
-        };
-        if let Err(e) = ensure_no_unrelated_staged_files(&staged_after, &files) {
-            return worklist_json_error(400, e);
-        }
-        // A deletion staged before this call also fails `git add` as
-        // unmatched, yet the commit carries it through `staged_after`; only
-        // paths absent from the stage were really left out.
-        skipped_files = skipped_files_left_out(&skipped_unmatched, &staged_after);
-        if staged_after.is_empty() {
-            // issue-366: an empty stage is a no-op commit in waiting — the
-            // item's declared files carry no changes (parked, or already
-            // committed). Refuse before git commit, releasing the claim so the
-            // row does not strand; nothing is pruned, queued, or recorded.
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    "op=refuse-empty-commit stage=whole-file",
-                );
-            }
-            release_claim_on_commit_refusal(app, &ids, "no changes to commit");
-            return worklist_json_error(
-                409,
-                "commit refused: this item's declared files carry no changes to commit \
-                 (its work may be parked or already committed)."
-                    .to_string(),
-            );
-        }
-
-        // issue-425-gate-routes-by-membership: one state for classification
-        // and staging. What was just staged must be exactly what the snapshot
-        // (taken before membership classified the paths) saw; otherwise an
-        // edit landed in between and the commit would carry lines no
-        // classification covered. Unstage and refuse — a retry re-snapshots.
-        // issue-434: decided from raw bytes plus git's own index-vs-file
-        // check, not a predicted staged blob (wrong for CRLF index blobs).
-        let Some(root) = project_root(Some(app)) else {
-            return worklist_json_error(500, "no project root");
-        };
-        let drift_check = match gate_drift_after_staging(&root, &worktree_snapshot, &staged_after) {
-            Ok(d) => d,
-            Err(e) => return worklist_json_error(500, e),
-        };
-        if let Some((reason, drift)) = drift_check {
-            let mut unstage = vec!["reset".to_string(), "-q".to_string(), "--".to_string()];
-            unstage.extend(staged_after.iter().cloned());
-            let unstage_refs: Vec<&str> = unstage.iter().map(|a| a.as_str()).collect();
-            let _ = worklist_git_lock_retry(app, &unstage_refs);
-            append_bram_trace_line(
-                app,
-                "worklist-commit",
-                &format!(
-                    "op=refuse-state-drift reason={} paths={}",
-                    reason,
-                    drift.iter().take(5).cloned().collect::<Vec<_>>().join(",")
-                ),
-            );
-            release_claim_on_commit_refusal(
-                app,
-                &ids,
-                "files changed while the commit was being prepared; try Commit again",
-            );
-            return worklist_json_error(
-                409,
-                format!(
-                    "commit refused: {} changed while the commit was being prepared, so \
-                     the commit would have included edits Bram hadn't checked. Nothing was \
-                     committed and nothing was left staged. Commit again.",
-                    drift.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-                ),
-            );
-        }
-
-        let mut commit_args = vec![
-            "commit".to_string(),
-            "-m".to_string(),
-            message.to_string(),
-            "--".to_string(),
-        ];
-        // Scope the commit pathspec to what is actually STAGED for the item,
-        // not `files − skipped_unmatched`. A deletion staged before this call
-        // (the apply did `git rm`) makes `git add -A -- <path>` report "did
-        // not match any files" — the path landed in skipped_unmatched and was
-        // dropped from the commit, leaving the staged deletion behind to block
-        // the NEXT commit as an unrelated staged file (pa elections field
-        // report, worklist-commit-omits-staged-deletions). `staged_after`
-        // lists staged deletions, so intersecting with it includes them; a
-        // truly-unmatched path (never tracked, gone) is absent from it and
-        // stays excluded, and `git commit -- <path>` never sees a
-        // nothing-matching pathspec.
-        commit_args.extend(
-            files
-                .iter()
-                .filter(|f| staged_after.iter().any(|s| staged_path_covered_by(f, s)))
-                .cloned(),
+    // issue-308: phase progress. A large commit (85 files, >2 min in the
+    // field report) is indistinguishable from a wedged one to a caller
+    // watching a blocked HTTP request, and the route was previously silent
+    // between entry and completion. These three lines — staging,
+    // committing, committed — put the phase edges in the trace so "still
+    // working" and "stuck" can be told apart without touching git state.
+    // Counts and the short sha only; never file contents.
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=staging files={}", files.len()),
         );
-        // issue-312 belt-and-braces: the cost of that bug was its silence — ok
-        // plus a sha, the item pruned, and files left in the index for the next
-        // commit to refuse or absorb. Anything the item staged but the pathspec
-        // would not carry is a bug in the scoping above, so say so BEFORE
-        // committing rather than reporting success over it.
-        let commit_pathspec: Vec<String> = commit_args
-            .iter()
-            .skip_while(|a| a.as_str() != "--")
-            .skip(1)
-            .cloned()
-            .collect();
-        let left_behind = staged_paths_left_behind(&commit_pathspec, &staged_after);
-        if !left_behind.is_empty() {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    &format!("op=left-behind count={}", left_behind.len()),
-                );
-            }
-            return worklist_json_error(
-            500,
-            format!(
-                "refusing to commit: {} staged path(s) the approved items declared are not covered by the commit pathspec (e.g. {}). This is a Bram bug, not a policy decision; the index is unchanged.",
-                left_behind.len(),
-                left_behind
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        );
-        }
-        if bram_trace_enabled() {
-            append_bram_trace_line(app, "worklist-commit", "op=committing");
-        }
-        let commit_refs: Vec<&str> = commit_args.iter().map(|a| a.as_str()).collect();
-        if let Err(e) = worklist_git_lock_retry(app, &commit_refs) {
+    }
+
+    let staged_before = match git_staged_files(app) {
+        Ok(files) => files,
+        Err(e) => return worklist_json_error(500, e),
+    };
+    if let Err(e) = ensure_no_unrelated_staged_files(&staged_before, &files) {
+        return worklist_json_error(400, e);
+    }
+
+    // Stage per-file, tolerating paths git cannot match at all — even
+    // with `-A`, a pathspec that matches neither the working tree nor
+    // the index (never tracked, or its deletion already committed)
+    // fails the whole add. A stale worklist `files` entry aborted
+    // delete-phase tranche 1's commit four times this way
+    // (worklist-commit-stage-deletions, 2026-07-06). Unmatched paths
+    // are skipped and traced; every other add failure still aborts,
+    // and the staged_after emptiness guard below still refuses a
+    // commit where nothing staged.
+    let mut skipped_unmatched: Vec<String> = Vec::new();
+    for file in &files {
+        let add_args = worklist_commit_add_args(std::slice::from_ref(file));
+        let add_refs: Vec<&str> = add_args.iter().map(|a| a.as_str()).collect();
+        if let Err(e) = worklist_git_lock_retry(app, &add_refs) {
             if index_lock_gave_up(&e) {
+                // Files staged earlier in this loop stay staged; the
+                // next attempt re-adds them and is idempotent.
                 return worklist_json_error(
                     500,
                     format!(
-                        "git commit failed: {}. Nothing was committed; the items' files are staged, and a retry commits them.",
+                        "git add failed: {}. Nothing was committed; files this request already staged stay staged, and a retry picks them up.",
                         e.trim()
                     ),
                 );
             }
-            return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
-        }
-        sha = match git_run(app, &["rev-parse", "HEAD"]) {
-            Ok(s) => s.trim().to_string(),
-            Err(e) => {
-                return worklist_json_error(
-                    500,
-                    format!("commit created but sha lookup failed: {}", e.trim()),
-                )
+            if e.contains("did not match any files") {
+                skipped_unmatched.push(file.clone());
+                continue;
             }
-        };
-        committed_paths = files
-            .iter()
-            .filter(|f| staged_after.contains(f))
-            .cloned()
-            .collect();
+            // issue-373: a path git refuses to stage because .gitignore
+            // excludes it is a CLIENT error — the user fixes it by
+            // correcting the item's `files` list — not a server fault.
+            // Returning 500 made the documented curl (`--retry 3
+            // --retry-delay 1`) silently re-POST the refusal three more
+            // times, because curl retries 5xx and not 4xx. Measured
+            // 2026-09-09: four POSTs at 1.00s spacing for one request,
+            // while a sibling 409 refusal the same session got exactly
+            // one. Joins the route's existing 4xx refusal family
+            // (refuse-empty-commit, refuse-joint-interval,
+            // refuse-entangled).
+            if e.contains("ignored by one of your .gitignore")
+                || e.contains("Use -f if you really want to add them")
+            {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "worklist-commit",
+                        &format!("op=refuse-ignored-path path={}", file),
+                    );
+                }
+                return worklist_json_error(
+                    409,
+                    format!(
+                        "this item declares `{}`, which git will not stage because .gitignore excludes it. Correct the item's files list and retry; nothing was committed.",
+                        file
+                    ),
+                );
+            }
+            return worklist_json_error(500, format!("git add failed: {}", e.trim()));
+        }
+    }
+    if !skipped_unmatched.is_empty() && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=skip-unmatched files={:?}", skipped_unmatched),
+        );
+    }
+    let staged_after = match git_staged_files(app) {
+        Ok(files) => files,
+        Err(e) => return worklist_json_error(500, e),
+    };
+    if let Err(e) = ensure_no_unrelated_staged_files(&staged_after, &files) {
+        return worklist_json_error(400, e);
+    }
+    // A deletion staged before this call also fails `git add` as
+    // unmatched, yet the commit carries it through `staged_after`; only
+    // paths absent from the stage were really left out.
+    skipped_files = skipped_files_left_out(&skipped_unmatched, &staged_after);
+    if staged_after.is_empty() {
+        // issue-366: an empty stage is a no-op commit in waiting — the
+        // item's declared files carry no changes (parked, or already
+        // committed). Refuse before git commit, releasing the claim so the
+        // row does not strand; nothing is pruned, queued, or recorded.
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
                 "worklist-commit",
-                &format!("op=committed sha={}", &sha[..sha.len().min(7)]),
+                "op=refuse-empty-commit stage=whole-file",
             );
         }
+        release_claim_on_commit_refusal(app, &ids, "no changes to commit");
+        return worklist_json_error(
+            409,
+            "commit refused: this item's declared files carry no changes to commit \
+             (its work may be parked or already committed)."
+                .to_string(),
+        );
+    }
+
+    // issue-425-gate-routes-by-membership: one state for classification
+    // and staging. What was just staged must be exactly what the snapshot
+    // (taken before membership classified the paths) saw; otherwise an
+    // edit landed in between and the commit would carry lines no
+    // classification covered. Unstage and refuse — a retry re-snapshots.
+    // issue-434: decided from raw bytes plus git's own index-vs-file
+    // check, not a predicted staged blob (wrong for CRLF index blobs).
+    let Some(root) = project_root(Some(app)) else {
+        return worklist_json_error(500, "no project root");
+    };
+    let drift_check = match gate_drift_after_staging(&root, &worktree_snapshot, &staged_after) {
+        Ok(d) => d,
+        Err(e) => return worklist_json_error(500, e),
+    };
+    if let Some((reason, drift)) = drift_check {
+        let mut unstage = vec!["reset".to_string(), "-q".to_string(), "--".to_string()];
+        unstage.extend(staged_after.iter().cloned());
+        let unstage_refs: Vec<&str> = unstage.iter().map(|a| a.as_str()).collect();
+        let _ = worklist_git_lock_retry(app, &unstage_refs);
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!(
+                "op=refuse-state-drift reason={} paths={}",
+                reason,
+                drift.iter().take(5).cloned().collect::<Vec<_>>().join(",")
+            ),
+        );
+        release_claim_on_commit_refusal(
+            app,
+            &ids,
+            "files changed while the commit was being prepared; try Commit again",
+        );
+        return worklist_json_error(
+            409,
+            format!(
+                "commit refused: {} changed while the commit was being prepared, so \
+                 the commit would have included edits Bram hadn't checked. Nothing was \
+                 committed and nothing was left staged. Commit again.",
+                drift.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+
+    let mut commit_args = vec![
+        "commit".to_string(),
+        "-m".to_string(),
+        message.to_string(),
+        "--".to_string(),
+    ];
+    // Scope the commit pathspec to what is actually STAGED for the item,
+    // not `files − skipped_unmatched`. A deletion staged before this call
+    // (the apply did `git rm`) makes `git add -A -- <path>` report "did
+    // not match any files" — the path landed in skipped_unmatched and was
+    // dropped from the commit, leaving the staged deletion behind to block
+    // the NEXT commit as an unrelated staged file (pa elections field
+    // report, worklist-commit-omits-staged-deletions). `staged_after`
+    // lists staged deletions, so intersecting with it includes them; a
+    // truly-unmatched path (never tracked, gone) is absent from it and
+    // stays excluded, and `git commit -- <path>` never sees a
+    // nothing-matching pathspec.
+    commit_args.extend(
+        files
+            .iter()
+            .filter(|f| staged_after.iter().any(|s| staged_path_covered_by(f, s)))
+            .cloned(),
+    );
+    // issue-312 belt-and-braces: the cost of that bug was its silence — ok
+    // plus a sha, the item pruned, and files left in the index for the next
+    // commit to refuse or absorb. Anything the item staged but the pathspec
+    // would not carry is a bug in the scoping above, so say so BEFORE
+    // committing rather than reporting success over it.
+    let commit_pathspec: Vec<String> = commit_args
+        .iter()
+        .skip_while(|a| a.as_str() != "--")
+        .skip(1)
+        .cloned()
+        .collect();
+    let left_behind = staged_paths_left_behind(&commit_pathspec, &staged_after);
+    if !left_behind.is_empty() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!("op=left-behind count={}", left_behind.len()),
+            );
+        }
+        return worklist_json_error(
+        500,
+        format!(
+            "refusing to commit: {} staged path(s) the approved items declared are not covered by the commit pathspec (e.g. {}). This is a Bram bug, not a policy decision; the index is unchanged.",
+            left_behind.len(),
+            left_behind
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "worklist-commit", "op=committing");
+    }
+    let commit_refs: Vec<&str> = commit_args.iter().map(|a| a.as_str()).collect();
+    if let Err(e) = worklist_git_lock_retry(app, &commit_refs) {
+        if index_lock_gave_up(&e) {
+            return worklist_json_error(
+                500,
+                format!(
+                    "git commit failed: {}. Nothing was committed; the items' files are staged, and a retry commits them.",
+                    e.trim()
+                ),
+            );
+        }
+        return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
+    }
+    sha = match git_run(app, &["rev-parse", "HEAD"]) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            return worklist_json_error(
+                500,
+                format!("commit created but sha lookup failed: {}", e.trim()),
+            )
+        }
+    };
+    committed_paths = files
+        .iter()
+        .filter(|f| staged_after.contains(f))
+        .cloned()
+        .collect();
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=committed sha={}", &sha[..sha.len().min(7)]),
+        );
     }
     // issue-410: known as the Worklist's own commit from this instant, so the
     // landed check never reads it as work committed outside the Worklist, even
@@ -103064,9 +101369,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
 
     // issue-366: the universal backstop. Two no-op shapes are equally the
     // lie — HEAD unmoved (the field case: the prior sha recorded as this
-    // item's commit), and a NEW commit whose tree equals the prior HEAD's (an
-    // interval `commit-tree` over an empty patch mints a fresh sha with no
-    // content). Both are caught by asking git whether the commit actually
+    // item's commit), and a NEW commit whose tree equals the prior HEAD's.
+    // Both are caught by asking git whether the commit actually
     // changed anything: `diff --quiet head_before sha` exits 0 when the trees
     // match. Refuse rather than prune/queue/record; release the claim so the
     // row recovers. (Skipped only for a first-ever commit, where head_before
@@ -103074,14 +101378,6 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     let empty_commit = !head_before.is_empty()
         && (sha == head_before || git_run(app, &["diff", "--quiet", &head_before, &sha]).is_ok());
     if empty_commit {
-        // A new-but-empty commit (sha moved, tree unchanged) can only come
-        // from the interval path's commit-tree/update-ref — the whole-file
-        // path's own is_empty guard fires first — and that path never touched
-        // the worktree or index, so moving the ref back to head_before cleanly
-        // discards the empty commit and leaves no staged residue.
-        if sha != head_before {
-            let _ = worklist_git_lock_retry(app, &["update-ref", "HEAD", &head_before]);
-        }
         if bram_trace_enabled() {
             append_bram_trace_line(app, "worklist-commit", "op=refuse-empty-commit");
         }
@@ -103140,67 +101436,14 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     }
     emit_replayable_signal(app, "git-status-changed");
 
-    // issue-364 residual disclosure: only an interval-staged commit can leave
-    // residue in TRACKED declared files (whole-file staging commits their
-    // entire diff). Diff each declared path against the fresh
-    // HEAD, classify leftovers by attribution, and disclose. A path with
-    // UNOWNED residue means the requesting item's work is probably
-    // incomplete — edited in unclaimed time, so no interval carried it into
-    // the commit — and pruning would orphan it (10fdd12) for a neighbour's
-    // whole-file stage to absorb (bcb2a7e). Such items are RETAINED:
-    // disclosed in the response, auth and claim released exactly as the
-    // prune would have, item left begun-with-changes where the pane's
-    // widened Commit offer is the resume channel.
+    // Declared files that are in no commit: the response names them, and the
+    // item stays on the board (retained) instead of being pruned.
     let mut residual_paths: Vec<serde_json::Value> = Vec::new();
     let mut retained: Vec<String> = Vec::new();
-    if needs_interval_stage {
-        let mut seen: std::collections::BTreeSet<String> = Default::default();
-        for id in &ids {
-            for path in item_files_map.get(id).cloned().unwrap_or_default() {
-                if !seen.insert(path.clone()) {
-                    continue;
-                }
-                let patch = git_run(app, &["diff", "HEAD", "--", &path]).unwrap_or_default();
-                if patch.trim().is_empty() {
-                    continue;
-                }
-                let residual = diff_residual_lines(&patch);
-                // issue-425-retire-replay: classify against membership's
-                // runs, from the gate's own pre-commit partition. Interval
-                // staging never touches the worktree, so present-file line
-                // numbers taken before the commit still hold after it.
-                let runs: Vec<serde_json::Value> = partition
-                    .get(&path)
-                    .map(|b| membership_runs_json(&b.runs))
-                    .unwrap_or_default();
-                let owner = residual_owner_label(&residual, &runs, &begun_outside);
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    &format!("op=residual-disclosed path={} owner={}", path, owner),
-                );
-                if owner == "unowned" {
-                    for rid in &ids {
-                        if item_files_map
-                            .get(rid)
-                            .map_or(false, |fs| fs.contains(&path))
-                            && !retained.contains(rid)
-                        {
-                            retained.push(rid.clone());
-                        }
-                    }
-                }
-                residual_paths.push(serde_json::json!({ "path": path, "owner": owner }));
-            }
-        }
-    }
-    // issue-419: the pass above is blind to a declared file git never
-    // tracked (`git diff HEAD` prints nothing for it), so a new file the
-    // interval path skipped was pruned away silently. Check for declared
-    // paths still untracked after EVERY commit. On the whole-file path
-    // `git add -A` stages new files, so this should never fire there: a
-    // `stage=whole-file` trace line is a tripwire for a new bug. Findings
-    // retain the item exactly as unowned tracked residue does.
+    // issue-419: a declared path git has never tracked is left out of the
+    // commit and, with nothing else to show for it, was pruned away silently.
+    // Check for declared paths still untracked after EVERY commit. `git add -A`
+    // stages new files, so this should rarely fire; findings retain the item.
     if let Some(root) = project_root(Some(app)) {
         let mut declared: Vec<String> = Vec::new();
         for id in &ids {
@@ -103210,18 +101453,13 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 }
             }
         }
-        let stage = if needs_interval_stage {
-            "interval"
-        } else {
-            "whole-file"
-        };
         for path in untracked_declared_paths(&root, &declared) {
             append_bram_trace_line(
                 app,
                 "worklist-commit",
                 &format!(
-                    "op=residual-disclosed path={} owner=unowned untracked=true stage={}",
-                    path, stage
+                    "op=residual-disclosed path={} owner=unowned untracked=true",
+                    path
                 ),
             );
             for rid in &ids {
@@ -103265,27 +101503,24 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // issue-425-gate-routes-by-membership: disclose, don't refuse. A
     // whole-file commit took every line on its paths, including lines
     // membership credits to no item; name them so the agent can say so.
-    // (Interval staging takes only the requested items' own hunks.)
-    if !needs_interval_stage {
-        let taken = membership_unowned_taken(&partition, &committed_paths);
-        if !taken.is_empty() {
-            for (path, a, r) in &taken {
-                append_bram_trace_line(
-                    app,
-                    "worklist-commit",
-                    &format!(
-                        "op=commit-took-unowned path={} added={} removed={}",
-                        path, a, r
-                    ),
-                );
-            }
-            response["unownedTaken"] = serde_json::Value::Array(
-                taken
-                    .iter()
-                    .map(|(p, a, r)| serde_json::json!({ "path": p, "added": a, "removed": r }))
-                    .collect(),
+    let taken = membership_unowned_taken(&partition, &committed_paths);
+    if !taken.is_empty() {
+        for (path, a, r) in &taken {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!(
+                    "op=commit-took-unowned path={} added={} removed={}",
+                    path, a, r
+                ),
             );
         }
+        response["unownedTaken"] = serde_json::Value::Array(
+            taken
+                .iter()
+                .map(|(p, a, r)| serde_json::json!({ "path": p, "added": a, "removed": r }))
+                .collect(),
+        );
     }
     if !retained.is_empty() {
         response["retained"] = serde_json::json!(retained);
@@ -111684,16 +109919,6 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_clear_landed(app, &buf)
-        }
-    } else if path == "__worklist/reanchor" {
-        // gate-names-the-outside-commit-that-strands-an-item: see
-        // handle_worklist_reanchor.
-        if method != "POST" {
-            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
-        } else {
-            let mut buf = Vec::new();
-            let _ = request.as_reader().read_to_end(&mut buf);
-            handle_worklist_reanchor(app, &buf)
         }
     } else if path == "__worklist/reorder" {
         if method != "POST" {
@@ -121736,26 +119961,5 @@ mod landed_by_merge_tests {
         let (dir, paths) = repo_with_merge("Merge\n\nItem: my-item", true);
         assert!(landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| true).is_none());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn no_interval_message_names_a_landed_owner() {
-        let req = vec!["req-item".to_string()];
-        let owners = vec!["old-item".to_string()];
-        let landed = vec![("old-item".to_string(), "ffce520".to_string())];
-        let m = no_interval_refusal_message(&req, &owners, &landed);
-        assert!(m.contains("old-item looks already committed (ffce520)"));
-        assert!(m.contains("clear it from the Worklist"));
-    }
-
-    #[test]
-    fn no_interval_message_keeps_old_text_and_adds_owners() {
-        let req = vec!["req-item".to_string()];
-        let owners = vec!["a".to_string(), "b".to_string()];
-        let m = no_interval_refusal_message(&req, &owners, &[]);
-        assert!(m.starts_with("commit refused: this item's changes are entirely shared"));
-        assert!(m.ends_with("Also changing these files: a, b."));
-        let m = no_interval_refusal_message(&req, &[], &[]);
-        assert!(!m.contains("Also changing"));
     }
 }

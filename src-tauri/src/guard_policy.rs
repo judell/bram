@@ -3938,26 +3938,50 @@ pub fn shadow_worklist_decision(provider: &str, payload: &Value) -> Option<Shado
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+struct EnforcementCfg {
+    #[serde(default)]
+    worklist: Option<WorklistEnf>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct WorklistEnf {
+    #[serde(default)]
+    enforcement: Option<String>,
+}
+
+/// Read `worklist.enforcement` from one config file that exists. `Err(())`
+/// means a read or parse error (fail closed); `Ok(None)` means no such key.
+fn read_enforcement(path: &Path) -> Result<Option<String>, ()> {
+    let bytes = std::fs::read(path).map_err(|_| ())?;
+    let cfg: EnforcementCfg = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    Ok(cfg.worklist.and_then(|w| w.enforcement))
+}
+
 /// Per-repo pause of Worklist coverage enforcement for Claude. Reads
-/// `worklist.enforcement` from `.bram.json` (legacy `.xmlui-desktop.json`);
-/// any error or other value means enforcement stays on.
+/// `worklist.enforcement` in the order Settings writes it: Bram's
+/// `.bram/settings.json` when the state folder exists and the file holds the
+/// key, else the first of `.bram.json` / `.xmlui-desktop.json` that exists.
+/// Any read or parse error in a file that exists, or any other value, means
+/// enforcement stays on.
 pub fn claude_enforcement_paused(cwd: &Path) -> bool {
     let Some(root) = find_project_root(&cwd.to_string_lossy()) else {
         return false;
     };
+    if has_state_dir(&root) {
+        let path = state_dir(&root).join("settings.json");
+        if path.exists() {
+            match read_enforcement(&path) {
+                Err(()) => return false,
+                Ok(Some(v)) => return v == "paused",
+                Ok(None) => {}
+            }
+        }
+    }
     for name in [".bram.json", ".xmlui-desktop.json"] {
         let path = root.join(name);
         if path.exists() {
-            let Ok(bytes) = std::fs::read(&path) else {
-                return false;
-            };
-            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-                return false;
-            };
-            return value
-                .pointer("/worklist/enforcement")
-                .and_then(|v| v.as_str())
-                == Some("paused");
+            return matches!(read_enforcement(&path), Ok(Some(v)) if v == "paused");
         }
     }
     false
@@ -3966,7 +3990,7 @@ pub fn claude_enforcement_paused(cwd: &Path) -> bool {
 /// Context text handed to Claude at SessionStart / UserPromptSubmit while
 /// enforcement is paused. Factual phrasing on purpose.
 pub fn enforcement_paused_context() -> &'static str {
-    "Worklist enforcement is paused for Claude in this repository: the user turned it off in Bram's Settings (.bram.json worklist.enforcement = \"paused\"). While it is paused, Bram's guard does not deny edits that no Worklist item covers, and the user manages the work and its commits directly, without Worklist items. Bram's conventions about proposing an item before editing, and the Start / Commit gate, do not apply while this is in effect. The guard's other checks (session URLs in commits, signatures on forge writes, subagent lifecycle calls) still apply."
+    "Worklist enforcement is paused for Claude in this repository: the user turned it off in Bram's Settings (worklist.enforcement = \"paused\"). While it is paused, Bram's guard does not deny edits that no Worklist item covers, and the user manages the work and its commits directly, without Worklist items. Bram's conventions about proposing an item before editing, and the Start / Commit gate, do not apply while this is in effect. The guard's other checks (session URLs in commits, signatures on forge writes, subagent lifecycle calls) still apply."
 }
 
 fn claude_decision(payload: &Value) -> ShadowVerdict {
@@ -8373,6 +8397,65 @@ mod guard_policy_tests {
             "{}",
             v.reason
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_paused_in_bram_settings_only() {
+        let root = managed_claude("enf-settings-only");
+        std::fs::write(
+            root.join(".bram/settings.json"),
+            r#"{"worklist":{"enforcement":"paused"},"ui":{}}"#,
+        )
+        .unwrap();
+        let v = write_uncovered(&root);
+        assert_eq!(v.decision, "allow");
+        assert!(
+            v.reason.starts_with("enforcement-paused:no-coverage"),
+            "{}",
+            v.reason
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_settings_on_wins_over_root_paused() {
+        let root = paused_claude("enf-settings-on", "paused");
+        std::fs::write(
+            root.join(".bram/settings.json"),
+            r#"{"worklist":{"enforcement":"on"}}"#,
+        )
+        .unwrap();
+        let v = write_uncovered(&root);
+        assert_eq!(v.decision, "deny");
+        assert!(v.reason.starts_with("no-coverage"), "{}", v.reason);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_settings_without_key_falls_through_to_root() {
+        let root = paused_claude("enf-settings-nokey", "paused");
+        std::fs::write(root.join(".bram/settings.json"), r#"{"ui":{}}"#).unwrap();
+        let v = write_uncovered(&root);
+        assert_eq!(v.decision, "allow");
+        assert!(
+            v.reason.starts_with("enforcement-paused:no-coverage"),
+            "{}",
+            v.reason
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforcement_unmarked_dot_bram_settings_ignored() {
+        let root = managed_claude("enf-unmarked");
+        std::fs::remove_file(root.join(".bram/.gitignore")).unwrap();
+        std::fs::write(
+            root.join(".bram/settings.json"),
+            r#"{"worklist":{"enforcement":"paused"}}"#,
+        )
+        .unwrap();
+        assert!(!claude_enforcement_paused(&root));
         let _ = std::fs::remove_dir_all(&root);
     }
 

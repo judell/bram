@@ -99884,6 +99884,42 @@ fn item_interval_changed_paths<R: tauri::Runtime>(
     }
 }
 
+// issue-497: the 409 text for `no-interval`. `owners` are the begun items
+// whose lines share the requested files; `landed` are the owners (with a
+// short SHA) already verified as committed outside the Worklist.
+fn no_interval_refusal_message(
+    requested: &[String],
+    owners: &[String],
+    landed: &[(String, String)],
+) -> String {
+    if !landed.is_empty() {
+        let who = owners.join(" and ");
+        let looks: Vec<String> = landed
+            .iter()
+            .map(|(o, sha)| format!("{} looks already committed ({})", o, sha))
+            .collect();
+        return format!(
+            "commit refused: {}'s changes are all in files that {} is also changing, and \
+             there's no record of which lines are whose. {}: clear it from the Worklist, then \
+             commit again.",
+            requested.join(", "),
+            who,
+            looks.join(" and ")
+        );
+    }
+    let mut msg = "commit refused: this item's changes are entirely shared with another begun \
+                   item and it has no claim interval to stage from (work predating the capture \
+                   phase). Commit them together, or separate the hunks by hand."
+        .to_string();
+    if !owners.is_empty() {
+        msg.push_str(&format!(
+            " Also changing these files: {}.",
+            owners.join(", ")
+        ));
+    }
+    msg
+}
+
 fn worklist_item_landed<R: tauri::Runtime>(
     app: &AppHandle<R>,
     item: &serde_json::Value,
@@ -99911,6 +99947,88 @@ fn worklist_item_landed_never_begun<R: tauri::Runtime>(
     let conn = worklist_state_open(app)?;
     let first_seen_ms = worklist_state::item_first_seen_ms(&conn, id).ok()??;
     worklist_item_landed_since(app, item, paths, None, first_seen_ms, Some(id))
+}
+
+// Declared paths covered by `touched`: an exact match, or a file under a
+// declared directory.
+fn landed_paths_covered(paths: &[String], touched: &[String]) -> usize {
+    paths
+        .iter()
+        .filter(|p| {
+            let dir = format!("{}/", p.trim_end_matches('/'));
+            touched.iter().any(|t| t == *p || t.starts_with(&dir))
+        })
+        .count()
+}
+
+// issue-497: a merge whose tree equals its FIRST parent on the item's paths is
+// dropped by git's default history simplification, so the ordinary pathspec
+// query never sees it (and `--name-only` lists nothing for a merge anyway).
+// Find merges since `since_s` whose message names `id`, with no pathspec, then
+// diff each against every parent and take the union of the item's paths that
+// differ. Returns (sha, subject, covered) for the newest merge with a
+// non-empty union. `is_gate` skips commits the Worklist made itself.
+fn landed_by_merge_in(
+    root: &Path,
+    since_s: i64,
+    id: &str,
+    paths: &[String],
+    is_gate: &dyn Fn(&str) -> bool,
+) -> Option<(String, String, usize)> {
+    if id.is_empty() || paths.is_empty() {
+        return None;
+    }
+    let git = |args: &[&str]| -> Option<String> {
+        let out = hidden_command("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let since = format!("--since=@{}", since_s);
+    let grep = format!("--grep={}", id);
+    let listing = git(&[
+        "log",
+        "--merges",
+        since.as_str(),
+        "--fixed-strings",
+        grep.as_str(),
+        "--format=%H",
+    ])?;
+    for sha in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if is_gate(sha) {
+            continue;
+        }
+        let Some(parents_line) = git(&["rev-list", "--parents", "-n", "1", sha]) else {
+            continue;
+        };
+        let parents: Vec<&str> = parents_line.split_whitespace().skip(1).collect();
+        let mut touched: Vec<String> = Vec::new();
+        for parent in parents {
+            let mut args = vec!["diff", "--name-only", parent, sha, "--"];
+            args.extend(paths.iter().map(|p| p.as_str()));
+            if let Some(out) = git(&args) {
+                touched.extend(
+                    out.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty()),
+                );
+            }
+        }
+        if touched.is_empty() {
+            continue;
+        }
+        let covered = landed_paths_covered(paths, &touched);
+        let subject = git(&["log", "-1", "--format=%s", sha])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        return Some((sha.to_string(), subject, covered));
+    }
+    None
 }
 
 // The landed check proper: `paths` clean against HEAD, and a commit since
@@ -99979,7 +100097,37 @@ fn worklist_item_landed_since<R: tauri::Runtime>(
                 .filter(|l| !l.is_empty()),
         );
     }
-    let (sha, subject) = newest?;
+    let Some((sha, subject)) = newest else {
+        // issue-497: no ordinary commit qualified. A merge that names the item
+        // and changed its files against either parent counts as landing it.
+        // The interval no-work veto is deliberately NOT applied here: merge
+        // resolution is often done by `git merge` before the claim's capture
+        // tree is taken, so the intervals can see no change even though the
+        // work landed. The id in the message is the positive evidence.
+        let id = item.get("id").and_then(|v| v.as_str())?;
+        let root = project_root(Some(app))?;
+        let (sha, subject, covered) =
+            landed_by_merge_in(&root, since_ms / 1000, id, paths, &|s: &str| {
+                is_gate_sha(app, s)
+            })?;
+        append_bram_trace_line(
+            app,
+            "worklist",
+            &format!(
+                "op=landed-by-merge id={} sha={} covered={}/{}",
+                id,
+                sha,
+                covered,
+                paths.len()
+            ),
+        );
+        return Some(LandedInfo {
+            sha,
+            subject,
+            covered,
+            planned: paths.len(),
+        });
+    };
     // landed-detector-needs-item-work: a commit touching the item's files is
     // not evidence that the item did the work. Without this, a begun item
     // that never changed anything (issue-406-chat-commit-everything-ready,
@@ -99992,13 +100140,7 @@ fn worklist_item_landed_since<R: tauri::Runtime>(
     if item_interval_changed_paths(app, id, paths) == Some(false) {
         return None;
     }
-    let covered = paths
-        .iter()
-        .filter(|p| {
-            let dir = format!("{}/", p.trim_end_matches('/'));
-            touched.iter().any(|t| t == *p || t.starts_with(&dir))
-        })
-        .count();
+    let covered = landed_paths_covered(paths, &touched);
     Some(LandedInfo {
         sha,
         subject,
@@ -102058,9 +102200,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // issue-425-gate-routes-by-membership: entangled iff membership credits
     // lines on a requested path to a begun item outside the request. Routing
     // stays request-wide: one entangled path interval-stages every file.
+    let mut entangling_owners: Vec<String> = Vec::new();
     for (path, owner) in
         membership_entangling_owners(&partition, &requested_files, &ids, &begun_outside)
     {
+        entangling_owners.push(owner.to_string());
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
@@ -102111,24 +102255,56 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 committed_paths = cp;
             }
             Err(e) if e == "no-interval" => {
+                // issue-497: name the row in the way, and say when it has
+                // already landed (the fix is then to clear it).
+                entangling_owners.sort();
+                entangling_owners.dedup();
+                let mut landed_owners: Vec<(String, String)> = Vec::new();
+                for owner in &entangling_owners {
+                    let Some(owner_item) = items
+                        .iter()
+                        .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(owner.as_str()))
+                    else {
+                        continue;
+                    };
+                    if let Some(info) = worklist_item_landed(
+                        app,
+                        owner_item,
+                        &worklist_item_declared_paths(owner_item),
+                        None,
+                    ) {
+                        landed_owners.push((owner.clone(), info.sha.chars().take(7).collect()));
+                    }
+                }
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         app,
                         "worklist-commit",
-                        &format!("op=refuse-no-interval ids={}", ids.join(",")),
+                        &format!(
+                            "op=refuse-no-interval ids={} owners={} landed={}",
+                            ids.join(","),
+                            entangling_owners.join(","),
+                            landed_owners
+                                .iter()
+                                .map(|(o, s)| format!("{}@{}", o, s))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
                     );
                 }
-                release_claim_on_commit_refusal(
-                    app,
-                    &ids,
-                    "its changes can't be separated from another item's; commit them together",
-                );
+                let reason = if entangling_owners.is_empty() {
+                    "its changes can't be separated from another item's; commit them together"
+                        .to_string()
+                } else {
+                    format!(
+                        "its changes can't be separated from {}'s; commit them together",
+                        entangling_owners.join(", ")
+                    )
+                };
+                release_claim_on_commit_refusal(app, &ids, &reason);
                 return worklist_json_error(
                     409,
-                    "commit refused: this item's changes are entirely shared with another begun \
-                     item and it has no claim interval to stage from (work predating the capture \
-                     phase). Commit them together, or separate the hunks by hand."
-                        .to_string(),
+                    no_interval_refusal_message(&ids, &entangling_owners, &landed_owners),
                 );
             }
             Err(e) => {
@@ -120949,5 +121125,136 @@ mod stage_manager_tests {
             None
         );
         assert_eq!(resolved_open_app(&cli, &cfg_open(None)), None);
+    }
+}
+
+#[cfg(test)]
+mod landed_by_merge_tests {
+    use super::*;
+
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    // main: base. feature: edits a, b, c. main meanwhile edits a and b.
+    // Merge main into feature keeping feature's content (`-s ours`), so the
+    // merge equals its FIRST parent on those paths (the #497 shape).
+    fn repo_with_merge(message: &str, touch_paths: bool) -> (PathBuf, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("bram-497-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q", "-b", "main"]);
+        git_in(&dir, &["config", "user.email", "t@example.com"]);
+        git_in(&dir, &["config", "user.name", "t"]);
+        git_in(&dir, &["config", "commit.gpgsign", "false"]);
+        for f in ["a.txt", "b.txt", "c.txt", "other.txt"] {
+            write(&dir, f, "base\n");
+        }
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "base"]);
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        if touch_paths {
+            for f in ["a.txt", "b.txt", "c.txt"] {
+                write(&dir, f, "feature\n");
+            }
+        }
+        write(&dir, "other.txt", "feature\n");
+        git_in(&dir, &["commit", "-q", "-am", "branch work"]);
+        git_in(&dir, &["checkout", "-q", "main"]);
+        if touch_paths {
+            for f in ["a.txt", "b.txt"] {
+                write(&dir, f, "main\n");
+            }
+        }
+        write(&dir, "main-only.txt", "m\n");
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "main work"]);
+        git_in(&dir, &["checkout", "-q", "feature"]);
+        git_in(
+            &dir,
+            &[
+                "merge", "-q", "--no-ff", "-s", "ours", "main", "-m", message,
+            ],
+        );
+        (
+            dir,
+            vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "c.txt".to_string(),
+            ],
+        )
+    }
+
+    #[test]
+    fn merge_naming_the_item_lands_it_though_equal_to_first_parent() {
+        let (dir, paths) = repo_with_merge("Merge main into feature\n\nItem: my-item", true);
+        // The ordinary pathspec query sees no merge (history simplification).
+        let mut args = vec!["log", "--merges", "--format=%H", "--"];
+        args.extend(paths.iter().map(|p| p.as_str()));
+        assert!(git_in(&dir, &args).trim().is_empty());
+        let got =
+            landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| false).expect("landed by merge");
+        // Differs from the second parent (main) on a, b (main edited them
+        // differently) and c (only feature edited it): all three.
+        assert_eq!(got.2, 3);
+        assert!(got.1.starts_with("Merge main into feature"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_without_the_id_does_not_land_it() {
+        let (dir, paths) = repo_with_merge("Merge main into feature", true);
+        assert!(landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| false).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_naming_the_id_but_changing_no_item_path_does_not_land_it() {
+        let (dir, paths) = repo_with_merge("Merge main into feature\n\nItem: my-item", false);
+        assert!(landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| false).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gate_merge_is_skipped() {
+        let (dir, paths) = repo_with_merge("Merge\n\nItem: my-item", true);
+        assert!(landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| true).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_interval_message_names_a_landed_owner() {
+        let req = vec!["req-item".to_string()];
+        let owners = vec!["old-item".to_string()];
+        let landed = vec![("old-item".to_string(), "ffce520".to_string())];
+        let m = no_interval_refusal_message(&req, &owners, &landed);
+        assert!(m.contains("old-item looks already committed (ffce520)"));
+        assert!(m.contains("clear it from the Worklist"));
+    }
+
+    #[test]
+    fn no_interval_message_keeps_old_text_and_adds_owners() {
+        let req = vec!["req-item".to_string()];
+        let owners = vec!["a".to_string(), "b".to_string()];
+        let m = no_interval_refusal_message(&req, &owners, &[]);
+        assert!(m.starts_with("commit refused: this item's changes are entirely shared"));
+        assert!(m.ends_with("Also changing these files: a, b."));
+        let m = no_interval_refusal_message(&req, &[], &[]);
+        assert!(!m.contains("Also changing"));
     }
 }

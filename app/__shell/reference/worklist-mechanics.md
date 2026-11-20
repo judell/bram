@@ -949,7 +949,9 @@ started** (its work was done in a "just do it" turn) counts from when the row
 first appeared on the board instead, and only if the landing commit's message
 **names the item id**. Never-started rows such as proposals and reminders
 often list busy files, so without the id an unrelated commit could look like
-their landing. It lists any others as refused. Rows it refuses still need the user's Drop. Cleared rows are
+their landing. A merge commit counts as landing a started row when its message names
+the item id and it changed at least one of the item's files compared with
+either parent. It lists any others as refused. Rows it refuses still need the user's Drop. Cleared rows are
 recorded in history under *Items cleared*, linked to the landing commit.
 
 **When you commit an item's work yourself outside the gate** (a "just do

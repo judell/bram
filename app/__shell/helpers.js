@@ -12971,14 +12971,18 @@ function __bramShownRowIdx(list, turnIdx) {
   }
   return -1;
 }
-function __bramShownFinish(p, state, latencyMs) {
+function __bramShownFinish(p, state, latencyMs, why) {
   if (__bramShownPending !== p) return;
   __bramShownPending = null;
   try { clearTimeout(p.timer); } catch (e) { /* ignore */ }
   try {
-    window.__bramIframeTrace("transcript-shown", {
+    var line = {
       state: state, turns: p.turns, latencyMs: latencyMs, agentId: p.agentId,
-    });
+    };
+    if (why) line.why = why;
+    if (typeof p.hiddenAtBroadcast === "boolean") line.hiddenAtBroadcast = p.hiddenAtBroadcast;
+    if (p.route !== undefined) line.route = p.route;
+    window.__bramIframeTrace("transcript-shown", line);
   } catch (e2) { /* ignore */ }
 }
 function __bramShownTimeout(p) {
@@ -12986,6 +12990,18 @@ function __bramShownTimeout(p) {
   // Unmounted meanwhile: nothing was owed to a Transcript that left.
   if (!window.__bramTranscriptMounted) {
     __bramShownPending = null;
+    return;
+  }
+  if (typeof document !== "undefined" && document.hidden === true) {
+    __bramShownFinish(p, "hidden", -1, "window");
+    return;
+  }
+  // Transcript.xmlui's List carries testId="transcript-list" (rendered as
+  // data-testid); absent from the DOM or zero-height means another tab.
+  var listEl = typeof document !== "undefined" &&
+    document.querySelector('[data-testid="transcript-list"]');
+  if (!listEl || listEl.getBoundingClientRect().height <= 0) {
+    __bramShownFinish(p, "hidden", -1, "tab");
     return;
   }
   var idx = __bramShownRowIdx(window.__bramLastTranscriptEvents, p.turnIdx);
@@ -13020,7 +13036,9 @@ function __bramShownNote(payload, reason, t0) {
   if (p) {
     try { clearTimeout(p.timer); } catch (e) { /* ignore */ }
   }
-  p = { turnIdx: n - 1, turns: n, agentId: agent, t0: t0, seenMs: -1, timer: null };
+  p = { turnIdx: n - 1, turns: n, agentId: agent, t0: t0, seenMs: -1, timer: null,
+    hiddenAtBroadcast: typeof document !== "undefined" && document.hidden === true,
+    route: typeof location !== "undefined" ? String(location.hash || "") : "" };
   __bramShownPending = p;
   p.timer = setTimeout(function () { __bramShownTimeout(p); }, 2000);
 }

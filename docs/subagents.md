@@ -86,6 +86,19 @@ false completion. Keep that rule for the new providers:
   an empty `agent_type` (see the
   [specimen index](agent-specimens/README.md)), so don't read it as "a
   subagent ran".
+- **Claude's foreground shape has no notice** (#505). An Agent call answered
+  inline (`"requestShape":"foreground"` in the `.meta.json` sidecar; the
+  built-in `web-fetch` type runs this way even when asked for background)
+  writes no `<task-notification>` to the parent, and the three seen so far
+  reached the host with no `SubagentStart` or `SubagentStop` either, so neither
+  completion rule above can ever fire and the agent read `waiting` for life.
+  For that shape only, the sidecar's `"finished":true` counts
+  (`st_sidecar_finished`). It is not trusted for the background shape: a
+  background agent that stops to wait on its own background work (issue 244)
+  already has `"finished":true` in its sidecar while it waits (observed
+  2026-11-20 23:05 on Claude Code 2.1.330, agent `a1b736f62e6664483`, five
+  seconds after the interim notice and three minutes before its resume), so
+  for that shape the flag means "stopped", not "done".
 
 ## Failure classes to design against
 

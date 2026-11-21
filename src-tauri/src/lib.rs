@@ -52506,6 +52506,44 @@ fn st_read_subagent_meta(subagents_dir: &Path, agent_id: &str) -> Option<serde_j
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
 }
 
+// The sidecar, typed (issue-505). Claude Code writes more fields than
+// these (isBuiltIn, spawnDepth, model, pickedEffortModel, …); the ones the
+// roster reads are here, every one optional, since sidecars from builds
+// before 2.1.3xx carry no `requestShape` or `finished` at all.
+#[derive(Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct SubagentMeta {
+    agent_type: String,
+    description: String,
+    tool_use_id: String,
+    // "foreground" | "background": how the Agent tool call was answered.
+    request_shape: String,
+    finished: bool,
+}
+
+fn st_read_subagent_meta_typed(subagents_dir: &Path, agent_id: &str) -> SubagentMeta {
+    let path = subagents_dir.join(format!("agent-{}.meta.json", agent_id));
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<SubagentMeta>(&s).ok())
+        .unwrap_or_default()
+}
+
+// issue-505: a foreground-shaped Agent call returns its result inline, so
+// the parent writes no <task-notification> for it and (observed on three
+// web-fetch agents across two projects) the host records no SubagentStart
+// or SubagentStop either. The sidecar's `finished` flag is then the only
+// completion record, and nothing it could contradict exists: a foreground
+// agent has no interim "waiting on its own background work" state the
+// parent will report later. For a background-shaped agent the flag is NOT
+// trusted: an agent that stops to wait on its own background work
+// (issue-244) already carries finished:true while it waits (observed
+// 2026-11-20, CC 2.1.330, five seconds after the interim notice), so there
+// the flag means "stopped", not "done".
+fn st_sidecar_finished(request_shape: &str, finished: bool) -> bool {
+    request_shape == "foreground" && finished
+}
+
 // Tail text of a JSONL file, reading at most `max_bytes` — the roster
 // polls every subagent file, so whole-file reads are avoided. The first
 // line of the window may be a mid-record cut; callers skip parse
@@ -52889,8 +52927,50 @@ mod subagent_stop_rule_tests {
 mod subagent_state_tests {
     use super::{
         parse_iso_to_epoch_ms, st_parent_agent_task_finished, st_parent_task_finished_after,
-        st_roster_parent_finished, st_subagent_state_str, SUBAGENT_RECENT_ACTIVITY_MS,
+        st_roster_parent_finished, st_sidecar_finished, st_subagent_state_str, SubagentMeta,
+        SUBAGENT_RECENT_ACTIVITY_MS,
     };
+
+    // issue-505: the sidecar's flag counts only for the foreground shape.
+    #[test]
+    fn sidecar_finished_counts_only_for_foreground_shape() {
+        assert!(st_sidecar_finished("foreground", true));
+        assert!(!st_sidecar_finished("foreground", false));
+        assert!(!st_sidecar_finished("background", true));
+        assert!(!st_sidecar_finished("", true)); // no requestShape key
+    }
+
+    #[test]
+    fn sidecar_finished_foreground_but_bound_is_not_finished() {
+        let sidecar = st_sidecar_finished("foreground", true);
+        assert!(!st_roster_parent_finished(true, sidecar));
+        assert!(st_roster_parent_finished(false, sidecar));
+    }
+
+    // The exact on-disk shape of a 2.1.330 sidecar (bram-studio session
+    // d471da9e, agent ad919cc6bf19f33aa), fields the roster ignores included.
+    #[test]
+    fn sidecar_meta_parses_real_foreground_shape() {
+        let raw = r#"{"agentType":"web-fetch","isBuiltIn":true,"description":"Read Hypothesis anchoring code","toolUseId":"toolu_01ANhvXiFbBeovj5PrSRpjET","spawnDepth":1,"requestShape":"foreground","requestNonInteractive":false,"model":"claude-haiku-5-5","pickedEffortModel":"claude-fable-5-1","finished":true}"#;
+        let m: SubagentMeta = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.agent_type, "web-fetch");
+        assert_eq!(m.description, "Read Hypothesis anchoring code");
+        assert_eq!(m.tool_use_id, "toolu_01ANhvXiFbBeovj5PrSRpjET");
+        assert_eq!(m.request_shape, "foreground");
+        assert!(m.finished);
+        assert!(st_sidecar_finished(&m.request_shape, m.finished));
+    }
+
+    // A sidecar from before the flag existed: every missing field defaults,
+    // and the agent falls through to the notice/recency rules unchanged.
+    #[test]
+    fn sidecar_meta_without_finished_key_defaults() {
+        let raw = r#"{"agentType":"general-purpose","description":"x","toolUseId":"toolu_y"}"#;
+        let m: SubagentMeta = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.request_shape, "");
+        assert!(!m.finished);
+        assert!(!st_sidecar_finished(&m.request_shape, m.finished));
+    }
 
     // Notice record in the real two-shape form, with the record timestamp.
     fn stamped(agent_id: &str, iso: &str) -> String {
@@ -53468,15 +53548,18 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         };
         let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
         let started_at_ms = md.created().map(to_ms).unwrap_or(updated_at_ms);
-        let meta = st_read_subagent_meta(&sf.dir, &sf.agent_id).unwrap_or(serde_json::Value::Null);
+        let meta = st_read_subagent_meta_typed(&sf.dir, &sf.agent_id);
         let start_rec = starts.get(&sf.agent_id);
+        // issue-505: the parent's notice, or (foreground shape only) the
+        // sidecar's own flag — see st_sidecar_finished. A live binding
+        // still vetoes either.
         let parent_finished = st_roster_parent_finished(
             bindings.bindings.contains_key(&sf.agent_id),
             st_parent_task_finished_after(
                 &session_text,
                 &sf.agent_id,
                 start_rec.map(|r| r.last_start_ms),
-            ),
+            ) || st_sidecar_finished(&meta.request_shape, meta.finished),
         );
         let state = st_subagent_state_with_stop(
             parent_finished,
@@ -53488,9 +53571,9 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         );
         agents.push(serde_json::json!({
             "agentId": sf.agent_id,
-            "agentType": meta.get("agentType").and_then(|v| v.as_str()).unwrap_or(""),
-            "description": meta.get("description").and_then(|v| v.as_str()).unwrap_or(""),
-            "toolUseId": meta.get("toolUseId").and_then(|v| v.as_str()).unwrap_or(""),
+            "agentType": meta.agent_type,
+            "description": meta.description,
+            "toolUseId": meta.tool_use_id,
             // Workflow membership (the wf_… run dir), for pane grouping.
             "workflowId": sf.workflow_id.as_deref().unwrap_or(""),
             "model": st_subagent_model(&sf.jsonl_path),

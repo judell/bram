@@ -266,7 +266,7 @@
               <Link
                 when="{$item.bramStateCommit &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase}"
                 noIndicator
-                testId="row-control-cited-commit"
+                automationId="row-control-cited-commit"
                 tooltip="{$item.bramStateDetail}"
                 onClick="openExternal(repoOrigin.value.htmlBase + '/commit/' + $item.bramStateCommit)">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
@@ -291,7 +291,7 @@
               <Link
                 when="{!$item.bramState &amp;&amp; $item.state === 'OPEN'}"
                 noIndicator
-                testId="row-control-new-item"
+                automationId="row-control-new-item"
                 tooltip="Start a worklist item for this issue"
                 onClick="navigate('/worklist2', { queryParams: { newIssue: $item.number } })">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"

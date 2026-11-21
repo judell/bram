@@ -90,7 +90,7 @@
     <!-- misaddressed-feedback-resends-as-chat: one click unticks the item,
          resends the message as chat, and notes the record. -->
     <HStack when="{window.__bramMisaddressedLabel(misaddressed.value)}"
-      testId="composer-misaddressed" width="100%" gap="$space-2"
+      automationId="composer-misaddressed" width="100%" gap="$space-2"
       verticalAlignment="center" paddingLeft="3rem">
       <Text fontSize="$fontSize-sm" color="$textColor-secondary"
         value="{window.__bramMisaddressedLabel(misaddressed.value)}" />

@@ -99,7 +99,7 @@
     </HStack>
     <Items data="{window.__bramTaskVisibleRows(cands.value, showAll, expanded)}">
       <VStack gap="$space-1">
-        <HStack testId="task-row" gap="$space-3" verticalAlignment="center"
+        <HStack automationId="task-row" gap="$space-3" verticalAlignment="center"
           paddingHorizontal="$space-1">
           <!-- The toggle is on the cells, not the row, so a click on the Save
                as task button does not also expand the row. -->
@@ -203,7 +203,7 @@
       <Text color="$textColor-secondary">Calls the agents make to Bram itself. These aren't saved as tasks: wrapped in make, a call would hide its route from Bram's guard.</Text>
       <Items data="{window.__bramTaskRouteRows(cands.value, expanded)}">
         <VStack gap="$space-1">
-          <HStack testId="task-route-row" gap="$space-3" verticalAlignment="center"
+          <HStack automationId="task-route-row" gap="$space-3" verticalAlignment="center"
             paddingHorizontal="$space-1">
             <HStack width="*" gap="$space-2" verticalAlignment="center" cursor="pointer"
               onClick="expanded = window.__bramToggleInArray(expanded, $item.key)">

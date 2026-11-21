@@ -75,7 +75,7 @@
     <VStack when="{!submitted &amp;&amp; window.__bramFilesTreeData(repoTree.value).length &gt; 0}" height="70vh">
       <Tree
         id="filesTree"
-        testId="files-tree"
+        automationId="files-tree"
         height="100%"
         data="{window.__bramFilesTreeData(repoTree.value)}"
         dataFormat="flat"

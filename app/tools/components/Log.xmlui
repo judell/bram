@@ -179,7 +179,7 @@
              Stack click:
              https://www.xmlui.org/docs/reference/components/Stack#click -->
         <VStack when="{!$item.queueId}" width="*" gap="$space-0_5">
-          <HStack testId="log-row" gap="$space-2" verticalAlignment="start" cursor="pointer"
+          <HStack automationId="log-row" gap="$space-2" verticalAlignment="start" cursor="pointer"
             onClick="expanded = window.__bramLogRowToggle(null, expanded, $item.id)">
             <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
               textColor-Link--active="$textColor-secondary">

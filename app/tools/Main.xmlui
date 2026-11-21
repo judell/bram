@@ -553,14 +553,14 @@
            https://www.xmlui.org/docs/howto/know-when-to-use-fit-content
            https://www.xmlui.org/docs/howto/run-a-one-time-action-on-page-load -->
       <Stack
-        testId="app-header-row"
+        automationId="app-header-row"
         orientation="{headerRows.value > 0 ? 'vertical' : 'horizontal'}"
         gap="$space-0_5"
         verticalAlignment="center"
         width="100%"
         onMount="window.__bramWatchHeaderRows()">
         <Stack
-          testId="app-header-left"
+          automationId="app-header-left"
           orientation="{headerRows.value > 1 ? 'vertical' : 'horizontal'}"
           gap="$space-0_5"
           verticalAlignment="center"
@@ -648,7 +648,7 @@
              https://www.xmlui.org/docs/reference/components/Stack#gap
              https://www.xmlui.org/docs/howto/override-a-components-theme-vars -->
         <Theme paddingHorizontal-Button-sm="$space-1">
-        <HStack testId="app-header-right" gap="$space-3" verticalAlignment="center" width="fit-content" canShrink="false" marginLeft="auto">
+        <HStack automationId="app-header-right" gap="$space-3" verticalAlignment="center" width="fit-content" canShrink="false" marginLeft="auto">
         <Theme fontSize="$fontSize-sm">
           <ToneSwitch
             tooltip="Switch between light and dark tone" />
@@ -1204,7 +1204,7 @@
   <!-- testId: #427 measures the Transcript's List down to this footer's top
        (helpers.js bramSubscribeTranscriptSplitHeight); the Worklist pane
        below is part of that height. -->
-  <Footer testId="app-footer">
+  <Footer automationId="app-footer">
     <Theme fontSize-TextArea="$fontSize-lg" fontSize-placeholder-TextArea="$fontSize-lg">
     <VStack width="100%" gap="0">
       <!-- worklist-bar-on-every-page: the bar, and the pane it opens, on the
@@ -1242,7 +1242,7 @@
              and tab switches. Lifecycle events:
              https://www.xmlui.org/docs/howto/clean-up-when-a-panel-closes -->
         <VStack when="{worklistOpen}" maxHeight="40vh" overflowY="auto" paddingTop="$space-2"
-          testId="worklist-pane"
+          automationId="worklist-pane"
           onMount="window.__bramWorklistPaneMounted()"
           onUnmount="window.__bramWorklistPaneUnmounted()">
           <Worklist />

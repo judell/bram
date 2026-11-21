@@ -89,6 +89,7 @@ Each is a hard rule, not a preference:
 - **Bare names inside arrow bodies silently abort analysis.** In an arrow body passed to `subscribeTauriEvent` / `onDidChange` / `onLoaded`, a bare `foo` with no xs declaration kills the registration and every statement after it. Call qualified: `window.foo()`.
 - **xs `function foo` hoists over `window.foo`.** A same-named xs declaration clobbers the helper (a delegator then calls itself). Name the helper `window.__bramFoo` or remove the xs declaration.
 - **helpers.js top-level *calls* must follow their definitions.** A load-time throw aborts everything after it; definitions referencing later names are fine.
+- **Match pane elements by `automationId` or `id`, never `testId`.** XMLUI renders `data-testid` only while `xsVerbose` is on; turning it off (`e7df16d3`) silently broke every `[data-testid=…]` lookup, ⌘Enter among them (#506). `automationId` renders as `data-automation-id` and `id` as `data-xmlui-id`, whatever the config.
 - **`ExpandableItem` state is uncontrolled and positional.** In an `Items` loop whose membership changes, use controlled expansion keyed by item id.
 
 ### Post-edit verification ritual

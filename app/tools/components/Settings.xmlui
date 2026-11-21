@@ -82,7 +82,7 @@
         </HStack>
         <Form
           id="agentSettingsForm"
-          testId="settings-agent-form"
+          automationId="settings-agent-form"
           data="{window.__bramSettingsFormData(settingsValue, 'shell')}"
           submitUrl="/__settings"
           submitMethod="post"
@@ -415,7 +415,7 @@
         <!-- The header's "Enforcement paused" link lands here via
              ?highlight=worklistEnforcement (settings-highlight-deeplink). -->
         <VStack
-          testId="setting-worklistEnforcement"
+          automationId="setting-worklistEnforcement"
           padding="$space-1"
           borderRadius="$borderRadius"
           backgroundColor="{highlightKey === 'worklistEnforcement' ? '$color-primary-100' : 'transparent'}">
@@ -490,7 +490,7 @@
           initialValue="{window.__bramBeepEnabled ? window.__bramBeepEnabled() : false}"
           onDidChange="(v) => window.__bramSetBeepEnabled(v)" />
         <VStack
-          testId="setting-tipsDismissInterval"
+          automationId="setting-tipsDismissInterval"
           padding="$space-1"
           borderRadius="$borderRadius"
           backgroundColor="{highlightKey === 'tipsDismissInterval' ? '$color-primary-100' : 'transparent'}">
@@ -541,7 +541,7 @@
             onClick="infoTitle = 'AI'; infoBody = window.settingsInfoBodies.ai; settingInfoDialog.open()" />
         </HStack>
         <VStack
-          testId="setting-describeCommands"
+          automationId="setting-describeCommands"
           padding="$space-1"
           borderRadius="$borderRadius"
           backgroundColor="{highlightKey === 'describeCommands' ? '$color-primary-100' : 'transparent'}">
@@ -583,7 +583,7 @@
           onDidChange="(v) => saveSettings.execute({ traces: { inspectorTap: v } })" />
         <Form
           id="archiveSettingsForm"
-          testId="settings-archive-form"
+          automationId="settings-archive-form"
           width="12rem"
           data="{window.__bramSettingsFormData(settingsValue, 'traces')}"
           submitUrl="/__settings"
@@ -649,7 +649,7 @@
         </HStack>
         <Form
           id="searchSettingsForm"
-          testId="settings-search-form"
+          automationId="settings-search-form"
           width="12rem"
           data="{window.__bramSettingsFormData(settingsValue, 'search')}"
           submitUrl="/__settings"

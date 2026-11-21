@@ -2580,7 +2580,7 @@ function __bramDraftTrace(subkind, fields) {
 function __bramDraftMarkUserEdit(e) {
   try {
     var t = e && e.target;
-    if (t && t.tagName === "TEXTAREA" && t.closest && t.closest('[data-testid="app-footer"]')) {
+    if (t && t.tagName === "TEXTAREA" && window.__bramComposerOwnsTarget(t)) {
       __bramDraftTyped = true;
     }
   } catch (x) {}
@@ -3046,15 +3046,59 @@ window.__bramComposerDirectEnterAt = 0;
 window.__bramComposerTakeDirectEnter = function () {
   var at = window.__bramComposerDirectEnterAt || 0;
   window.__bramComposerDirectEnterAt = 0;
-  return at > 0 && (Date.now() - at) < 1000;
+  var ageMs = at > 0 ? Date.now() - at : -1;
+  var fresh = at > 0 && ageMs < 1000;
+  // issue-506: say whether a note existed and how old it was when the
+  // submit looked for it, so a stale note reads differently from none.
+  if (at > 0) {
+    try { window.__bramIframeTrace("composer-direct-enter", { op: fresh ? "taken" : "stale", ageMs: ageMs }); } catch (e) {}
+  }
+  return fresh;
 };
+// issue-506: is this event target the composer's own text box? Matched by
+// the box's XMLUI id (`id="composerBox"` in MessageAgentComposer.xmlui),
+// which XMLUI renders as data-xmlui-id on every visual component that has
+// an id, whatever the config. The old test used the Footer's testId;
+// data-automation-id is rendered only while xsVerbose is on, and e7df16d3
+// (2026-11-18) turned that off, so the test silently stopped matching.
+window.__bramComposerOwnsTarget = function (t) {
+  if (!t || !t.closest) return false;
+  return !!t.closest('[data-xmlui-id="composerBox"]');
+};
+// The data-xmlui-id values from the target up to the root, for the trace.
+function __bramTestIdAncestry(t) {
+  var out = [];
+  try {
+    var n = t;
+    while (n && out.length < 12) {
+      var id = n.getAttribute && n.getAttribute("data-xmlui-id");
+      if (id) out.push(id);
+      n = n.parentNode;
+    }
+  } catch (e) {}
+  return out;
+}
 window.__bramComposerDirectEnterKeydown = function (e) {
   try {
     if (!e || e.key !== "Enter" || e.shiftKey) return;
-    var mod = window.__bramDirectEnterKeyIsMac() ? e.metaKey : e.ctrlKey;
-    if (!mod) return;
+    var mac = window.__bramDirectEnterKeyIsMac();
+    var mod = mac ? e.metaKey : e.ctrlKey;
+    // A plain Enter is the common case and traces nothing. Any modifier
+    // Enter traces why it was or wasn't noted (issue-506).
+    if (!mod && !e.metaKey && !e.ctrlKey) return;
     var t = e.target;
-    if (!t || t.tagName !== "TEXTAREA" || !t.closest || !t.closest('[data-testid="app-footer"]')) return;
+    var tag = t && t.tagName ? String(t.tagName) : "";
+    var owns = window.__bramComposerOwnsTarget(t);
+    var why = !mod ? "no-modifier" : tag !== "TEXTAREA" ? "not-textarea" : !owns ? "not-composer" : "";
+    try {
+      var shadow = !!(t && t.getRootNode && t.getRootNode() !== document);
+      window.__bramIframeTrace("composer-direct-enter", {
+        op: why ? "declined" : "noted", why: why || undefined, tag: tag,
+        ancestry: __bramTestIdAncestry(t), shadow: shadow,
+        mac: mac, meta: !!e.metaKey, ctrl: !!e.ctrlKey,
+      });
+    } catch (e2) {}
+    if (why) return;
     window.__bramComposerDirectEnterAt = Date.now();
   } catch (x) {}
 };
@@ -5527,8 +5571,8 @@ window.__bramRowClickHit = function (e, item, prev) {
   while (t && t.tagName) {
     // XMLUI's Link renders a DIV (observed: dom-click tagName=DIV on the
     // new-item link), so tag sniffing alone misses — in-row controls carry
-    // an explicit testId marker (data-testid="row-control-…") instead.
-    var tid = (t.getAttribute && t.getAttribute("data-testid")) || "";
+    // an explicit automationId marker (data-automation-id="row-control-…") instead.
+    var tid = (t.getAttribute && t.getAttribute("data-automation-id")) || "";
     if (t.tagName === "A" || t.tagName === "BUTTON" || tid.indexOf("row-control") === 0) {
       return prev;
     }
@@ -8383,12 +8427,12 @@ window.__bramConsumeExpandParam = function (keys, id) {
   window.__bramScrollWorklistRowIntoView(id);
   return window.__bramToggleExpansionKey(keys, id, true);
 };
-// rAF retry against the row's data-testid, the settings-highlight scroller's
+// rAF retry against the row's data-automation-id, the settings-highlight scroller's
 // shape — the row may not be mounted on the first frames after navigation.
 window.__bramScrollWorklistRowIntoView = function (id) {
   var tries = 0;
   var attempt = function () {
-    var el = document.querySelector('[data-testid="worklist-row-' + id + '"]');
+    var el = document.querySelector('[data-automation-id="worklist-row-' + id + '"]');
     if (el && el.scrollIntoView) {
       el.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
@@ -12996,10 +13040,10 @@ function __bramShownTimeout(p) {
     __bramShownFinish(p, "hidden", -1, "window");
     return;
   }
-  // Transcript.xmlui's List carries testId="transcript-list" (rendered as
-  // data-testid); absent from the DOM or zero-height means another tab.
+  // Transcript.xmlui's List carries automationId="transcript-list" (rendered as
+  // data-automation-id whatever the config; testId renders only with xsVerbose); absent from the DOM or zero-height means another tab.
   var listEl = typeof document !== "undefined" &&
-    document.querySelector('[data-testid="transcript-list"]');
+    document.querySelector('[data-automation-id="transcript-list"]');
   if (!listEl || listEl.getBoundingClientRect().height <= 0) {
     __bramShownFinish(p, "hidden", -1, "tab");
     return;
@@ -13189,7 +13233,7 @@ function __bramWidestOverflow(page) {
   return deepest.slice(0, 5).map(function (el) {
     var r = el.getBoundingClientRect();
     var cls = (typeof el.className === "string" ? el.className : "").split(" ")[0];
-    var tid = el.getAttribute("data-testid");
+    var tid = el.getAttribute("data-automation-id");
     var txt = (el.textContent || "").trim().slice(0, 40);
     return el.tagName.toLowerCase() + (cls ? "." + cls : "") + (tid ? " [" + tid + "]" : "") +
       " " + Math.round(r.width) + "w right=" + Math.round(r.right) + " limit=" + Math.round(limit) +
@@ -13233,8 +13277,8 @@ window.bramSubscribeTranscriptSplitHeight = (function () {
   function measure() {
     var sp = null, ft = null;
     try {
-      sp = document.querySelector('[data-testid="transcript-split"]');
-      ft = document.querySelector('[data-testid="app-footer"]');
+      sp = document.querySelector('[data-automation-id="transcript-split"]');
+      ft = document.querySelector('[data-automation-id="app-footer"]');
     } catch (e) { return; }
     if (!sp) return;
     var page = sp.parentElement;
@@ -13329,9 +13373,9 @@ window.bramSubscribeTranscriptSplitHeight = (function () {
     };
   };
   window.__bramWatchHeaderRows = function () {
-    var row = document.querySelector('[data-testid="app-header-row"]');
-    var left = document.querySelector('[data-testid="app-header-left"]');
-    var right = document.querySelector('[data-testid="app-header-right"]');
+    var row = document.querySelector('[data-automation-id="app-header-row"]');
+    var left = document.querySelector('[data-automation-id="app-header-left"]');
+    var right = document.querySelector('[data-automation-id="app-header-right"]');
     if (!row || !left || !right || row.__bramHeaderRowsWatched) return;
     row.__bramHeaderRowsWatched = true;
     var root = document.documentElement;
@@ -13447,7 +13491,7 @@ var __bramWorklistPaneState = null;
 window.__bramWorklistPaneMounted = function () {
   var KEY = "bram.transcriptWorklistPaneScroll";
   var el = null;
-  try { el = document.querySelector('[data-testid="worklist-pane"]'); } catch (e) { el = null; }
+  try { el = document.querySelector('[data-automation-id="worklist-pane"]'); } catch (e) { el = null; }
   if (!el) return;
   if (__bramWorklistPaneState) window.__bramWorklistPaneUnmounted();
   var saved = Number(__bramReadSS(KEY, "0")) || 0;
@@ -15065,7 +15109,7 @@ function __bramIsScrollable(el) {
 
 // The transcript List's virtua scroller.
 //
-// SCOPED to [data-testid="transcript-list"], and that scoping is the whole
+// SCOPED to [data-automation-id="transcript-list"], and that scoping is the whole
 // point. The first version walked up from `document.querySelector("[data-index]")`
 // — the first virtualized row ANYWHERE in the document. Search results, the
 // message queue and the transcript all render Lists with [data-index] rows, so
@@ -15079,7 +15123,7 @@ function __bramIsScrollable(el) {
 // than silently falling back to the old document-wide behaviour.
 function __bramTranscriptScrollerInfo() {
   var root = null;
-  try { root = document.querySelector('[data-testid="transcript-list"]'); } catch (e) { root = null; }
+  try { root = document.querySelector('[data-automation-id="transcript-list"]'); } catch (e) { root = null; }
   if (root) {
     if (__bramIsScrollable(root)) return { el: root, how: "scoped-self" };
     try {
@@ -15123,7 +15167,7 @@ function __bramTranscriptScroller() {
 function __bramLastRowProbe(total) {
   var out = { lastRowRendered: false, lastRowGap: -1, lastRowIndex: -1, maxRenderedIndex: -1 };
   try {
-    var root = document.querySelector('[data-testid="transcript-list"]');
+    var root = document.querySelector('[data-automation-id="transcript-list"]');
     var nodes = (root || document).querySelectorAll("[data-index]");
     if (!nodes || !nodes.length) return out;
     var want = (typeof total === "number" && total > 0) ? total - 1 : -1;
@@ -15396,7 +15440,7 @@ window.__bramFollowVerify = function (cause, agentId, total) {
                   + " h" + Math.round(up.clientHeight);
               }
               listBottom = Math.round(sc.getBoundingClientRect().bottom);
-              var ft = document.querySelector('[data-testid="app-footer"]');
+              var ft = document.querySelector('[data-automation-id="app-footer"]');
               if (ft) footerTop = Math.round(ft.getBoundingClientRect().top);
               winH = window.innerHeight || -1;
             } catch (e6) { /* ignore */ }
@@ -18713,7 +18757,7 @@ window.__bramLogFocusAfterExpand = function (focusId) {
 window.__bramLogRowToggle = function (e, expanded, id) {
   var t = e && e.target;
   while (t && t.tagName) {
-    var tid = (t.getAttribute && t.getAttribute("data-testid")) || "";
+    var tid = (t.getAttribute && t.getAttribute("data-automation-id")) || "";
     if (tid === "log-row") break;
     if (t.tagName === "A" || t.tagName === "BUTTON") {
       window.__bramIframeTrace("log-row-toggle", { op: "link", id: String(id), tag: t.tagName });
@@ -21403,7 +21447,7 @@ window.__bramIndexProgressLabel = function (status) {
 };
 
 // settings-highlight-deeplink: scroll the setting anchored as
-// data-testid="setting-<key>" into view. Called from Settings when it opens (or
+// data-automation-id="setting-<key>" into view. Called from Settings when it opens (or
 // is already open and re-targeted) with ?highlight=<key>; the tint itself is
 // reactive markup. Retries across frames until the element is laid out (the
 // settings body renders after settingsConfig loads), then scrolls. Frame-based,
@@ -21412,7 +21456,7 @@ window.__bramHighlightSetting = function (key) {
   if (!key) return;
   var tries = 0;
   var attempt = function () {
-    var el = document.querySelector('[data-testid="setting-' + key + '"]');
+    var el = document.querySelector('[data-automation-id="setting-' + key + '"]');
     if (el && el.scrollIntoView) {
       el.scrollIntoView({ block: 'center', behavior: 'smooth' });
       return;
@@ -22128,7 +22172,12 @@ window.__bramInstallCodeBlockTools();
 // composer-cmd-enter-just-do-it: registered after its definition (top-level
 // calls must follow what they call). Capture phase, so it runs before the
 // TextArea's own keydown submits the Form.
-try { document.addEventListener("keydown", window.__bramComposerDirectEnterKeydown, true); } catch (e) {}
+try {
+  document.addEventListener("keydown", window.__bramComposerDirectEnterKeydown, true);
+  // issue-506: a line at registration, so "the listener never ran" can be
+  // told from "it ran and declined".
+  window.__bramIframeTrace("composer-direct-enter", { op: "listener-registered" });
+} catch (e) {}
 
 // ---- Bram's story (issue-473-readable-launch-log, iteration 2) -------------
 // The Log's narrator. Pure and synchronous: takes the payload of
@@ -22304,7 +22353,7 @@ window.__bramQueueRevealFocus = function (id) {
   if (!id) return;
   var tries = 0;
   var tick = function () {
-    var el = document.querySelector('[data-testid="queue-entry-' + String(id).replace(/"/g, "") + '"]');
+    var el = document.querySelector('[data-automation-id="queue-entry-' + String(id).replace(/"/g, "") + '"]');
     if (el) { el.scrollIntoView({ block: "center" }); return; }
     if (++tries < 20) requestAnimationFrame(tick);
   };

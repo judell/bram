@@ -298,7 +298,7 @@
               <Items data="{$item.itemIds || []}">
                 <Link
                   noIndicator
-                  testId="row-control-worklist-item"
+                  automationId="row-control-worklist-item"
                   tooltip="Open this Worklist item in History"
                   label="{$item}"
                   breakMode="word"

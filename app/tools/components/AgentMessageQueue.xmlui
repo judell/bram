@@ -171,7 +171,7 @@
         gap="$space-2"
         verticalAlignment="start"
         paddingVertical="$space-2"
-        testId="{'queue-entry-' + $item.id}"
+        automationId="{'queue-entry-' + $item.id}"
         borderRadius="$borderRadius"
         backgroundColor="{$item.id === $queryParams.focus ? '$color-primary-50' : 'transparent'}">
         <VStack width="*" gap="$space-0_5">

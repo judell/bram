@@ -283,10 +283,10 @@
          List keeps its measured, bounded height (the Footer's height, pane
          included, is one of the measured terms), and it no longer remounts
          when the pane opens or closes: only its height changes. -->
-    <Stack testId="transcript-split" height="{window.__bramTranscriptSplitHeightCss(splitHeight.value)}" gap="0">
+    <Stack automationId="transcript-split" height="{window.__bramTranscriptSplitHeightCss(splitHeight.value)}" gap="0">
     <List
       id="transcriptList"
-      testId="transcript-list"
+      automationId="transcript-list"
       height="100%"
       data="{(findPlan &amp;&amp; findPlan.rows) || events}"
       idKey="{findPlan ? '__findKey' : 'id'}"

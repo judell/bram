@@ -471,7 +471,7 @@
         gap="$space-1"
         paddingBottom="$space-2"
         backgroundColor="{window.__bramLandedRowTint($item)}"
-        testId="worklist-row-{$item.id}">
+        automationId="worklist-row-{$item.id}">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line
              itself is the toggle. The selection Checkbox sits OUTSIDE the

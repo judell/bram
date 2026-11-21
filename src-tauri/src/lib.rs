@@ -52769,6 +52769,46 @@ fn st_parent_task_finished_after(
     }
 }
 
+// subagent-paused-reads-waiting-at-once: the interim notice is positive
+// evidence of a pause, not just a non-finish. Returns the record timestamp
+// of the latest stamped interim notice naming this agent, ignoring any
+// older than the agent's latest start (a resumed agent's earlier pause).
+// The caller compares it with the agent's own transcript mtime: a notice
+// newer than the agent's last write means it is paused right now; once it
+// resumes, its transcript moves past the notice and recency rules again.
+fn st_parent_interim_pause_after(
+    session_text: &str,
+    agent_id: &str,
+    last_start_ms: Option<i64>,
+) -> Option<i64> {
+    if agent_id.is_empty() {
+        return None;
+    }
+    let marker = format!("<task-id>{}</task-id>", agent_id);
+    let mut latest: Option<i64> = None;
+    for line in session_text.lines() {
+        if !line.contains(marker.as_str())
+            || !line.contains("<task-notification>")
+            || !st_task_notification_is_interim(line)
+        {
+            continue;
+        }
+        let ts = line.rfind("\"timestamp\":\"").and_then(|i| {
+            let rest = &line[i + 13..];
+            rest.find('"')
+                .and_then(|e| parse_iso_to_epoch_ms(&rest[..e]))
+        });
+        let Some(t) = ts else {
+            continue;
+        };
+        if last_start_ms.is_some_and(|s| t < s) {
+            continue;
+        }
+        latest = Some(latest.map_or(t, |l| l.max(t)));
+    }
+    latest
+}
+
 // Recency window for the roster's `running` verdict. A subagent's JSONL
 // mtime advancing within this window means it is actively appending; past
 // it (and with no parent-side completion evidence — see
@@ -52828,6 +52868,149 @@ fn st_subagent_state_with_stop(
         }
     }
     st_subagent_state_str(false, updated_at_ms, now_ms)
+}
+
+// How much later than the agent's last transcript write an interim notice
+// may be stamped and still count as "after" it. The parent writes the
+// notice after the agent stops (14 s after its last write in the 2026-11-20
+// run), and a resume moves the agent's mtime past the notice by many
+// seconds, so a small slack guards only against clock granularity.
+const SUBAGENT_PAUSE_NOTICE_SLACK_MS: i64 = 5_000;
+
+// subagent-paused-reads-waiting-at-once: the stop rule plus the pause rule.
+// A stamped interim notice newer than the agent's last transcript write
+// means the agent is paused on its own background work now, so it reads
+// `waiting` at once rather than after SUBAGENT_RECENT_ACTIVITY_MS of
+// silence. Finished still beats it.
+fn st_subagent_state_resolved(
+    parent_finished: bool,
+    bound: bool,
+    last_start_ms: Option<i64>,
+    last_stop_ms: Option<i64>,
+    paused_at_ms: Option<i64>,
+    updated_at_ms: i64,
+    now_ms: i64,
+) -> &'static str {
+    if parent_finished {
+        return "finished";
+    }
+    if st_subagent_paused_now(paused_at_ms, updated_at_ms) {
+        return "waiting";
+    }
+    st_subagent_state_with_stop(
+        parent_finished,
+        bound,
+        last_start_ms,
+        last_stop_ms,
+        updated_at_ms,
+        now_ms,
+    )
+}
+
+fn st_subagent_paused_now(paused_at_ms: Option<i64>, updated_at_ms: i64) -> bool {
+    paused_at_ms.is_some_and(|p| p + SUBAGENT_PAUSE_NOTICE_SLACK_MS >= updated_at_ms)
+}
+
+// Why a `waiting` row waits, for the chip hover: "background-work" when the
+// parent's interim notice says so, "no-record" when only silence does.
+fn st_subagent_wait_reason(state: &str, paused_now: bool) -> &'static str {
+    match (state, paused_now) {
+        ("waiting", true) => "background-work",
+        ("waiting", false) => "no-record",
+        _ => "",
+    }
+}
+
+#[cfg(test)]
+mod subagent_pause_rule_tests {
+    use super::{
+        st_parent_interim_pause_after, st_subagent_paused_now, st_subagent_state_resolved,
+        st_subagent_wait_reason, SUBAGENT_PAUSE_NOTICE_SLACK_MS,
+    };
+
+    const NOW: i64 = 10_000_000_000;
+
+    // The delivered interim notice as the 2026-11-20 run recorded it.
+    fn interim(agent_id: &str, iso: &str) -> String {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"<task-notification>\\n<task-id>{}</task-id>\\n<tool-use-id>toolu_x</tool-use-id>\\n<status>completed</status>\\n<summary>Agent \\\"Wait on background sleep\\\" is waiting on its own background work</summary>\\n<note>This agent stopped with background work of its own still running. It may resume on its own when that work completes or reports, and the same task-id notifies again if it does; the result below may be interim.</note>\\n</task-notification>\"}},\"timestamp\":\"{}\"}}\n",
+            agent_id, iso
+        )
+    }
+    fn final_notice(agent_id: &str, iso: &str) -> String {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"<task-notification>\\n<task-id>{}</task-id>\\n<status>completed</status>\\n<summary>Agent \\\"x\\\" finished</summary>\\n</task-notification>\"}},\"timestamp\":\"{}\"}}\n",
+            agent_id, iso
+        )
+    }
+
+    #[test]
+    fn latest_interim_notice_is_found_and_final_notices_ignored() {
+        let text = interim("a1", "2026-11-20T23:04:55Z")
+            + &final_notice("a1", "2026-11-20T23:08:00Z")
+            + &interim("a2", "2026-11-20T23:09:00Z");
+        let t = st_parent_interim_pause_after(&text, "a1", None).unwrap();
+        assert_eq!(
+            t,
+            super::parse_iso_to_epoch_ms("2026-11-20T23:04:55Z").unwrap()
+        );
+        assert!(st_parent_interim_pause_after(&text, "a3", None).is_none());
+        assert!(st_parent_interim_pause_after(&text, "", None).is_none());
+    }
+
+    #[test]
+    fn interim_notice_before_latest_start_is_ignored() {
+        let text = interim("a1", "2026-11-20T23:04:55Z");
+        let start = super::parse_iso_to_epoch_ms("2026-11-20T23:06:00Z").unwrap();
+        assert!(st_parent_interim_pause_after(&text, "a1", Some(start)).is_none());
+        assert!(st_parent_interim_pause_after(&text, "a1", Some(start - 600_000)).is_some());
+    }
+
+    #[test]
+    fn paused_now_only_while_notice_is_newer_than_last_write() {
+        // Notice 14 s after the agent's last write: paused.
+        assert!(st_subagent_paused_now(Some(NOW), NOW - 14_000));
+        // Resumed: the agent wrote again 20 s after the notice.
+        assert!(!st_subagent_paused_now(Some(NOW), NOW + 20_000));
+        // Within slack either way.
+        assert!(st_subagent_paused_now(
+            Some(NOW),
+            NOW + SUBAGENT_PAUSE_NOTICE_SLACK_MS
+        ));
+        assert!(!st_subagent_paused_now(None, NOW));
+    }
+
+    #[test]
+    fn paused_agent_reads_waiting_at_once_and_finished_still_wins() {
+        // 10 s idle: recency alone would say running.
+        let s =
+            st_subagent_state_resolved(false, false, None, None, Some(NOW - 1), NOW - 10_000, NOW);
+        assert_eq!(s, "waiting");
+        let s = st_subagent_state_resolved(false, false, None, None, None, NOW - 10_000, NOW);
+        assert_eq!(s, "running");
+        let s =
+            st_subagent_state_resolved(true, false, None, None, Some(NOW - 1), NOW - 10_000, NOW);
+        assert_eq!(s, "finished");
+        // Resumed after the pause: its write is newer than the notice.
+        let s = st_subagent_state_resolved(
+            false,
+            false,
+            None,
+            None,
+            Some(NOW - 60_000),
+            NOW - 1_000,
+            NOW,
+        );
+        assert_eq!(s, "running");
+    }
+
+    #[test]
+    fn wait_reason_names_the_cause() {
+        assert_eq!(st_subagent_wait_reason("waiting", true), "background-work");
+        assert_eq!(st_subagent_wait_reason("waiting", false), "no-record");
+        assert_eq!(st_subagent_wait_reason("running", true), "");
+        assert_eq!(st_subagent_wait_reason("finished", false), "");
+    }
 }
 
 #[cfg(test)]
@@ -53561,14 +53744,24 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
                 start_rec.map(|r| r.last_start_ms),
             ) || st_sidecar_finished(&meta.request_shape, meta.finished),
         );
-        let state = st_subagent_state_with_stop(
+        // subagent-paused-reads-waiting-at-once: the parent's interim
+        // notice, if newer than the agent's last write, says it is paused.
+        let paused_at_ms = st_parent_interim_pause_after(
+            &session_text,
+            &sf.agent_id,
+            start_rec.map(|r| r.last_start_ms),
+        );
+        let state = st_subagent_state_resolved(
             parent_finished,
             bindings.bindings.contains_key(&sf.agent_id),
             start_rec.map(|r| r.last_start_ms),
             start_rec.map(|r| r.last_stop_ms).filter(|&s| s > 0),
+            paused_at_ms,
             updated_at_ms,
             now_ms,
         );
+        let wait_reason =
+            st_subagent_wait_reason(state, st_subagent_paused_now(paused_at_ms, updated_at_ms));
         agents.push(serde_json::json!({
             "agentId": sf.agent_id,
             "agentType": meta.agent_type,
@@ -53583,6 +53776,8 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
             // predate this field's introduction degrade gracefully.
             "state": state,
             "finished": state == "finished",
+            // Why a waiting row waits: "background-work" | "no-record" | "".
+            "waitReason": wait_reason,
             "startedAtMs": started_at_ms,
             "updatedAtMs": updated_at_ms,
             // Resumes the host saw (SubagentStarts beyond the first).

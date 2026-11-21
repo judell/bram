@@ -71,6 +71,14 @@ projection pass. Whether a child gets exported at all is still open.
 - **`running`:** the transcript changed within
   `SUBAGENT_RECENT_ACTIVITY_MS` (2 minutes).
 - **`waiting`:** neither. It's stopped or wedged, and Bram doesn't guess which.
+  One case it does know: a stamped interim notice ("waiting on its own
+  background work") in the parent newer than the agent's last transcript write
+  means it is paused right now, so it reads `waiting` at once instead of after
+  the two-minute window (`st_parent_interim_pause_after`,
+  `st_subagent_state_resolved`), and the row's `waitReason` says
+  `background-work`; silence alone gives `no-record`. The chip hover names
+  the difference. A resume moves the agent's transcript past the notice and
+  recency rules again.
 
 Only explicit evidence sets `finished`. A failed read yields `waiting`, never a
 false completion. Keep that rule for the new providers:

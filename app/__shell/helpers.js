@@ -17648,15 +17648,19 @@ window.__bramMainChipTooltip = function (roster) {
 // Chip / overflow-item tooltip: type, description, and the model the
 // subagent ran on (host-extracted from the transcript head). issue-244: a
 // `waiting` subagent gets an explicit note distinguishing it from a
-// genuine finish — its stream went idle but the parent transcript hasn't
-// recorded the Task's completion, so it may be paused on background work
-// or wedged.
+// genuine finish. subagent-paused-reads-waiting-at-once: the host's
+// `waitReason` says which kind of wait — the parent's interim notice
+// ("background-work": it will resume on its own) or silence alone
+// ("no-record": stopped with no completion recorded). An older host
+// without the field gets the silence wording.
 window.__bramAgentChipTooltip = function (agent) {
   if (!agent) return "";
   var s = (agent.agentType || "agent") + ": " + (agent.description || agent.agentId || "");
   if (agent.model) s += " — " + agent.model;
   if (__bramAgentState(agent) === "waiting") {
-    s += " — Stopped, awaiting background work — not finished.";
+    s += agent.waitReason === "background-work"
+      ? " — Waiting on its own background work; resumes when that finishes."
+      : " — Stopped with no completion recorded — not finished.";
   }
   return s;
 };

@@ -185,6 +185,15 @@ The common thread is not that all bugs had the same fix. The common
 thread is that each fix could now attach to a shared host-side account
 of the turn.
 
+## The same shape for subagents
+
+Subagent state follows this pattern as of `subagent-state-spine`
+(2026-11-20): a host-owned `SubagentSpine`, one arbitration function with
+named sources, `source` / `reason` / `sinceMs` on each row, a trace line
+per transition, and an emit only on a visible change. It owns the clock
+through a tick, which the turn-state spine never needed. See
+[subagents.md](subagents.md#the-subagent-spine).
+
 ## Boundaries
 
 The spine is not a full event-sourcing system. It does not preserve

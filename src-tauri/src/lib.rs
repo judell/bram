@@ -53643,88 +53643,256 @@ fn st_last_session_model(session_path: &Path) -> String {
     String::new()
 }
 
-// /__agents — roster of the active session's subagents: label fields from
-// each meta.json sidecar; a three-state `state` (running/waiting/finished,
-// issue-244 — see st_subagent_state_str) from the subagent's own mtime
-// recency plus the parent transcript's Task-completion evidence; a legacy
-// `finished` boolean derived from `state`; started/updated from file
-// times. Drives the footer chips strip.
-fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
-    let empty = || {
-        serde_json::to_vec(&serde_json::json!({ "sid": "", "agents": [] }))
-            .map_err(|e| e.to_string())
-    };
-    let Some(session_path) = active_session_path(app)? else {
-        return empty();
-    };
-    let sid = session_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let empty_session = || {
-        serde_json::to_vec(&serde_json::json!({
-            "sid": sid,
-            "agents": [],
-            "mainModel": main_session_model(app, &session_path),
-            "mainProvider": projected_turns_provider_label(&session_path),
-        }))
-        .map_err(|e| e.to_string())
-    };
-    let to_ms = |t: std::time::SystemTime| -> i64 {
-        t.duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
-    };
-    if jsonl_completion_provider_for_path(&session_path) == Some(JsonlCompletionProvider::Codex) {
-        let now_ms = to_ms(std::time::SystemTime::now());
-        let mut agents: Vec<serde_json::Value> = Vec::new();
-        for (id, path, child) in codex_child_rollouts(&session_path) {
+// =====================================================================
+// Subagent spine (subagent-state-spine). The host-owned record of each
+// subagent's state, shaped like the turn-state spine (docs/spine.md):
+// one arbitration function gathers every input, diffs against the held
+// record, stamps source / reason / sinceMs on the rows that changed,
+// traces each transition, and emits `subagent-state-changed` only when
+// something the pane shows changed. /__agents serves the record.
+//
+// Before this, /__agents recomputed every row per fetch and the pane
+// learned of changes only from file signals; two inputs (the clock and
+// the parent transcript) sent none, so timed transitions and an interim
+// notice were invisible until something unrelated prodded a refetch
+// (2026-11-21 07:19:17Z: notice landed, no emit, chip stayed ● through
+// the pause). The tick below owns the clock; ParentScan owns the parent
+// read, once per change instead of once per fetch.
+// =====================================================================
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubagentState {
+    agent_id: String,
+    agent_type: String,
+    description: String,
+    tool_use_id: String,
+    // Workflow membership (the wf_… run dir), for pane grouping.
+    workflow_id: String,
+    model: String,
+    // "running" | "waiting" | "finished" (issue-244, st_subagent_state_str).
+    state: String,
+    // Kept as a boolean derived from `state` for pane builds that predate
+    // the three-state field.
+    finished: bool,
+    // Why a waiting row waits: "background-work" | "no-record" | "".
+    wait_reason: String,
+    started_at_ms: i64,
+    updated_at_ms: i64,
+    // Resumes the host saw (SubagentStarts beyond the first).
+    resumed_count: u64,
+    // Spine stamps: which caller last changed what the pane shows for this
+    // row, why, and when.
+    source: String,
+    reason: String,
+    since_ms: i64,
+    // What made a finished row finished: "notice" | "sidecar" |
+    // "stop-idle" | "idle" (Codex) | "". Feeds `reason`; not pane-visible.
+    #[serde(skip)]
+    finished_via: &'static str,
+}
+
+impl SubagentState {
+    // The fields the pane renders. A change here is a transition; a bare
+    // mtime or resumed-count move is not.
+    fn visible_eq(&self, other: &SubagentState) -> bool {
+        self.state == other.state
+            && self.wait_reason == other.wait_reason
+            && self.description == other.description
+            && self.model == other.model
+            && self.agent_type == other.agent_type
+            && self.workflow_id == other.workflow_id
+    }
+}
+
+// The parent transcript, read once per change. Keyed by (path, len,
+// mtime): a tick with no parent change costs no read and no scan. Results
+// of the two per-agent scans are memoized per (agent, latest start), since
+// the start ledger can move without the parent changing.
+#[derive(Default)]
+struct ParentScan {
+    key: Option<(PathBuf, u64, i64)>,
+    text: String,
+    per_agent: std::collections::HashMap<(String, Option<i64>), (bool, Option<i64>)>,
+    // Reads performed; tests pin that an unchanged file is not re-read.
+    reads: u64,
+}
+
+impl ParentScan {
+    fn sync(&mut self, path: &Path) {
+        let (len, mtime) = std::fs::metadata(path)
+            .ok()
+            .map(|md| {
+                (
+                    md.len(),
+                    md.modified().ok().and_then(system_time_ms).unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+        let key = Some((path.to_path_buf(), len, mtime));
+        if self.key != key {
+            // A read failure degrades to "no parent evidence", which only
+            // pushes a row toward waiting, never toward a false finish.
+            self.text = std::fs::read_to_string(path).unwrap_or_default();
+            self.per_agent.clear();
+            self.key = key;
+            self.reads += 1;
+        }
+    }
+
+    // (finished per the parent's final notice, paused-at per its latest
+    // interim notice), both relative to the agent's latest start.
+    fn lookup(&mut self, agent_id: &str, last_start_ms: Option<i64>) -> (bool, Option<i64>) {
+        let key = (agent_id.to_string(), last_start_ms);
+        if let Some(v) = self.per_agent.get(&key) {
+            return *v;
+        }
+        let v = (
+            st_parent_task_finished_after(&self.text, agent_id, last_start_ms),
+            st_parent_interim_pause_after(&self.text, agent_id, last_start_ms),
+        );
+        self.per_agent.insert(key, v);
+        v
+    }
+}
+
+#[derive(Default)]
+struct SubagentSpine {
+    sid: String,
+    agents: Vec<SubagentState>,
+    scan: ParentScan,
+}
+
+#[derive(Default)]
+struct SubagentSpineState(Mutex<SubagentSpine>);
+
+// How often the host re-reads the clock for the time-only transitions
+// (the recency window, the stop rule). Each tick costs a stat per
+// subagent transcript and arithmetic; the parent is re-read only when it
+// changed. A transition lands within one tick of its moment.
+const SUBAGENT_SPINE_TICK_MS: u64 = 5_000;
+
+// Why a row's visible state is what it is now, for the trace and the row.
+fn st_spine_reason(prev: Option<&SubagentState>, next: &SubagentState) -> String {
+    // Same state, different label (the model arriving with the first
+    // assistant record, a description change): a metadata move.
+    if prev.is_some_and(|p| p.state == next.state && p.wait_reason == next.wait_reason) {
+        return "metadata".to_string();
+    }
+    match next.state.as_str() {
+        "waiting" if next.wait_reason == "background-work" => "interim-notice".to_string(),
+        "waiting" => "recency".to_string(),
+        "finished" => {
+            if next.finished_via.is_empty() {
+                "completion".to_string()
+            } else {
+                next.finished_via.to_string()
+            }
+        }
+        _ => match prev {
+            None => "new".to_string(),
+            Some(p) if p.state == "waiting" || p.state == "finished" => "resume".to_string(),
+            Some(_) => "activity".to_string(),
+        },
+    }
+}
+
+// The diff. Rows whose visible fields are unchanged keep their stamps;
+// the rest are stamped with this caller's source, a derived reason, and
+// now. Returns the stamped rows and one trace line per transition
+// (removed rows included). A session change makes every row new.
+fn st_spine_apply(
+    prev: &[SubagentState],
+    mut next: Vec<SubagentState>,
+    session_changed: bool,
+    source: &str,
+    now_ms: i64,
+) -> (Vec<SubagentState>, Vec<String>) {
+    let mut transitions = Vec::new();
+    for row in next.iter_mut() {
+        let old = if session_changed {
+            None
+        } else {
+            prev.iter().find(|p| p.agent_id == row.agent_id)
+        };
+        match old {
+            Some(o) if o.visible_eq(row) => {
+                row.source = o.source.clone();
+                row.reason = o.reason.clone();
+                row.since_ms = o.since_ms;
+            }
+            _ => {
+                row.source = source.to_string();
+                row.reason = st_spine_reason(old, row);
+                row.since_ms = now_ms;
+                transitions.push(format!(
+                    "op=state agent={} from={} to={} waitReason={} source={} reason={}",
+                    row.agent_id,
+                    old.map_or("none", |o| o.state.as_str()),
+                    row.state,
+                    row.wait_reason,
+                    source,
+                    row.reason
+                ));
+            }
+        }
+    }
+    if !session_changed {
+        for p in prev {
+            if !next.iter().any(|n| n.agent_id == p.agent_id) {
+                transitions.push(format!(
+                    "op=state agent={} from={} to=gone source={}",
+                    p.agent_id, p.state, source
+                ));
+            }
+        }
+    }
+    (next, transitions)
+}
+
+// The gather step: every row of the active session, from the same inputs
+// the old per-fetch roster read, through the same pure rules. Unstamped;
+// st_spine_apply stamps.
+fn st_gather_subagent_rows<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_path: &Path,
+    scan: &mut ParentScan,
+    now_ms: i64,
+) -> Vec<SubagentState> {
+    let to_ms = |t: std::time::SystemTime| -> i64 { system_time_ms(t).unwrap_or(0) };
+    let mut agents: Vec<SubagentState> = Vec::new();
+    if jsonl_completion_provider_for_path(session_path) == Some(JsonlCompletionProvider::Codex) {
+        for (id, path, child) in codex_child_rollouts(session_path) {
             let Ok(md) = std::fs::metadata(&path) else {
                 continue;
             };
             let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
             let state = codex_child_state(&path, updated_at_ms, now_ms);
-            agents.push(serde_json::json!({
-                "agentId": id,
-                "agentType": child.nickname,
-                "description": codex_child_label(&child),
-                "toolUseId": "",
-                "workflowId": "",
-                "model": st_last_session_model(&path),
-                "state": state,
-                "finished": state == "finished",
-                "startedAtMs": md.created().map(to_ms).unwrap_or(updated_at_ms),
-                "updatedAtMs": updated_at_ms,
-            }));
+            agents.push(SubagentState {
+                agent_id: id,
+                agent_type: child.nickname.clone(),
+                description: codex_child_label(&child),
+                model: st_last_session_model(&path),
+                state: state.to_string(),
+                finished: state == "finished",
+                started_at_ms: md.created().map(to_ms).unwrap_or(updated_at_ms),
+                updated_at_ms,
+                finished_via: if state == "finished" { "idle" } else { "" },
+                ..Default::default()
+            });
         }
-        agents.sort_by_key(|a| a.get("startedAtMs").and_then(|v| v.as_i64()).unwrap_or(0));
-        let body = serde_json::json!({
-            "sid": sid,
-            "agents": agents,
-            "mainModel": main_session_model(app, &session_path),
-            "mainProvider": projected_turns_provider_label(&session_path),
-        });
-        return serde_json::to_vec(&body).map_err(|e| e.to_string());
+        agents.sort_by_key(|a| a.started_at_ms);
+        return agents;
     }
-    let files = st_subagent_files(&session_path);
+    let files = st_subagent_files(session_path);
     if files.is_empty() {
-        return empty_session();
+        return agents;
     }
-    // issue-244: one read of the parent transcript, reused for every row's
-    // parent-side completion check below — precedent for a full-session
-    // read with no mtime cache already exists (build_conversation_cache_entry
-    // reads the whole file too; that path caches, this one is small/rare
-    // enough by comparison — one roster poll per subagents-changed tick —
-    // that it doesn't need to). A read failure degrades to "no parent
-    // evidence found", which only ever pushes a row toward `waiting`
-    // instead of `finished` — conservative, never a false completion.
-    let session_text = std::fs::read_to_string(&session_path).unwrap_or_default();
-    let now_ms = to_ms(std::time::SystemTime::now());
+    scan.sync(session_path);
     let starts = read_subagent_starts(app);
-    // issue-478: a roster tick is when a new brief becomes readable.
+    // issue-478: a roster refresh is when a new brief becomes readable.
     delegated_narrow_pending(app);
     let bindings = read_delegated_bindings(app);
-    let mut agents: Vec<serde_json::Value> = Vec::new();
     for sf in files {
         let Ok(md) = std::fs::metadata(&sf.jsonl_path) else {
             continue;
@@ -53733,58 +53901,133 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         let started_at_ms = md.created().map(to_ms).unwrap_or(updated_at_ms);
         let meta = st_read_subagent_meta_typed(&sf.dir, &sf.agent_id);
         let start_rec = starts.get(&sf.agent_id);
+        let last_start = start_rec.map(|r| r.last_start_ms);
+        let bound = bindings.bindings.contains_key(&sf.agent_id);
+        let (notice_finished, paused_at_ms) = scan.lookup(&sf.agent_id, last_start);
         // issue-505: the parent's notice, or (foreground shape only) the
         // sidecar's own flag — see st_sidecar_finished. A live binding
         // still vetoes either.
-        let parent_finished = st_roster_parent_finished(
-            bindings.bindings.contains_key(&sf.agent_id),
-            st_parent_task_finished_after(
-                &session_text,
-                &sf.agent_id,
-                start_rec.map(|r| r.last_start_ms),
-            ) || st_sidecar_finished(&meta.request_shape, meta.finished),
-        );
-        // subagent-paused-reads-waiting-at-once: the parent's interim
-        // notice, if newer than the agent's last write, says it is paused.
-        let paused_at_ms = st_parent_interim_pause_after(
-            &session_text,
-            &sf.agent_id,
-            start_rec.map(|r| r.last_start_ms),
-        );
+        let sidecar_finished = st_sidecar_finished(&meta.request_shape, meta.finished);
+        let parent_finished = st_roster_parent_finished(bound, notice_finished || sidecar_finished);
         let state = st_subagent_state_resolved(
             parent_finished,
-            bindings.bindings.contains_key(&sf.agent_id),
-            start_rec.map(|r| r.last_start_ms),
+            bound,
+            last_start,
             start_rec.map(|r| r.last_stop_ms).filter(|&s| s > 0),
             paused_at_ms,
             updated_at_ms,
             now_ms,
         );
-        let wait_reason =
-            st_subagent_wait_reason(state, st_subagent_paused_now(paused_at_ms, updated_at_ms));
-        agents.push(serde_json::json!({
-            "agentId": sf.agent_id,
-            "agentType": meta.agent_type,
-            "description": meta.description,
-            "toolUseId": meta.tool_use_id,
-            // Workflow membership (the wf_… run dir), for pane grouping.
-            "workflowId": sf.workflow_id.as_deref().unwrap_or(""),
-            "model": st_subagent_model(&sf.jsonl_path),
-            // Three-state truth (issue-244): "running" | "waiting" |
-            // "finished" — see st_subagent_state_str. `finished` is KEPT as
-            // a boolean, now derived from `state`, so pane builds that
-            // predate this field's introduction degrade gracefully.
-            "state": state,
-            "finished": state == "finished",
-            // Why a waiting row waits: "background-work" | "no-record" | "".
-            "waitReason": wait_reason,
-            "startedAtMs": started_at_ms,
-            "updatedAtMs": updated_at_ms,
-            // Resumes the host saw (SubagentStarts beyond the first).
-            "resumedCount": start_rec.map(|r| r.starts.saturating_sub(1)).unwrap_or(0),
-        }));
+        let finished_via = if state != "finished" {
+            ""
+        } else if parent_finished && notice_finished {
+            "notice"
+        } else if parent_finished {
+            "sidecar"
+        } else {
+            "stop-idle"
+        };
+        agents.push(SubagentState {
+            agent_id: sf.agent_id.clone(),
+            agent_type: meta.agent_type,
+            description: meta.description,
+            tool_use_id: meta.tool_use_id,
+            workflow_id: sf.workflow_id.clone().unwrap_or_default(),
+            model: st_subagent_model(&sf.jsonl_path),
+            state: state.to_string(),
+            finished: state == "finished",
+            wait_reason: st_subagent_wait_reason(
+                state,
+                st_subagent_paused_now(paused_at_ms, updated_at_ms),
+            )
+            .to_string(),
+            started_at_ms,
+            updated_at_ms,
+            resumed_count: start_rec.map(|r| r.starts.saturating_sub(1)).unwrap_or(0),
+            finished_via,
+            ..Default::default()
+        });
     }
-    agents.sort_by_key(|a| a.get("startedAtMs").and_then(|v| v.as_i64()).unwrap_or(0));
+    agents.sort_by_key(|a| a.started_at_ms);
+    agents
+}
+
+// The arbitration point. Every caller names itself: "watcher" (a subagent
+// or parent transcript write), "hook" (SubagentStart / SubagentStop),
+// "tick" (the clock), "fetch" (/__agents). Returns whether anything the
+// pane shows changed, in which case `subagent-state-changed` was emitted.
+fn refresh_subagent_spine<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) -> bool {
+    let Some(state) = app.try_state::<SubagentSpineState>() else {
+        return false;
+    };
+    let session_path = active_session_path(app).ok().flatten();
+    let now_ms = unix_now_ms();
+    let mut spine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let sid = session_path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let session_changed = sid != spine.sid;
+    let next = match session_path.as_ref() {
+        Some(p) => {
+            let mut scan = std::mem::take(&mut spine.scan);
+            let rows = st_gather_subagent_rows(app, p, &mut scan, now_ms);
+            spine.scan = scan;
+            rows
+        }
+        None => Vec::new(),
+    };
+    let (rows, transitions) = st_spine_apply(&spine.agents, next, session_changed, source, now_ms);
+    spine.sid = sid;
+    spine.agents = rows;
+    drop(spine);
+    for t in &transitions {
+        app.trace("subagents", t);
+    }
+    if transitions.is_empty() {
+        return false;
+    }
+    emit_replayable_signal(app, "subagent-state-changed");
+    true
+}
+
+// The clock as an input: the recency window and the stop rule move rows
+// with no file change, so a host tick re-arbitrates on time.
+fn start_subagent_spine_tick<R: tauri::Runtime>(app_handle: AppHandle<R>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(SUBAGENT_SPINE_TICK_MS));
+        refresh_subagent_spine(&app_handle, "tick");
+    });
+}
+
+// /__agents — the spine's record for the active session plus the main
+// session's model and provider for the footer line. Refreshes first (source
+// "fetch"), which is cheap: the parent is re-read only when it changed.
+fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
+    let Some(session_path) = active_session_path(app)? else {
+        return serde_json::to_vec(&serde_json::json!({ "sid": "", "agents": [] }))
+            .map_err(|e| e.to_string());
+    };
+    refresh_subagent_spine(app, "fetch");
+    let (sid, agents) = match app.try_state::<SubagentSpineState>() {
+        Some(state) => {
+            let spine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            (spine.sid.clone(), spine.agents.clone())
+        }
+        // Before .manage() (never in practice): an unstamped gather.
+        None => {
+            let mut scan = ParentScan::default();
+            let rows = st_gather_subagent_rows(app, &session_path, &mut scan, unix_now_ms());
+            (
+                session_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                rows,
+            )
+        }
+    };
     let body = serde_json::json!({
         "sid": sid,
         "agents": agents,
@@ -53792,6 +54035,169 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         "mainProvider": projected_turns_provider_label(&session_path),
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod subagent_spine_tests {
+    use super::{st_spine_apply, st_spine_reason, ParentScan, SubagentState};
+
+    const NOW: i64 = 10_000_000_000;
+
+    fn row(id: &str, state: &str, wait_reason: &str) -> SubagentState {
+        SubagentState {
+            agent_id: id.to_string(),
+            agent_type: "general-purpose".to_string(),
+            description: "d".to_string(),
+            state: state.to_string(),
+            finished: state == "finished",
+            wait_reason: wait_reason.to_string(),
+            updated_at_ms: NOW - 1_000,
+            ..Default::default()
+        }
+    }
+
+    // The wire shape /__agents served before the spine, plus the stamps.
+    #[test]
+    fn row_serializes_with_the_existing_field_names_plus_stamps() {
+        let v = serde_json::to_value(row("a1", "waiting", "background-work")).unwrap();
+        let obj = v.as_object().unwrap();
+        for k in [
+            "agentId",
+            "agentType",
+            "description",
+            "toolUseId",
+            "workflowId",
+            "model",
+            "state",
+            "finished",
+            "waitReason",
+            "startedAtMs",
+            "updatedAtMs",
+            "resumedCount",
+            "source",
+            "reason",
+            "sinceMs",
+        ] {
+            assert!(obj.contains_key(k), "missing {}", k);
+        }
+        assert!(!obj.contains_key("finishedVia"));
+        assert_eq!(v["state"], "waiting");
+        assert_eq!(v["finished"], false);
+    }
+
+    #[test]
+    fn apply_stamps_a_state_change_and_not_an_mtime_move() {
+        let prev = {
+            let (rows, _) =
+                st_spine_apply(&[], vec![row("a1", "running", "")], false, "watcher", NOW);
+            rows
+        };
+        assert_eq!(prev[0].source, "watcher");
+        assert_eq!(prev[0].reason, "new");
+        assert_eq!(prev[0].since_ms, NOW);
+
+        // Same visible state, newer mtime: no transition, stamps carried.
+        let mut same = row("a1", "running", "");
+        same.updated_at_ms = NOW + 500;
+        let (rows, transitions) = st_spine_apply(&prev, vec![same], false, "tick", NOW + 1_000);
+        assert!(transitions.is_empty());
+        assert_eq!(rows[0].source, "watcher");
+        assert_eq!(rows[0].since_ms, NOW);
+
+        // The clock moved it to waiting: one transition, reason recency.
+        let (rows, transitions) = st_spine_apply(
+            &rows,
+            vec![row("a1", "waiting", "no-record")],
+            false,
+            "tick",
+            NOW + 120_000,
+        );
+        assert_eq!(transitions.len(), 1);
+        assert!(transitions[0].contains("from=running to=waiting"));
+        assert_eq!(rows[0].source, "tick");
+        assert_eq!(rows[0].reason, "recency");
+        assert_eq!(rows[0].since_ms, NOW + 120_000);
+    }
+
+    #[test]
+    fn apply_reports_removed_rows_and_a_session_change_makes_all_new() {
+        let (prev, _) = st_spine_apply(&[], vec![row("a1", "finished", "")], false, "fetch", NOW);
+        let (rows, transitions) = st_spine_apply(&prev, vec![], false, "watcher", NOW);
+        assert!(rows.is_empty());
+        assert_eq!(transitions.len(), 1);
+        assert!(transitions[0].contains("agent=a1 from=finished to=gone"));
+
+        let (rows, transitions) =
+            st_spine_apply(&prev, vec![row("a1", "finished", "")], true, "fetch", NOW);
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(rows[0].reason, "completion");
+        assert_eq!(rows[0].source, "fetch");
+    }
+
+    #[test]
+    fn reason_names_the_cause_of_each_state() {
+        let running = row("a1", "running", "");
+        let waiting_bg = row("a1", "waiting", "background-work");
+        let waiting_idle = row("a1", "waiting", "no-record");
+        let mut finished = row("a1", "finished", "");
+        assert_eq!(st_spine_reason(None, &running), "new");
+        assert_eq!(st_spine_reason(Some(&running), &running), "metadata");
+        assert_eq!(
+            st_spine_reason(Some(&waiting_idle), &waiting_bg),
+            "interim-notice"
+        );
+        assert_eq!(st_spine_reason(Some(&waiting_bg), &running), "resume");
+        assert_eq!(
+            st_spine_reason(Some(&running), &waiting_bg),
+            "interim-notice"
+        );
+        assert_eq!(st_spine_reason(Some(&running), &waiting_idle), "recency");
+        assert_eq!(st_spine_reason(Some(&running), &finished), "completion");
+        finished.finished_via = "sidecar";
+        assert_eq!(st_spine_reason(Some(&running), &finished), "sidecar");
+    }
+
+    // The parent is read once per (len, mtime); per-agent results are
+    // memoized until it changes.
+    #[test]
+    fn parent_scan_reads_once_per_change() {
+        let dir = std::env::temp_dir().join(format!("bram-spine-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let notice = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<task-notification>\\n<task-id>a1</task-id>\\n<status>completed</status>\\n<summary>done</summary>\\n</task-notification>\"},\"timestamp\":\"2026-11-20T23:08:00Z\"}\n";
+        std::fs::write(&path, notice).unwrap();
+        let mut scan = ParentScan::default();
+        scan.sync(&path);
+        assert_eq!(scan.reads, 1);
+        assert_eq!(scan.lookup("a1", None), (true, None));
+        assert_eq!(scan.lookup("a2", None), (false, None));
+        scan.sync(&path);
+        assert_eq!(scan.reads, 1, "unchanged file must not be re-read");
+        assert_eq!(
+            scan.per_agent.len(),
+            2,
+            "memo kept across an unchanged sync"
+        );
+
+        // A change: re-read, memo cleared, new content seen.
+        let interim = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<task-notification>\\n<task-id>a2</task-id>\\n<status>completed</status>\\n<summary>Agent \\\"x\\\" is waiting on its own background work</summary>\\n</task-notification>\"},\"timestamp\":\"2026-11-20T23:09:00Z\"}\n";
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut f, interim.as_bytes()).unwrap();
+        drop(f);
+        scan.sync(&path);
+        assert_eq!(scan.reads, 2);
+        assert!(scan.per_agent.is_empty());
+        let (finished, paused) = scan.lookup("a2", None);
+        assert!(!finished);
+        assert_eq!(
+            paused,
+            Some(super::parse_iso_to_epoch_ms("2026-11-20T23:09:00Z").unwrap())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // Session-size thresholds. Calibrated from observation: at ~21 MB the
@@ -78374,6 +78780,7 @@ fn record_subagent_stop<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str, defe
             &format!("op=subagent-stop-write-failed agent={}", agent),
         ),
     }
+    refresh_subagent_spine(app, "hook");
 }
 
 fn record_subagent_start<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str) {
@@ -78390,6 +78797,7 @@ fn record_subagent_start<R: tauri::Runtime>(app: &AppHandle<R>, agent: &str) {
             &format!("op=subagent-start-write-failed agent={}", agent),
         ),
     }
+    refresh_subagent_spine(app, "hook");
 }
 
 fn handle_agent_subagent<R: tauri::Runtime>(
@@ -111645,6 +112053,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
+        .manage(SubagentSpineState::default())
         .manage(WhisperState::default())
         .manage(SpawnedServerState::default())
         .manage(ActiveProjectState(Mutex::new(initial_proj)))
@@ -112208,6 +112617,7 @@ pub fn run() {
             }
             let app_handle = app.handle().clone();
             start_codex_session_poll_fallback(app_handle.clone());
+            start_subagent_spine_tick(app_handle.clone());
             start_claude_turn_stats_poll(app_handle.clone());
             start_git_head_watch(app_handle.clone());
             // membership-precomputed-off-the-render-path: one attempt at
@@ -112445,9 +112855,17 @@ pub fn run() {
                     // session-activity emits once the append burst has quieted.
                     if let Some(since) = pending_session_emit_since {
                         if since.elapsed() >= session_emit_debounce {
+                            // subagent-state-spine: a subagent write or a
+                            // parent append (its notices) may move a row;
+                            // the spine decides and emits only on change.
+                            let spine_input =
+                                pending_subagents_emit || !pending_session_emit_paths.is_empty();
                             if pending_subagents_emit {
                                 emit_replayable_signal(&app_handle, "subagents-changed");
                                 pending_subagents_emit = false;
+                            }
+                            if spine_input {
+                                refresh_subagent_spine(&app_handle, "watcher");
                             }
                             if !pending_session_emit_paths.is_empty() {
                                 emit_talk_session_changed_for_path_providers(

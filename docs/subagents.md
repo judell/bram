@@ -142,11 +142,38 @@ entirely unowned. A subagent's timing is suspected but unconfirmed. Line
 ownership is tracked in #436, and #454's grant redesign may change this class.
 Don't count it as understood.
 
+## The subagent spine
+
+Subagent state is a host-owned record, shaped like the
+[turn-state spine](spine.md): `SubagentSpine` holds one `SubagentState` per
+agent of the active session, and `refresh_subagent_spine(app, source)` is the
+one arbitration point. It gathers the same inputs the roster always read
+(transcript mtimes, the sidecar, the start/stop ledger, the delegated
+bindings, the parent's notices, the clock), runs the pure rules above, diffs
+against the held rows, stamps `source` / `reason` / `sinceMs` on the rows
+whose visible state moved, writes one `[subagents] op=state` trace line per
+transition, and emits `subagent-state-changed` only then. `/__agents` serves
+the record.
+
+Callers name themselves: `watcher` (a subagent write, or a parent append and
+so its notices), `hook` (SubagentStart / SubagentStop), `tick` (the clock,
+every 5 s, so the recency window and the stop rule land on time with no
+file change), `fetch` (the route). The parent transcript is read once per
+change (`ParentScan`, keyed by length and mtime), not once per fetch.
+
+Before the spine, every row was recomputed per fetch and the pane learned of
+changes only from file signals; the clock and the parent sent none, so timed
+transitions and an interim notice were invisible until something else
+prodded a refetch (2026-11-21 07:19:17Z: the notice landed, nothing emitted,
+the chip read ● through the pause). Debug it the spine way: if the record
+was right, fix the consumer; if wrong, fix the gather or a rule.
+
 ## Refresh
 
-Follow [Push over polling](developing-bram.md#push-over-polling). Children
-should arrive through `subagents-changed`, so the pane needs no new
-subscription.
+Follow [Push over polling](developing-bram.md#push-over-polling). The footer
+roster refetches on `subagent-state-changed`, which the spine emits for any
+cause. `subagents-changed` stays the content signal for the Transcript's
+subagent view and the peek, which change without a state change.
 
 For Codex, the host polls. On macOS the directory watcher reports a rollout only
 at its create and its writer's close, not on appends (reproduced with `notify`

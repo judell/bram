@@ -159,20 +159,22 @@
        FooterIndexLabel.xmlui with the indicator that reads it
        (pane-sources-move-to-their-readers). -->
   <!-- Subagent roster for the footer chips strip, and main-model metadata
-       for the footer session line. Refreshed by both session and subagent
-       signals: subagent JSONL appends are swallowed by the watcher's
-       session-JSONL branch and never reach sessions-list-changed, which
-       left chips stale until the main conversation next moved. -->
+       for the footer session line. subagent-state-spine: the host holds
+       the roster and emits subagent-state-changed only when a row's
+       visible state moved, whatever moved it (a subagent write, a parent
+       notice, a hook, or the clock), so this is the one subagent signal
+       the footer needs. sessions-list-changed (above) still refetches it
+       for the session line's model metadata. -->
   <DataSource
     id="footerAgents"
     url="/__agents"
     onError="() => null" />
   <PushSource
-    id="subagentsChangedEvt"
+    id="subagentStateChangedEvt"
     initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('subagents-changed')}" />
+    subscribe="{window.bramSubscribeTauriEvent('subagent-state-changed')}" />
   <ChangeListener
-    listenTo="{subagentsChangedEvt.value &amp;&amp; subagentsChangedEvt.value.tick}"
+    listenTo="{subagentStateChangedEvt.value &amp;&amp; subagentStateChangedEvt.value.tick}"
     onDidChange="() => footerAgents.refetch()" />
   <!-- Pending permission menu for the footer mount — the single canonical
        menu surface: same place on every tab, always visible. Replaces the
@@ -218,7 +220,7 @@
        polling, ~once per turn. -->
   <ChangeListener
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
-    onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
+    onDidChange="() => footerSessions.refetch()" />
   <!-- pane-buttons-acknowledge-clicks: these were APICalls, whose onSuccess
        and post-success invalidation reached the pane ~30 s after the host
        answered. Now window.__bramPaneAction (a plain fetch) publishes busy /

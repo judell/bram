@@ -99475,6 +99475,7 @@ fn landed_paths_covered(paths: &[String], touched: &[String]) -> usize {
 // diff each against every parent and take the union of the item's paths that
 // differ. Returns (sha, subject, covered) for the newest merge with a
 // non-empty union. `is_gate` skips commits the Worklist made itself.
+// `since_s` must be a real epoch: git reads `--since=@0` as now, not 1970.
 fn landed_by_merge_in(
     root: &Path,
     since_s: i64,
@@ -116372,15 +116373,18 @@ mod index_lock_retry_tests {
         })
     }
 
+    // A 300 ms hold was gone before a loaded Windows had even spawned git
+    // (Indigo, 2026-11-21: "expected at least one traced wait" in 3 of 8
+    // full runs), so hold it long enough that the first attempt must wait.
     #[test]
     fn add_succeeds_after_a_short_lock_is_released() {
         let root = scratch_repo("short");
-        let holder = hold_lock(&root, 300);
+        let holder = hold_lock(&root, 1200);
         let mut waits = 0u32;
         let out = retry_on_index_lock(
             || git_add(&root),
             Duration::from_millis(100),
-            Duration::from_millis(2000),
+            Duration::from_millis(4000),
             |_| waits += 1,
         );
         holder.join().unwrap();
@@ -120151,6 +120155,13 @@ mod stage_manager_tests {
 mod landed_by_merge_tests {
     use super::*;
 
+    // "All history" must be a real timestamp: git reads `--since=@0` as now
+    // (`git rev-parse --since=@0` prints `--max-age=<now>`; small numbers
+    // are not epochs to its date parser), so a zero only found a merge made
+    // in the same second as the query (Indigo, 2026-11-21: 5 of 6 full runs
+    // failed, every run alone passed). 2001-09-09, well before any test repo.
+    const SINCE_ALL: i64 = 1_000_000_000;
+
     fn git_in(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .current_dir(dir)
@@ -120226,8 +120237,8 @@ mod landed_by_merge_tests {
         let mut args = vec!["log", "--merges", "--format=%H", "--"];
         args.extend(paths.iter().map(|p| p.as_str()));
         assert!(git_in(&dir, &args).trim().is_empty());
-        let got =
-            landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| false).expect("landed by merge");
+        let got = landed_by_merge_in(&dir, SINCE_ALL, "my-item", &paths, &|_| false)
+            .expect("landed by merge");
         // Differs from the second parent (main) on a, b (main edited them
         // differently) and c (only feature edited it): all three.
         assert_eq!(got.2, 3);
@@ -120238,21 +120249,21 @@ mod landed_by_merge_tests {
     #[test]
     fn merge_without_the_id_does_not_land_it() {
         let (dir, paths) = repo_with_merge("Merge main into feature", true);
-        assert!(landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| false).is_none());
+        assert!(landed_by_merge_in(&dir, SINCE_ALL, "my-item", &paths, &|_| false).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn merge_naming_the_id_but_changing_no_item_path_does_not_land_it() {
         let (dir, paths) = repo_with_merge("Merge main into feature\n\nItem: my-item", false);
-        assert!(landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| false).is_none());
+        assert!(landed_by_merge_in(&dir, SINCE_ALL, "my-item", &paths, &|_| false).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn gate_merge_is_skipped() {
         let (dir, paths) = repo_with_merge("Merge\n\nItem: my-item", true);
-        assert!(landed_by_merge_in(&dir, 0, "my-item", &paths, &|_| true).is_none());
+        assert!(landed_by_merge_in(&dir, SINCE_ALL, "my-item", &paths, &|_| true).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

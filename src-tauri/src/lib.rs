@@ -21249,8 +21249,13 @@ fn set_shell_window_title<R: tauri::Runtime>(app: &AppHandle<R>) {
 // notification badge read as an unread count and cut names at 9 characters.
 // The leading 9 characters, as Raymond's badge had them (Jon: "keep label as
 // the leading 9 chars").
+// Only the macOS caller below uses these, but dock_badge_tests pins them on
+// every platform (the Windows-spellings case runs on Windows), so they stay
+// compiled everywhere and are merely unused off macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const DOCK_BADGE_MAX_CHARS: usize = 9;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn dock_badge_label(project_root: Option<&Path>) -> Option<String> {
     // Fold Windows separators so a `C:\\…` spelling names its last folder on
     // every platform (developing-bram.md §Paths).
@@ -21270,6 +21275,7 @@ fn dock_badge_label(project_root: Option<&Path>) -> Option<String> {
 // units, then spread by the golden angle. The key is the absolute project
 // root, as /__app-info's projectKey publishes it. Pinned to the JavaScript's
 // output in dock_badge_tests.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn dock_project_hue(key: &str) -> u32 {
     if key.is_empty() {
         return 210;
@@ -21283,6 +21289,7 @@ fn dock_project_hue(key: &str) -> u32 {
 }
 
 // hsl(h, s, l) to sRGB in 0..=1, for __bramProjectTint's hsl(hue, 62%, 45%).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn dock_hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let hp = (h % 360.0) / 60.0;

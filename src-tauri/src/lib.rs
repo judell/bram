@@ -111015,12 +111015,35 @@ fn path_looks_absolute(p: &str) -> bool {
         || (b.len() >= 3 && b[1] == b':' && b[0].is_ascii_alphabetic())
 }
 
+// Windows request spellings the OS can't canonicalize: the Git Bash form
+// `/c/Users/..` and the slash-led drive `/C:/..` both become `C:/..`. Backs
+// developing-bram.md's Paths rule ("accept the Git Bash spelling
+// `/c/Users/...` as `C:/Users/...`"). Elsewhere `/c/..` is a real path.
+fn fold_windows_request_path(requested: &str) -> String {
+    if !cfg!(windows) {
+        return requested.to_string();
+    }
+    let b = requested.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() {
+        let drive = (b[1] as char).to_ascii_uppercase();
+        if b[2] == b'/' {
+            return format!("{}:{}", drive, &requested[2..]);
+        }
+        if b.len() >= 4 && b[2] == b':' && (b[3] == b'/' || b[3] == b'\\') {
+            return format!("{}:{}", drive, &requested[3..]);
+        }
+    }
+    requested.to_string()
+}
+
 // Canonicalize the request and apply the scope check. Err is (status, reason).
 fn resolve_file_request(
     requested: &str,
     home: Option<&Path>,
     root: &Path,
 ) -> Result<PathBuf, (u16, &'static str)> {
+    let folded = fold_windows_request_path(requested);
+    let requested = folded.as_str();
     if requested.is_empty() || !path_looks_absolute(requested) {
         return Err((400, "not-absolute"));
     }
@@ -111248,8 +111271,8 @@ fn serve_file_request<R: tauri::Runtime>(
 #[cfg(test)]
 mod file_serve_tests {
     use super::{
-        file_content_type, file_scope_check, file_token, parse_byte_range, redact_query_param,
-        resolve_file_request, token_matches, ByteRange,
+        file_content_type, file_scope_check, file_token, fold_windows_request_path,
+        parse_byte_range, redact_query_param, resolve_file_request, token_matches, ByteRange,
     };
     use std::path::Path;
 
@@ -111343,6 +111366,31 @@ mod file_serve_tests {
             Err("outside-scope")
         );
         assert_eq!(file_scope_check(r"C:\Users\jon", h, r), Ok(()));
+    }
+
+    #[test]
+    fn fold_windows_request_path_spellings() {
+        for same in ["/Users/x/y.md", r"C:\x\y", "", r"\server\share"] {
+            assert_eq!(fold_windows_request_path(same), same);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                fold_windows_request_path("/c/Users/jon/x"),
+                "C:/Users/jon/x"
+            );
+            assert_eq!(
+                fold_windows_request_path("/C:/Users/jon/x"),
+                "C:/Users/jon/x"
+            );
+            assert_eq!(fold_windows_request_path(r"/c:\x"), r"C:\x");
+            assert_eq!(fold_windows_request_path("/d/x"), "D:/x");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(
+            fold_windows_request_path("/c/Users/jon/x"),
+            "/c/Users/jon/x"
+        );
     }
 
     #[test]

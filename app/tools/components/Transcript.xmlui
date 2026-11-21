@@ -356,7 +356,7 @@
         <Markdown
           when="{$item.kind === 'text' || $item.kind === 'thinking'}"
           interpolateBindings="false" allowHtml="false"
-          content="{$item.text}"
+          content="{window.__bramLinkTargetsForRender($item.text)}"
           highlightText="{window.__bramSearchTerms($item.__needle)}"
           highlightActiveIndex="{$item.__activeOcc}" />
         <!-- issue-470-compaction-summary-collapsed: Claude Code's compaction

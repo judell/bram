@@ -12398,6 +12398,12 @@ window.__bramLocalLinkRequestFromHref = function (href) {
     ) {
       return null;
     }
+    // The renderer percent-encodes a target's odd bytes (a backslash as
+    // `%5C`); the route wants the path itself, as the file:// branch below
+    // already decodes. A malformed escape keeps the raw value.
+    if (hashPath.indexOf("%") >= 0) {
+      try { hashPath = decodeURIComponent(hashPath); } catch (e) {}
+    }
     href = hashPath;
   }
   if (/^(mailto|tel|javascript):/i.test(href)) {
@@ -12408,7 +12414,7 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   var m;
   if ((m = raw.match(/^file:\/\/(?:localhost)?([^?#]*)(?:[?#].*)?$/i))) {
     raw = decodeURIComponent(m[1] || "");
-  } else if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+  } else if (!/^[A-Za-z]:[\\/]/.test(raw) && /^[a-z][a-z0-9+.-]*:/i.test(raw)) {
     return { skip: true, reason: "external-scheme", href: href };
   }
   raw = raw.replace(/[?#].*$/, "");
@@ -16661,6 +16667,39 @@ window.__bramSearchQuery = function (query, mode) {
   if (mode && mode !== "and") return s;
   var stem = __bramSearchPrefixStem(s);
   return stem ? stem : s;
+};
+
+// Agent text, rendered: a link target that starts with a drive letter
+// (`](C:\x\y.md)`, `](C:/x/y.md)`) becomes `](/C:\x\y.md)`. The Markdown
+// renderer's URL rule reads `C:` as a scheme and drops the href, so the click
+// handler never sees an anchor (Indigo, 2026-11-21, judell/bram#507 check 2);
+// a slash-led spelling survives and the /__open-file route folds it back.
+// Fenced code is left alone.
+window.__bramLinkTargetsForRender = function (text) {
+  if (typeof text !== "string" || text.indexOf("](") < 0) return text;
+  var lines = text.split("\n");
+  var fence = null; // {ch, len} while inside a fenced code block
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (m && m[1].charAt(0) === fence.ch && m[1].length >= fence.len &&
+          /^\s*$/.test(line.slice(m[0].length))) {
+        fence = null;
+      }
+      continue;
+    }
+    if (m) {
+      fence = { ch: m[1].charAt(0), len: m[1].length };
+      continue;
+    }
+    // Backslashes too: the renderer percent-encodes them (`%5C`) and the
+    // route then sees a path that doesn't exist. `C:/` is a Windows path.
+    lines[i] = line.replace(/\]\(([A-Za-z]:[\\/][^)\s]*)\)/g, function (_, target) {
+      return "](/" + target.replace(/\\/g, "/") + ")";
+    });
+  }
+  return lines.join("\n");
 };
 
 // The user's own message, as typed: every single newline is a line break

@@ -52844,32 +52844,6 @@ fn st_subagent_state_str(parent_finished: bool, updated_at_ms: i64, now_ms: i64)
 // that an agent waiting on a slow background task isn't called finished early.
 const SUBAGENT_STOPPED_IDLE_MS: i64 = 30 * 60_000;
 
-// st_subagent_state_str plus the stop rule: finished when unbound, stopped
-// after its latest start, and quiet (transcript and stop) for the idle window.
-// A resume fires SubagentStart, which undoes this on its own.
-fn st_subagent_state_with_stop(
-    parent_finished: bool,
-    bound: bool,
-    last_start_ms: Option<i64>,
-    last_stop_ms: Option<i64>,
-    updated_at_ms: i64,
-    now_ms: i64,
-) -> &'static str {
-    if parent_finished {
-        return "finished";
-    }
-    if !bound {
-        if let Some(stop) = last_stop_ms {
-            if stop > last_start_ms.unwrap_or(0)
-                && now_ms.saturating_sub(updated_at_ms.max(stop)) >= SUBAGENT_STOPPED_IDLE_MS
-            {
-                return "finished";
-            }
-        }
-    }
-    st_subagent_state_str(false, updated_at_ms, now_ms)
-}
-
 // How much later than the agent's last transcript write an interim notice
 // may be stamped and still count as "after" it. The parent writes the
 // notice after the agent stops (14 s after its last write in the 2026-11-20
@@ -52877,12 +52851,17 @@ fn st_subagent_state_with_stop(
 // seconds, so a small slack guards only against clock granularity.
 const SUBAGENT_PAUSE_NOTICE_SLACK_MS: i64 = 5_000;
 
-// subagent-paused-reads-waiting-at-once: the stop rule plus the pause rule.
-// A stamped interim notice newer than the agent's last transcript write
-// means the agent is paused on its own background work now, so it reads
-// `waiting` at once rather than after SUBAGENT_RECENT_ACTIVITY_MS of
-// silence. Finished still beats it.
-fn st_subagent_state_resolved(
+// The subagent state rule, in order: the parent's recorded completion
+// wins; a stamped interim notice newer than the agent's last transcript
+// write means it is paused on its own background work now
+// (subagent-paused-reads-waiting-at-once), so `waiting` at once rather than
+// after SUBAGENT_RECENT_ACTIVITY_MS of silence; an unbound agent stopped
+// after its latest start and quiet (transcript and stop) for the idle window
+// is finished (a resume fires SubagentStart, which undoes this); otherwise
+// recency decides (st_subagent_state_str). One function since
+// subagent-spine-trim; it was three nested wrappers, each added so the
+// inner one's tests stayed untouched.
+fn st_subagent_state(
     parent_finished: bool,
     bound: bool,
     last_start_ms: Option<i64>,
@@ -52897,14 +52876,16 @@ fn st_subagent_state_resolved(
     if st_subagent_paused_now(paused_at_ms, updated_at_ms) {
         return "waiting";
     }
-    st_subagent_state_with_stop(
-        parent_finished,
-        bound,
-        last_start_ms,
-        last_stop_ms,
-        updated_at_ms,
-        now_ms,
-    )
+    if !bound {
+        if let Some(stop) = last_stop_ms {
+            if stop > last_start_ms.unwrap_or(0)
+                && now_ms.saturating_sub(updated_at_ms.max(stop)) >= SUBAGENT_STOPPED_IDLE_MS
+            {
+                return "finished";
+            }
+        }
+    }
+    st_subagent_state_str(false, updated_at_ms, now_ms)
 }
 
 fn st_subagent_paused_now(paused_at_ms: Option<i64>, updated_at_ms: i64) -> bool {
@@ -52924,7 +52905,7 @@ fn st_subagent_wait_reason(state: &str, paused_now: bool) -> &'static str {
 #[cfg(test)]
 mod subagent_pause_rule_tests {
     use super::{
-        st_parent_interim_pause_after, st_subagent_paused_now, st_subagent_state_resolved,
+        st_parent_interim_pause_after, st_subagent_paused_now, st_subagent_state,
         st_subagent_wait_reason, SUBAGENT_PAUSE_NOTICE_SLACK_MS,
     };
 
@@ -52983,16 +52964,14 @@ mod subagent_pause_rule_tests {
     #[test]
     fn paused_agent_reads_waiting_at_once_and_finished_still_wins() {
         // 10 s idle: recency alone would say running.
-        let s =
-            st_subagent_state_resolved(false, false, None, None, Some(NOW - 1), NOW - 10_000, NOW);
+        let s = st_subagent_state(false, false, None, None, Some(NOW - 1), NOW - 10_000, NOW);
         assert_eq!(s, "waiting");
-        let s = st_subagent_state_resolved(false, false, None, None, None, NOW - 10_000, NOW);
+        let s = st_subagent_state(false, false, None, None, None, NOW - 10_000, NOW);
         assert_eq!(s, "running");
-        let s =
-            st_subagent_state_resolved(true, false, None, None, Some(NOW - 1), NOW - 10_000, NOW);
+        let s = st_subagent_state(true, false, None, None, Some(NOW - 1), NOW - 10_000, NOW);
         assert_eq!(s, "finished");
         // Resumed after the pause: its write is newer than the notice.
-        let s = st_subagent_state_resolved(
+        let s = st_subagent_state(
             false,
             false,
             None,
@@ -53017,7 +52996,7 @@ mod subagent_pause_rule_tests {
 mod subagent_stop_rule_tests {
     use super::{
         read_subagent_starts_at, record_subagent_start_at, record_subagent_stop_at,
-        st_subagent_state_with_stop, SUBAGENT_STOPPED_IDLE_MS,
+        st_subagent_state, SUBAGENT_STOPPED_IDLE_MS,
     };
 
     const NOW: i64 = 10_000_000_000;
@@ -53026,11 +53005,12 @@ mod subagent_stop_rule_tests {
     #[test]
     fn unbound_stop_after_start_idle_is_finished() {
         let stop = NOW - IDLE - 5;
-        let s = st_subagent_state_with_stop(
+        let s = st_subagent_state(
             false,
             false,
             Some(stop - 1000),
             Some(stop),
+            None,
             stop - 10,
             NOW,
         );
@@ -53040,7 +53020,7 @@ mod subagent_stop_rule_tests {
     #[test]
     fn bound_agent_is_not_finished() {
         let stop = NOW - IDLE - 5;
-        let s = st_subagent_state_with_stop(false, true, Some(stop - 1000), Some(stop), stop, NOW);
+        let s = st_subagent_state(false, true, Some(stop - 1000), Some(stop), None, stop, NOW);
         assert_eq!(s, "waiting");
     }
 
@@ -53049,31 +53029,30 @@ mod subagent_stop_rule_tests {
         let stop = NOW - IDLE - 5;
         let start = stop + 10;
         let running =
-            st_subagent_state_with_stop(false, false, Some(start), Some(stop), NOW - 1000, NOW);
+            st_subagent_state(false, false, Some(start), Some(stop), None, NOW - 1000, NOW);
         assert_eq!(running, "running");
-        let waiting =
-            st_subagent_state_with_stop(false, false, Some(start), Some(stop), start, NOW);
+        let waiting = st_subagent_state(false, false, Some(start), Some(stop), None, start, NOW);
         assert_eq!(waiting, "waiting");
     }
 
     #[test]
     fn idle_under_window_is_waiting() {
         let stop = NOW - IDLE + 60_000;
-        let s = st_subagent_state_with_stop(false, false, Some(stop - 1000), Some(stop), stop, NOW);
+        let s = st_subagent_state(false, false, Some(stop - 1000), Some(stop), None, stop, NOW);
         assert_eq!(s, "waiting");
     }
 
     #[test]
     fn recent_transcript_activity_defers_finished() {
         let stop = NOW - IDLE - 5;
-        let s = st_subagent_state_with_stop(false, false, None, Some(stop), NOW - 60_000, NOW);
+        let s = st_subagent_state(false, false, None, Some(stop), None, NOW - 60_000, NOW);
         assert_eq!(s, "running");
     }
 
     #[test]
     fn notice_finished_wins() {
         assert_eq!(
-            st_subagent_state_with_stop(true, false, None, None, NOW, NOW),
+            st_subagent_state(true, false, None, None, None, NOW, NOW),
             "finished"
         );
     }
@@ -53672,8 +53651,7 @@ struct SubagentState {
     model: String,
     // "running" | "waiting" | "finished" (issue-244, st_subagent_state_str).
     state: String,
-    // Kept as a boolean derived from `state` for pane builds that predate
-    // the three-state field.
+    // Derived from `state`; the footer's running-subagent count reads it.
     finished: bool,
     // Why a waiting row waits: "background-work" | "no-record" | "".
     wait_reason: String,
@@ -53909,7 +53887,7 @@ fn st_gather_subagent_rows<R: tauri::Runtime>(
         // still vetoes either.
         let sidecar_finished = st_sidecar_finished(&meta.request_shape, meta.finished);
         let parent_finished = st_roster_parent_finished(bound, notice_finished || sidecar_finished);
-        let state = st_subagent_state_resolved(
+        let state = st_subagent_state(
             parent_finished,
             bound,
             last_start,
@@ -54010,23 +53988,12 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
             .map_err(|e| e.to_string());
     };
     refresh_subagent_spine(app, "fetch");
-    let (sid, agents) = match app.try_state::<SubagentSpineState>() {
-        Some(state) => {
-            let spine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-            (spine.sid.clone(), spine.agents.clone())
-        }
-        // Before .manage() (never in practice): an unstamped gather.
-        None => {
-            let mut scan = ParentScan::default();
-            let rows = st_gather_subagent_rows(app, &session_path, &mut scan, unix_now_ms());
-            (
-                session_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                rows,
-            )
-        }
+    let Some(state) = app.try_state::<SubagentSpineState>() else {
+        return Err("subagent spine not managed".to_string());
+    };
+    let (sid, agents) = {
+        let spine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        (spine.sid.clone(), spine.agents.clone())
     };
     let body = serde_json::json!({
         "sid": sid,

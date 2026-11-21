@@ -1569,7 +1569,7 @@
                   label="{window.__bramAgentChipLabel($item)}"
                   size="xs"
                   variant="{transcriptAgentId === $item.agentId ? 'solid' : 'outlined'}"
-                  themeColor="{($item.state || ($item.finished ? 'finished' : 'running')) === 'finished' ? 'secondary' : 'primary'}"
+                  themeColor="{$item.state === 'finished' ? 'secondary' : 'primary'}"
                   tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
                   onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
                 <Button

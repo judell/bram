@@ -17596,15 +17596,11 @@ window.__bramProjectedLastExchange = function (payload) {
 // (not a helper here) so the hot-reloaded markup keeps working against a
 // running binary that predates this file.
 
-// Effective three-state read for an agent roster row (issue-244:
-// running | waiting | finished — see st_subagent_state_str in lib.rs).
-// Prefers the host's `state` field; a stale pane against an older host
-// (no `state` field yet) degrades to the legacy two-state read on
-// `finished` so it never renders undefined/blank.
+// Three-state read for an agent roster row (issue-244: running | waiting |
+// finished — see st_subagent_state in lib.rs). The host has sent `state`
+// on every row since 2026-09-07; "running" only for a missing row.
 function __bramAgentState(agent) {
-  if (!agent) return "running";
-  if (agent.state) return agent.state;
-  return agent.finished ? "finished" : "running";
+  return (agent && agent.state) || "running";
 }
 
 // Footer chip label: description (fallback agentType), truncated, with a

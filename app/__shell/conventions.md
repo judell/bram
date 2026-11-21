@@ -811,6 +811,17 @@ instead of a fix; for a plain change, just make it. Log-line shape →
   workaround, and file each where it belongs. A workaround you land
   carries the issue number it's waiting on, and its retirement is its
   own worklist item.
+- **When a stretch of related commits ends**, or one item restructures a
+  mechanism the earlier ones fed, ask what the later work obviated. List
+  the stretch's commits and sort each earlier piece: removed by the later
+  work, narrowed by it, made removable by it, or still load-bearing.
+  Measure before answering (what the added lines are made of: mechanism,
+  tests, comments, moved code); don't estimate. Then propose the cleanup
+  as its own small item at once, with the measurement in its draft,
+  rather than leaving it to be noticed. (Bram, 2026-11-20: three subagent
+  commits in one evening; the third retired parts of the first two and of
+  a year-old compatibility layer, and nothing prompted the question until
+  the user asked it.)
 
 - **Something misbehaves, or you're designing a mechanism that waits or acts on inferred conditions** → read `.claude/bram-reference/diagnostics.md` (§Log-first development) and `development-principles.md`.
 - **Debugging Bram itself (trace log, Inspector export, Status tab)** → read `.claude/bram-reference/diagnostics.md` (§Debugging Bram itself).

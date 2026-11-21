@@ -43446,7 +43446,10 @@ fn handle_doorway_stage<R: tauri::Runtime>(
             a && b && c
         })
         .unwrap_or(false);
-    let _ = app.emit(
+    // Replayable: a stage posted before the pane's composer subscribed is
+    // remembered and replayed to it (doorway-stage-survives-late-pane).
+    emit_replayable_payload(
+        app,
         "doorway-stage",
         serde_json::json!({ "text": text, "prompt": name }),
     );
@@ -43546,6 +43549,23 @@ fn compose_doorway_text(
         prompt_name,
         compact
     ))
+}
+
+#[cfg(test)]
+mod doorway_stage_replay_tests {
+    use super::*;
+    use serde_json::json;
+
+    // The doorway route emits through emit_replayable_payload, which stores
+    // the event with remember_tauri_event; a late subscriber replays it.
+    #[test]
+    fn a_remembered_doorway_stage_is_reported_as_the_latest() {
+        let payload = json!({"text": "x", "prompt": "p"});
+        remember_tauri_event("doorway-stage", payload.clone());
+        let r = latest_tauri_event_response("doorway-stage");
+        assert_eq!(r["exists"], json!(true));
+        assert_eq!(r["payload"], payload);
+    }
 }
 
 #[cfg(test)]

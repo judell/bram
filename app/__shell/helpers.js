@@ -12718,7 +12718,7 @@ window.bramSubscribeTauriEvent = (function () {
           if (!data || !data.exists) return;
           tick += 1;
           lastPayload = data.payload || null;
-          var snapshot = { tick: tick, payload: lastPayload, replayed: true, name: eventName };
+          var snapshot = { tick: tick, payload: lastPayload, replayed: true, name: eventName, tsMs: data.tsMs || 0 };
           subscribers.forEach(function (fn) {
             try { fn(snapshot); } catch (err) {
               console.error("[bramSubscribeTauriEvent] replay subscriber threw:", err);
@@ -18479,10 +18479,52 @@ window.__bramApplyDoorwayStage = function (evtValue, box) {
   var text = p && p.text;
   // The listener also fires once at mount with no payload: nothing to say.
   if (!text) return;
+  // doorway-stage-survives-late-pane: the composer subscribes with replay on,
+  // so a stage posted before it existed arrives as a replay snapshot
+  // ({replayed: true, tsMs} from the host's /__event/latest). Apply a replay
+  // once: keep the applied stage's time under a project-scoped sessionStorage
+  // key (focus state) and skip a replay not newer than it, so a pane reload
+  // does not re-stage a prompt already sent. A live stage stores the pane's
+  // clock, which is at or after the host's tsMs for the same event. No
+  // project key, or a replay without tsMs, means no safe guard: apply nothing.
+  var replayed = !!(evtValue && evtValue.replayed);
+  var stageKey = null;
+  try { stageKey = window.__bramProjectScopedKey("doorwayStageApplied"); } catch (e) { stageKey = null; }
+  var stageTs = replayed ? Number(evtValue.tsMs) || 0 : Date.now();
+  if (replayed) {
+    var lastTs = 0;
+    var ok = !!stageKey && stageTs > 0;
+    if (ok) {
+      try {
+        lastTs = Number(window.sessionStorage.getItem(stageKey)) || 0;
+      } catch (e) { ok = false; }
+    }
+    if (!ok || stageTs <= lastTs) {
+      try {
+        window.__bramIframeTrace("doorway-stage", {
+          path: "replay-skipped",
+          prompt: (p && p.prompt) || "",
+          tsMs: stageTs,
+          lastTsMs: lastTs,
+        });
+      } catch (e) {}
+      return;
+    }
+  }
   if (!box) {
     try { window.__bramIframeTrace("doorway-stage", { skipped: true, hasBox: false }); } catch (e) {}
     return;
   }
+  if (stageKey) {
+    try { window.sessionStorage.setItem(stageKey, String(stageTs)); } catch (e) {}
+  }
+  try {
+    window.__bramIframeTrace("doorway-stage", {
+      path: replayed ? "replay" : "live",
+      prompt: (p && p.prompt) || "",
+      tsMs: stageTs,
+    });
+  } catch (e) {}
   var existing = "";
   try {
     existing = box.value == null ? "" : String(box.value);

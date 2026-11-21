@@ -64,12 +64,14 @@
        (/__doorway/stage); it lands in this box unsent, focused. Same
        PushSource + ChangeListener shape as send-restore above
        (https://www.xmlui.org/docs/reference/components/ChangeListener).
-       Live only (false): a replay on remount would re-stage a prompt the
-       user already sent. -->
+       Replay on: a stage posted before this subscriber existed (the host
+       remembers it) is replayed to it. A replayed stage is applied once, by
+       __bramApplyDoorwayStage's timestamp guard, so a remount does not
+       re-stage a prompt already sent. -->
   <PushSource
     id="doorwayStage"
     initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('doorway-stage', false)}" />
+    subscribe="{window.bramSubscribeTauriEvent('doorway-stage')}" />
   <ChangeListener
     listenTo="{doorwayStage.value &amp;&amp; doorwayStage.value.tick}"
     onDidChange="() => window.__bramApplyDoorwayStage(doorwayStage.value, composerBox)" />

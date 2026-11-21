@@ -26,7 +26,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # each call because Setup may create it mid-scenario.
 state_rel() { basename "$(bram_state_dir "$1")"; }
 BRAM_BIN="${BRAM_BIN:-$REPO_ROOT/src-tauri/target/debug/bram}"
-WORK_ROOT="${HARNESS_TMP:-$(mktemp -d -t bram-setup-harness)}"
+# Git Bash's mktemp rejects the `-t` template form; give it an explicit one.
+WORK_ROOT="${HARNESS_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/bram-setup-harness.XXXXXX")}"
+# Git Bash detection (MINGW/MSYS/Cygwin shells), for Windows-only product behavior.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;; *) IS_WINDOWS=0 ;; esac
+# Git Bash: Bram reports C:/... while `pwd -P` gives /c/...; cygpath -m converts.
+native_path() {
+  if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
 KEEP_ON_FAIL="${KEEP_ON_FAIL:-1}"
 
 PASS=0
@@ -258,10 +265,14 @@ assert_setup_landed() {
     assert_file "$dir" ".agents/hooks.json"
     # The command wraps the guard so that no decision (an older guard that
     # doesn't know the hook) becomes a deny; agy lets empty output through.
-    if jq -e '.["bram-worklist-guard"].PreToolUse[0]
-              | (.matcher == "^(write_file|edit_file|run_command|call_mcp_tool)$")
-                and (.hooks[0].command | contains("guard antigravity-worklist"))
-                and (.hooks[0].command | contains("\"decision\":\"deny\""))' \
+    # Mirrors antigravity_guard_command (src-tauri/src/lib.rs): on Windows the
+    # command is the bare `<exe> guard antigravity-worklist`, with no deny wrapper.
+    local agy_deny='and (.hooks[0].command | contains("\"decision\":\"deny\""))'
+    [ "$IS_WINDOWS" = 1 ] && agy_deny='and (.hooks[0].command | contains("\"decision\":\"deny\"") | not)'
+    if jq -e ".[\"bram-worklist-guard\"].PreToolUse[0]
+              | (.matcher == \"^(write_file|edit_file|run_command|call_mcp_tool)\$\")
+                and (.hooks[0].command | contains(\"guard antigravity-worklist\"))
+                $agy_deny" \
          "$dir/.agents/hooks.json" > /dev/null 2>&1; then
       ok "Antigravity hooks register the guard"
     else
@@ -370,7 +381,7 @@ scenario_subfolder() {
   launch_refused "$dir" || return
   assert_refused "$dir" "subfolder"
   local top; top="$(status_field projectFolder.toplevel)"
-  if [ "$top" = "$(cd "$repo" && pwd -P)" ]; then
+  if [ "$top" = "$(native_path "$(cd "$repo" && pwd -P)")" ]; then
     ok "toplevel names the repo root"
   else
     bad "toplevel names the repo root" "got: $top"
@@ -474,10 +485,12 @@ assert_held() {
   fi
   # A state write is refused, names the hold, and creates nothing.
   local body code
-  body="$(curl -4 -sS --max-time 20 -o /dev/stdout -w ' %{http_code}' -X POST \
+  # Git Bash: curl can't write to /dev/stdout (error 23), so use a temp file.
+  local bodyf="$WORK_ROOT/$SCENARIO.409body"
+  code="$(curl -4 -sS --max-time 20 -o "$bodyf" -w '%{http_code}' -X POST \
     -H 'Content-Type: application/json' --data '{"ids":["second-item","live-item"]}' \
     "http://127.0.0.1:$BRAM_PORT/__worklist/reorder")"
-  code="${body##* }"; body="${body% *}"
+  body="$(cat "$bodyf" 2>/dev/null)"
   if [ "$code" = "409" ] && [ "$(printf '%s' "$body" | jq -r .held)" = "$obstacle" ]; then
     ok "a state write is refused with 409 held=$obstacle"
   else

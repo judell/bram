@@ -95119,6 +95119,20 @@ fn route_request<R: tauri::Runtime>(
     match std::fs::read(&full) {
         Ok(bytes) => (200, mime_for(&full), bytes),
         Err(_) => {
+            // loopback-serves-directory-index: a directory URL serves its
+            // index.html, as any static server does. The orientation site's
+            // own links are `diagrams/` and `overview/`, and until this they
+            // were 404 here (Indigo, 2026-11-21).
+            if let Some(dir_index) = directory_index_for(&proj, path) {
+                if let Ok(bytes) = std::fs::read(&dir_index) {
+                    append_bram_trace_line(
+                        app,
+                        "project-serve",
+                        &format!("op=dir-index path={}", path),
+                    );
+                    return (200, mime_for(&dir_index), bytes);
+                }
+            }
             if spa_fallback_eligible(path) {
                 if let Ok(bytes) = std::fs::read(&index) {
                     append_bram_trace_line(
@@ -95140,6 +95154,20 @@ fn route_request<R: tauri::Runtime>(
 fn spa_fallback_eligible(path: &str) -> bool {
     let last = path.rsplit('/').next().unwrap_or(path);
     !last.is_empty() && !last.contains('.')
+}
+
+// loopback-serves-directory-index: the index.html a directory URL stands
+// for, when the request names an existing directory under the project (with
+// or without a trailing slash) that has one. None otherwise, so a directory
+// without an index and a plain missing path keep their 404 or SPA fallback.
+// `path` has already passed project_path_refusal. Pure and unit-tested.
+fn directory_index_for(proj: &Path, path: &str) -> Option<PathBuf> {
+    let dir = proj.join(path.trim_end_matches('/'));
+    if !dir.is_dir() {
+        return None;
+    }
+    let index = dir.join("index.html");
+    index.is_file().then_some(index)
 }
 
 // loopback-root-serves-dotgit: why a project-relative path must not be
@@ -95229,6 +95257,41 @@ mod spa_fallback_tests {
         // Trailing slash: final segment empty — not a fallback candidate
         // (the bare root is handled before the predicate).
         assert!(!spa_fallback_eligible("details/"));
+    }
+
+    // loopback-serves-directory-index: the orientation site's `diagrams/`
+    // link was 404 because nothing tried the directory's index.html.
+    #[test]
+    fn a_directory_url_resolves_to_its_index_and_nothing_else_does() {
+        use super::directory_index_for;
+        let proj = std::env::temp_dir().join(format!(
+            "bram-dir-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let diagrams = proj.join("orientation").join("diagrams");
+        std::fs::create_dir_all(&diagrams).unwrap();
+        std::fs::create_dir_all(proj.join("empty")).unwrap();
+        std::fs::write(diagrams.join("index.html"), "<p>d</p>").unwrap();
+        let want = diagrams.join("index.html");
+        // With and without the trailing slash.
+        assert_eq!(
+            directory_index_for(&proj, "orientation/diagrams/").as_deref(),
+            Some(want.as_path())
+        );
+        assert_eq!(
+            directory_index_for(&proj, "orientation/diagrams").as_deref(),
+            Some(want.as_path())
+        );
+        // A directory with no index, a missing path, and an asset typo give
+        // nothing, so the SPA fallback and the honest 404 are unchanged.
+        assert_eq!(directory_index_for(&proj, "empty/"), None);
+        assert_eq!(directory_index_for(&proj, "nosuch/"), None);
+        assert_eq!(directory_index_for(&proj, "img/missing.png"), None);
+        let _ = std::fs::remove_dir_all(&proj);
     }
 }
 

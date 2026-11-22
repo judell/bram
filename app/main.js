@@ -527,6 +527,14 @@ term.attachCustomKeyEventHandler((ev) => {
     // No selection: let xterm.js send ^C → SIGINT.
   }
   if (!isMac && ev.ctrlKey && (ev.key === "V" || ev.key === "v")) {
+    // WebKitGTK rejects navigator.clipboard.readText() in this window (#511).
+    // Returning false keeps xterm.js from turning Ctrl+V into a ^V byte and
+    // leaves the key to the browser, whose native paste event xterm.js's own
+    // paste listener on its textarea handles (bracketed when the app asked
+    // for it). That listener stops propagation, so the container listener
+    // above never doubles it. WebView2 resolves readText(), so Windows keeps
+    // the path below.
+    if (isLinux) return false;
     const handled = readClipboardAndPasteToTerminal(
       ev.shiftKey ? "ctrl-shift-v" : "ctrl-v",
     );

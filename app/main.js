@@ -176,8 +176,19 @@ const readSavedFontSize = () => {
   }
 };
 
+const isWindows = navigator.userAgent.toLowerCase().includes("windows");
+// WebKitGTK's user agent carries "X11; Linux". On Linux, fontconfig answers a
+// missing family (Menlo, Monaco) with its nearest substitute, a sans font, and
+// xterm.js lays it on the monospace grid (#510). The generic `monospace`
+// resolves to the font the user configured. macOS resolves the generic to
+// Courier, so the named list stays for everything else.
+const isLinux = !isWindows && /Linux/i.test(navigator.userAgent);
+const TERMINAL_FONT_FAMILY = isLinux
+  ? "monospace"
+  : 'Menlo, Monaco, "Courier New", monospace';
+
 const term = new Terminal({
-  fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+  fontFamily: TERMINAL_FONT_FAMILY,
   fontSize: readSavedFontSize(),
   cursorBlink: true,
   theme: { background: "#000000", foreground: "#e0e0e0" },
@@ -189,7 +200,6 @@ const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 const PTY_RESIZE_MIN_INTERVAL_MS = 40;
 const VIEWPORT_RESTORE_WINDOW_MS = 750;
-const isWindows = navigator.userAgent.toLowerCase().includes("windows");
 
 const container = document.getElementById("terminal");
 term.open(container);

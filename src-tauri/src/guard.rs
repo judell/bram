@@ -734,7 +734,9 @@ fn authority_worklist_hook(
         "opencode-rs" | "antigravity-rs" => "claude-rs",
         other => other,
     };
-    let Some(v) = crate::guard_policy::shadow_worklist_decision(policy_provider, payload) else {
+    let Some(v) =
+        crate::guard_policy::shadow_worklist_decision_for(policy_provider, provider, payload)
+    else {
         return match provider {
             "opencode-rs" => opencode_answer("allow", ""),
             "antigravity-rs" => antigravity_answer("allow", ""),

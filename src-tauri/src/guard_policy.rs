@@ -3929,10 +3929,24 @@ fn resolve_session_root(payload: &Value) -> Option<PathBuf> {
 // --- the pipeline -------------------------------------------------------------
 
 /// Shadow verdict for one PreToolUse payload. `None` means this provider has no
-/// ported policy.
+/// ported policy. The provider is also the caller named in any `would-deny`
+/// breadcrumb; when the two differ, use `shadow_worklist_decision_for`.
 pub fn shadow_worklist_decision(provider: &str, payload: &Value) -> Option<ShadowVerdict> {
-    match provider {
-        "claude-rs" => Some(claude_decision(payload)),
+    shadow_worklist_decision_for(provider, provider, payload)
+}
+
+/// Same dispatch, with the policy and the caller named separately.
+/// `policy_provider` picks the ported policy (`guard.rs` folds `opencode-rs`
+/// and `antigravity-rs` into `claude-rs`); `caller` is the real provider,
+/// which the Claude policy's observe-only `would-deny` breadcrumbs name
+/// (judell/bram#512). `None` means `policy_provider` has no ported policy.
+pub fn shadow_worklist_decision_for(
+    policy_provider: &str,
+    caller: &str,
+    payload: &Value,
+) -> Option<ShadowVerdict> {
+    match policy_provider {
+        "claude-rs" => Some(claude_decision(caller, payload)),
         "codex-rs" => Some(codex_decision(payload)),
         _ => None,
     }
@@ -3993,8 +4007,12 @@ pub fn enforcement_paused_context() -> &'static str {
     "Worklist enforcement is paused for Claude in this repository: the user turned it off in Bram's Settings (worklist.enforcement = \"paused\"). While it is paused, Bram's guard does not deny edits that no Worklist item covers, and the user manages the work and its commits directly, without Worklist items. Bram's conventions about proposing an item before editing, and the Start / Commit gate, do not apply while this is in effect. The guard's other checks (session URLs in commits, signatures on forge writes, subagent lifecycle calls) still apply."
 }
 
-fn claude_decision(payload: &Value) -> ShadowVerdict {
-    let v = claude_decision_inner(payload);
+/// The Claude policy. It decides Claude-shaped payloads from any provider:
+/// Claude Code natively, OpenCode and Antigravity through `opencode_policy_payload`
+/// / `antigravity_policy_payload` in `guard.rs`. The name is the payload dialect,
+/// not the caller; `caller` is the real provider, named in `would-deny` breadcrumbs.
+fn claude_decision(caller: &str, payload: &Value) -> ShadowVerdict {
+    let v = claude_decision_inner(caller, payload);
     if v.decision == "deny"
         && (v.reason.starts_with("no-coverage") || v.reason.starts_with("bash-write-no-coverage"))
         && claude_enforcement_paused(&payload_cwd(payload))
@@ -4004,21 +4022,21 @@ fn claude_decision(payload: &Value) -> ShadowVerdict {
     v
 }
 
-fn claude_decision_inner(payload: &Value) -> ShadowVerdict {
+fn claude_decision_inner(caller: &str, payload: &Value) -> ShadowVerdict {
     let tool_name = str_field(payload, "tool_name");
     if tool_name == "Bash" {
-        return bash_branch(payload);
+        return bash_branch(caller, payload);
     }
     if tool_name.starts_with("mcp__") {
-        return mcp_branch(payload, &tool_name);
+        return mcp_branch(caller, payload, &tool_name);
     }
     if tool_name != "Write" && tool_name != "Edit" {
         return allow("no-trace:not-write-edit", "-");
     }
-    write_edit_branch(payload, &tool_name)
+    write_edit_branch(caller, payload, &tool_name)
 }
 
-fn bash_branch(payload: &Value) -> ShadowVerdict {
+fn bash_branch(caller: &str, payload: &Value) -> ShadowVerdict {
     let ti = tool_input(payload);
     let command = ti
         .get("command")
@@ -4219,7 +4237,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
         // allow -- the gap `trace_would_deny_unaddressed` never reaches on
         // Bash. Refine it into a per-target observation without changing
         // the allow itself.
-        trace_bash_would_deny(&project_root, "claude-rs", &command, &covered, |raw| {
+        trace_bash_would_deny(&project_root, caller, &command, &covered, |raw| {
             let candidate = if Path::new(raw).is_absolute() {
                 PathBuf::from(raw)
             } else {
@@ -4264,7 +4282,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     )
 }
 
-fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
+fn mcp_branch(caller: &str, payload: &Value, tool_name: &str) -> ShadowVerdict {
     let ti = tool_input(payload);
     let cwd = payload_cwd(payload);
     if !mcp_is_mutation(tool_name) {
@@ -4293,7 +4311,7 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         // indistinguishable from a harmless connector call at this point,
         // so it is traced rather than silently allowed -- see
         // `trace_mcp_write_verb_no_candidates`.
-        trace_mcp_write_verb_no_candidates(&project_root, "claude-rs", tool_name);
+        trace_mcp_write_verb_no_candidates(&project_root, caller, tool_name);
         return allow("mcp-no-candidate-paths", "-");
     }
     let agent_id = str_field(payload, "agent_id");
@@ -4332,7 +4350,7 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         if is_lifecycle_path(&project_root, &rel) || is_covered || fresh_bypass(&project_root, &rel)
         {
             if is_covered && !is_lifecycle_path(&project_root, &rel) {
-                trace_would_deny_unaddressed(&project_root, "claude-rs", tool_name, &rel);
+                trace_would_deny_unaddressed(&project_root, caller, tool_name, &rel);
             }
             continue;
         }
@@ -4361,7 +4379,7 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
     allow("covered-by-worklist-item", "-")
 }
 
-fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
+fn write_edit_branch(caller: &str, payload: &Value, tool_name: &str) -> ShadowVerdict {
     let ti = tool_input(payload);
     let fp = ti.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     if fp.is_empty() {
@@ -4553,7 +4571,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
     // coverage verdict's own copy is only consulted for the allow leg.
     let (is_covered, _worktree) = coverage_verdict(&covered, &rel);
     if is_covered {
-        trace_would_deny_unaddressed(&project_root, "claude-rs", tool_name, &rel);
+        trace_would_deny_unaddressed(&project_root, caller, tool_name, &rel);
         return allow("covered-by-worklist-item", rel);
     }
     let session_root = resolve_session_root(payload);
@@ -6209,6 +6227,67 @@ mod guard_policy_tests {
         assert_eq!(would_deny_reason(&root, "c.js"), "general-turn-item-edit");
         let ids = begun_item_ids(&root);
         assert!(ids.contains("begun") && ids.contains("done") && !ids.contains("unstarted"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // judell/bram#512: the `would-deny` breadcrumb names the real caller, not
+    // the policy that decided. `guard.rs` folds antigravity-rs (and
+    // opencode-rs) into the Claude policy; before this the line read
+    // `claude-rs would-deny …` beside an `antigravity-rs PreToolUse …` line
+    // for the same evaluation, and read as two guards disagreeing.
+    #[test]
+    fn would_deny_breadcrumb_names_real_caller_not_policy() {
+        let root = scratch("would-deny-caller");
+        crate::guard_policy::test_make_state_dir(&root).unwrap();
+        // The empty authorization file marks the repo managed and holds no
+        // live grant, so the probe fires.
+        std::fs::write(root.join(AUTH_REL), "{}").unwrap();
+        std::fs::write(
+            root.join(WORKLIST_REL),
+            serde_json::json!({ "items": [
+                { "id": "unstarted", "status": "proposed", "files": ["a.js"] },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let payload = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": root.join("a.js").to_string_lossy(), "old_string": "a", "new_string": "b"},
+            "cwd": root.to_string_lossy(),
+        });
+        let v = shadow_worklist_decision_for("claude-rs", "antigravity-rs", &payload).unwrap();
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "covered-by-worklist-item")
+        );
+        let events = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
+            .unwrap_or_default();
+        let line = events
+            .lines()
+            .find(|l| l.contains(" would-deny "))
+            .unwrap_or_else(|| panic!("no would-deny line in events: {events}"));
+        // `<ts> <provider> would-deny <tool> target=… auth=none ctx=none reason=…`
+        let mut fields = line.split_whitespace();
+        let _ts = fields.next();
+        assert_eq!(fields.next(), Some("antigravity-rs"), "line: {line}");
+        assert_eq!(fields.next(), Some("would-deny"), "line: {line}");
+        assert_eq!(fields.next(), Some("Edit"), "line: {line}");
+        assert!(line.contains("target=a.js"), "line: {line}");
+        assert!(
+            line.contains("reason=proposed-only-coverage"),
+            "line: {line}"
+        );
+        assert!(!events.contains("claude-rs would-deny"), "events: {events}");
+
+        // The one-argument wrapper still names its provider as the caller.
+        let v = shadow_worklist_decision("claude-rs", &payload).unwrap();
+        assert_eq!(v.reason, "covered-by-worklist-item");
+        let events = std::fs::read_to_string(root.join(".bram/bram-traces/hook-events.log"))
+            .unwrap_or_default();
+        assert!(
+            events.contains("claude-rs would-deny Edit"),
+            "events: {events}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

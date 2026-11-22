@@ -113155,6 +113155,16 @@ pub fn run() {
                         }
                     }
 
+                    // On Linux, inotify reports every open and read as an Access event; FSEvents
+                    // (macOS) and ReadDirectoryChangesW (Windows) never do. Dispatching on Access
+                    // loops: a status refresh reads a file, the read is an event, the event
+                    // triggers a refresh. #511. A write that ends in Access(Close(Write)) has
+                    // already produced its Modify event, so nothing real is lost.
+                    if matches!(event.kind, EventKind::Access(_)) {
+                        trace_dispatch("skip", &[("reason", "access".to_string())]);
+                        continue;
+                    }
+
                     if bram_trace_enabled() {
                         let change = notify_event_kind_label(&event.kind);
                         for p in &event.paths {

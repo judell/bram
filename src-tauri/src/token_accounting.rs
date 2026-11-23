@@ -3012,6 +3012,10 @@ pub struct SessionRow {
     pub quota: Option<Quota>,
     pub unreadable: usize,
     pub compactions: usize,
+    /// Main thread only: the session cut at its boundaries, with the
+    /// fresh-session counterfactual per stretch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stretches: Vec<Stretch>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -3098,6 +3102,7 @@ pub struct ModelRow {
     pub cache_hit_share: f64,
     pub gap_ms: P50,
     pub output_per_call: P50,
+    pub item_starts: ItemStarts,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -3931,6 +3936,7 @@ pub fn build_report(
             quota: pf.quota.clone(),
             unreadable: pf.unreadable,
             compactions: pf.compactions,
+            stretches: Vec::new(),
         };
         let mut items: BTreeMap<String, ItemRow> = BTreeMap::new();
         let mut chat_calls = 0f64;
@@ -3957,6 +3963,20 @@ pub fn build_report(
             };
             match &attribution {
                 Attribution::Items(ids) => {
+                    if thread == Thread::Main {
+                        let a = model_acc
+                            .entry((pf.provider.to_string(), c.model.clone()))
+                            .or_default();
+                        for id in ids {
+                            let e = a
+                                .item_starts
+                                .entry(id.clone())
+                                .or_insert((c.at_ms, c.context));
+                            if c.at_ms < e.0 {
+                                *e = (c.at_ms, c.context);
+                            }
+                        }
+                    }
                     let share = 1.0 / ids.len() as f64;
                     for id in ids {
                         let it = items.entry(id.clone()).or_insert_with(|| ItemRow {
@@ -4010,6 +4030,7 @@ pub fn build_report(
 
         if thread == Thread::Main {
             accumulate_models(&mut model_acc, pf.provider, &pf.session_id, &calls);
+            row.stretches = stretches(&calls, &windows);
         }
         sessions.push(row);
     }
@@ -4115,6 +4136,8 @@ struct ModelAcc {
     peaks: HashMap<String, u64>,
     /// session -> context of its first main-thread call, when on this model
     floors: HashMap<String, u64>,
+    /// item id -> (time, context) of its first credited main-thread call
+    item_starts: HashMap<String, (i64, u64)>,
 }
 
 fn accumulate_models(
@@ -4277,6 +4300,7 @@ fn finish_models(
                 output_per_call: P50 {
                     p50: nearest_rank(&a.outputs, 50.0),
                 },
+                item_starts: item_starts_of(&a.item_starts),
             }
         })
         .collect();
@@ -6047,6 +6071,134 @@ fn main_sample(label: &'static str, lc: &LiveCalls) -> Option<Sample> {
             .and_then(|q| q.secondary.as_ref())
             .and_then(|w| w.used_percent),
     })
+}
+
+/// One boundary in a main-thread session and the calls that follow it, up
+/// to the next boundary (status-session-context-report). Boundaries are the
+/// session's first call, either edge of a claim window (an item begun,
+/// committed, dropped or given feedback) and each compaction (a call whose
+/// context is under half the previous call's). `excess_over_floor` is the
+/// fresh-session counterfactual: the stretch's calls times what the context
+/// at its boundary exceeded the floor by, which is what a new session
+/// started at that boundary would not have re-read.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stretch {
+    /// `start` | `claim-opened` | `claim-closed` | `compaction`
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_kind: Option<String>,
+    pub ids: Vec<String>,
+    pub at_ms: i64,
+    /// Context at the boundary: the last call at or before it, or for a
+    /// compaction the first call after it.
+    pub context_at: u64,
+    pub calls: usize,
+    pub avg_context: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub excess_over_floor: u64,
+}
+
+pub fn stretches(calls: &[&RawCall], windows: &[ClaimWindow]) -> Vec<Stretch> {
+    let Some(first) = calls.first() else {
+        return Vec::new();
+    };
+    let floor = first.context;
+    let last_at = calls.last().map(|c| c.at_ms).unwrap_or(first.at_ms);
+    let mut bounds: Vec<(i64, &str, Option<String>, Vec<String>)> =
+        vec![(first.at_ms, "start", None, Vec::new())];
+    for w in windows {
+        if w.from_ms > first.at_ms && w.from_ms <= last_at {
+            bounds.push((
+                w.from_ms,
+                "claim-opened",
+                Some(w.kind.clone()),
+                w.ids.clone(),
+            ));
+        }
+        if w.to_ms > w.from_ms + 1 && w.to_ms > first.at_ms && w.to_ms <= last_at {
+            bounds.push((w.to_ms, "claim-closed", Some(w.kind.clone()), w.ids.clone()));
+        }
+    }
+    for pair in calls.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a.context > 100_000 && b.context * 2 < a.context {
+            bounds.push((b.at_ms, "compaction", None, Vec::new()));
+        }
+    }
+    bounds.sort_by_key(|b| b.0);
+    let mut out: Vec<Stretch> = Vec::new();
+    for (i, b) in bounds.iter().enumerate() {
+        let end = bounds.get(i + 1).map(|n| n.0).unwrap_or(i64::MAX);
+        // A call belongs to the latest boundary at or before it.
+        let in_stretch: Vec<&RawCall> = calls
+            .iter()
+            .copied()
+            .filter(|c| c.at_ms >= b.0 && c.at_ms < end)
+            .collect();
+        let n = in_stretch.len();
+        if n == 0 {
+            continue;
+        }
+        let context_at = if b.1 == "compaction" || b.1 == "start" {
+            in_stretch[0].context
+        } else {
+            calls
+                .iter()
+                .filter(|c| c.at_ms <= b.0)
+                .map(|c| c.context)
+                .last()
+                .unwrap_or(floor)
+        };
+        out.push(Stretch {
+            kind: b.1.to_string(),
+            claim_kind: b.2.clone(),
+            ids: b.3.clone(),
+            at_ms: b.0,
+            context_at,
+            calls: n,
+            avg_context: in_stretch.iter().map(|c| c.context).sum::<u64>() / n as u64,
+            cache_read: in_stretch.iter().map(|c| c.cache_read).sum(),
+            output: in_stretch.iter().map(|c| c.output).sum(),
+            excess_over_floor: n as u64 * context_at.saturating_sub(floor),
+        });
+    }
+    out
+}
+
+/// Context at each item's first credited call on a model, as percentiles
+/// and counts above the thresholds the fresh-session default was chosen
+/// from (status-session-context-report; decision note
+/// 2026-11-23-session-size-is-data-context-is-the-trigger).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemStarts {
+    pub items: usize,
+    pub p25: u64,
+    pub p50: u64,
+    pub p75: u64,
+    pub p90: u64,
+    pub max: u64,
+    pub above300k: usize,
+    pub above400k: usize,
+    pub above500k: usize,
+}
+
+fn item_starts_of(starts: &HashMap<String, (i64, u64)>) -> ItemStarts {
+    let mut v: Vec<u64> = starts.values().map(|s| s.1).collect();
+    v.sort_unstable();
+    ItemStarts {
+        items: v.len(),
+        p25: nearest_rank(&v, 25.0),
+        p50: nearest_rank(&v, 50.0),
+        p75: nearest_rank(&v, 75.0),
+        p90: nearest_rank(&v, 90.0),
+        max: v.last().copied().unwrap_or(0),
+        above300k: v.iter().filter(|c| **c > 300_000).count(),
+        above400k: v.iter().filter(|c| **c > 400_000).count(),
+        above500k: v.iter().filter(|c| **c > 500_000).count(),
+    }
 }
 
 /// Growth since the last boundary: `(tokens, calls, boundary_at_ms)`.

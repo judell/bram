@@ -24175,10 +24175,10 @@ window.__bramTokenInfoText = function (key, report, rates) {
 // (which sections the user is looking at), so sessionStorage, scoped by
 // project; null key means the project is unknown, so neither read nor write.
 // Default is all closed.
-// The folds open before the user has chosen any this session: Token
-// accounting's Models table (Jon, 2026-11-12). Once anything is toggled, the
-// saved list wins, including Models closed.
-window.__bramStatusOpenDefault = ["tokens-models"];
+// Default is all closed. (Until 2026-11-23 the Token accounting Models
+// table opened by default; it now lives on the Accounting tab, which starts
+// with every fold closed, see __bramAccountingOpenLoad.)
+window.__bramStatusOpenDefault = [];
 window.__bramStatusOpenLoad = function () {
   try {
     var k = window.__bramProjectScopedKey("bram.statusOpen");
@@ -24197,15 +24197,19 @@ window.__bramStatusOpenSave = function (list) {
   } catch (e) {}
 };
 // Toggle a key in the open list and persist; returns the new list.
-// Opening Token accounting also opens its Models fold, whatever the saved
-// list said (Jon, 2026-11-12); Models can still be closed by hand after.
 window.__bramStatusToggle = function (list, key) {
   var next = window.__bramToggleInArray(list, key);
-  if (key === "tokens" && next.indexOf("tokens") >= 0 && next.indexOf("tokens-models") < 0) {
-    next = next.concat(["tokens-models"]);
-  }
   window.__bramStatusOpenSave(next);
   return next;
+};
+// The Accounting tab's folds at load: the saved list, with Models closed
+// whatever it said (accounting-loads-on-open, Jon, 2026-11-23: "collapse
+// models at load"). The full walk fills the folds in while the quick This
+// session block is read, and a closed Models table keeps the page from
+// jumping when it lands. Opening it is a click; it stays open within the
+// pane's life through the same saved list.
+window.__bramAccountingOpenLoad = function () {
+  return window.__bramStatusOpenLoad().filter(function (k) { return k !== "tokens-models"; });
 };
 // Status rows with no verdict read "N/A", not "none" / "n/a" / blank
 // (status-warns-only-with-an-action).

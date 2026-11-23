@@ -566,6 +566,85 @@ fn since_boundary_reads_the_last_claim_edge() {
     assert_eq!(since_boundary(&[], &[]), (0, 0, 0));
 }
 
+// status-session-context-report: a session cut at its claim edges and
+// compactions, each stretch carrying the fresh-session counterfactual.
+#[test]
+fn stretches_cut_at_claim_edges_and_compactions() {
+    let rc = |at: i64, ctx: u64, read: u64, out: u64| RawCall {
+        key: format!("k{at}"),
+        at_ms: at,
+        model: "m".into(),
+        context: ctx,
+        cache_read: read,
+        output: out,
+        ..Default::default()
+    };
+    let calls = vec![
+        rc(100, 74_000, 0, 10),
+        rc(200, 230_000, 229_000, 10),
+        rc(300, 390_000, 389_000, 10),
+        rc(400, 900_000, 899_000, 10),
+        rc(500, 137_000, 136_000, 10), // compaction: under half the previous
+        rc(600, 363_000, 362_000, 10),
+    ];
+    let refs: Vec<&RawCall> = calls.iter().collect();
+    let w = |from: i64, to: i64, kind: &str| ClaimWindow {
+        from_ms: from,
+        to_ms: to,
+        kind: kind.into(),
+        ids: vec!["x".into()],
+    };
+    // An approval claim opened at 250 and cleared at 350, then an open claim
+    // at 550 (to = from + 1, so no closing edge).
+    let out = stretches(&refs, &[w(250, 350, "approved"), w(550, 551, "feedback")]);
+    let kinds: Vec<&str> = out.iter().map(|s| s.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "start",
+            "claim-opened",
+            "claim-closed",
+            "compaction",
+            "claim-opened"
+        ]
+    );
+    // start: calls at 100 and 200, context at the floor, no excess.
+    assert_eq!(
+        (out[0].calls, out[0].context_at, out[0].excess_over_floor),
+        (2, 74_000, 0)
+    );
+    // opened at 250: the call at 300; context at the boundary is the last
+    // call at or before it (200 -> 230k); excess = 1 x (230k - 74k).
+    assert_eq!(
+        (out[1].calls, out[1].context_at, out[1].excess_over_floor),
+        (1, 230_000, 156_000)
+    );
+    // closed at 350: the call at 400; context at the boundary 390k.
+    assert_eq!(
+        (out[2].calls, out[2].context_at, out[2].excess_over_floor),
+        (1, 390_000, 316_000)
+    );
+    // compaction at 500: context is the post-compaction call's, 137k.
+    assert_eq!(
+        (out[3].calls, out[3].context_at, out[3].excess_over_floor),
+        (1, 137_000, 63_000)
+    );
+    assert_eq!(out[3].ids, Vec::<String>::new());
+    // opened at 550: the call at 600; context at 500 -> 137k.
+    assert_eq!(
+        (
+            out[4].calls,
+            out[4].context_at,
+            out[4].claim_kind.as_deref()
+        ),
+        (1, 137_000, Some("feedback"))
+    );
+    assert_eq!(out[4].ids, vec!["x".to_string()]);
+    assert_eq!(out[1].cache_read, 389_000);
+    assert_eq!(out[0].output, 20);
+    assert!(stretches(&[], &[]).is_empty());
+}
+
 #[test]
 fn the_sample_line_names_the_turn() {
     let s = Sample {

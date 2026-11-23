@@ -30,7 +30,7 @@
     <DataSource id="tokens" url="/__token-accounting?t={tokensNonce}" when="{tokensNonce > 0}" />
     <VStack gap="$space-2">
       <HStack gap="$space-3" verticalAlignment="center">
-        <Heading level="h2">Accounting</Heading>
+        <Heading level="h2">Cost</Heading>
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Token accounting')}" />
         <!-- accounting-loads-on-open (Jon, 2026-11-23): the full walk starts
              with the page (tokensNonce begins at 1) and fills the folds below

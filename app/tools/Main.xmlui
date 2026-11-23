@@ -740,7 +740,7 @@
     <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
     <!-- promote-accounting-to-nav (Jon, 2026-11-23): Token accounting leaves
          the Status tab for its own page, between Files and Settings. -->
-    <NavLink label="Accounting" to="/accounting" tooltip="What the agents&apos; model calls used, this session and every session, and what a fresh session would have saved" />
+    <NavLink label="Cost" to="/accounting" tooltip="What the agents&apos; model calls used, this session and every session, and what a fresh session would have saved" />
     <NavLink label="Settings" to="/settings" tooltip="Project and personal settings for Bram" />
     <NavLink label="Log" to="/log" tooltip="What Bram did around your work, newest first" />
     <!-- nav-primary-list-and-more-group: less-used pages, collapsed by
@@ -875,6 +875,11 @@
               <HStack verticalAlignment="center" gap="0">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Search" />
                 <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Search tab" onClick="modeInfoDialog.open(window.__bramModeInfo('search'))" />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Cost" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Cost tab" onClick="modeInfoDialog.open(window.__bramModeInfo('cost'))" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
               </HStack>
               <HStack verticalAlignment="center" gap="0">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="and Files." />

@@ -8234,6 +8234,10 @@ window.__bramModeInfoBodies = {
   files: {
     title: "Files",
     body: "The Files tab browses this folder's files and searches their contents."
+  },
+  cost: {
+    title: "Cost",
+    body: "The Cost tab prices the agent's model calls in dollars at list rates, this session and every session in this folder, and says what a fresh session would save."
   }
 };
 // {title, body} for modeInfoDialog.open(...). Reads only its argument and
@@ -22317,7 +22321,7 @@ window.__bramSessionContextInfoBody = function (key, ctx, rates) {
       num(ctx.floor) + "** tokens.\n\n" +
       "A fresh session starts near the floor, so the gap between the context figure and this one is what a new session would save on every call. " +
       "Compaction brings the context down to a summary, not to the floor.\n\n" +
-      "The floor is mostly instruction files; Accounting › Models splits it into the agent's own share, the project's and Bram's conventions."
+      "The floor is mostly instruction files; Cost › Models splits it into the agent's own share, the project's and Bram's conventions."
     );
   }
   var lim = typeof ctx.suggestTokens === "number" && ctx.suggestTokens > 0 ? K(ctx.suggestTokens) : "";

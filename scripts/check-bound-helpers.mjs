@@ -91,7 +91,7 @@ const HELPER_OK = {
 };
 // Bindings whose helper is a once-only initializer reading storage or the DOM:
 // a `var.` that handlers reassign afterwards.
-const INITIALIZER = /^__bram(Restore[A-Z]\w*|\w*Initial\w*|OrientSent|StatusOpenLoad|FilesView|CompactionOpen|GateLastSession|GateLastSessionLine)$/;
+const INITIALIZER = /^__bram(Restore[A-Z]\w*|\w*Initial\w*|OrientSent|StatusOpenLoad|AccountingOpenLoad|FilesView|CompactionOpen|GateLastSession|GateLastSessionLine)$/;
 
 
 // ---- bindings ---------------------------------------------------------------

@@ -1,8 +1,8 @@
 <Component
   name="Accounting"
-  var.tokensNonce="{0}"
+  var.tokensNonce="{1}"
   var.tokenInfoKey="{''}"
-  var.statusOpen="{window.__bramStatusOpenLoad()}">
+  var.statusOpen="{window.__bramAccountingOpenLoad()}">
 
   <!-- promote-accounting-to-nav (Jon, 2026-11-23, "promote status / token
        accounting to between files and settings in the nav, as Accounting"):
@@ -32,8 +32,12 @@
       <HStack gap="$space-3" verticalAlignment="center">
         <Heading level="h2">Accounting</Heading>
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Token accounting')}" />
+        <!-- accounting-loads-on-open (Jon, 2026-11-23): the full walk starts
+             with the page (tokensNonce begins at 1) and fills the folds below
+             while This session, which is quick, is read; Models starts
+             collapsed so the page doesn't jump when it lands. -->
         <Button
-          label="{tokensNonce > 0 ? 'Reload' : 'Load'}"
+          label="Reload"
           size="sm"
           enabled="{!tokens.inProgress}"
           onClick="tokensNonce = tokensNonce + 1" />
@@ -41,18 +45,13 @@
           when="{tokens.inProgress}"
           fontSize="$fontSize-sm"
           color="$textColor-secondary"
-          value="Reading every session (about 7 s)…" />
+          value="Reading every session, this fills in below…" />
         <Text
           when="{tokens.loaded &amp;&amp; !!tokens.value}"
           fontSize="$fontSize-sm"
           color="$textColor-secondary"
           value="{(tokens.value.sessions || []).length + ' sessions, ' + tokens.value.ms + ' ms'}" />
       </HStack>
-      <Text
-        when="{tokensNonce == 0}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        value="Per-call token readings from every agent's session files: context per call by model, how much would fit a smaller window, and what each session costs before any work." />
       <!-- This session: loads on open, no Load button
            (https://www.xmlui.org/docs/howto/hide-an-element-until-its-datasource-is-ready). -->
       <VStack when="{thisSession.loaded &amp;&amp; !!window.__bramTokenMainRow(thisSession.value)}" gap="$space-2">

@@ -370,9 +370,13 @@
         <!-- session-context-pane: thousands in the box, tokens on disk; the
              conversions live in helpers.js. NumberBox label/initialValue/
              integersOnly/minValue: https://www.xmlui.org/docs/reference/components/NumberBox -->
+        <!-- Label above a full-width box, as the other NumberBoxes on this
+             tab (Keep raw traces, Commit depth); beside the box the long
+             label wrapped around a sliver of input (Jon, 2026-11-23,
+             "awkward wrap"). -->
         <NumberBox
           label="Ask at the next natural pause once the context passes (thousands of tokens; 0 = never)"
-          labelPosition="end"
+          width="100%"
           integersOnly="{true}"
           minValue="{0}"
           initialValue="{window.__bramSuggestContextSetting(settingsValue)}"

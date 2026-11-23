@@ -16,6 +16,10 @@
 #   scripts/setup-harness.sh pristine_git    # one scenario
 #   BRAM_BIN=/path/to/bram scripts/setup-harness.sh
 #
+# Every launch runs with BRAM_USER_STATE_DIR under the work directory, so the
+# mode a scenario chooses (Workflow or Freestyle, decision 2026-11-22) is
+# recorded there and never in your own ~/.bram/folders.json.
+#
 # Exit status is the number of failed assertions (0 = all pass).
 
 set -uo pipefail
@@ -35,6 +39,115 @@ native_path() {
   if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
 }
 KEEP_ON_FAIL="${KEEP_ON_FAIL:-1}"
+# harness-two-modes: every launch records its folder's mode under this
+# directory, never under the real ~/.bram/. The launch functions refuse to
+# run without it, so a future scenario cannot forget the isolation.
+USER_STATE="$WORK_ROOT/user-state"
+
+# HARNESS_SHOTS=<dir> (macOS): write <dir>/index.html, a narrative of the
+# run that lists every scenario with its assertions, and for the `snap`
+# points a screenshot of the launched Bram window with one line saying what
+# it should show, so a person can review what the pane showed while the
+# assertions flew by (Jon, 2026-11-22: "those tests flew by too fast and I
+# saw banners I wanted to verify"; then: "list all of the tests, only some
+# of which expand to images"). The window is found by the spawned PID, so
+# the capture works even when the window isn't frontmost. Captures are
+# scaled to HARNESS_SHOT_WIDTH pixels wide (default 1200) so the narrative
+# can be checked in: site/harness/, which the Pages workflow publishes at
+# https://judell.github.io/bram/harness/. Off by default; the assertions
+# don't depend on it.
+SHOTS="${HARNESS_SHOTS:-}"
+SHOT_WIDTH="${HARNESS_SHOT_WIDTH:-1200}"
+SHOT_N=0
+# Per-scenario narrative parts, assembled into index.html at the end.
+narrate_check() {
+  [ -n "$SHOTS" ] || return 0
+  mkdir -p "$SHOTS/.parts"
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$SHOTS/.parts/$SCENARIO.checks"
+}
+html_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+write_narrative() {
+  [ -n "$SHOTS" ] || return 0
+  local out="$SHOTS/index.html" s n_ok n_bad line kind name note
+  {
+    printf '<!doctype html><meta charset="utf-8"><title>Startup harness narrative</title>\n'
+    printf '<style>body{font:16px/1.5 -apple-system,Helvetica,Arial,sans-serif;max-width:960px;margin:2em auto;padding:0 1em;color:#222}'
+    printf 'h2{margin-top:2em;font-size:1.15em}h2 .tally{font-weight:normal;color:#555;font-size:.9em;margin-left:.6em}'
+    printf 'figure{margin:1em 0}img{max-width:100%%;border:1px solid #ccc;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.15)}'
+    printf 'figcaption{font-size:.95em;margin-bottom:.4em}details{margin:.5em 0}summary{cursor:pointer;color:#555;font-size:.9em}'
+    printf 'pre{background:#f6f6f6;padding:.6em .8em;border-radius:4px;font-size:.85em;overflow:auto}.bad{color:#b00020;font-weight:600}</style>\n'
+    printf '<h1>Startup harness narrative</h1>\n'
+    printf '<p>%s. Binary built %s. Every scenario lists its assertions; the ones that change what the pane shows carry a picture of it.</p>\n' \
+      "$(printf '%d passed, %d failed' "$PASS" "$FAIL")" "$(date -r "$BRAM_BIN" 2>/dev/null | html_escape)"
+    for s in "${SCENARIOS[@]}"; do
+      n_ok="$(grep -c '^ok' "$SHOTS/.parts/$s.checks" 2>/dev/null || true)"
+      n_bad="$(grep -c '^FAIL' "$SHOTS/.parts/$s.checks" 2>/dev/null || true)"
+      printf '<section><h2>%s<span class="tally">%s ok%s</span></h2>\n' "$s" "${n_ok:-0}" "$([ "${n_bad:-0}" -gt 0 ] && printf ', <span class="bad">%s failed</span>' "$n_bad")"
+      [ -f "$SHOTS/.parts/$s.figs" ] && cat "$SHOTS/.parts/$s.figs"
+      if [ -f "$SHOTS/.parts/$s.checks" ]; then
+        printf '<details><summary>assertions</summary><pre>'
+        while IFS=$'\t' read -r kind name note; do
+          if [ "$kind" = "FAIL" ]; then
+            printf '<span class="bad">FAIL %s</span>' "$(printf '%s' "$name" | html_escape)"
+            [ -n "$note" ] && printf '\n     %s' "$(printf '%s' "$note" | html_escape)"
+            printf '\n'
+          else
+            printf 'ok   %s\n' "$(printf '%s' "$name" | html_escape)"
+          fi
+        done < "$SHOTS/.parts/$s.checks"
+        printf '</pre></details>\n'
+      fi
+      printf '</section>\n'
+    done
+  } > "$out"
+  rm -rf "$SHOTS/.parts"
+  printf 'narrative: %s\n' "$out"
+}
+window_lister() {
+  local bin="$WORK_ROOT/list-windows"
+  [ -x "$bin" ] && { printf '%s' "$bin"; return 0; }
+  command -v swiftc > /dev/null 2>&1 || return 1
+  cat > "$WORK_ROOT/list-windows.swift" <<'SWIFT'
+import CoreGraphics
+import Foundation
+let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { exit(1) }
+for w in list {
+    let id = w[kCGWindowNumber as String] as? Int ?? 0
+    let pid = w[kCGWindowOwnerPID as String] as? Int ?? 0
+    let owner = w[kCGWindowOwnerName as String] as? String ?? ""
+    let layer = w[kCGWindowLayer as String] as? Int ?? 0
+    if layer != 0 { continue }
+    print("\(id)\t\(pid)\t\(owner)")
+}
+SWIFT
+  swiftc -O -o "$bin" "$WORK_ROOT/list-windows.swift" > /dev/null 2>&1 || return 1
+  printf '%s' "$bin"
+}
+# snap <slug> <one line of what the pane should show now>
+snap() {
+  [ -n "$SHOTS" ] || return 0
+  local slug="$1" line="$2" lister id file figs="$SHOTS/.parts/$SCENARIO.figs"
+  mkdir -p "$SHOTS/.parts"
+  SHOT_N=$((SHOT_N + 1))
+  file="$(printf '%02d-%s-%s.png' "$SHOT_N" "$SCENARIO" "$slug")"
+  # Let the pane catch up with the host: status refetches ride events, and
+  # a fresh launch is still painting when the port appears.
+  sleep 4
+  lister="$(window_lister)" || { printf '<figure><figcaption>%s</figcaption><p><em>no capture: swiftc unavailable</em></p></figure>\n' "$(printf '%s' "$line" | html_escape)" >> "$figs"; return 0; }
+  # The owner reads "bram" for the binary run directly and "Bram" from the
+  # app bundle, so match the pid and the name case-blind.
+  id="$("$lister" | awk -F'\t' -v p="$BRAM_PID" '$2==p && tolower($3)=="bram"{print $1; exit}')"
+  if [ -n "$id" ] && /usr/sbin/screencapture -l "$id" -x "$SHOTS/$file" 2>/dev/null; then
+    # Scaled for check-in; a full-size capture is ~2 MB.
+    sips -Z "$SHOT_WIDTH" "$SHOTS/$file" > /dev/null 2>&1 || true
+    printf '<figure><figcaption>%s</figcaption><img src="%s" alt="%s"></figure>\n' \
+      "$(printf '%s' "$line" | html_escape)" "$file" "$slug" >> "$figs"
+  else
+    printf '<figure><figcaption>%s</figcaption><p><em>no capture: no on-screen Bram window for pid %s</em></p></figure>\n' \
+      "$(printf '%s' "$line" | html_escape)" "$BRAM_PID" >> "$figs"
+  fi
+}
 
 PASS=0
 FAIL=0
@@ -42,8 +155,8 @@ BRAM_PID=""
 BRAM_PORT=""
 SCENARIO=""
 
-ok()  { PASS=$((PASS + 1)); printf '    ok   %s\n' "$1"; }
-bad() { FAIL=$((FAIL + 1)); printf '    FAIL %s\n' "$1"; [ $# -gt 1 ] && [ -n "$2" ] && printf '         %s\n' "$2"; }
+ok()  { PASS=$((PASS + 1)); printf '    ok   %s\n' "$1"; narrate_check ok "$1" ""; }
+bad() { FAIL=$((FAIL + 1)); printf '    FAIL %s\n' "$1"; [ $# -gt 1 ] && [ -n "$2" ] && printf '         %s\n' "$2"; narrate_check FAIL "$1" "${2:-}"; }
 
 # check <name> <command...>  -- passes when the command succeeds
 check() {
@@ -66,16 +179,57 @@ require_bin() {
   printf 'built:  %s\n' "$(date -r "$BRAM_BIN" 2>/dev/null || stat -c %y "$BRAM_BIN" 2>/dev/null)"
 }
 
+# The one place a Bram process starts. BRAM_TRACE=1 matters: traces are
+# opt-in per project and a scratch project has no settings yet, so only the
+# env var turns them on. BRAM_USER_STATE_DIR keeps the mode record out of the
+# developer's own ~/.bram/ (harness-two-modes).
+spawn_bram() {
+  local dir="$1"
+  if [ -z "${USER_STATE:-}" ]; then
+    echo "USER_STATE unset: a launch would write the real ~/.bram/folders.json"
+    exit 2
+  fi
+  mkdir -p "$USER_STATE"
+  # BRAM_TEST_DRIVE=1 opens the POST /__test/* routes (switch, new-session,
+  # turn), the headless stand-ins for the pane's agent-starting clicks.
+  BRAM_TRACE=1 BRAM_TEST_DRIVE=1 BRAM_USER_STATE_DIR="$USER_STATE" "$BRAM_BIN" "$dir" > "$WORK_ROOT/$SCENARIO.log" 2>&1 &
+  BRAM_PID=$!
+}
+
+# The "Which agent do you use?" answer, headless: with several agent CLIs
+# installed the first wake holds the autostart to ask, and nothing that
+# needs a running session (the Setup banner, Orient me, First commit)
+# shows until one starts. Switching to a provider starts it.
+start_agent() {
+  local provider="$1" bodyf="$WORK_ROOT/$SCENARIO.switch-body"
+  printf '{"provider":"%s"}' "$provider" > "$bodyf"
+  curl -4 -sS --max-time 60 -X POST -H 'Content-Type: application/json' \
+    --data @"$bodyf" "http://127.0.0.1:$BRAM_PORT/__test/switch" > /dev/null
+}
+
+# One ask at a time (pane rule, 2026-11-22): the offers that send a turn
+# wait for a session that postdates Setup. The host facts the pane reads.
+assert_session_postdates_setup() {
+  local i launched setup
+  for i in $(seq 1 60); do
+    launched="$(status_field agentLaunchedAtMs)"; setup="$(status_field lastSetup.atMs)"
+    if [ "$launched" != "null" ] && [ "$setup" != "null" ] && [ "$launched" -gt "$setup" ] 2>/dev/null; then
+      ok "a session postdates Setup (launched $launched > setup $setup)"
+      return 0
+    fi
+    sleep 1
+  done
+  bad "a session postdates Setup" "launched=$launched setup=$setup after 60s"
+  return 1
+}
+
 launch() {
   local dir="$1"
   # The optional second argument names the state folder to watch for the port
   # file, for a launch whose answer isn't bram_state_dir's (a foreign .bram/,
   # #469: the sourced bram-state.sh still adopts any .bram/).
   local sd="${2:-}"
-  # BRAM_TRACE=1 matters: traces are opt-in per project and a scratch project
-  # has no settings yet, so only the env var turns them on.
-  BRAM_TRACE=1 "$BRAM_BIN" "$dir" > "$WORK_ROOT/$SCENARIO.log" 2>&1 &
-  BRAM_PID=$!
+  spawn_bram "$dir"
   local i
   for i in $(seq 1 80); do
     local sdir="${sd:+$dir/$sd}"; [ -n "$sdir" ] || sdir="$(bram_state_dir "$dir")"
@@ -95,8 +249,7 @@ launch() {
 # prints on stderr. Ready once /__enhance/status answers.
 launch_refused() {
   local dir="$1"
-  BRAM_TRACE=1 "$BRAM_BIN" "$dir" > "$WORK_ROOT/$SCENARIO.log" 2>&1 &
-  BRAM_PID=$!
+  spawn_bram "$dir"
   local i
   for i in $(seq 1 80); do
     BRAM_PORT="$(sed -n 's/^\[bram\] loopback port=\([0-9]*\).*/\1/p' "$WORK_ROOT/$SCENARIO.log" | head -1)"
@@ -171,6 +324,37 @@ fingerprint() {
 }
 
 run_setup() { api "__enhance/run?force=true" > /dev/null; }
+
+# harness-two-modes: the first-wake chooser's click, headless. Prints the
+# response so a scenario can inspect it.
+choose_mode() {
+  local mode="$1" bodyf="$WORK_ROOT/$SCENARIO.mode-body"
+  printf '{"mode":"%s"}' "$mode" > "$bodyf"
+  curl -4 -sS --max-time 120 -X POST -H 'Content-Type: application/json' \
+    --data @"$bodyf" "http://127.0.0.1:$BRAM_PORT/__mode"
+}
+
+# The recorded mode for a folder, from the isolated user-state record; the
+# host keys it by the folder's canonical path.
+recorded_mode() {
+  local key; key="$(native_path "$(cd "$1" && pwd -P)")"
+  jq -r --arg k "$key" '.folders[$k].mode // "none"' "$USER_STATE/folders.json" 2>/dev/null || echo none
+}
+
+assert_recorded_mode() {
+  local dir="$1" want="$2" got; got="$(recorded_mode "$dir")"
+  if [ "$got" = "$want" ]; then ok "record says $want"; else bad "record says $want" "got: $got ($USER_STATE/folders.json)"; fi
+}
+
+# Freestyle and the undecided wake seed nothing: Bram's own state folder
+# (port, trace) is the only new thing in the folder.
+assert_nothing_seeded() {
+  local dir="$1" p written=""
+  for p in resources .claude AGENTS.md CLAUDE.md .bram.json .opencode .agents; do
+    [ -e "$dir/$p" ] && written="$written $p"
+  done
+  if [ -z "$written" ]; then ok "nothing seeded in $(basename "$dir")"; else bad "nothing seeded in $(basename "$dir")" "found:$written"; fi
+}
 
 # first-run-sequence-greeting-vs-setup: Setup now runs automatically inside
 # pty_spawn, before the agent autostart. The trace is the observable record of
@@ -360,13 +544,87 @@ assert_idempotent() {
 # happy path, which is why these vary the fixture rather than the steps.
 # ---------------------------------------------------------------------------
 
-scenario_pristine_nogit() {
-  # issue-448: a folder that isn't in a git repository is not a project
-  # folder (README prerequisite #1). Before, Setup seeded it on first launch.
-  local dir="$WORK_ROOT/pristine_nogit"; mkdir -p "$dir"
+# harness-two-modes (decision 2026-11-22, #513, #514): a folder that isn't in
+# a git repository is a project folder. Bram wakes, asks how to work, and
+# seeds nothing until told. These three replace pristine_nogit, which
+# asserted the issue-448 refusal that no longer exists.
+nogit_project() {
+  local dir="$1"; mkdir -p "$dir"
   printf '# scratch\n' > "$dir/README.md"
-  launch_refused "$dir" || return
-  assert_refused "$dir" "not-git"
+}
+
+assert_undecided_wake() {
+  local dir="$1"
+  assert_field projectFolder.kind not-git
+  assert_field mode undecided
+  assert_trace "$dir" "\[auto-setup\] op=skip reason=mode-undecided" "auto-setup skipped: mode undecided"
+  check "Bram's state folder exists" test -d "$dir/.bram"
+  check "no .git created by the wake" test ! -e "$dir/.git"
+  assert_nothing_seeded "$dir"
+  assert_recorded_mode "$dir" none
+}
+
+scenario_nogit_undecided() {
+  local dir="$WORK_ROOT/nogit_undecided"; nogit_project "$dir"
+  launch "$dir" || return
+  # Snaps picture only what a person hasn't seen earlier in the sequence
+  # (Jon, 2026-11-22); every scenario still asserts, pictured or not.
+  snap wake "A plain folder, first wake: the chooser at the top of the Transcript (the Workflow card offers to create a repo), the undecided greeting, nothing seeded."
+  assert_undecided_wake "$dir"
+  shutdown_bram
+}
+
+scenario_nogit_freestyle() {
+  local dir="$WORK_ROOT/nogit_freestyle"; nogit_project "$dir"
+  launch "$dir" || return
+  assert_undecided_wake "$dir"
+  local resp; resp="$(choose_mode freestyle)"
+  snap chosen "Freestyle chosen: the chooser gone, the freestyle note and greeting, no Setup banner."
+  if [ "$(printf '%s' "$resp" | jq -r .mode)" = "freestyle" ] && [ "$(printf '%s' "$resp" | jq -r .ran)" = "null" ]; then
+    ok "freestyle chosen, nothing ran"
+  else
+    bad "freestyle chosen, nothing ran" "got: $resp"
+  fi
+  sleep 1
+  assert_field mode freestyle
+  assert_recorded_mode "$dir" freestyle
+  assert_trace "$dir" "\[mode\] op=chose mode=freestyle" "choice traced"
+  assert_nothing_seeded "$dir"
+  check "still no .git" test ! -e "$dir/.git"
+  # The record outlives the process: a second launch reads it and skips
+  # Setup for that reason, without asking again.
+  shutdown_bram
+  launch "$dir" || return
+  assert_field mode freestyle
+  assert_trace "$dir" "\[auto-setup\] op=skip reason=freestyle" "second launch skips Setup: freestyle"
+  assert_nothing_seeded "$dir"
+  shutdown_bram
+}
+
+scenario_nogit_workflow() {
+  local dir="$WORK_ROOT/nogit_workflow"; nogit_project "$dir"
+  launch "$dir" || return
+  assert_undecided_wake "$dir"
+  local resp; resp="$(choose_mode workflow)"
+  if [ "$(printf '%s' "$resp" | jq -r .mode)" = "workflow" ] && [ "$(printf '%s' "$resp" | jq -r '.ran.ok // .ran.enhanced // "x"')" != "x" ]; then
+    ok "workflow chosen, Setup ran"
+  else
+    bad "workflow chosen, Setup ran" "got: $(printf '%s' "$resp" | head -c 300)"
+  fi
+  sleep 1
+  check "git init ran" test -d "$dir/.git"
+  assert_trace "$dir" "\[mode\] op=git-init" "git init traced"
+  assert_trace "$dir" "\[mode\] op=chose mode=workflow" "choice traced"
+  assert_field mode workflow
+  assert_field modeCreatedRepo true
+  # The repo has no commits, which is what the First commit offer keys on.
+  assert_field repoUnborn true
+  assert_recorded_mode "$dir" workflow
+  start_agent claude
+  assert_session_postdates_setup
+  snap first-commit "Agent started after Setup on the new repo: the First commit offer under the greeting."
+  assert_setup_landed "$dir"
+  assert_idempotent "$dir"
   shutdown_bram
 }
 
@@ -379,6 +637,9 @@ scenario_subfolder() {
   git -C "$repo" init -q
   printf '# repo\n' > "$repo/README.md"
   launch_refused "$dir" || return
+  # No snap: the status names the subfolder (asserted below), but the pane
+  # showed no refusal banner in the 2026-11-22 narrative; the picture returns
+  # with the fix (item pane-follow-ups-from-harness-narrative).
   assert_refused "$dir" "subfolder"
   local top; top="$(status_field projectFolder.toplevel)"
   if [ "$top" = "$(native_path "$(cd "$repo" && pwd -P)")" ]; then
@@ -401,8 +662,20 @@ scenario_pristine_git() {
   git -C "$dir" add -A
   git -C "$dir" -c user.email=h@h -c user.name=harness commit -qm init
   launch "$dir" || return
-  assert_trace "$dir" "\[auto-setup\] op=ran firstRun=true" "auto-setup ran on first launch"
+  # #513 (decision 2026-11-22): Setup no longer runs unasked on an unseen
+  # repo; the first wake asks, and the workflow choice is what runs it.
+  assert_trace "$dir" "\[auto-setup\] op=skip reason=mode-undecided" "auto-setup skipped on first launch: mode undecided"
+  assert_field mode undecided
+  check "nothing seeded before the choice" test ! -e "$dir/.claude"
+  choose_mode workflow > /dev/null
   sleep 1
+  assert_field mode workflow
+  assert_field lastSetup.source mode
+  start_agent claude
+  assert_session_postdates_setup
+  snap orient "Agent chosen and started after Setup: Orient me offered, no Setup banner (the session already has the instructions)."
+  assert_field modeCreatedRepo false "an existing repo is not one the choice created"
+  assert_recorded_mode "$dir" workflow
   assert_setup_landed "$dir"
 
   # #249's real failure: Setup must not leave TRACKED files modified. Untracked
@@ -437,6 +710,11 @@ scenario_already_setup() {
   check "re-running Setup leaves the tree clean" git -C "$dir" diff --quiet
   assert_field firstRun false
   assert_field claudeNeedsSetup false
+  # harness-two-modes: a folder carrying Bram's marker with no mode record
+  # (set up before the chooser existed, or on another machine) is workflow
+  # without being asked.
+  assert_field mode workflow "marker with no record resolves to workflow"
+  assert_recorded_mode "$dir" none
   shutdown_bram
 }
 
@@ -518,6 +796,7 @@ scenario_held_mixed() {
   legacy_board_project "$dir" mixed
   local before; before="$(tree_sum "$dir/resources")"
   launch_refused "$dir" || return
+  snap held "A live board in resources/ beside a file that isn't Bram's: the start holds and asks about the move; the held board still reads."
   assert_held "$dir" mixed "$before"
   check "no .bram/ created" test ! -e "$dir/.bram"
   # The pane reads the held board from resources/.
@@ -576,6 +855,7 @@ scenario_foreign_dot_bram() {
   local before before_res
   before="$(tree_sum "$dir/.bram")"; before_res="$(tree_sum "$dir/resources")"
   launch_refused "$dir" || return
+  snap held "Another tool's .bram/ with no Bram marker: the start holds (foreign-dot-bram) and writes nothing."
   assert_foreign_dot_bram "$dir" "$before" "$before_res"
   shutdown_bram
 }
@@ -608,6 +888,7 @@ scenario_stale_instructions() {
   assert_field claudeNeedsSetup false
   printf '<!-- bram v0.0.1 -->\nold text\n' > "$dir/.claude/bram-conventions.md"
   sleep 1
+  snap stale "Conventions copy staled by hand: the needs-setup banner names stale instructions (#465)."
   assert_field claudeNeedsSetup true
   assert_field claudeDocsCurrent false
   assert_field menuHookRegistered true
@@ -642,6 +923,9 @@ scenario_antigravity_reasons() {
   jq 'del(.["bram-worklist-guard"])' "$dir/.agents/hooks.json" > "$dir/.agents/hooks.json.tmp" \
     && mv "$dir/.agents/hooks.json.tmp" "$dir/.agents/hooks.json"
   sleep 1
+  # No snap: the status flips (asserted below) but the pane showed no banner
+  # in the 2026-11-22 narrative; the refetch after a hooks.json edit is an
+  # open question, not something to picture yet.
   assert_field antigravityNeedsSetup true
   assert_field providerNeedsSetup true
   assert_field antigravityHooks missing
@@ -692,6 +976,7 @@ scenario_nested() {
   printf '{}\n' > "$parent/.bram.json"
   printf '# child\n' > "$dir/README.md"
   launch "$dir" || return
+  snap nested "A repo nested under a managed parent: the nesting warning; Setup not run."
   local nested; nested="$(status_field nestedUnder)"
   if [ "$nested" != "null" ] && [ -n "$nested" ]; then
     ok "nestedUnder reported ($nested)"
@@ -716,7 +1001,7 @@ require_bin
 command -v jq >/dev/null || { echo "jq required"; exit 127; }
 printf 'workdir: %s\n' "$WORK_ROOT"
 
-SCENARIOS=(pristine_nogit subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested held_mixed plain_legacy_moves foreign_dot_bram foreign_dot_bram_damaged)
+SCENARIOS=(nogit_undecided nogit_freestyle nogit_workflow subfolder pristine_git already_setup stale_instructions antigravity_reasons legacy_hooks nested held_mixed plain_legacy_moves foreign_dot_bram foreign_dot_bram_damaged)
 [ $# -gt 0 ] && SCENARIOS=("$@")
 
 for s in "${SCENARIOS[@]}"; do
@@ -726,11 +1011,15 @@ for s in "${SCENARIOS[@]}"; do
     bad "unknown scenario: $s"
     continue
   fi
+  # A stale picture from an earlier run must not survive a scenario that
+  # takes none this time.
+  [ -n "$SHOTS" ] && rm -f "$SHOTS"/[0-9][0-9]-"$s"-*.png
   "scenario_$s"
   shutdown_bram
 done
 
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
+write_narrative
 if [ "$FAIL" -gt 0 ] && [ "$KEEP_ON_FAIL" = "1" ]; then
   printf 'projects kept for inspection: %s\n' "$WORK_ROOT"
 else

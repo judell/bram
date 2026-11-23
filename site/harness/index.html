@@ -1,0 +1,253 @@
+<!doctype html><meta charset="utf-8"><title>Startup harness narrative</title>
+<style>body{font:16px/1.5 -apple-system,Helvetica,Arial,sans-serif;max-width:960px;margin:2em auto;padding:0 1em;color:#222}h2{margin-top:2em;font-size:1.15em}h2 .tally{font-weight:normal;color:#555;font-size:.9em;margin-left:.6em}figure{margin:1em 0}img{max-width:100%;border:1px solid #ccc;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.15)}figcaption{font-size:.95em;margin-bottom:.4em}details{margin:.5em 0}summary{cursor:pointer;color:#555;font-size:.9em}pre{background:#f6f6f6;padding:.6em .8em;border-radius:4px;font-size:.85em;overflow:auto}.bad{color:#b00020;font-weight:600}</style>
+<h1>Startup harness narrative</h1>
+<p>199 passed, 0 failed. Binary built Sun Nov 22 19:59:32 PST 2026. Every scenario lists its assertions; the ones that change what the pane shows carry a picture of it.</p>
+<section><h2>nogit_undecided<span class="tally">7 ok</span></h2>
+<figure><figcaption>A plain folder, first wake: the chooser at the top of the Transcript (the Workflow card offers to create a repo), the undecided greeting, nothing seeded.</figcaption><img src="01-nogit_undecided-wake.png" alt="wake"></figure>
+<details><summary>assertions</summary><pre>ok   projectFolder.kind == not-git
+ok   mode == undecided
+ok   auto-setup skipped: mode undecided
+ok   Bram's state folder exists
+ok   no .git created by the wake
+ok   nothing seeded in nogit_undecided
+ok   record says none
+</pre></details>
+</section>
+<section><h2>nogit_freestyle<span class="tally">16 ok</span></h2>
+<figure><figcaption>Freestyle chosen: the chooser gone, the freestyle note and greeting, no Setup banner.</figcaption><img src="02-nogit_freestyle-chosen.png" alt="chosen"></figure>
+<details><summary>assertions</summary><pre>ok   projectFolder.kind == not-git
+ok   mode == undecided
+ok   auto-setup skipped: mode undecided
+ok   Bram's state folder exists
+ok   no .git created by the wake
+ok   nothing seeded in nogit_freestyle
+ok   record says none
+ok   freestyle chosen, nothing ran
+ok   mode == freestyle
+ok   record says freestyle
+ok   choice traced
+ok   nothing seeded in nogit_freestyle
+ok   still no .git
+ok   mode == freestyle
+ok   second launch skips Setup: freestyle
+ok   nothing seeded in nogit_freestyle
+</pre></details>
+</section>
+<section><h2>nogit_workflow<span class="tally">42 ok</span></h2>
+<figure><figcaption>Agent started after Setup on the new repo: the First commit offer under the greeting.</figcaption><img src="03-nogit_workflow-first-commit.png" alt="first-commit"></figure>
+<details><summary>assertions</summary><pre>ok   projectFolder.kind == not-git
+ok   mode == undecided
+ok   auto-setup skipped: mode undecided
+ok   Bram's state folder exists
+ok   no .git created by the wake
+ok   nothing seeded in nogit_workflow
+ok   record says none
+ok   workflow chosen, Setup ran
+ok   git init ran
+ok   git init traced
+ok   choice traced
+ok   mode == workflow
+ok   modeCreatedRepo == true
+ok   repoUnborn == true
+ok   record says workflow
+ok   a session postdates Setup (launched 1795408676693 &gt; setup 1795408674908)
+ok   seeded .bram/.worklist-authorization.json
+ok   seeded .claude/bram-conventions.md
+ok   seeded .claude/settings.json
+ok   seeded AGENTS.md
+ok   seeded CLAUDE.md
+ok   retired Python hook absent: .claude/hooks/claude-worklist-guard.py
+ok   retired Python hook absent: .claude/hooks/claude-permission-menu-hook.py
+ok   bram-guard registered in settings.local.json
+ok   no python commands in settings.local.json
+ok   enhanced == true
+ok   claudeNeedsSetup == false
+ok   codexNeedsSetup == false
+ok   opencodeNeedsSetup == false
+ok   seeded .opencode/plugins/bram.js
+ok   OpenCode plugin matches the bundle
+ok   OpenCode instructions list the conventions
+ok   antigravityNeedsSetup == false
+ok   seeded .agents/hooks.json
+ok   Antigravity hooks register the guard
+ok   antigravityRulesCurrent == true
+ok   Antigravity rules: two always-on slices within 24,000 bytes
+ok   Antigravity rules reassemble the seeded conventions
+ok   firstRun == false
+ok   no machine-specific interpreter in tracked settings.json
+ok   no stale legacy hook shims
+ok   second Setup is byte-idempotent
+</pre></details>
+</section>
+<section><h2>subfolder<span class="tally">5 ok</span></h2>
+<details><summary>assertions</summary><pre>ok   projectFolder.kind is subfolder
+ok   autostart held (subfolder)
+ok   nothing written in src
+ok   toplevel names the repo root
+ok   nothing written at the repo root
+</pre></details>
+</section>
+<section><h2>pristine_git<span class="tally">38 ok</span></h2>
+<figure><figcaption>Agent chosen and started after Setup: Orient me offered, no Setup banner (the session already has the instructions).</figcaption><img src="04-pristine_git-orient.png" alt="orient"></figure>
+<details><summary>assertions</summary><pre>ok   auto-setup skipped on first launch: mode undecided
+ok   mode == undecided
+ok   nothing seeded before the choice
+ok   mode == workflow
+ok   lastSetup.source == mode
+ok   a session postdates Setup (launched 1795408688727 &gt; setup 1795408686996)
+ok   modeCreatedRepo == false
+ok   record says workflow
+ok   seeded .bram/.worklist-authorization.json
+ok   seeded .claude/bram-conventions.md
+ok   seeded .claude/settings.json
+ok   seeded AGENTS.md
+ok   seeded CLAUDE.md
+ok   retired Python hook absent: .claude/hooks/claude-worklist-guard.py
+ok   retired Python hook absent: .claude/hooks/claude-permission-menu-hook.py
+ok   bram-guard registered in settings.local.json
+ok   no python commands in settings.local.json
+ok   enhanced == true
+ok   claudeNeedsSetup == false
+ok   codexNeedsSetup == false
+ok   opencodeNeedsSetup == false
+ok   seeded .opencode/plugins/bram.js
+ok   OpenCode plugin matches the bundle
+ok   OpenCode instructions list the conventions
+ok   antigravityNeedsSetup == false
+ok   seeded .agents/hooks.json
+ok   Antigravity hooks register the guard
+ok   antigravityRulesCurrent == true
+ok   Antigravity rules: two always-on slices within 24,000 bytes
+ok   Antigravity rules reassemble the seeded conventions
+ok   firstRun == false
+ok   no machine-specific interpreter in tracked settings.json
+ok   no stale legacy hook shims
+ok   no tracked files modified by Setup
+ok   orientation playbook seeded
+ok   orientation template seeded
+ok   template copied unstamped
+ok   second Setup is byte-idempotent
+</pre></details>
+</section>
+<section><h2>already_setup<span class="tally">5 ok</span></h2>
+<details><summary>assertions</summary><pre>ok   re-running Setup leaves the tree clean
+ok   firstRun == false
+ok   claudeNeedsSetup == false
+ok   mode == workflow
+ok   record says none
+</pre></details>
+</section>
+<section><h2>stale_instructions<span class="tally">5 ok</span></h2>
+<figure><figcaption>Conventions copy staled by hand: the needs-setup banner names stale instructions (#465).</figcaption><img src="05-stale_instructions-stale.png" alt="stale"></figure>
+<details><summary>assertions</summary><pre>ok   claudeNeedsSetup == false
+ok   claudeNeedsSetup == true
+ok   claudeDocsCurrent == false
+ok   menuHookRegistered == true
+ok   setupReasons names stale instructions only
+</pre></details>
+</section>
+<section><h2>antigravity_reasons<span class="tally">12 ok</span></h2>
+<details><summary>assertions</summary><pre>ok   activeProvider == antigravity
+ok   antigravityNeedsSetup == false
+ok   providerNeedsSetup == false
+ok   setupReasons empty when Antigravity setup is current
+ok   antigravityNeedsSetup == true
+ok   providerNeedsSetup == true
+ok   antigravityHooks == missing
+ok   setupReasons names missing Antigravity hook group
+ok   antigravityRulesCurrent == false
+ok   setupReasons names missing hook group and stale rules
+ok   antigravityNeedsSetup == false
+ok   providerNeedsSetup == false
+</pre></details>
+</section>
+<section><h2>legacy_hooks<span class="tally">25 ok</span></h2>
+<details><summary>assertions</summary><pre>ok   seeded .bram/.worklist-authorization.json
+ok   seeded .claude/bram-conventions.md
+ok   seeded .claude/settings.json
+ok   seeded AGENTS.md
+ok   seeded CLAUDE.md
+ok   retired Python hook absent: .claude/hooks/claude-worklist-guard.py
+ok   retired Python hook absent: .claude/hooks/claude-permission-menu-hook.py
+ok   bram-guard registered in settings.local.json
+ok   no python commands in settings.local.json
+ok   enhanced == true
+ok   claudeNeedsSetup == false
+ok   codexNeedsSetup == false
+ok   opencodeNeedsSetup == false
+ok   seeded .opencode/plugins/bram.js
+ok   OpenCode plugin matches the bundle
+ok   OpenCode instructions list the conventions
+ok   antigravityNeedsSetup == false
+ok   seeded .agents/hooks.json
+ok   Antigravity hooks register the guard
+ok   antigravityRulesCurrent == true
+ok   Antigravity rules: two always-on slices within 24,000 bytes
+ok   Antigravity rules reassemble the seeded conventions
+ok   firstRun == false
+ok   no machine-specific interpreter in tracked settings.json
+ok   no stale legacy hook shims
+</pre></details>
+</section>
+<section><h2>nested<span class="tally">3 ok</span></h2>
+<figure><figcaption>A repo nested under a managed parent: the nesting warning; Setup not run.</figcaption><img src="06-nested-nested.png" alt="nested"></figure>
+<details><summary>assertions</summary><pre>ok   nestedUnder reported (/private/var/folders/9d/ffn1sscs6bgdm20v54qmyth80000gn/T/bram-setup-harness.QHLmGn/nested_parent)
+ok   auto-setup skipped on nested launch
+ok   nested launch not seeded
+</pre></details>
+</section>
+<section><h2>held_mixed<span class="tally">12 ok</span></h2>
+<figure><figcaption>A live board in resources/ beside a file that isn't Bram's: the start holds and asks about the move; the held board still reads.</figcaption><img src="07-held_mixed-held.png" alt="held"></figure>
+<details><summary>assertions</summary><pre>ok   projectFolder.kind is state-held
+ok   obstacle is mixed
+ok   autostart held (state-held)
+ok   hold recorded in .git/bram/state-hold.log
+ok   a state write is refused with 409 held=mixed
+ok   the refusal is on stderr
+ok   nothing written (port, trace, Setup)
+ok   resources/ byte-identical
+ok   tracked tree unchanged
+ok   no .bram/ created
+ok   the held board reads from resources/
+ok   retry asks for the move answer
+</pre></details>
+</section>
+<section><h2>plain_legacy_moves<span class="tally">5 ok</span></h2>
+<details><summary>assertions</summary><pre>ok   resources/ moved away
+ok   .bram/ carries .migrated-from
+ok   board moved into .bram/
+ok   traces op=moved
+ok   projectFolder.kind is ok
+</pre></details>
+</section>
+<section><h2>foreign_dot_bram<span class="tally">12 ok</span></h2>
+<figure><figcaption>Another tool's .bram/ with no Bram marker: the start holds (foreign-dot-bram) and writes nothing.</figcaption><img src="08-foreign_dot_bram-held.png" alt="held"></figure>
+<details><summary>assertions</summary><pre>ok   projectFolder.kind is state-held
+ok   obstacle is foreign-dot-bram
+ok   autostart held (state-held)
+ok   hold recorded in .git/bram/state-hold.log
+ok   a state write is refused with 409 held=foreign-dot-bram
+ok   the refusal is on stderr
+ok   nothing written (port, trace, Setup)
+ok   resources/ byte-identical
+ok   tracked tree unchanged
+ok   no .gitignore or .migrated-from written into .bram/
+ok   .bram/ contents unchanged
+ok   state-dir plan reports foreignDotBram
+</pre></details>
+</section>
+<section><h2>foreign_dot_bram_damaged<span class="tally">12 ok</span></h2>
+<details><summary>assertions</summary><pre>ok   projectFolder.kind is state-held
+ok   obstacle is foreign-dot-bram
+ok   autostart held (state-held)
+ok   hold recorded in .git/bram/state-hold.log
+ok   a state write is refused with 409 held=foreign-dot-bram
+ok   the refusal is on stderr
+ok   nothing written (port, trace, Setup)
+ok   resources/ byte-identical
+ok   tracked tree unchanged
+ok   no .gitignore or .migrated-from written into .bram/
+ok   .bram/ contents unchanged
+ok   state-dir plan reports foreignDotBram
+</pre></details>
+</section>

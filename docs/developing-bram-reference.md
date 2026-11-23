@@ -706,9 +706,13 @@ instance binds its own loopback port and writes its own
 directory while your working session keeps going, untouched:
 
 ```sh
-git init /tmp/scratch-project   # issue-448: Bram starts only at a repo's root
-BRAM_TRACE=1 ./bram /tmp/scratch-project
+mkdir /tmp/scratch-project      # a plain folder works; Bram asks Workflow or Freestyle
+BRAM_TRACE=1 BRAM_USER_STATE_DIR=/tmp/scratch-user-state ./bram /tmp/scratch-project
 ```
+
+`BRAM_USER_STATE_DIR` keeps the folder's mode record (decision
+2026-11-22) out of your own `~/.bram/folders.json`; the harness sets it
+for every launch.
 
 Two details that are easy to get wrong:
 
@@ -782,13 +786,39 @@ BRAM_BIN=/path/to/bram scripts/setup-harness.sh
 
 Exit status is the number of failed assertions. Scenarios vary the
 *starting state* rather than the steps, because that is where the
-historical failures were: `pristine_nogit` (not a git repo, so refused:
-nothing written, autostart held, #448), `subfolder` (inside a repo but not
-its root, refused and named as such, #448), `pristine_git`,
-`already_setup` (the cross-machine re-run from #249), `legacy_hooks`
-(retired generic hook names, #173), and `nested` (a managed parent). The
-refused scenarios find the port from Bram's stderr (`[bram] loopback
-port=`), since a refused launch writes no port file.
+historical failures were: `nogit_undecided` (a plain folder: Bram
+wakes, asks, seeds nothing; decision 2026-11-22, #513), `nogit_freestyle`
+(Freestyle chosen: the record written, still nothing seeded, a second
+launch reads the record), `nogit_workflow` (Workflow chosen: `git init`,
+Setup, the record says it created the repo, `repoUnborn` for the First
+commit offer), `subfolder` (inside a repo but not its root, refused and
+named as such, #448), `pristine_git` (an unseen repo: Setup waits for
+the choice, then lands), `already_setup` (the cross-machine re-run from
+#249; a marker with no record is workflow without asking),
+`legacy_hooks` (retired generic hook names, #173), and `nested` (a
+managed parent). The refused scenarios find the port from Bram's stderr
+(`[bram] loopback port=`), since a refused launch writes no port file.
+Every launch sets `BRAM_USER_STATE_DIR` under the work directory, so no
+scenario's mode choice reaches your own `~/.bram/folders.json`; the
+spawn refuses to run without it.
+
+The assertions are headless, but the pane is where a person checks the
+banners. `HARNESS_SHOTS=<dir> scripts/setup-harness.sh` (macOS) writes
+`<dir>/index.html`, a narrative of the run: every scenario with its
+assertions folded under it, and at each scenario's `snap` points a
+capture of the launched window (found by the spawned PID) under one
+line saying what the pane should show. A snap is taken only where the
+pane shows something not seen earlier in the sequence; every scenario
+asserts whether or not it is pictured. Captures are scaled to
+`HARNESS_SHOT_WIDTH` pixels wide (default 1200) and need Screen
+Recording permission for the terminal running the harness.
+
+The checked-in copy is `site/harness/`, written by
+`HARNESS_SHOTS=site/harness scripts/setup-harness.sh` and committed when
+the startup surface changes; the Pages workflow (`.github/workflows/pages.yml`,
+triggered by `site/**`) publishes it at
+<https://judell.github.io/bram/harness/>. The window titles carry the
+run's temp paths, so a re-run always differs byte-wise.
 
 Every assertion traces to a bug the record actually caught, which is
 the standard for adding another one. Notably `already_setup` asserts

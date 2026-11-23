@@ -53,6 +53,10 @@
     queryParams="{{ q: searchQuery, limit: 500, types: 'session' }}"
     when="{searchQuery.trim().length >= 2}" />
 
+  <!-- The context threshold (sessions.suggestAtContextTokens) that colors a
+       row's CONTEXT cell, read the way Settings and the footer tip read it. -->
+  <DataSource id="contextThresholdSettings" url="/__settings" />
+
   <variable
     name="sessionsSource"
     value="{((sessionsExpanded || searchQuery.trim().length >= 2) &amp;&amp; sessionsFull.value) ? sessionsFull.value : (sessionsFirstPage.value || [])}" />
@@ -251,6 +255,10 @@
         borderBottom="1px solid $borderColor">
         <Text width="*" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="TITLE" />
         <Text width="140px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="MODIFIED" />
+        <!-- sessions-table-context-and-floor: tooltip is plain text,
+             https://www.xmlui.org/docs/howto/show-a-multi-line-or-formatted-tooltip -->
+        <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="CONTEXT" tooltip="Tokens in this session's last call: what its next turn would send. Past the threshold in Settings it turns the warning color: start a new session for that work." />
+        <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="FLOOR" tooltip="Tokens in its first call: about where a fresh session starts." />
         <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SIZE" />
       </HStack>
       <Items data="{filteredSessions}">
@@ -315,6 +323,8 @@
               color="$textColor-secondary"
               value="{window.__bramPendingSessionLabel($item)}" />
             <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
+            <Text width="70px" fontSize="$fontSize-sm" color="{window.__bramSessionTokensCellColor($item.context, contextThresholdSettings.value)}" value="{window.__bramSessionTokensCell($item.context)}" />
+            <Text width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionTokensCell($item.floor)}" />
             <Text width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionSizeLabel($item)}" />
           </HStack>
           <!-- session-groups: the session's group (switching agents moves

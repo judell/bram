@@ -30296,8 +30296,8 @@ mod pending_session_title_tests {
         fresh_partner_title, merge_pending_session_entry, new_session_launch_command,
         pending_session_title_abandoned_by_resume, pending_session_title_can_claim,
         pending_title_marks_new_session, provider_cli_name, provider_switch_launch,
-        session_change_snapshot, session_provider_label, switch_starts_fresh_partner,
-        PendingSessionTitle, SessionEntry, SessionProvider,
+        session_change_snapshot, session_provider_label, session_row_context,
+        switch_starts_fresh_partner, PendingSessionTitle, SessionEntry, SessionProvider,
     };
 
     #[test]
@@ -30771,6 +30771,37 @@ mod pending_session_title_tests {
         assert!(codex_session_is_visible(true, false));
     }
 
+    // sessions-table-context-and-floor: a row's context is its last call's,
+    // its floor its first call's; a provider not read by file has neither.
+    #[test]
+    fn session_row_context_reads_first_and_last_call() {
+        let line = |id: &str, ts: &str, input: u64, read: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","isSidechain":false,"message":{{"id":"{id}","model":"claude-opus-5-5","role":"assistant","content":[{{"type":"text","text":"x"}}],"usage":{{"input_tokens":{input},"cache_read_input_tokens":{read},"cache_creation_input_tokens":0,"output_tokens":10}}}}}}"#
+            )
+        };
+        let path =
+            std::env::temp_dir().join(format!("bram-row-context-{}.jsonl", uuid::Uuid::new_v4()));
+        let body = [
+            line("m1", "2026-11-22T10:00:00.000Z", 1_000, 70_000),
+            line("m2", "2026-11-22T10:01:00.000Z", 500, 90_000),
+            line("m3", "2026-11-22T10:02:00.000Z", 200, 120_000),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(&path, body).unwrap();
+
+        assert_eq!(
+            session_row_context(SessionProvider::Claude, &path),
+            (Some(120_200), Some(71_000))
+        );
+        assert_eq!(
+            session_row_context(SessionProvider::Antigravity, &path),
+            (None, None)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn pending_codex_row_replaces_the_old_current_marker() {
         let mut entries = vec![SessionEntry {
@@ -30782,6 +30813,8 @@ mod pending_session_title_tests {
             current: true,
             pending: false,
             running: false,
+            context: None,
+            floor: None,
         }];
         let pending = SessionEntry {
             id: "pending-2".to_string(),
@@ -30792,6 +30825,8 @@ mod pending_session_title_tests {
             current: true,
             pending: true,
             running: false,
+            context: None,
+            floor: None,
         };
 
         merge_pending_session_entry(&mut entries, pending, Some(20));
@@ -30818,6 +30853,8 @@ mod pending_session_title_tests {
             current: true,
             pending: false,
             running: false,
+            context: None,
+            floor: None,
         }];
         let pending = SessionEntry {
             id: "0192aabb-ccdd-4eef-8899-001122334455".to_string(),
@@ -30828,6 +30865,8 @@ mod pending_session_title_tests {
             current: true,
             pending: true,
             running: false,
+            context: None,
+            floor: None,
         };
 
         merge_pending_session_entry(&mut entries, pending, Some(20));
@@ -35653,6 +35692,33 @@ struct SessionEntry {
     // delete-live-session-leaves-stub: the row is the session a CLI is
     // running now (session_delete_refused), so the pane disables its ✕.
     running: bool,
+    // sessions-table-context-and-floor: the last and first main-thread
+    // call's context in tokens (session_row_context). Null where there is
+    // no reading: a pending row, no calls yet, or a provider whose reader
+    // doesn't locate by file.
+    context: Option<u64>,
+    floor: Option<u64>,
+}
+
+/// `(context, floor)` for one session's transcript, through the same
+/// incremental reader `/__session-size` uses, so a transcript is parsed in
+/// full once per launch and only its new bytes after that. Measured
+/// 2026-11-22 on this repo: 75 Claude transcripts (1.08 GB) took 1.7 s cold
+/// and 3 ms warm; the 20 newest (the first page) are 284 MB. OpenCode
+/// (`SessionId`) and Antigravity (`Project`) can't be placed by file and
+/// report none.
+fn session_row_context(provider: SessionProvider, path: &Path) -> (Option<u64>, Option<u64>) {
+    let label = session_provider_label(provider);
+    let by_file = token_accounting::live_provider(label)
+        .is_some_and(|p| p.locate == token_accounting::LiveLocate::File);
+    if !by_file {
+        return (None, None);
+    }
+    match token_accounting::live_context(label, &token_accounting::LiveAt::File(path.to_path_buf()))
+    {
+        Some(lc) => (Some(lc.tokens), Some(lc.floor)),
+        None => (None, None),
+    }
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
@@ -46031,7 +46097,10 @@ fn list_sessions<R: tauri::Runtime>(
                 Some(live_id) => session.id == *live_id,
                 None => false,
             };
+            let (context, floor) = session_row_context(session.provider, &session.path);
             SessionEntry {
+                context,
+                floor,
                 id: session.id,
                 mtime: session.mtime,
                 size: session.size,
@@ -46062,9 +46131,12 @@ fn list_sessions<R: tauri::Runtime>(
             .ok()
             .and_then(|(_, all)| all.into_iter().find(|s| s.id == live));
         if let Some(session) = found {
+            let (context, floor) = session_row_context(session.provider, &session.path);
             entries.insert(
                 0,
                 SessionEntry {
+                    context,
+                    floor,
                     id: session.id,
                     mtime: session.mtime,
                     size: session.size,
@@ -46135,6 +46207,8 @@ fn pending_session_entry<R: tauri::Runtime>(
         current: true,
         pending: true,
         running: started,
+        context: None,
+        floor: None,
     })
 }
 

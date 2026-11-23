@@ -16863,6 +16863,25 @@ function __bramCompactTokens(n) {
   return String(n);
 }
 
+// sessions-table-context-and-floor: a Sessions row's CONTEXT / FLOOR cell.
+// "—" when the host has no reading (pending row, no calls, or a provider
+// it can't read by file). Reads only its argument.
+window.__bramSessionTokensCell = function (n) {
+  if (n === null || n === undefined) return "—";
+  return __bramCompactTokens(n);
+};
+// The CONTEXT cell takes the warning color once the row's context has
+// reached sessions.suggestAtContextTokens (default 400,000; 0 = off), the
+// same rule as the footer's figure (Jon, 2026-11-23: "here we do have hard
+// numbers"). The action it names is the header tooltip's: start a new
+// session for that session's next work. Reads only its arguments.
+window.__bramSessionTokensCellColor = function (n, settings) {
+  var s = settings && settings.sessions;
+  var t = s && typeof s.suggestAtContextTokens === "number" ? s.suggestAtContextTokens : 400000;
+  if (t > 0 && typeof n === "number" && n >= t) return "$color-warn-700";
+  return "$textColor-primary";
+};
+
 // "Context compacted (auto, 969k → 7k tokens) · 42 lines" — the parenthetical
 // only when the boundary metadata is present.
 window.__bramCompactionLabel = function (item) {

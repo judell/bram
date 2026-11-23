@@ -747,16 +747,36 @@ has its own switch:
 - `suggestOnNewIssue`: you are about to file an issue.
 - `suggestOnTopicShift`: the conversation has moved to a significantly
   different topic.
+- `suggestAtContextTokens`: the session's live context has passed this
+  many tokens (`0` means never). The reading is `GET /__session-size`,
+  `context.tokens`, with `context.floor` (what a fresh session starts at)
+  beside it.
 
-If the switch is on **and** the new work is a different line from what
-this session has been doing, ask in one line whether to continue it in
-a fresh session. Work that belongs to the session's existing line gets
-no question. Ask in prose, whichever agent you are: a provider's own
-question tool would make Claude and Codex behave differently.
+If one of the first three switches is on **and** the new work is a
+different line from what this session has been doing, ask in one line
+whether to continue it in a fresh session. Work that belongs to the
+session's existing line gets no question from those three. Ask in prose,
+whichever agent you are: a provider's own question tool would make
+Claude and Codex behave differently.
 
-**Limits.** Ask at most once per topic. After a no, don't ask again
-about that topic. Don't ask in a session that is still short. Ask
-**before** you propose the item or file the issue, not after.
+**The context trigger is about cost, not topic.** Each call re-sends the
+whole live context, so a long session pays for its history on every
+turn; "same line of work" is no exemption. Once the context is past the
+limit, ask at the **next natural pause**: after a Commit or Drop, when an
+item's work is done and reported, before proposing an item or filing an
+issue, or when the user's turn opens a new question. Never mid-edit or
+mid-build. Say the two numbers: "This session's context is 525k; a fresh
+one starts near 74k. Continue the next piece in a fresh session?" When
+one item has run past the limit on its own, name it when that item ends
+rather than carrying on silently. (Session fb876140, 2026-11-22: items
+proposed at 230k, an issue filed at 363k, items begun at 390k and 525k,
+no question asked, because each read as the same line of work.)
+
+**Limits.** Ask at most once per topic, and for the context trigger at
+most once per natural pause past the limit. After a no, don't ask again
+about that topic, or until the next pause. Don't ask in a session that
+is still short. Ask **before** you propose the item or file the issue,
+not after.
 
 **On yes, hand the work over; don't start it here.** Do not propose the
 item or file the issue in this session: the new session is where it gets

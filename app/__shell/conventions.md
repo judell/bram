@@ -567,9 +567,12 @@ issue, or tell the user what to relay.
 
 ### Suggest a fresh session for a new line of work
 
-**Before you propose an item, file an issue, or follow a big topic shift,**
-check whether to offer the user a fresh session for it → read
-`.claude/bram-reference/environment.md` (§Suggest a fresh session).
+**Before you propose an item, file an issue, or follow a big topic shift,
+or when the session's context has passed the limit in Settings,**
+check whether to offer the user a fresh session → read
+`.claude/bram-reference/environment.md` (§Suggest a fresh session). The
+context trigger is about cost, not topic: it asks at the next natural
+pause even when the work is the same line.
 
 
 ## Signing agent-authored forge artifacts

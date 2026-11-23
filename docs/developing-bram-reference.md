@@ -1106,6 +1106,61 @@ page, so the trace can't see it: a person has to look. On 2026-10-31 this test
 showed the jitter fixed while **Open terminal** still sat on top of the status
 label (footer-silence-banner-overflow-jitter).
 
+### A bare folder for freestyle
+
+The git scenarios above cannot stand up a plain directory with data in it
+and no `.git`, the folder the freestyle mode is for. The `freestyle-survey`
+starter does. Its seed is `scripts/fixtures/freestyle-survey/folder/`, Elle
+O'Brien's CC0 course-survey demo (a README, `data/survey.csv` with 219 rows,
+an empty `scripts/`), vendored verbatim.
+
+```sh
+python3 scripts/demo_instance.py --repo ../bram-freestyle-survey new survey --from freestyle-survey --bare
+```
+
+- **`--bare`** materializes `folder/` into the fixture directory (default
+  `../bram-freestyle-survey`; `--repo` overrides) with no `.git`, and writes
+  `.bram-demo.json` with `"bare": true`, the starter and the name. The
+  starter is bare-only: without `--bare` it fails, and `--from all` never
+  includes it.
+- **Verbs that apply:** `status`, `launch`, `stop`, `reset`. `launch` is the
+  same `launch_demo` (env scrub, PID record, `trace_in_source` line); the
+  runtime files (`process.json`, `bram.log`) live in the fixture's `.bram/bram-demo/`.
+  `reset` deletes everything except `.bram/` and the marker and re-copies
+  `folder/` byte for byte, so the agent's scripts, figures and `CLAUDE.md`
+  go.
+- **Verbs that refuse** on a bare fixture: `use`, `add`, `capture`, `prune`
+  ("bare fixture: nothing to park").
+- **The python check.** `launch` first runs `python3 -c "import pandas,
+  matplotlib"` in the fixture and refuses with `python3 -m pip install
+  pandas matplotlib` if it fails; it installs nothing. Otherwise the agent
+  spends the demo installing packages.
+- **The runbook** is `scripts/fixtures/freestyle-survey/RUNBOOK.md`, beside
+  `folder/`, never inside it: it holds the answer key (CC BY 4.0, see
+  `ATTRIBUTION.md` there).
+- **`--git`** materializes the same folder with a `git init` and one commit
+  of its contents, so the chooser's Workflow card can be seen both ways: in
+  a bare folder it says it will create a repo; in a `--git` fixture it does
+  not. Make two fixtures (`--repo` names each) to compare them side by side.
+  `reset` re-runs the init.
+- **The fixture's `.bram/` carries Bram's marker** (`.gitignore` = `*`),
+  written by the runtime-root resolver. Without it the host reads the demo's
+  runtime folder as another tool's `.bram/` and holds the start
+  (`state-held obstacle=foreign-dot-bram`, judell/bram#469).
+- **What a launch looks like since freestyle-mode-host** (2026-11-22): the
+  window opens, `/__enhance/status` reports `mode: "undecided"` and
+  `projectFolder.kind: "not-git"` (or `"ok"` with `--git`), the trace carries
+  `[auto-setup] op=skip reason=mode-undecided`, the port lands in
+  `.bram/.bram-port` (the owner lock in `.bram/bram-port.lock`, since there
+  is no git directory to hold it), and the agent starts. Before that date the
+  launch was refused (`[bram] op=autostart-held reason=not-git` in
+  `bram.log`), which was the baseline the host work was measured against.
+- **The mode record.** Launch with `BRAM_USER_STATE_DIR=<scratch>` to keep a
+  demo's choice out of your real `~/.bram/folders.json`; the launcher
+  inherits it. Without it, the choice you click is recorded for the fixture's
+  path on this machine, and the chooser won't show again until that row is
+  removed.
+
 ### Relationship to the scripted sections
 
 The Worklist-gate walkthrough and the startup-dance harness are

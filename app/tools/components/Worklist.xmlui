@@ -182,7 +182,40 @@
        the last-exchange dock it fed (sole consumer). The helpers.js
        projected-turns machinery stays — dormant here, still the transport
        other surfaces could subscribe to. -->
-  <VStack padding="$space-4" gap="$space-3">
+  <!-- freestyle-mode-pane: mode comes from /__enhance/status, which only
+       Main.xmlui bound; a peer-style DataSource here (refetched when a
+       /__mode choice lands, via the shared runEnhanceSetup pane action)
+       keeps the board markup below untouched except for its `when`. -->
+  <DataSource id="enhanceMode" url="/__enhance/status" />
+  <PushSource
+    id="modeChosenAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('runEnhanceSetup')}" />
+  <ChangeListener
+    listenTo="{modeChosenAct.value &amp;&amp; modeChosenAct.value.tick}"
+    onDidChange="() => { if (modeChosenAct.value &amp;&amp; !modeChosenAct.value.busy) enhanceMode.refetch(); }" />
+  <VStack
+    when="{enhanceMode.value &amp;&amp; enhanceMode.value.mode === 'freestyle'}"
+    padding="$space-4"
+    gap="$space-3">
+    <Text>This folder is in freestyle mode: you work with the agent directly, in the message box or the terminal, with no Worklist in between. Switch to workflow when you want changes proposed and committed through one.</Text>
+    <HStack>
+      <Button label="Switch to workflow" onClick="window.__bramChooseMode('workflow')" />
+    </HStack>
+  </VStack>
+  <!-- Until the mode is chosen the chooser at the top of the pane is the
+       way in; the board waits (Jon's screenshot, 2026-11-22: "+ New item"
+       and "(no items)" under the chooser). -->
+  <VStack
+    when="{enhanceMode.value &amp;&amp; enhanceMode.value.mode === 'undecided'}"
+    padding="$space-4"
+    gap="$space-3">
+    <Text>The Worklist starts once you choose how to work in this folder, at the top of this pane.</Text>
+  </VStack>
+  <VStack
+    when="{!(enhanceMode.value &amp;&amp; (enhanceMode.value.mode === 'freestyle' || enhanceMode.value.mode === 'undecided'))}"
+    padding="$space-4"
+    gap="$space-3">
     <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
       <!-- worklist-select-all-checkbox: one click selects every row, so
            Do recommended lights without ticking each one (Jon, 2026-11-12).
@@ -718,6 +751,23 @@
                  expansion state, keyed by item and path, never by position. -->
             <!-- While a file's diff is open, the table narrows to that row;
                  closing it brings the others back. -->
+            <!-- worklist2-files-disclosure (Jon, 2026-11-22): the table folds
+                 like Before / After below, closed by default, keyed
+                 `<id>::files` in expandedKeys like the prose sections. A
+                 22-file first commit otherwise fills the row before its
+                 prose. -->
+            <HStack
+              gap="$space-1"
+              verticalAlignment="center"
+              cursor="pointer"
+              onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::files')">
+              <Text
+                color="$color-primary-600"
+                value="{window.__bramFilesDisclosureLabel(expandedKeys, $item)}" />
+            </HStack>
+            <VStack
+              when="{(expandedKeys || []).includes($item.id + '::files')}"
+              gap="$space-1">
             <Table
               when="{$item.changedFiles}"
               data="{window.__bramFilesTableRows($item.changedFiles, diffKeys, rowId)}"
@@ -917,6 +967,7 @@
               data="{window.__bramWorklistItemFiles($item)}">
               <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
             </Items>
+            </VStack>
           </VStack>
           <!-- prose-section-headers-clickable: chevron + pointer + accent so
                these read as toggles, not labels — the file rows' old glyph

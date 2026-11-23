@@ -1,0 +1,220 @@
+response_id,submitted_at,email,course,course_name,rating,would_recommend,comments
+R_1001,2026-04-20 08:27,student096@example.edu,XYZ 120,Pastry Science,2,No,
+R_1002,2026-04-20 08:47,student063@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1003,2026-04-20 09:01,student031@example.edu,XYZ 110,Intro to Beekeeping,N/A,Yes,Loved the final project.
+R_1004,2026-04-20 10:02,student129@example.edu,XYZ 230,Applied Knot Theory,N/A,Yes,
+R_1005,2026-04-20 10:43,student068@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1006,2026-04-20 11:44,student115@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1007,2026-04-20 13:59,student004@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Office hours saved me.
+R_1008,2026-04-20 17:34,student206@example.edu,XYZ 240,Lighthouse Management,4,Yes,Loved the final project.
+R_1009,2026-04-20 20:41,student212@example.edu,XYZ 240,Lighthouse Management,5,Yes,
+R_1010,2026-04-20 21:49,student070@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1011,2026-04-20 21:59,student168@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1012,2026-04-20 22:56,student012@example.edu,XYZ 110,Intro to Beekeeping,N/A,No,
+R_1013,2026-04-21 01:20,student018@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,Too much work for the credit hours.
+R_1014,2026-04-21 01:35,student061@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,
+R_1015,2026-04-21 03:20,student019@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1016,2026-04-21 03:35,student045@example.edu,XYZ 110,Intro to Beekeeping,3,No,Wish there were more examples.
+R_1017,2026-04-21 03:59,student089@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1018,2026-04-21 04:01,student098@example.edu,XYZ 120,Pastry Science,3,Yes,
+R_1019,2026-04-21 05:47,student127@example.edu,XYZ 230,Applied Knot Theory,5,Yes,Great examples in lecture.
+R_1020,2026-04-21 05:53,student173@example.edu,XYZ 240,Lighthouse Management,3,No,
+R_1021,2026-04-21 07:23,student205@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1022,2026-04-21 09:48,student028@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Office hours saved me.
+R_1023,2026-04-21 11:50,student081@example.edu,XYZ 120,Pastry Science,4,Yes,Great examples in lecture.
+R_1024,2026-04-21 12:35,student009@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1025,2026-04-21 14:22,student095@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1026,2026-04-21 15:12,student099@example.edu,XYZ 120,Pastry Science,3,No,
+R_1027,2026-04-21 19:04,student055@example.edu,XYZ 110,Intro to Beekeeping,3,No,
+R_1028,2026-04-21 20:10,student030@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Labs were really helpful.
+R_1029,2026-04-21 20:16,student207@example.edu,XYZ 240,Lighthouse Management,4,Yes,Labs were really helpful.
+R_1030,2026-04-21 20:36,student010@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Labs were really helpful.
+R_1031,2026-04-21 20:57,student067@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,
+R_1032,2026-04-21 22:58,student145@example.edu,XYZ 230,Applied Knot Theory,5,Yes,
+R_1033,2026-04-21 23:40,student060@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1034,2026-04-22 00:29,student035@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,Wish there were more examples.
+R_1035,2026-04-22 00:30,student130@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1036,2026-04-22 00:44,student187@example.edu,XYZ 240,Lighthouse Management,3,No,
+R_1037,2026-04-22 00:56,student057@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1038,2026-04-22 00:59,student078@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1039,2026-04-22 02:10,student113@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1040,2026-04-22 02:19,student091@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1041,2026-04-22 03:06,student022@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1042,2026-04-22 03:13,student144@example.edu,XYZ 230,Applied Knot Theory,3,Yes,Grading felt inconsistent.
+R_1043,2026-04-22 05:01,student041@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1044,2026-04-22 05:21,student062@example.edu,XYZ 110,Intro to Beekeeping,3,No,Wish there were more examples.
+R_1045,2026-04-22 05:59,student086@example.edu,XYZ 120,Pastry Science,N/A,Yes,Clear and well organized.
+R_1046,2026-04-22 06:25,student193@example.edu,XYZ 240,Lighthouse Management,N/A,Yes,Office hours saved me.
+R_1047,2026-04-22 07:38,student093@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1048,2026-04-22 08:11,student071@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1049,2026-04-22 13:45,student135@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Loved the final project.
+R_1050,2026-04-22 13:45,student154@example.edu,XYZ 230,Applied Knot Theory,1,No,Pacing was too fast.
+R_1051,2026-04-22 13:49,student036@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Office hours saved me.
+R_1052,2026-04-22 14:06,student059@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,Grading felt inconsistent.
+R_1053,2026-04-22 14:58,student160@example.edu,XYZ 230,Applied Knot Theory,3,Yes,
+R_1054,2026-04-22 15:49,student176@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1055,2026-04-22 21:08,student184@example.edu,XYZ 240,Lighthouse Management,3,No,Grading felt inconsistent.
+R_1056,2026-04-22 22:48,student028@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1057,2026-04-22 22:54,student110@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1058,2026-04-22 22:57,student148@example.edu,XYZ 230,Applied Knot Theory,2,No,Grading felt inconsistent.
+R_1059,2026-04-23 00:29,student191@example.edu,XYZ 240,Lighthouse Management,N/A,Yes,Labs were really helpful.
+R_1060,2026-04-23 02:30,student201@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1061,2026-04-23 02:58,student024@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,Too much work for the credit hours.
+R_1062,2026-04-23 03:12,student200@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1063,2026-04-23 04:02,student211@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1064,2026-04-23 04:07,student124@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Labs were really helpful.
+R_1065,2026-04-23 06:44,student082@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1066,2026-04-23 08:34,student125@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1067,2026-04-23 09:41,student120@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1068,2026-04-23 11:27,student136@example.edu,XYZ 230,Applied Knot Theory,5,Yes,
+R_1069,2026-04-23 13:34,student021@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Loved the final project.
+R_1070,2026-04-23 13:34,student189@example.edu,XYZ 240,Lighthouse Management,4,Yes,Clear and well organized.
+R_1071,2026-04-23 15:20,student051@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Great examples in lecture.
+R_1072,2026-04-23 16:04,student097@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1073,2026-04-23 16:23,student056@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Great examples in lecture.
+R_1074,2026-04-23 16:36,student209@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1075,2026-04-23 16:45,student092@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1076,2026-04-23 17:18,student122@example.edu,XYZ 120,Pastry Science,4,Yes,Clear and well organized.
+R_1077,2026-04-23 20:20,student066@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,Pacing was too fast.
+R_1078,2026-04-23 20:20,student174@example.edu,XYZ 240,Lighthouse Management,5,Yes,
+R_1079,2026-04-23 20:33,student109@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1080,2026-04-23 22:13,student085@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1081,2026-04-23 23:18,student033@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1082,2026-04-23 23:48,student008@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Loved the final project.
+R_1083,2026-04-24 01:56,student143@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Clear and well organized.
+R_1084,2026-04-24 03:55,student151@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1085,2026-04-24 04:45,student154@example.edu,XYZ 230,Applied Knot Theory,2,No,Pacing was too fast.
+R_1086,2026-04-24 05:59,student203@example.edu,XYZ 240,Lighthouse Management,2,No,Assignments were confusing.
+R_1087,2026-04-24 06:45,student165@example.edu,XYZ 230,Applied Knot Theory,1,No,Assignments were confusing.
+R_1088,2026-04-24 07:02,student080@example.edu,XYZ 120,Pastry Science,5,Yes,Great examples in lecture.
+R_1089,2026-04-24 07:45,student077@example.edu,XYZ 120,Pastry Science,3,Yes,
+R_1090,2026-04-24 09:47,student074@example.edu,XYZ 120,Pastry Science,5,Yes,Great examples in lecture.
+R_1091,2026-04-24 10:08,student194@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1092,2026-04-24 10:17,student161@example.edu,XYZ 230,Applied Knot Theory,3,Yes,Assignments were confusing.
+R_1093,2026-04-24 12:19,student026@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Labs were really helpful.
+R_1094,2026-04-24 13:37,student131@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Loved the final project.
+R_1095,2026-04-24 13:40,student178@example.edu,XYZ 240,Lighthouse Management,3,Yes,Pacing was too fast.
+R_1096,2026-04-24 14:42,student141@example.edu,XYZ 230,Applied Knot Theory,3,No,Assignments were confusing.
+R_1097,2026-04-24 17:30,student064@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1098,2026-04-24 18:39,student132@example.edu,XYZ 230,Applied Knot Theory,3,Yes,
+R_1099,2026-04-24 19:37,student048@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1100,2026-04-24 20:24,student042@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1101,2026-04-24 21:41,student025@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1102,2026-04-24 21:49,student013@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1103,2026-04-24 22:05,student088@example.edu,XYZ 120,Pastry Science,3,No,
+R_1104,2026-04-25 00:17,student075@example.edu,XYZ 120,Pastry Science,N/A,Yes,Labs were really helpful.
+R_1105,2026-04-25 00:48,student027@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1106,2026-04-25 02:55,student032@example.edu,XYZ 110,Intro to Beekeeping,3,No,Too much work for the credit hours.
+R_1107,2026-04-25 05:59,student015@example.edu,XYZ 110,Intro to Beekeeping,2,No,
+R_1108,2026-04-25 06:10,student116@example.edu,XYZ 120,Pastry Science,3,No,Assignments were confusing.
+R_1109,2026-04-25 10:22,student003@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1110,2026-04-25 10:46,student029@example.edu,XYZ 110,Intro to Beekeeping,3,No,Pacing was too fast.
+R_1111,2026-04-25 12:57,student148@example.edu,XYZ 230,Applied Knot Theory,2,No,
+R_1112,2026-04-25 13:21,student137@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1113,2026-04-25 15:43,student192@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1114,2026-04-25 16:34,student114@example.edu,XYZ 120,Pastry Science,3,Yes,Wish there were more examples.
+R_1115,2026-04-25 16:58,student103@example.edu,XYZ 120,Pastry Science,3,Yes,
+R_1116,2026-04-25 17:58,student076@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1117,2026-04-25 18:11,student001@example.edu,XYZ 110,Intro to Beekeeping,N/A,Yes,
+R_1118,2026-04-25 19:52,student210@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1119,2026-04-25 19:59,student208@example.edu,XYZ 240,Lighthouse Management,N/A,Yes,
+R_1120,2026-04-25 21:01,student016@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1121,2026-04-25 21:46,student183@example.edu,XYZ 240,Lighthouse Management,3,Yes,Pacing was too fast.
+R_1122,2026-04-26 00:36,student185@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1123,2026-04-26 00:43,student069@example.edu,XYZ 120,Pastry Science,3,Yes,
+R_1124,2026-04-26 01:07,student023@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Great examples in lecture.
+R_1125,2026-04-26 01:37,student049@example.edu,XYZ 110,Intro to Beekeeping,3,No,
+R_1126,2026-04-26 01:52,student150@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1127,2026-04-26 02:40,student156@example.edu,XYZ 230,Applied Knot Theory,5,Yes,
+R_1128,2026-04-26 06:26,student182@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1129,2026-04-26 06:35,student179@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1130,2026-04-26 06:44,student170@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Great examples in lecture.
+R_1131,2026-04-26 08:43,student065@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1132,2026-04-26 09:05,student149@example.edu,XYZ 230,Applied Knot Theory,3,Yes,
+R_1133,2026-04-26 10:07,student199@example.edu,XYZ 240,Lighthouse Management,3,No,Too much work for the credit hours.
+R_1134,2026-04-26 11:24,student123@example.edu,XYZ 120,Pastry Science,3,No,Too much work for the credit hours.
+R_1135,2026-04-26 12:48,student147@example.edu,XYZ 230,Applied Knot Theory,5,Yes,Labs were really helpful.
+R_1136,2026-04-26 13:01,student153@example.edu,XYZ 230,Applied Knot Theory,2,No,Assignments were confusing.
+R_1137,2026-04-26 13:15,student014@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,Grading felt inconsistent.
+R_1138,2026-04-26 14:18,student090@example.edu,XYZ 120,Pastry Science,3,No,Pacing was too fast.
+R_1139,2026-04-26 14:52,student007@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Loved the final project.
+R_1140,2026-04-26 14:52,student073@example.edu,XYZ 120,Pastry Science,3,No,Grading felt inconsistent.
+R_1141,2026-04-26 15:50,student058@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Labs were really helpful.
+R_1142,2026-04-26 18:07,student158@example.edu,XYZ 230,Applied Knot Theory,3,Yes,
+R_1143,2026-04-26 18:43,student039@example.edu,XYZ 110,Intro to Beekeeping,N/A,Yes,
+R_1144,2026-04-26 21:07,student054@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1145,2026-04-26 21:49,student180@example.edu,XYZ 240,Lighthouse Management,4,Yes,Loved the final project.
+R_1146,2026-04-26 22:51,student108@example.edu,XYZ 120,Pastry Science,4,Yes,Labs were really helpful.
+R_1147,2026-04-27 00:07,student011@example.edu,XYZ 110,Intro to Beekeeping,2,No,
+R_1148,2026-04-27 00:18,student037@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1149,2026-04-27 00:29,student083@example.edu,XYZ 120,Pastry Science,N/A,Yes,
+R_1150,2026-04-27 02:26,student140@example.edu,XYZ 230,Applied Knot Theory,3,No,
+R_1151,2026-04-27 02:30,student142@example.edu,XYZ 230,Applied Knot Theory,5,Yes,
+R_1152,2026-04-27 03:07,student038@example.edu,XYZ 110,Intro to Beekeeping,3,No,
+R_1153,2026-04-27 03:12,student167@example.edu,XYZ 230,Applied Knot Theory,5,Yes,
+R_1154,2026-04-27 05:01,student105@example.edu,XYZ 120,Pastry Science,3,Yes,
+R_1155,2026-04-27 07:13,student017@example.edu,XYZ 110,Intro to Beekeeping,3,No,Pacing was too fast.
+R_1156,2026-04-27 07:35,student040@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1157,2026-04-27 07:45,student165@example.edu,XYZ 230,Applied Knot Theory,1,No,
+R_1158,2026-04-27 07:58,student052@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Loved the final project.
+R_1159,2026-04-27 08:48,student126@example.edu,XYZ 230,Applied Knot Theory,5,Yes,Great examples in lecture.
+R_1160,2026-04-27 09:11,student111@example.edu,XYZ 120,Pastry Science,N/A,Yes,Labs were really helpful.
+R_1161,2026-04-27 09:41,student079@example.edu,XYZ 120,Pastry Science,3,Yes,
+R_1162,2026-04-27 10:19,student087@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1163,2026-04-27 10:38,student198@example.edu,XYZ 240,Lighthouse Management,4,Yes,Clear and well organized.
+R_1164,2026-04-27 12:30,student152@example.edu,XYZ 230,Applied Knot Theory,3,No,
+R_1165,2026-04-27 13:25,student104@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1166,2026-04-27 14:32,student169@example.edu,XYZ 230,Applied Knot Theory,1,No,Grading felt inconsistent.
+R_1167,2026-04-27 14:57,student128@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Great examples in lecture.
+R_1168,2026-04-27 18:46,student043@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Office hours saved me.
+R_1169,2026-04-27 19:28,student181@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1170,2026-04-27 19:59,student155@example.edu,XYZ 230,Applied Knot Theory,N/A,Yes,Office hours saved me.
+R_1171,2026-04-27 20:21,student146@example.edu,XYZ 230,Applied Knot Theory,2,No,
+R_1172,2026-04-27 20:22,student204@example.edu,XYZ 240,Lighthouse Management,4,Yes,Clear and well organized.
+R_1173,2026-04-27 20:34,student118@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1174,2026-04-27 21:22,student186@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1175,2026-04-27 21:30,student164@example.edu,XYZ 230,Applied Knot Theory,3,Yes,
+R_1176,2026-04-28 00:16,student166@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1177,2026-04-28 00:31,student034@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1178,2026-04-28 03:16,student084@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1179,2026-04-28 04:03,student171@example.edu,XYZ 240,Lighthouse Management,N/A,Yes,
+R_1180,2026-04-28 05:57,student100@example.edu,XYZ 120,Pastry Science,2,No,
+R_1181,2026-04-28 08:10,student188@example.edu,XYZ 240,Lighthouse Management,2,No,
+R_1182,2026-04-28 10:07,student199@example.edu,XYZ 240,Lighthouse Management,3,No,
+R_1183,2026-04-28 11:57,student121@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1184,2026-04-28 12:42,student190@example.edu,XYZ 240,Lighthouse Management,3,Yes,Pacing was too fast.
+R_1185,2026-04-28 13:38,student005@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,
+R_1186,2026-04-28 16:44,student162@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Clear and well organized.
+R_1187,2026-04-28 16:50,student117@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1188,2026-04-28 18:03,student195@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1189,2026-04-28 18:23,student102@example.edu,XYZ 120,Pastry Science,5,Yes,
+R_1190,2026-04-28 20:30,student163@example.edu,XYZ 230,Applied Knot Theory,3,Yes,Grading felt inconsistent.
+R_1191,2026-04-28 22:41,student157@example.edu,XYZ 230,Applied Knot Theory,3,No,Grading felt inconsistent.
+R_1192,2026-04-28 22:45,student134@example.edu,XYZ 230,Applied Knot Theory,5,Yes,Labs were really helpful.
+R_1193,2026-04-28 23:49,student133@example.edu,XYZ 230,Applied Knot Theory,4,Yes,Great examples in lecture.
+R_1194,2026-04-29 00:07,student006@example.edu,XYZ 110,Intro to Beekeeping,3,Yes,
+R_1195,2026-04-29 01:07,student119@example.edu,XYZ 120,Pastry Science,3,Yes,Assignments were confusing.
+R_1196,2026-04-29 02:32,student169@example.edu,XYZ 230,Applied Knot Theory,2,No,Grading felt inconsistent.
+R_1197,2026-04-29 04:45,student159@example.edu,XYZ 230,Applied Knot Theory,N/A,Yes,Loved the final project.
+R_1198,2026-04-29 05:28,student002@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,
+R_1199,2026-04-29 07:59,student072@example.edu,XYZ 120,Pastry Science,5,Yes,Clear and well organized.
+R_1200,2026-04-29 09:21,student106@example.edu,XYZ 120,Pastry Science,3,No,
+R_1201,2026-04-29 09:22,student202@example.edu,XYZ 240,Lighthouse Management,4,Yes,
+R_1202,2026-04-29 12:00,student020@example.edu,XYZ 110,Intro to Beekeeping,5,Yes,Loved the final project.
+R_1203,2026-04-29 14:01,student196@example.edu,XYZ 240,Lighthouse Management,3,Yes,
+R_1204,2026-04-29 18:12,student138@example.edu,XYZ 230,Applied Knot Theory,3,No,
+R_1205,2026-04-29 19:18,student044@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Great examples in lecture.
+R_1206,2026-04-29 19:23,student047@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Loved the final project.
+R_1207,2026-04-29 19:31,student053@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Labs were really helpful.
+R_1208,2026-04-30 00:33,student172@example.edu,XYZ 240,Lighthouse Management,3,No,
+R_1209,2026-04-30 00:40,student177@example.edu,XYZ 240,Lighthouse Management,2,No,Assignments were confusing.
+R_1210,2026-04-30 01:35,student050@example.edu,XYZ 110,Intro to Beekeeping,4,Yes,Loved the final project.
+R_1211,2026-04-30 03:01,student153@example.edu,XYZ 230,Applied Knot Theory,2,No,
+R_1212,2026-04-30 03:49,student175@example.edu,XYZ 240,Lighthouse Management,3,Yes,Assignments were confusing.
+R_1213,2026-04-30 04:21,student107@example.edu,XYZ 120,Pastry Science,3,Yes,Pacing was too fast.
+R_1214,2026-04-30 04:31,student197@example.edu,XYZ 240,Lighthouse Management,4,Yes,Great examples in lecture.
+R_1215,2026-04-30 04:53,student101@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1216,2026-04-30 05:38,student046@example.edu,XYZ 110,Intro to Beekeeping,3,No,Pacing was too fast.
+R_1217,2026-04-30 06:12,student139@example.edu,XYZ 230,Applied Knot Theory,4,Yes,
+R_1218,2026-04-30 06:15,student094@example.edu,XYZ 120,Pastry Science,4,Yes,
+R_1219,2026-04-30 07:38,student112@example.edu,XYZ 120,Pastry Science,5,Yes,

@@ -1,5 +1,7 @@
 <Component name="Transcript"
   var.orientSent="{window.__bramOrientSent()}"
+  var.firstCommitSent="{false}"
+  var.freestyleNoteSeen="{window.__bramFreestyleNoteSeen()}"
   var.fullscreenImage="{null}">
   <!-- (#427: the List now sits at height="100%" inside the measured
        Stack below, which bounds it; the history that follows still
@@ -212,7 +214,7 @@
              __bramShownTranscriptEvents), so find, follow and the You nav act
              on what is shown. The listener below the List lands the reader
              where they were. https://www.xmlui.org/docs/reference/components/Switch -->
-        <Switch label="Only mine" labelPosition="end"
+        <Switch label="Only mine" labelPosition="start"
           initialValue="{youOnly}"
           onDidChange="(v) => youOnly = window.__bramYouOnlySet(v, events, allEvents, $props.agentId)" />
         <FindBar id="transcriptFindBar" placeholder="Find in transcript…"
@@ -249,15 +251,28 @@
          https://www.xmlui.org/docs/reference/components/DataSource
          https://www.xmlui.org/docs/reference/components/Button -->
     <DataSource id="orientStatus" url="/__enhance/status" />
+    <!-- freestyle-mode-pane: the offers below read the mode, the Setup record
+         and the agent-launch stamp, all of which move during a session (a
+         choice, Setup, a new session). Refetch on the host's
+         enhance-status-changed tick, as Main.xmlui does for its own copy;
+         a fetch-once status hid the First commit offer after a new session
+         (2026-11-22). -->
+    <PushSource
+      id="orientStatusEvt"
+      initial="{0}"
+      subscribe="{window.bramSubscribeEnhanceStatusTick()}" />
+    <ChangeListener
+      listenTo="{orientStatusEvt.value}"
+      onDidChange="() => orientStatus.refetch()" />
     <HStack
-      when="{!$props.agentId &amp;&amp; !orientSent &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.startupGreetingVisible &amp;&amp; orientStatus.value.startupGreetingOrientMe}"
+      when="{!$props.agentId &amp;&amp; !orientSent &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.startupGreetingOrientMe &amp;&amp; window.__bramOrientOfferAllowed(orientStatus.value)}"
       width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2"
       paddingHorizontal="$space-4">
       <!-- width="*": the text takes the row's remainder and wraps, so the
            button can't be pushed off the edge
            (https://www.xmlui.org/docs/howto/keep-a-star-sized-element-from-collapsing). -->
       <Text fontSize="$fontSize-sm" width="*"
-        value="New here? Get an overview and architecture diagrams of this repo, every claim cited to the code. It starts as a Worklist item, so nothing is written until you click Start. If Claude is new to this repo, open the terminal first and answer its trust prompt." />
+        value="{window.__bramOrientOfferText(orientStatus.value)}" />
       <Button label="Orient me" size="sm"
         onClick="toTurn('Orient in this repo: read and follow .claude/bram-reference/orientation.md'); orientSent = true; window.__bramMarkOrientSent(); emitEvent('openWorklist')" />
       <!-- orient-me-dismiss-x: hide without orienting; remembered per project
@@ -265,6 +280,37 @@
       <Button label="✕" variant="ghost" size="sm"
         tooltip="Hide this; nothing is sent"
         onClick="orientSent = true; window.__bramMarkOrientSent()" />
+    </HStack>
+    <!-- freestyle-mode-pane: the repo the workflow choice just created has
+         no commits. Offer the first one through the Worklist, as Orient me
+         does for orientation (Jon, 2026-11-22). The turn asks the agent to
+         propose it as an item, so nothing is committed until Start & commit.
+         Same shape as the Orient me row above. -->
+    <HStack
+      when="{!$props.agentId &amp;&amp; !firstCommitSent &amp;&amp; window.__bramFirstCommitOfferAllowed(orientStatus.value)}"
+      width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2"
+      paddingHorizontal="$space-4">
+      <Text fontSize="$fontSize-sm" width="*"
+        value="This repo has no commits yet. Make the first one through the Worklist: the agent proposes it as an item, you read what it will commit, and you click Start &amp; commit." />
+      <Button label="First commit" size="sm"
+        onClick="toTurn('Propose the first commit of this new repo as one Worklist item: everything now in the folder, including the files Setup wrote. In the draft, say what each file is and why it belongs in the repo. Do not commit until I click Start and commit.'); firstCommitSent = true; emitEvent('openWorklist')" />
+      <Button label="✕" variant="ghost" size="sm"
+        tooltip="Hide this; nothing is sent"
+        onClick="firstCommitSent = true" />
+    </HStack>
+    <!-- freestyle-mode-pane: right after choosing Freestyle the user wants
+         to know how to proceed, not how to switch back (Jon, 2026-11-22).
+         Shown while the folder is in freestyle until read once (the Orient
+         me persistence). WORDING is Jon's to settle. -->
+    <HStack
+      when="{!$props.agentId &amp;&amp; !freestyleNoteSeen &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.mode === 'freestyle'}"
+      width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2"
+      paddingHorizontal="$space-4">
+      <Text width="*"
+        value="You're freestyling! Talk to the agent in the message box below or in the terminal; this Transcript shows the conversation, Sessions keeps every session, and Search finds anything said before. If you decide you want changes proposed and committed through a Worklist, switch to workflow from the Worklist tab." />
+      <Button label="✕" variant="ghost" size="sm"
+        tooltip="Got it"
+        onClick="freestyleNoteSeen = true; window.__bramMarkFreestyleNoteSeen()" />
     </HStack>
     <!-- #427: the List's bounded height. This tab's page scrolls
          (load-bearing; app-wide scrollWholePage=false was rejected on

@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}" var.stageManagerBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}" var.stageManagerBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.setupBannerDismissedAt="{0}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -82,13 +82,16 @@
        rendered on a tab a first-time user has no reason to visit. One-shot
        redirect: the helper consumes the shot on the first firstRun-true
        evaluation regardless of route (so a later refetch can never yank a
-       user who has since navigated), and the redirect itself fires only
-       from the default landing. Every non-first launch is untouched. The
-       bare-name navigate inside an arrow body is sanctioned engine-action
-       precedent (the '/' redirect at the follow-output listener below). -->
+       user who has since navigated). Every non-first launch is untouched.
+       freestyle-mode-pane (Jon, 2026-11-22): the Transcript is home, so a
+       first wake lands there whatever route the shell restored, not only
+       from the default landing; the chooser and the greeting both live
+       there. The bare-name navigate inside an arrow body is sanctioned
+       engine-action precedent (the '/' redirect at the follow-output
+       listener below). -->
   <ChangeListener
     listenTo="{enhanceStatus.value &amp;&amp; (enhanceStatus.value.firstRun || enhanceStatus.value.startupGreetingVisible)}"
-    onDidChange="() => { if (window.__bramFirstRunLanding(enhanceStatus.value) &amp;&amp; ($pathname === '/' || $pathname === '/worklist2')) navigate('/transcript') }" />
+    onDidChange="() => { if (window.__bramFirstRunLanding(enhanceStatus.value) &amp;&amp; $pathname !== '/transcript') navigate('/transcript') }" />
   <!-- update-banner-visible-on-transcript: on the Transcript the pinned
        update banner yields to the Transcript's own pinned heading, so a
        launch that opens there with an update pending lands on the Worklist
@@ -240,6 +243,18 @@
   <ChangeListener
     listenTo="{runEnhanceSetupAct.value &amp;&amp; runEnhanceSetupAct.value.tick}"
     onDidChange="() => { if (runEnhanceSetupAct.value &amp;&amp; !runEnhanceSetupAct.value.busy) { if (!runEnhanceSetupAct.value.ok) setupCompleteProvider = ''; enhanceStatus.refetch(); } }" />
+  <!-- freestyle-mode-pane: a /__mode answer carries the setup run as `ran`
+       (null for freestyle); raise the Setup-complete banner for it. -->
+  <ChangeListener
+    listenTo="{runEnhanceSetupAct.value &amp;&amp; runEnhanceSetupAct.value.tick}"
+    onDidChange="() => { if (window.__bramModeRanOk(runEnhanceSetupAct.value) &amp;&amp; !setupCompleteProvider) setupCompleteProvider = (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || 'setup'; }" />
+  <!-- freestyle-mode-pane: a mode choice lands on the Transcript, where the
+       next step shows (the freestyle note, the First commit offer); staying
+       on the Worklist tab after choosing Freestyle told the user only how
+       to switch back (Jon, 2026-11-22). -->
+  <ChangeListener
+    listenTo="{runEnhanceSetupAct.value &amp;&amp; runEnhanceSetupAct.value.tick}"
+    onDidChange="() => { if (window.__bramModeChoiceLanded(runEnhanceSetupAct.value) &amp;&amp; $pathname !== '/transcript') navigate('/transcript'); }" />
   <ChangeListener
     listenTo="{enhanceStatus.value &amp;&amp; enhanceStatus.value.providerNeedsSetup}"
     onDidChange="(c) => { if (c.newValue) { if ($pathname !== '/') navigate('/'); window.scrollAllToTop(); } }" />
@@ -698,8 +713,9 @@
     </property>
     <!-- worklist2 cutover complete: the legacy Workspace tab and its
          Show legacy Worklist setting were retired in the 0.5.3 run. -->
-    <NavLink label="Worklist" to="/worklist2" tooltip="Proposed and in-progress changes: start, commit or drop them" />
+    <!-- Transcript first: it is home (Jon, 2026-11-22). -->
     <NavLink label="Transcript" to="/transcript" tooltip="The current agent session, turn by turn" />
+    <NavLink label="Worklist" to="/worklist2" tooltip="Proposed and in-progress changes: start, commit or drop them" />
     <NavLink label="Sessions" to="/sessions" tooltip="Every Claude and Codex session in this project: switch, rename, pair" />
     <NavLink label="Issues" to="/issues" tooltip="This repo&apos;s open issues" />
     <NavLink label="Commits" to="/commits" tooltip="Recent commits, and pushing them" />
@@ -751,6 +767,125 @@
        instead of ~/community-calendar and was read past. Hence words, at
        startup, naming the ABSOLUTE path: the two differ only in the last
        component, so a basename would have read as correct. -->
+  <!-- freestyle-mode-pane: the first-wake chooser, shown while the host's
+       /__enhance/status says mode is "undecided" (absent on older hosts, so
+       nothing renders). Two Card components side by side in an HStack
+       (https://www.xmlui.org/docs/reference/components/Card). Each button is
+       one call: window.__bramChooseMode(mode) POSTs /__mode through the
+       runEnhanceSetup pane action, so the ChangeListener near
+       runEnhanceSetupAct refetches enhanceStatus and the Setup-complete
+       banner takes the `ran` body.
+       WORDING: every string for the chooser is in this one block (the ⓘ
+       bodies in window.__bramModeInfoBodies, helpers.js); the wording is
+       Jon's to settle on the demo instance. Jon, 2026-11-22: the details
+       were "inside baseball" (Setup, conventions, guard hooks, the Worklist
+       gate, ".bram/ state"), so each term carries the pane's little-ⓘ
+       explainer (Settings' settingInfoDialog pattern; one ModalDialog taking
+       {title, body} via $param, as Worklist's fileCellInfoDialog does:
+       https://www.xmlui.org/docs/reference/components/ModalDialog#open).
+       The freestyle subtitle reads "for a new project" alone when the host
+       says the folder is empty (folderEmpty). -->
+  <!-- 60% of the width for these brief popups (Jon, 2026-11-22); the
+       skills dialog's Theme override pattern. -->
+  <Theme maxWidth-ModalDialog="60vw">
+    <ModalDialog id="modeInfoDialog" title="{$param &amp;&amp; $param.title}">
+      <Markdown content="{($param &amp;&amp; $param.body) || ''}" />
+    </ModalDialog>
+  </Theme>
+  <VStack
+    when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.mode === 'undecided'}"
+    padding="$space-4"
+    gap="$space-3"
+    backgroundColor="$color-info-50"
+    borderBottom="1px solid $color-info-200">
+    <Heading level="h3">How do you want to work in this folder?</Heading>
+    <HStack gap="$space-3">
+      <Card width="*" gap="$space-2">
+        <Text fontWeight="$fontWeight-bold">Workflow</Text>
+        <Text fontSize="$fontSize-sm">For a repo you'll commit to and share.</Text>
+        <!-- Tasks' header look (gap 0, xs ghost buttons) with the Setup
+             banner's ⓘ label rather than the info icon, which renders as an
+             exclamation glyph, and the Search tab's narrower xs padding
+             (Jon, 2026-11-22: too much space around the ⓘ and between
+             lines). One HStack per line. -->
+        <Theme paddingHorizontal-Button-xs="$space-0_5" paddingVertical-Button-xs="0" borderWidth-Button="0">
+          <VStack gap="$space-2">
+            <!-- Each word-plus-ⓘ (plus its comma) is one non-wrapping unit,
+                 so a line never breaks between a word and its ⓘ or before a
+                 comma (Jon, 2026-11-22). The outer row wraps between units. -->
+            <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Setup" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="What Setup does" onClick="modeInfoDialog.open(window.__bramModeInfo('setup'))" />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="installs Bram's conventions" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="What the conventions are" onClick="modeInfoDialog.open(window.__bramModeInfo('conventions'))" />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="and guard hooks." />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="What the guard hooks do" onClick="modeInfoDialog.open(window.__bramModeInfo('guardHooks'))" />
+              </HStack>
+            </HStack>
+            <HStack verticalAlignment="center" gap="0" wrapContent="true">
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Changes flow through the Worklist." />
+              <Button label="ⓘ" variant="ghost" size="xs" tooltip="How the Worklist works" onClick="modeInfoDialog.open(window.__bramModeInfo('worklistGate'))" />
+            </HStack>
+          </VStack>
+        </Theme>
+        <Text
+          when="{window.__bramProjectFolderIs(enhanceStatus.value, 'not-git')}"
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary">This folder has no git repository; choosing this creates one.</Text>
+        <Button
+          label="{window.__bramProjectFolderIs(enhanceStatus.value, 'not-git') ? 'Create a repo and work this way' : 'Work this way'}"
+          onClick="window.__bramChooseMode('workflow')" />
+      </Card>
+      <Card width="*" gap="$space-2">
+        <Text fontWeight="$fontWeight-bold">Freestyle</Text>
+        <Text fontSize="$fontSize-sm">{window.__bramFreestyleSubtitle(enhanceStatus.value)}</Text>
+        <Theme paddingHorizontal-Button-xs="$space-0_5" paddingVertical-Button-xs="0" borderWidth-Button="0">
+          <VStack gap="$space-2">
+            <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Bram keeps its notes in its own folder" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="What Bram writes here" onClick="modeInfoDialog.open(window.__bramModeInfo('bramFolder'))" />
+              </HStack>
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="and changes nothing else." />
+            </HStack>
+            <HStack verticalAlignment="center" gap="$space-1" wrapContent="true">
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="You can use Transcript" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Transcript tab" onClick="modeInfoDialog.open(window.__bramModeInfo('transcript'))" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Sessions" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Sessions tab" onClick="modeInfoDialog.open(window.__bramModeInfo('sessions'))" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Queue" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Queue tab" onClick="modeInfoDialog.open(window.__bramModeInfo('queue'))" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Search" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Search tab" onClick="modeInfoDialog.open(window.__bramModeInfo('search'))" />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="and Files." />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Files tab" onClick="modeInfoDialog.open(window.__bramModeInfo('files'))" />
+              </HStack>
+            </HStack>
+          </VStack>
+        </Theme>
+        <Button label="Work this way" onClick="window.__bramChooseMode('freestyle')" />
+      </Card>
+    </HStack>
+    <Text fontSize="$fontSize-sm" color="$textColor-secondary">You can switch from freestyle to workflow later from the Worklist tab. The choice is remembered for this folder on this computer.</Text>
+  </VStack>
+
   <VStack
     when="{enhanceStatus.value && enhanceStatus.value.firstRun && enhanceStatus.value.nestedUnder}"
     padding="$space-4"
@@ -771,7 +906,7 @@
   </VStack>
 
   <VStack
-    when="{enhanceStatus.value && enhanceStatus.value.firstRun && !enhanceStatus.value.nestedUnder && window.__bramProjectFolderIsOk(enhanceStatus.value)}"
+    when="{enhanceStatus.value && enhanceStatus.value.firstRun && !enhanceStatus.value.nestedUnder && window.__bramProjectFolderIsOk(enhanceStatus.value) && enhanceStatus.value.mode !== 'undecided' && enhanceStatus.value.mode !== 'freestyle'}"
     padding="$space-4"
     gap="$space-2"
     backgroundColor="$color-info-50"
@@ -853,26 +988,12 @@
       <Text inline="true" fontFamily="$fontFamily-monospace" value="bram" />.
     </Text>
   </VStack>
-  <VStack
-    when="{window.__bramProjectFolderIs(enhanceStatus.value, 'not-git')}"
-    backgroundColor="$color-warn-100"
-    padding="$space-3"
-    gap="$space-2">
-    <Text fontWeight="$fontWeight-bold" value="This isn't a project folder" />
-    <Text fontSize="$fontSize-sm">
-      Bram is running in
-      <Text inline="true" fontFamily="$fontFamily-monospace" value="{enhanceStatus.value.projectFolder.root}" />,
-      which isn't in a git repository. Bram works in a project folder: the
-      root of the local git repository for the app you want to work on, such as
-      <Text inline="true" fontFamily="$fontFamily-monospace" value="~/code/my-app" />.
-    </Text>
-    <Text fontSize="$fontSize-sm">
-      Quit Bram. Then, in your terminal,
-      <Text inline="true" fontFamily="$fontFamily-monospace" value="cd" /> to your
-      project folder and run
-      <Text inline="true" fontFamily="$fontFamily-monospace" value="bram" />.
-    </Text>
-  </VStack>
+  <!-- The issue-448 "This isn't a project folder" block for a folder with no
+       git repository was retired by freestyle-mode (decision 2026-11-22): such
+       a folder is a project folder now, and the chooser is what it shows. It
+       reappeared after a workflow choice in a bare folder (the launch-time
+       kind stayed "not-git"), which is how it was caught. Home and subfolder
+       refusals stay. -->
   <VStack
     when="{window.__bramProjectFolderIs(enhanceStatus.value, 'subfolder')}"
     backgroundColor="$color-warn-100"
@@ -1119,7 +1240,7 @@
        already provider-neutral; the codex-hook-refresh variant only appears
        when Codex is the active provider. -->
   <VStack
-    when="{enhanceStatus.value && enhanceStatus.value.providerNeedsSetup && !setupCompleteProvider && window.__bramProjectFolderIsOk(enhanceStatus.value)}"
+    when="{enhanceStatus.value && enhanceStatus.value.providerNeedsSetup && !setupCompleteProvider && window.__bramProjectFolderIsOk(enhanceStatus.value) && enhanceStatus.value.mode !== 'undecided' && enhanceStatus.value.mode !== 'freestyle'}"
     padding="$space-4"
     gap="$space-3"
     backgroundColor="$color-info-50"
@@ -1141,22 +1262,36 @@
 </HStack>
   </VStack>
 
+  <!-- setup-banner-survives-reload (Jon, 2026-11-22): the banner reads the
+       host's own record (status.lastSetup vs status.agentLaunchedAtMs), not
+       the click, so a pane reload keeps it while the running session still
+       predates the instructions, and a new agent launch clears it (the host
+       emits enhance-status-changed at launch). The ✕ hides this one Setup
+       run for this pane instance only; a reload shows it again while the
+       condition holds (Jon, 2026-11-22: a remembered dismissal lied). -->
   <HStack
-    when="{setupCompleteProvider}"
+    when="{window.__bramSetupPendingMessage(enhanceStatus.value, setupBannerDismissedAt)}"
     backgroundColor="$color-info-100"
     padding="$space-2"
     gap="$space-3"
     verticalAlignment="center">
-    <!-- The sentence depends on the agent and on what Setup changed (the
-         /__enhance/run response, held by runEnhanceSetupAct): see
+    <!-- The sentence depends on the agent and on what Setup changed: see
          docs/decisions/2026-11-15-agent-reload-after-setup.md. -->
-    <Text fontSize="$fontSize-sm" width="*" overflowMode="flow">{window.__bramSetupCompleteMessage(setupCompleteProvider, runEnhanceSetupAct.value &amp;&amp; runEnhanceSetupAct.value.data)}</Text>
+    <Text fontSize="$fontSize-sm" width="*" overflowMode="flow">{window.__bramSetupPendingMessage(enhanceStatus.value, setupBannerDismissedAt)}</Text>
+    <!-- After a mode choice the banner does the thing instead of pointing at
+         the Sessions tab (Jon, 2026-11-22): the same Create path, stock
+         title, no brief. -->
+    <Button
+      when="{window.__bramSetupBannerOffersNewSession(enhanceStatus.value)}"
+      label="Start a new session"
+      size="xs"
+      onClick="window.__bramSetupBannerNewSession(enhanceStatus.value, toast)" />
     <Button
       label="✕"
       variant="ghost"
       size="xs"
       tooltip="Dismiss"
-      onClick="setupCompleteProvider = ''" />
+      onClick="setupBannerDismissedAt = window.__bramMarkSetupBannerDismissed(enhanceStatus.value)" />
   </HStack>
 
   <!-- The tool-descriptions launch banner was retired here
@@ -1173,9 +1308,11 @@
   <Theme paddingVertical-Pages="0" paddingHorizontal-Pages="0" paddingVertical-content-App="0"
     backgroundColor-mark-markdown="$color-warn-200"
     backgroundColor-markActive-markdown="$color-warn-400">
-    <Pages fallbackPath="/worklist2">
+    <!-- The Transcript is home in both modes (Jon, 2026-11-22): the root
+         route and the fallback render it; the Worklist keeps /worklist2. -->
+    <Pages fallbackPath="/transcript">
       <Page url="/needs-you"><Inbox /></Page>
-      <Page url="/"><Worklist /></Page>
+      <Page url="/"><Transcript agentId="{transcriptAgentId}" worklistOpen="{worklistOpen}" onOpenWorklist="worklistOpen = window.__bramSetWorklistPaneOpen(true, 'orient')" /></Page>
       <Page url="/worklist"><Worklist /></Page>
       <Page url="/worklist2"><Worklist /></Page>
       <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" worklistOpen="{worklistOpen}" onOpenWorklist="worklistOpen = window.__bramSetWorklistPaneOpen(true, 'orient')" /></Page>
@@ -1264,7 +1401,7 @@
            gate produced a working board whose ticks lit no buttons
            (xmlui instance, 2026-08-25: publish with no subscriber until a
            route change mounted the bar). -->
-      <WorklistGateBar when="{$pathname === '/worklist2' || $pathname === '/worklist' || $pathname === '/'}" />
+      <WorklistGateBar when="{$pathname === '/worklist2' || $pathname === '/worklist'}" />
       <HStack
         width="100%"
         verticalAlignment="center"
@@ -1323,8 +1460,12 @@
         id="startupAgentChoice"
         initial="{null}"
         subscribe="{window.bramSubscribeStartupAgentChoice()}" />
+      <!-- freestyle-mode-pane (Jon, 2026-11-22): one ask at a time. On a
+           fresh folder the mode chooser comes first; the agent question
+           waits until a mode is chosen, and the agent picked then starts
+           with the right instructions, so no reload is needed either. -->
       <VStack
-        when="{!!startupAgentChoice.value}"
+        when="{!!startupAgentChoice.value &amp;&amp; !(enhanceStatus.value &amp;&amp; enhanceStatus.value.mode === 'undecided')}"
         gap="$space-1"
         paddingHorizontal="$space-2"
         paddingVertical="$space-1"

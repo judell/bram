@@ -71,7 +71,22 @@
        scroll container here defeats ResultList's virtualization (every row
        mounted; see Issues.xmlui, issues-status-lightweight, for the receipts).
        https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region -->
-  <VStack padding="$space-4" gap="$space-4">
+  <!-- freestyle-mode-pane: History is the Worklist's record, so in freestyle
+       (or before the choice) the tab says so instead of an empty list.
+       Status refetched on the host's enhance-status tick. -->
+  <DataSource id="enhanceMode" url="/__enhance/status" />
+  <PushSource
+    id="enhanceModeEvt"
+    initial="{0}"
+    subscribe="{window.bramSubscribeEnhanceStatusTick()}" />
+  <ChangeListener
+    listenTo="{enhanceModeEvt.value}"
+    onDidChange="() => enhanceMode.refetch()" />
+  <VStack when="{window.__bramTabHold(enhanceMode.value, 'history')}" padding="$space-4" gap="$space-3">
+    <Heading level="h2">History</Heading>
+    <Text>{window.__bramTabHold(enhanceMode.value, 'history')}</Text>
+  </VStack>
+  <VStack when="{!window.__bramTabHold(enhanceMode.value, 'history')}" padding="$space-4" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">History</Heading>
       <SearchBox

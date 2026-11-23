@@ -294,6 +294,62 @@ fn is_home(dir: &Path, home: Option<&Path>) -> bool {
     }
 }
 
+// --- the user's mode record (freestyle-mode-host, decision 2026-11-22) -------
+//
+// `~/.bram/folders.json` (or `$BRAM_USER_STATE_DIR/folders.json`, the
+// harness's isolation) records, per folder on this machine, whether the user
+// chose workflow or freestyle. The host writes it from `POST /__mode`; an
+// agent never does, in any provider, because the choice is the user's and the
+// record is what the next launch reads. The file sits outside every project
+// tree, where the coverage checks below would otherwise allow a write.
+pub const USER_MODE_RECORD_LEAF: &str = "folders.json";
+
+const USER_MODE_RECORD_BODY: &str = "host-owned-mode-record: this file is Bram's record of how the user chose to work in each folder on this machine (workflow or freestyle).\nThe host writes it when the user chooses in the agent pane; an agent never does. If the user wants a different mode, point them at the first-wake chooser or the Worklist tab's Switch to workflow button.";
+
+fn user_mode_record_path() -> Option<PathBuf> {
+    let dir = match std::env::var_os("BRAM_USER_STATE_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => home_dir()?.join(STATE_DIR_NEW),
+    };
+    Some(dir.join(USER_MODE_RECORD_LEAF))
+}
+
+// Paths compare after `\` folds to `/` (docs/developing-bram.md, Paths).
+fn fold_path(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// Whether `target`, as a file tool names it, is the user's mode record.
+/// Accepts a `~/` spelling and surrounding quotes.
+pub fn is_user_mode_record(target: &str) -> bool {
+    let Some(record) = user_mode_record_path() else {
+        return false;
+    };
+    let t = target.trim().trim_matches(|c| c == '"' || c == '\'');
+    if t.is_empty() {
+        return false;
+    }
+    let expanded = match (t.strip_prefix("~/"), home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
+        _ => t.to_string(),
+    };
+    fold_path(&abspath(&expanded)) == fold_path(&abspath_of(&record))
+}
+
+/// Whether a shell command names the user's mode record: by its absolute
+/// path, or by any `.bram/folders.json` spelling (`~/`, `$HOME/`). Reads are
+/// fine; callers pair this with a write test.
+pub fn bash_names_user_mode_record(command: &str) -> bool {
+    let folded = command.replace('\\', "/");
+    if folded.contains(".bram/folders.json") {
+        return true;
+    }
+    match user_mode_record_path() {
+        Some(record) => folded.contains(&fold_path(&abspath_of(&record))),
+        None => false,
+    }
+}
+
 /// Whether `dir/.bram` is Bram's (judell/bram#469): it carries one of the two
 /// markers every Bram-made state folder has, `.migrated-from` (the mover) or a
 /// `.gitignore` whose content is exactly `*` (`ensure_new_state_dir`, the
@@ -4183,6 +4239,18 @@ fn bash_branch(caller: &str, payload: &Value) -> ShadowVerdict {
             "Worklist lifecycle calls (/__worklist/resolve, /__worklist/mutate, worklist-commit) stay in the orchestrator's own turn, after delegated subagents return. A subagent transcript cannot make them directly. See 'Delegating worklist items to subagents' in conventions.md.",
         );
     }
+    // freestyle-mode-host: a shell write that names the user's mode record is
+    // refused whatever the project (the file is outside every project tree).
+    if bash_names_user_mode_record(&command) && (bash_writes(&command) || has_redirect(&command)) {
+        return deny_msg(
+            "host-owned-mode-record",
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            USER_MODE_RECORD_BODY,
+        );
+    }
     if forge_issue_only_write(&command) {
         return allow("forge-issue-only", "-");
     }
@@ -4288,10 +4356,24 @@ fn mcp_branch(caller: &str, payload: &Value, tool_name: &str) -> ShadowVerdict {
     if !mcp_is_mutation(tool_name) {
         return allow("mcp-read-only", "-");
     }
+    let cwd_s = cwd.to_string_lossy().to_string();
+    // freestyle-mode-host: any string in the input that names the user's mode
+    // record refuses the write, before the project-root lookup.
+    let mut strings: Vec<String> = Vec::new();
+    collect_strings(&ti, &mut strings);
+    if let Some(hit) = strings.iter().find(|s| is_user_mode_record(s)) {
+        return deny_msg(
+            "host-owned-mode-record",
+            hit.clone(),
+            tool_name,
+            hit,
+            &cwd_s,
+            USER_MODE_RECORD_BODY,
+        );
+    }
     let Some(project_root) = find_project_root(&cwd.to_string_lossy()) else {
         return allow("unmanaged-repo", "-");
     };
-    let cwd_s = cwd.to_string_lossy().to_string();
     let candidates =
         mcp_candidate_paths(&ti, &project_root, |s| normalize_target(&project_root, s));
     if candidates.is_empty() {
@@ -4384,6 +4466,19 @@ fn write_edit_branch(caller: &str, payload: &Value, tool_name: &str) -> ShadowVe
     let fp = ti.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     if fp.is_empty() {
         return allow("no-trace:no-file-path", "-");
+    }
+    // freestyle-mode-host: the user's mode record is outside every project
+    // tree, so it must be refused before the project-root lookup below would
+    // allow it as `outside-project`.
+    if is_user_mode_record(fp) {
+        return deny_msg(
+            "host-owned-mode-record",
+            fp,
+            tool_name,
+            fp,
+            &process_cwd(),
+            USER_MODE_RECORD_BODY,
+        );
     }
     let start = Path::new(fp)
         .parent()
@@ -5635,6 +5730,10 @@ fn codex_apply_patch_branch(
     covered: &HashSet<String>,
 ) -> ShadowVerdict {
     let raw_targets = patch_targets(tool_input);
+    // freestyle-mode-host: the user's mode record is never an agent's to patch.
+    if let Some(hit) = raw_targets.iter().find(|t| is_user_mode_record(t)) {
+        return codex_deny(USER_MODE_RECORD_BODY, hit);
+    }
     let trace_target = raw_targets
         .first()
         .map(|t| codex_normalize_target(cwd, t).unwrap_or_else(|| t.clone()))
@@ -5782,6 +5881,12 @@ fn codex_bash_branch(cwd: &Path, tool_input: &Value, covered: &HashSet<String>) 
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // freestyle-mode-host: same refusal as the Claude Bash site.
+    if bash_names_user_mode_record(&command)
+        && (codex_bash_writes(&command) || has_redirect(&command))
+    {
+        return codex_deny(USER_MODE_RECORD_BODY, "-");
+    }
 
     if is_gh_body_at_antipattern(&command) {
         // Python appends `Detected: <regex match>` as a third line. The traced
@@ -10653,5 +10758,72 @@ mod state_dir_tests {
         let old = "Read and follow this Bram turn: @resources/outbound-turns/7-turn.json"; // state-dir: literal ok (the retired name, under test)
         assert_eq!(outbound_turn_text(&root, old), "");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+// freestyle-mode-host (decision 2026-11-22): the user's mode record is the
+// host's alone. One test, because it sets the process-wide
+// BRAM_USER_STATE_DIR and the rest of the suite must not see it move.
+#[cfg(test)]
+mod user_mode_record_tests {
+    use super::{
+        bash_names_user_mode_record, codex_apply_patch_branch, is_user_mode_record,
+        write_edit_branch,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn the_mode_record_is_refused_to_every_agent_write_surface() {
+        let dir = std::env::temp_dir().join(format!("bram-user-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("BRAM_USER_STATE_DIR", &dir);
+        let record = dir.join("folders.json");
+        let record_s = record.to_string_lossy().into_owned();
+
+        // Recognition: the record by path, with quotes, and not its neighbors.
+        assert!(is_user_mode_record(&record_s));
+        assert!(is_user_mode_record(&format!("\"{}\"", record_s)));
+        assert!(!is_user_mode_record(
+            &dir.join("other.json").to_string_lossy()
+        ));
+        assert!(!is_user_mode_record("/some/project/.bram/worklist.json"));
+        assert!(!is_user_mode_record(""));
+
+        // Shell spellings: absolute, tilde and $HOME forms; a plain read of
+        // something else is not a hit.
+        assert!(bash_names_user_mode_record(&format!(
+            "jq . x > {}",
+            record_s
+        )));
+        assert!(bash_names_user_mode_record(
+            "echo '{}' >> ~/.bram/folders.json"
+        ));
+        assert!(bash_names_user_mode_record(
+            "cp a \"$HOME/.bram/folders.json\""
+        ));
+        assert!(!bash_names_user_mode_record("git status"));
+
+        // A fired violation on the Claude Write surface.
+        let payload = json!({ "tool_input": { "file_path": record_s } });
+        let v = write_edit_branch("claude", &payload, "Write");
+        assert_eq!(v.decision, "deny");
+        assert_eq!(v.reason, "host-owned-mode-record");
+        assert!(v.message.contains("an agent never does"));
+
+        // And on Codex's apply_patch.
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n-x\n+y\n*** End Patch\n",
+            record_s
+        );
+        let v = codex_apply_patch_branch(
+            &dir,
+            &json!({ "patch": patch, "input": patch }),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(v.decision, "deny");
+        assert!(v.reason.starts_with("host-owned-mode-record"));
+
+        std::env::remove_var("BRAM_USER_STATE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

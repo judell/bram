@@ -1584,6 +1584,27 @@ window.__bramSwitchAgent = function (provider) {
 // delete / rename buttons. Rename now works for OpenCode too — it writes the
 // title into OpenCode's own database — so only delete keeps the "do it inside
 // OpenCode" rule.
+// The Sessions row for a pending session (pending-row-started): "[current]"
+// once the CLI has reported the reserved id, "[requested]" before that.
+// worklist2-files-disclosure (Jon, 2026-11-22): the expanded row's file
+// table folds like Before / After, closed by default, the count on the
+// label. Reads only its arguments.
+window.__bramFilesDisclosureLabel = function (expandedKeys, item) {
+  var open = (expandedKeys || []).includes(((item && item.id) || "") + "::files");
+  var n = ((item && item.changedFiles) || window.__bramWorklistItemFiles(item) || []).length;
+  return (open ? "▾ " : "▸ ") + "Files" + (n ? " (" + n + ")" : "");
+};
+window.__bramPendingSessionLabel = function (item) {
+  var title = (item && item.title) || "(untitled)";
+  return item && item.running
+    ? "[current] " + title + " — started, no turns yet"
+    : "[requested] " + title + " — session not yet confirmed";
+};
+window.__bramSessionSizeLabel = function (item) {
+  if (!item) return "";
+  if (item.pending) return item.running ? "New" : "Pending";
+  return Math.round((item.size || 0) / 1024) + " KB";
+};
 window.__bramSessionEditEnabled = function (item, action, pendingDeletes, pendingRenames) {
   if (!item || item.pending) return false;
   // opencode-session-delete: OpenCode rows delete through its own CLI now.
@@ -2096,7 +2117,10 @@ window.__bramSessionMetaLine = function (s) {
   var provider = String(s.provider || "").toUpperCase();
   var title = s.title || "(untitled)";
   if (s.pending) {
-    return (provider ? provider + "  " : "") + title + "  ·  requested — session not yet confirmed";
+    // pending-row-started: `running` on a pending row means the CLI has
+    // reported the reserved id; only the first turn's file is still to come.
+    var state = s.running ? "started — no turns yet" : "requested — session not yet confirmed";
+    return (provider ? provider + "  " : "") + title + "  ·  " + state;
   }
   var id = String(s.id || "");
   var shortId = id.length > 12 ? id.slice(0, 12) : (id || "unknown");
@@ -2940,9 +2964,9 @@ window.__bramComposerPlaceholderHint = function (pathname, sel, toChat) {
   var route = String(
     pathname != null ? pathname : (function () { try { return location.hash; } catch (e) { return ""; } })()
   );
-  // The root route renders the Worklist (and its gate bar) too — Main.xmlui's
-  // gate-bar `when` includes '/', so the buttons-above sentence is true there.
-  var onWorklist = route.indexOf("/worklist") >= 0 || route === "/" || route === "#/";
+  // The root route renders the Transcript since 2026-11-22 (home in both
+  // modes), so only the /worklist routes carry the gate bar.
+  var onWorklist = route.indexOf("/worklist") >= 0;
   // composer-cmd-enter-just-do-it (Jon's wording).
   var direct = " (" + window.__bramDirectEnterKeyLabel() + "Enter to \u201cjust do it and commit\u201d)";
   // Feedback elevated to a first-class concept (Jon's spec, 2026-09-07;
@@ -8000,12 +8024,22 @@ window.__bramSetupInfoMarkdown = function () {
 // Per-agent facts and sources: docs/decisions/2026-11-15-agent-reload-after-setup.md.
 window.__bramSetupCompleteMessage = function (provider, result) {
   var fallback = "Setup complete. Restart Bram to load the updated files.";
+  // A /__mode answer wraps the run: {mode, ran}. For that first-wake case
+  // the running session has nothing worth keeping, so the cheaper ask is a
+  // new session (Jon, 2026-11-22); the general Setup banner keeps the
+  // decided text (docs/decisions/2026-11-15-agent-reload-after-setup.md).
+  var fromMode = !!(result && result.mode && result.ran && typeof result.ran === "object");
+  if (fromMode) result = result.ran;
   var wrote = result && Array.isArray(result.wrote) ? result.wrote : null;
   if (!wrote) return fallback;
   var paths = wrote.map(function (p) { return String(p).replace(/\\/g, "/").toLowerCase(); });
   var any = function (test) { return paths.some(test); };
   var endsWith = function (p, s) { return p === s || p.slice(-s.length - 1) === "/" + s; };
-  var restart = "Setup complete. Restart Bram to load the updated instructions.";
+  // The mode banner carries a "Start a new session" button (Jon, 2026-11-22:
+  // do the thing, don't point at the tab), so its sentence just names it.
+  var restart = fromMode
+    ? "Setup complete. Start a new session to load the instructions."
+    : "Setup complete. Restart Bram to load the updated instructions.";
   if (provider === "claude") {
     var claudeInstr = any(function (p) {
       return endsWith(p, "claude.md") || endsWith(p, ".claude/bram-conventions.md") ||
@@ -8032,6 +8066,224 @@ window.__bramSetupCompleteMessage = function (provider, result) {
     return agyRules ? "Setup complete. Restart Bram to load the updated rules." : "Setup complete.";
   }
   return fallback;
+};
+// setup-banner-survives-reload (Jon, 2026-11-22): the Setup-complete banner's
+// sentence, from the host's record of this process's last Setup and its last
+// agent launch, or "" when nothing is pending or this run was dismissed.
+// Reads only its arguments.
+window.__bramSetupPendingMessage = function (status, dismissedAt) {
+  var s = status || {};
+  var last = s.lastSetup;
+  var msg = "";
+  // No agent launched yet (the agent question is still open): nothing to
+  // reload, and the agent picked next starts with the instructions.
+  var launched = s.agentLaunchedAtMs || 0;
+  if (last && last.atMs && launched > 0 && last.atMs > launched && !(dismissedAt && dismissedAt === last.atMs)) {
+    var result = last.source === "mode"
+      ? { mode: true, ran: { wrote: last.wrote || [] } }
+      : { wrote: last.wrote || [] };
+    msg = window.__bramSetupCompleteMessage(s.activeProvider || "setup", result);
+  }
+  return msg;
+};
+// The banner's "Start a new session" button shows for a Setup run by a mode
+// choice: that first-wake session has nothing worth keeping, and a new one
+// loads the instructions without a relaunch. The general Setup banner keeps
+// its decided "Restart Bram" ask
+// (docs/decisions/2026-11-15-agent-reload-after-setup.md). Reads only its
+// argument.
+window.__bramSetupBannerOffersNewSession = function (status) {
+  var s = status || {};
+  return !!(s.lastSetup && s.lastSetup.source === "mode");
+};
+// The button's click: the same path as the Sessions tab's Create, with a
+// stock title and no brief (the host clears the banner when the new agent
+// launches, via enhance-status-changed).
+window.__bramSetupBannerNewSession = function (status, toastApi) {
+  var s = status || {};
+  var provider = s.activeProvider || "claude";
+  window.__bramIframeTrace("setup-banner", { op: "new-session-click", provider: provider });
+  return window.__bramCreateNewSessionClick(provider, "after setup", toastApi, "", null);
+};
+// The ✕ hides the banner for this pane instance only, never across a reload
+// (Jon, 2026-11-22: a dismissal that outlived the reload had the pane lying
+// about the state). The stamp lives in a plain var; a reload starts at 0, so
+// the banner is back for as long as the session predates the instructions.
+// Pure: returns the current run's stamp for the var.
+window.__bramMarkSetupBannerDismissed = function (status) {
+  return (status && status.lastSetup && status.lastSetup.atMs) || 0;
+};
+// freestyle-mode-pane: choose the folder's mode. POST /__mode {mode} through
+// the runEnhanceSetup pane action (Main.xmlui's ChangeListener refetches
+// enhanceStatus when it lands; for workflow the answer's `ran` feeds
+// __bramSetupCompleteMessage via the Setup-complete banner).
+window.__bramChooseMode = function (mode) {
+  return window.__bramPaneAction("runEnhanceSetup", "/__mode", { body: { mode: mode } });
+};
+// True when a pane-action snapshot is a landed, successful /__mode answer
+// that ran Setup (workflow). Reads only its argument.
+window.__bramModeRanOk = function (act) {
+  return !!(act && !act.busy && act.ok && act.data && typeof act.data === "object" && act.data.ran);
+};
+// freestyle-mode-pane: the tabs that have nothing to show in a mode or a
+// folder state say why, in plain words, instead of hiding or showing an
+// empty list (Jon, 2026-11-22: "not hide, convert to mode-appropriate
+// messages"). Returns the sentence to show, or "" when the tab is live.
+// Issues and Commits depend on a repository, not on the mode; History and
+// the Worklist depend on the mode. Reads only its arguments.
+window.__bramTabHold = function (status, tab) {
+  var s = status || {};
+  var mode = s.mode;
+  if (!mode) return "";
+  var noRepo = !!(s.projectFolder && s.projectFolder.kind === "not-git");
+  if (tab === "issues") {
+    return noRepo
+      ? "There's no git repository in this folder yet, so there's no GitHub or GitLab to read issues from. Choosing Workflow creates a repo; issues appear once it has a remote."
+      : "";
+  }
+  if (tab === "commits") {
+    return noRepo
+      ? "There's no git repository in this folder yet. In freestyle you can work without one; choosing Workflow creates a repo, and its first commit goes through the Worklist."
+      : "";
+  }
+  if (tab === "history") {
+    if (mode === "freestyle") return "History is the record of what landed through the Worklist. In freestyle nothing goes through it; switch to workflow from the Worklist tab to start the record.";
+    if (mode === "undecided") return "History is the record of what lands through the Worklist. It starts if you choose (or later switch to) Workflow mode.";
+    return "";
+  }
+  return "";
+};
+// True when a pane-action snapshot is a landed, successful /__mode answer of
+// either mode. Reads only its argument.
+window.__bramModeChoiceLanded = function (act) {
+  return !!(act && !act.busy && act.ok && act.data && typeof act.data === "object" && act.data.mode);
+};
+// freestyle-note-once: the Transcript's "you're in freestyle, here's how to
+// proceed" note hides once read in this project, across reloads and
+// relaunches (a decision, like Orient me's, so localStorage).
+window.__bramFreestyleNoteSeen = function () {
+  var key = window.__bramProjectScopedKey("bram.freestyleNoteSeen");
+  if (!key) return false;
+  try { return window.localStorage.getItem(key) === "1"; } catch (e) { return false; }
+};
+window.__bramMarkFreestyleNoteSeen = function () {
+  var key = window.__bramProjectScopedKey("bram.freestyleNoteSeen");
+  if (!key) return;
+  try { window.localStorage.setItem(key, "1"); } catch (e) {}
+};
+// The chooser's ⓘ explainers (Jon, 2026-11-22: the card details were
+// "inside baseball"; each term gets the pane's little-ⓘ modal instead).
+// Plain words for someone who has never used Bram. Markdown bodies.
+window.__bramModeInfoBodies = {
+  setup: {
+    title: "Setup",
+    body:
+      "Setup is Bram's one-time installer for a folder. It writes a few files so your coding agent knows how to work with Bram: instructions in `CLAUDE.md` or `AGENTS.md`, a `.claude/` folder holding Bram's conventions and guard hooks, and Bram's own `.bram/` folder.\n\nYou can run it again later from the banner at the top of this pane; it only refreshes what it wrote."
+  },
+  conventions: {
+    title: "Conventions",
+    body:
+      "The conventions are the instructions Setup gives your agent: work with you to define tasks, refine those definitions, build the units of work you've defined, test them, commit with well-written messages, and sign anything it posts on your behalf.\n\nThey live in `.claude/bram-conventions.md` and are read at the start of every agent session."
+  },
+  guardHooks: {
+    title: "Guard hooks",
+    body:
+      "Guard hooks are small checks that run inside the agent before it edits a file, runs a command or commits. They refuse an edit that no Worklist item covers, a commit you didn't approve, and a few unsafe shell patterns. You can use the \"just do it\" escape for small things that commit directly.\n\nBecause they run inside the agent, they work even when Bram's window is closed."
+  },
+  worklistGate: {
+    title: "The Worklist",
+    body:
+      "In workflow mode, changes flow through the Worklist. The agent proposes an item, you read it in the Worklist tab, and you click **Start**, **Commit** or **Drop**.\n\nNothing reaches your repo without that click."
+  },
+  bramFolder: {
+    title: "Bram's own folder",
+    body:
+      "Bram keeps its notes in a `.bram/` folder at the top of this folder: its port, its traces, the search index and the sessions it has seen. The folder hides itself from git.\n\nIn freestyle mode that is the only thing Bram writes here. Your agent still writes whatever you ask it to."
+  },
+  transcript: {
+    title: "Transcript",
+    body: "The Transcript tab shows the current agent session turn by turn, as it happens."
+  },
+  sessions: {
+    title: "Sessions",
+    body:
+      "The Sessions tab lists every agent session in this folder, so you can switch back to one, rename it, or see what it did."
+  },
+  queue: {
+    title: "Queue",
+    body:
+      "The Queue tab holds notes you want to send the agent when it's free, so you don't interrupt it mid-task."
+  },
+  search: {
+    title: "Search",
+    body:
+      "The Search tab finds words across this folder's history: every session's transcript, and in workflow mode the commits, issues and Worklist items too."
+  },
+  files: {
+    title: "Files",
+    body: "The Files tab browses this folder's files and searches their contents."
+  }
+};
+// {title, body} for modeInfoDialog.open(...). Reads only its argument and
+// the static table above.
+window.__bramModeInfo = function (key) {
+  return window.__bramModeInfoBodies[key] || { title: "", body: "" };
+};
+// Orient me only once the workflow choice is made, and only in a repo that
+// existed before Bram did (Jon, 2026-11-22): a repo the choice just created
+// has nothing to orient in. An older host (no `mode`) keeps the old answer.
+// Reads only its argument.
+// The Orient me row's sentence names the agent that will answer (Jon,
+// 2026-11-22: cite the actual agent, not "Claude"). Reads only its argument.
+window.__bramOrientOfferText = function (status) {
+  var who = window.__bramProviderLabel((status && status.activeProvider) || "claude");
+  return "New here? Get an overview and architecture diagrams of this repo, every claim cited to the code. " +
+    "It starts as a Worklist item, so nothing is written until you click Start. If " + who +
+    " is new to this repo, open the terminal first and answer its trust prompt.";
+};
+window.__bramOrientOfferAllowed = function (status) {
+  var s = status || {};
+  // An older host (no `mode`): the greeting alone decides, as before.
+  if (s.mode === undefined) return !!s.startupGreetingVisible;
+  if (s.mode !== "workflow" || s.modeCreatedRepo) return false;
+  // The offer sends a turn, so it waits for an agent to be running (the
+  // agent question, when there is one, comes first), and for that session
+  // to postdate Setup: the tour starts as a Worklist item, which needs the
+  // conventions, so the Setup banner's ask comes first (Jon, 2026-11-22).
+  var launched = s.agentLaunchedAtMs || 0;
+  if (launched === 0) return false;
+  if (s.lastSetup && s.lastSetup.atMs && s.lastSetup.atMs > launched) return false;
+  // Either the first-wake greeting is up, or the workflow choice was made in
+  // this process (a freestyle folder upgraded in a later launch never sees
+  // the greeting again, and still deserves the tour; 2026-11-22).
+  return !!s.startupGreetingVisible || !!(s.lastSetup && s.lastSetup.source === "mode");
+};
+// The first-commit offer: the repo the workflow choice just created has no
+// commits, so the Transcript offers the first one through the Worklist, the
+// way Orient me introduces it (Jon, 2026-11-22: "routing the initial commit
+// through the worklist doubles as an intro"). Reads only its argument.
+window.__bramFirstCommitOfferAllowed = function (status) {
+  var s = status || {};
+  if (!(s.mode === "workflow" && !!s.modeCreatedRepo && !!s.repoUnborn)) return false;
+  // One ask at a time (Jon, 2026-11-22): the offer sends a turn, so it waits
+  // for an agent to be running, and for that session to postdate Setup (the
+  // Setup-complete banner's own condition has cleared).
+  var launched = s.agentLaunchedAtMs || 0;
+  if (launched === 0) return false;
+  var last = s.lastSetup;
+  if (last && last.atMs && last.atMs > launched) return false;
+  return true;
+};
+// The offer's natural end is the commit itself (repoUnborn turns false), so
+// a click or ✕ hides it for this pane instance only, in a plain var. A
+// remembered mark outlived a reset of the folder and hid the offer on the
+// next run (2026-11-22), the same lie the Setup banner's remembered
+// dismissal told.
+// The freestyle card's subtitle: "for a new project" alone when the host says
+// the folder holds nothing but Bram's own entries (Jon, 2026-11-22).
+window.__bramFreestyleSubtitle = function (status) {
+  if (status && status.folderEmpty) return "For a new project.";
+  return "For a folder you're exploring, or a new project.";
 };
 window.__bramSetupBanner = function (status, field) {
   var s = status || {};

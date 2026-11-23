@@ -26443,6 +26443,10 @@ fn launch_agent_command<R: tauri::Runtime>(mut launch: AgentLaunch<R>) {
     if launch.fresh {
         drop_state_moved_notes_for_new_session(&launch.app);
     }
+    // setup-banner-survives-reload: a new agent process starts here, so the
+    // Setup-complete banner's condition may have cleared; the pane refetches.
+    note_agent_launched();
+    emit_replayable_signal(&launch.app, "enhance-status-changed");
     std::thread::spawn(move || {
         // A shared Codex server inherits another launch's environment. Hooks
         // then lack this Bram instance's menu token (Windows 0.165.0, #455).
@@ -43253,11 +43257,30 @@ fn has_project_settings(dir: &Path) -> bool {
 // The authorization marker IS written by Setup, as its first act, so it is the
 // artifact that actually means "acknowledged". Accepting either is stricter
 // about intent, not looser: running Setup is a deliberate act on this project.
+//
+// freestyle-mode-host (decision 2026-11-22): a recorded mode is an
+// acknowledgement too. Choosing Freestyle is as deliberate as running Setup,
+// and Search is one of the things freestyle keeps; without this the index held
+// forever in a freestyle folder (seen on the survey fixture: "holding" with no
+// cycle ever completing).
 fn project_is_managed(dir: &Path) -> bool {
-    has_project_settings(dir) || resource_relative_path(dir, WORKLIST_AUTH_REL).exists()
+    has_project_settings(dir)
+        || resource_relative_path(dir, WORKLIST_AUTH_REL).exists()
+        || folder_mode_record(dir).is_some()
 }
 
 const REPO_STARTUP_GREETING: &str = "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, or click Orient me for a guided tour: an overview and architecture diagrams of this repo, with every claim cited to the code.";
+// freestyle-mode-host (decision 2026-11-22): the first wake in a folder with
+// no mode chosen yet. The chooser at the top of the pane is the next step;
+// Orient me appears only after the workflow choice, in a repo that already
+// existed.
+const FOLDER_STARTUP_GREETING_UNDECIDED: &str = "Hello, this is Bram. I just woke up in a folder I haven't seen before. Choose how you want to work here at the top of this pane, Workflow or Freestyle. Either way, you can ask me to look around.";
+// The workflow choice created this repository: no history to orient in, and
+// the first commit is the first job (routed through the Worklist as an
+// introduction to it, Jon 2026-11-22).
+// Freestyle chosen: no gate, no setup, the agent is simply here.
+const FOLDER_STARTUP_GREETING_FREESTYLE: &str = "Hello, this is Bram. We're freestyling in this folder: ask me about what's here, or tell me what to do, and I'll get going. Nothing changes until you ask.";
+const FOLDER_STARTUP_GREETING_NEW_REPO: &str = "Hello, this is Bram. This repository is brand new, so its first job is its first commit. Click First commit below and I'll propose it as a Worklist item for you to approve. You can also just ask me to look around.";
 // Schemas 1 and 2 meant "written to the PTY" and "landed as a provider user
 // turn" respectively. Neither represents the intended feature. Schema 3 is
 // written only after Bram has serialized the greeting into its own UI
@@ -43873,7 +43896,26 @@ fn repo_startup_greeting_turn() -> serde_json::Value {
     let announcement = auto_setup_announcement();
     // repo-authored-first-run-greeting: a repo-declared greeting replaces the
     // default copy; the announcement rides along either way.
-    let base = repo_authored_greeting_text().unwrap_or_else(|| REPO_STARTUP_GREETING.to_string());
+    // freestyle-mode-host: until the folder is in workflow mode the pane
+    // hides Orient me and shows the chooser, so the default copy points at
+    // the chooser instead of a button that isn't there.
+    let root = determine_project_root();
+    let created_repo = folder_mode_record(&root).map_or(false, |r| r.created_repo);
+    let default_copy = match folder_mode(&root) {
+        // A repo the workflow choice just created has nothing to orient in;
+        // its first job is the first commit, offered below the greeting.
+        FolderModeState::Workflow if created_repo => FOLDER_STARTUP_GREETING_NEW_REPO,
+        FolderModeState::Workflow => REPO_STARTUP_GREETING,
+        FolderModeState::Freestyle => FOLDER_STARTUP_GREETING_FREESTYLE,
+        FolderModeState::Undecided => FOLDER_STARTUP_GREETING_UNDECIDED,
+    };
+    repo_startup_greeting_turn_from(default_copy, &announcement)
+}
+
+// The projection itself, split from the mode lookup so a test can pin its
+// shape against the approved copy whatever folder it runs in.
+fn repo_startup_greeting_turn_from(default_copy: &str, announcement: &str) -> serde_json::Value {
+    let base = repo_authored_greeting_text().unwrap_or_else(|| default_copy.to_string());
     let text = if announcement.is_empty() {
         base
     } else {
@@ -44178,6 +44220,22 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     // per launch keeps the stray scaffold visible in the project trace.
     if status["nestedUnderIgnoredHome"].as_bool().unwrap_or(false) {
         append_bram_trace_line(app, "auto-setup", "op=nested-root-is-home-ignored");
+    }
+    // freestyle-mode-host (decision 2026-11-22): Setup runs unasked only in a
+    // folder the user has put in workflow mode (or one already carrying
+    // Bram's marker). #513: a first wake used to seed 22 files with no
+    // prompt, and the undo did not survive a restart. Undecided waits for
+    // the pane's chooser; freestyle never seeds.
+    match status["mode"].as_str().unwrap_or("undecided") {
+        "workflow" => {}
+        "freestyle" => {
+            append_bram_trace_line(app, "auto-setup", "op=skip reason=freestyle");
+            return;
+        }
+        _ => {
+            append_bram_trace_line(app, "auto-setup", "op=skip reason=mode-undecided");
+            return;
+        }
     }
     let claude_needs = status["claudeNeedsSetup"].as_bool().unwrap_or(false);
     let codex_needs = status["codexNeedsSetup"].as_bool().unwrap_or(false);
@@ -45729,8 +45787,10 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                 if bram_trace_enabled() {
                     let artifact = if has_project_settings(&root) {
                         "settings"
-                    } else {
+                    } else if resource_relative_path(&root, WORKLIST_AUTH_REL).exists() {
                         "setup-marker"
+                    } else {
+                        "mode-record"
                     };
                     append_bram_trace_line(
                         &app,
@@ -46009,6 +46069,17 @@ fn pending_session_entry<R: tauri::Runtime>(
     provider: SessionProvider,
 ) -> Option<SessionEntry> {
     let rec = read_pending_session_title(app, provider)?;
+    // pending-row-started (Jon, 2026-11-22): the row read "requested —
+    // session not yet confirmed" until the first turn wrote the JSONL,
+    // minutes after the CLI had reported the reserved id from its own
+    // SessionStart hook (handle_agent_session). That report is the
+    // confirmation: `running` on the bridge row says the CLI is up under
+    // this id, and the pane labels it "started, no turns yet". The row stays
+    // `pending` (no file, no rename yet) until the first turn.
+    let started = pending_row_started(
+        named_session(provider).as_deref(),
+        rec.session_id.as_deref(),
+    );
     Some(SessionEntry {
         id: rec.session_id.unwrap_or_else(|| {
             format!("{}{}", PENDING_SESSION_ID_PREFIX, rec.created_at_ms.max(0))
@@ -46019,8 +46090,31 @@ fn pending_session_entry<R: tauri::Runtime>(
         provider,
         current: true,
         pending: true,
-        running: false,
+        running: started,
     })
+}
+
+// The CLI's own session report names the id Bram reserved for the pending
+// session: it is running, with no turns yet.
+fn pending_row_started(reported: Option<&str>, reserved: Option<&str>) -> bool {
+    matches!((reported, reserved), (Some(a), Some(b)) if !a.is_empty() && a == b)
+}
+
+#[cfg(test)]
+mod pending_row_started_tests {
+    use super::pending_row_started;
+
+    #[test]
+    fn only_the_reported_reserved_id_counts() {
+        assert!(pending_row_started(Some("5fe8d7f3"), Some("5fe8d7f3")));
+        // Nothing reported yet: still only requested.
+        assert!(!pending_row_started(None, Some("5fe8d7f3")));
+        // A Codex pending row has no reserved id until its rollout claims one.
+        assert!(!pending_row_started(Some("5fe8d7f3"), None));
+        // The report names the session being left, not the new one.
+        assert!(!pending_row_started(Some("3298af2e"), Some("5fe8d7f3")));
+        assert!(!pending_row_started(Some(""), Some("")));
+    }
 }
 
 fn merge_pending_session_entry(
@@ -57490,8 +57584,8 @@ mod repo_startup_greeting_tests {
     use super::{
         cap_greeting_text, claim_repo_startup_greeting, compose_repo_authored_greeting,
         greeting_rel_path_refusal, persist_repo_startup_greeting_projected,
-        repo_startup_greeting_marker_path, repo_startup_greeting_turn, RepoStartupGreetingClaim,
-        REPO_AUTHORED_GREETING_MAX_BYTES, REPO_STARTUP_GREETING,
+        repo_startup_greeting_marker_path, repo_startup_greeting_turn_from,
+        RepoStartupGreetingClaim, REPO_AUTHORED_GREETING_MAX_BYTES, REPO_STARTUP_GREETING,
         REPO_STARTUP_GREETING_MARKER_SCHEMA,
     };
 
@@ -57579,7 +57673,9 @@ mod repo_startup_greeting_tests {
 
     #[test]
     fn greeting_is_a_bram_owned_assistant_projection_not_a_user_turn() {
-        let turn = repo_startup_greeting_turn();
+        // freestyle-mode-host: the mode lookup picks the copy; the projection
+        // is pinned on the approved workflow copy directly.
+        let turn = repo_startup_greeting_turn_from(REPO_STARTUP_GREETING, "");
         assert_eq!(turn["role"].as_str(), Some("assistant"));
         assert_eq!(turn["bramOwned"].as_bool(), Some(true));
         assert_eq!(
@@ -65497,6 +65593,37 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         json!(stage_manager_splits_companion_now(root.as_deref()));
     body["claudeDocsCurrent"] = json!(claude_docs_current);
     body["menuHookRegistered"] = json!(menu_hook_registered);
+    // freestyle-mode-host (decision 2026-11-22): how the user chose to work
+    // in this folder on this machine, or "undecided", which the pane's
+    // first-wake chooser keys on. `modeRecord` is the host-owned file the
+    // answer lives in. Inserted here for the same reason as issue-465's.
+    body["mode"] = json!(root
+        .as_ref()
+        .map(|p| folder_mode(p).as_str())
+        .unwrap_or("undecided"));
+    body["modeRecord"] = json!(folder_modes_path().map(|p| p.to_string_lossy().to_string()));
+    // True when the workflow choice created this folder's repository, so the
+    // Orient me tour stays hidden (nothing to orient in).
+    body["modeCreatedRepo"] = json!(root
+        .as_ref()
+        .and_then(|p| folder_mode_record(p))
+        .map(|r| r.created_repo)
+        .unwrap_or(false));
+    // The chooser's freestyle card reads "for a new project" alone when the
+    // folder holds nothing but Bram's own entries (Jon, 2026-11-22).
+    body["folderEmpty"] = json!(root.as_ref().map(|p| folder_is_empty(p)).unwrap_or(false));
+    // A repository with no commits yet (the one the workflow choice just
+    // created): the pane offers the first commit through the Worklist, the
+    // way Orient me introduces it (Jon, 2026-11-22).
+    body["repoUnborn"] = json!(root
+        .as_ref()
+        .map(|p| git_toplevel_of(p).is_some() && !git_has_head(p))
+        .unwrap_or(false));
+    // setup-banner-survives-reload: this process's last Setup (null if none)
+    // and the time it last launched an agent (0 if none), so the pane can
+    // tell whether the running session predates the instructions.
+    body["lastSetup"] = json!(last_setup());
+    body["agentLaunchedAtMs"] = json!(agent_launched_at_ms());
     body["setupReasons"] = json!(setup_reasons_list);
     body["runningVersion"] = json!(running_version);
     body["checkoutVersion"] = json!(checkout_version_str);
@@ -65642,8 +65769,13 @@ enum ProjectFolder {
 }
 
 impl ProjectFolder {
+    // freestyle-mode-host (decision 2026-11-22): a folder with no git
+    // repository is a project folder too. The unit of Bram's attention is a
+    // folder; "managed" is a mode the user enters (folder_mode below), so the
+    // issue-448 refusal now covers only the home directory and a subfolder of
+    // a repo. `kind()` still reports "not-git" so the pane can say so.
     fn is_ok(&self) -> bool {
-        *self == ProjectFolder::Ok
+        matches!(self, ProjectFolder::Ok | ProjectFolder::NotGit)
     }
 
     fn kind(&self) -> &'static str {
@@ -65690,6 +65822,91 @@ fn git_toplevel_of(dir: &Path) -> Option<PathBuf> {
     (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
+// --- setup-banner-survives-reload (Jon, 2026-11-22) --------------------------
+//
+// The Setup-complete banner reports a condition the host can know: the agent
+// session running now started before Setup wrote the instruction files, so it
+// hasn't read them. Pane state set at the click forgot that on every reload.
+// The host keeps the last Setup of this process (what it wrote, when, and
+// whether it came from Run Setup or the first-wake chooser) and the time it
+// last launched an agent; the status reports both and the pane compares. A
+// Bram relaunch starts a new agent, which clears the condition by itself.
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LastSetup {
+    at_ms: i64,
+    wrote: Vec<String>,
+    source: String,
+}
+
+static LAST_SETUP: std::sync::Mutex<Option<LastSetup>> = std::sync::Mutex::new(None);
+static AGENT_LAUNCHED_AT_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn record_last_setup(wrote: &[String], source: &str) {
+    if let Ok(mut slot) = LAST_SETUP.lock() {
+        *slot = Some(LastSetup {
+            at_ms: unix_now_ms(),
+            wrote: wrote.to_vec(),
+            source: source.to_string(),
+        });
+    }
+}
+
+fn mark_last_setup_source(source: &str) {
+    if let Ok(mut slot) = LAST_SETUP.lock() {
+        if let Some(last) = slot.as_mut() {
+            last.source = source.to_string();
+        }
+    }
+}
+
+fn last_setup() -> Option<LastSetup> {
+    LAST_SETUP.lock().ok().and_then(|s| s.clone())
+}
+
+fn note_agent_launched() {
+    AGENT_LAUNCHED_AT_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Release);
+}
+
+fn agent_launched_at_ms() -> i64 {
+    AGENT_LAUNCHED_AT_MS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+// The revision the gate and the membership engine diff the worktree against:
+// `HEAD`, or git's empty tree on an unborn branch (right after `git init`,
+// the first-commit path of freestyle-mode's workflow choice), where every
+// command that names HEAD fails. Asked of git so a SHA-256 repository gets
+// its own empty-tree id; the SHA-1 constant is the fallback.
+fn git_base_rev(dir: &Path) -> String {
+    if git_has_head(dir) {
+        return "HEAD".to_string();
+    }
+    hidden_command("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["hash-object", "-t", "tree", "--stdin"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
+}
+
+// Whether the repository has a commit to point at (false on an unborn
+// branch, right after `git init`).
+fn git_has_head(dir: &Path) -> bool {
+    hidden_command("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 // The launch folder is fixed for the life of the process, so this is too.
 fn project_folder() -> &'static ProjectFolder {
     static FOLDER: std::sync::OnceLock<ProjectFolder> = std::sync::OnceLock::new();
@@ -65700,13 +65917,416 @@ fn project_folder() -> &'static ProjectFolder {
     })
 }
 
+// --- folder mode: workflow or freestyle (decision 2026-11-22) ----------------
+//
+// On first wake in a folder Bram offers two ways to work and remembers the
+// answer per folder and per machine. Workflow is what Bram was: Setup seeds
+// the conventions and guard hooks, the Worklist gate is on. Freestyle seeds
+// nothing and installs no hooks; the terminal, Sessions, Transcript, Log,
+// Context, Status and Search work as always. The record is the host's: it
+// lives under the user's Bram folder (`~/.bram/folders.json`, or
+// `$BRAM_USER_STATE_DIR/folders.json` so the harness can isolate it), and
+// every provider's guard denies an agent write to it (guard_policy.rs,
+// `is_user_mode_record`). Port, traces and the search index stay in the
+// folder's own `.bram/` in both modes, so Search works in freestyle.
+
+const USER_STATE_DIR_ENV: &str = "BRAM_USER_STATE_DIR";
+const FOLDER_MODES_LEAF: &str = "folders.json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FolderMode {
+    Workflow,
+    Freestyle,
+}
+
+impl FolderMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            FolderMode::Workflow => "workflow",
+            FolderMode::Freestyle => "freestyle",
+        }
+    }
+
+    fn parse(s: &str) -> Option<FolderMode> {
+        match s {
+            "workflow" => Some(FolderMode::Workflow),
+            "freestyle" => Some(FolderMode::Freestyle),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderModeRecord {
+    mode: FolderMode,
+    chosen_at_ms: i64,
+    // The workflow choice ran `git init` here: the repo didn't exist before
+    // Bram did, so the Orient me tour of "this repo" has nothing to show
+    // (Jon, 2026-11-22: Orient me only after the workflow choice, and only
+    // in an existing repo). Absent from the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    created_repo: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderModes {
+    #[serde(default)]
+    folders: std::collections::BTreeMap<String, FolderModeRecord>,
+}
+
+// What the process acts on: a recorded mode, or none yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderModeState {
+    Workflow,
+    Freestyle,
+    Undecided,
+}
+
+impl FolderModeState {
+    fn as_str(self) -> &'static str {
+        match self {
+            FolderModeState::Workflow => "workflow",
+            FolderModeState::Freestyle => "freestyle",
+            FolderModeState::Undecided => "undecided",
+        }
+    }
+}
+
+// The user's Bram folder: `~/.bram` (it already holds `bram-guard`), or
+// `$BRAM_USER_STATE_DIR` when set, which is how scripts/setup-harness.sh keeps
+// its scenarios off the real machine record.
+fn user_state_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(USER_STATE_DIR_ENV).filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    home_dir().map(|h| h.join(".bram"))
+}
+
+fn folder_modes_path() -> Option<PathBuf> {
+    user_state_dir().map(|d| d.join(FOLDER_MODES_LEAF))
+}
+
+// The record's key: the folder's canonical path with `\` folded to `/`, so a
+// Windows spelling and a Git Bash spelling of one folder share a row.
+fn folder_mode_key(root: &Path) -> String {
+    let canon = strip_unc_prefix(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+    canon.to_string_lossy().replace('\\', "/")
+}
+
+fn read_folder_modes(path: &Path) -> FolderModes {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<FolderModes>(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_folder_mode(path: &Path, key: &str, record: FolderModeRecord) -> Result<(), String> {
+    let mut modes = read_folder_modes(path);
+    modes.folders.insert(key.to_string(), record);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let mut text = serde_json::to_string_pretty(&modes).map_err(|e| e.to_string())?;
+    text.push('\n');
+    std::fs::write(path, text).map_err(|e| e.to_string())
+}
+
+// The record wins; without one, a folder that already carries Bram's marker
+// (`.bram/.worklist-authorization.json`, or the legacy one) is workflow with
+// no prompt: an already-managed repo on a new machine stays managed, and
+// stepping it out is #466's uninstall path. Anything else is undecided.
+fn resolve_folder_mode(recorded: Option<FolderMode>, has_marker: bool) -> FolderModeState {
+    match recorded {
+        Some(FolderMode::Workflow) => FolderModeState::Workflow,
+        Some(FolderMode::Freestyle) => FolderModeState::Freestyle,
+        None if has_marker => FolderModeState::Workflow,
+        None => FolderModeState::Undecided,
+    }
+}
+
+// A folder with nothing in it but Bram's own entries (`.bram/`, `.bram.json`,
+// a demo marker) and the Finder's `.DS_Store`: the chooser's freestyle card
+// then reads "for a new project" alone.
+fn folder_is_empty(root: &Path) -> bool {
+    match std::fs::read_dir(root) {
+        Ok(entries) => entries.flatten().all(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(".bram") || name == ".DS_Store"
+        }),
+        Err(_) => false,
+    }
+}
+
+fn folder_mode_record(root: &Path) -> Option<FolderModeRecord> {
+    let path = folder_modes_path()?;
+    read_folder_modes(&path)
+        .folders
+        .get(&folder_mode_key(root))
+        .cloned()
+}
+
+// Read on every call, not fixed at launch: `POST /__mode` changes it and the
+// pane's next status fetch must see the new answer.
+fn folder_mode(root: &Path) -> FolderModeState {
+    let recorded = folder_mode_record(root).map(|r| r.mode);
+    let has_marker = resource_relative_path(root, WORKLIST_AUTH_REL).exists();
+    resolve_folder_mode(recorded, has_marker)
+}
+
+// POST /__mode {"mode": "workflow" | "freestyle", "force"?: bool}: the pane's
+// first-wake chooser and the Worklist tab's Switch to workflow. Freestyle
+// records the answer. Workflow first runs `git init` when the folder has no
+// repository, then Setup exactly as Run Setup does, then records; its `ran` is
+// the /__enhance/run body so the pane can reuse the Setup-complete message. A
+// folder already recorded answers 409 unless forced; switching back from
+// workflow is #466's uninstall path and is not offered here.
+fn handle_mode_choice<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    body: &[u8],
+    now_ms: i64,
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let parsed = serde_json::from_slice::<serde_json::Value>(body).unwrap_or_default();
+    let Some(mode) = parsed["mode"].as_str().and_then(FolderMode::parse) else {
+        return (
+            400,
+            JSON,
+            b"{\"error\":\"mode must be workflow or freestyle\"}".to_vec(),
+        );
+    };
+    let force = parsed["force"].as_bool().unwrap_or(false);
+    let Some(path) = folder_modes_path() else {
+        return (
+            500,
+            JSON,
+            b"{\"error\":\"no home directory for the mode record\"}".to_vec(),
+        );
+    };
+    let key = folder_mode_key(root);
+    if let Some(existing) = read_folder_modes(&path).folders.get(&key) {
+        // Freestyle to workflow is the designed upgrade (the Worklist tab's
+        // Switch to workflow), so it needs no force. A repeat of the same
+        // mode, or workflow back to freestyle (#466's uninstall path, not
+        // offered here), is refused unless forced.
+        let upgrade = existing.mode == FolderMode::Freestyle && mode == FolderMode::Workflow;
+        if !force && !upgrade {
+            append_bram_trace_line(
+                app,
+                "mode",
+                &format!(
+                    "op=refuse reason=already-chosen mode={} asked={}",
+                    existing.mode.as_str(),
+                    mode.as_str()
+                ),
+            );
+            return (
+                409,
+                JSON,
+                serde_json::json!({
+                    "error": "mode already chosen for this folder",
+                    "mode": existing.mode.as_str(),
+                })
+                .to_string()
+                .into_bytes(),
+            );
+        }
+    }
+    let mut ran = serde_json::Value::Null;
+    let mut created_repo = false;
+    if mode == FolderMode::Workflow {
+        if git_toplevel_of(root).is_none() {
+            let out = hidden_command("git")
+                .arg("-C")
+                .arg(root)
+                .args(["init", "-q"])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    append_bram_trace_line(app, "mode", "op=git-init");
+                    created_repo = true;
+                }
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    append_bram_trace_line(
+                        app,
+                        "mode",
+                        &format!("op=git-init-failed error={}", err),
+                    );
+                    return (
+                        500,
+                        JSON,
+                        serde_json::json!({ "error": format!("git init failed: {}", err) })
+                            .to_string()
+                            .into_bytes(),
+                    );
+                }
+                Err(e) => {
+                    append_bram_trace_line(app, "mode", &format!("op=git-init-failed error={}", e));
+                    return (
+                        500,
+                        JSON,
+                        serde_json::json!({ "error": format!("git init failed: {}", e) })
+                            .to_string()
+                            .into_bytes(),
+                    );
+                }
+            }
+        }
+        match run_enhance(app, false) {
+            Ok(bytes) => {
+                ran = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                // The banner's sentence differs for a first-wake choice.
+                mark_last_setup_source("mode");
+            }
+            Err(e) => {
+                append_bram_trace_line(app, "mode", &format!("op=setup-failed error={}", e));
+                return (
+                    500,
+                    JSON,
+                    serde_json::json!({ "error": format!("Setup failed: {}", e) })
+                        .to_string()
+                        .into_bytes(),
+                );
+            }
+        }
+    }
+    let record = FolderModeRecord {
+        mode,
+        chosen_at_ms: now_ms,
+        created_repo,
+    };
+    if let Err(e) = write_folder_mode(&path, &key, record) {
+        append_bram_trace_line(app, "mode", &format!("op=record-failed error={}", e));
+        return (
+            500,
+            JSON,
+            serde_json::json!({ "error": format!("couldn't write the mode record: {}", e) })
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    append_bram_trace_line(
+        app,
+        "mode",
+        &format!(
+            "op=chose mode={} force={} record={}",
+            mode.as_str(),
+            force,
+            path.display()
+        ),
+    );
+    emit_replayable_signal(app, "enhance-status-changed");
+    (
+        200,
+        JSON,
+        serde_json::json!({
+            "mode": mode.as_str(),
+            "ran": ran,
+            "record": path.to_string_lossy(),
+        })
+        .to_string()
+        .into_bytes(),
+    )
+}
+
+#[cfg(test)]
+mod folder_mode_tests {
+    use super::{
+        read_folder_modes, resolve_folder_mode, write_folder_mode, FolderMode, FolderModeRecord,
+        FolderModeState,
+    };
+
+    #[test]
+    fn the_record_wins_then_the_marker_then_undecided() {
+        assert_eq!(
+            resolve_folder_mode(Some(FolderMode::Freestyle), true),
+            FolderModeState::Freestyle
+        );
+        assert_eq!(
+            resolve_folder_mode(Some(FolderMode::Workflow), false),
+            FolderModeState::Workflow
+        );
+        assert_eq!(resolve_folder_mode(None, true), FolderModeState::Workflow);
+        assert_eq!(resolve_folder_mode(None, false), FolderModeState::Undecided);
+    }
+
+    #[test]
+    fn the_record_round_trips_with_a_pinned_wire_shape() {
+        let dir = std::env::temp_dir().join(format!("bram-folder-modes-{}", std::process::id()));
+        let path = dir.join("folders.json");
+        write_folder_mode(
+            &path,
+            "/Users/me/survey",
+            FolderModeRecord {
+                mode: FolderMode::Freestyle,
+                chosen_at_ms: 1_795_000_000_000,
+                created_repo: false,
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "{\n  \"folders\": {\n    \"/Users/me/survey\": {\n      \"mode\": \"freestyle\",\n      \"chosenAtMs\": 1795000000000\n    }\n  }\n}\n"
+        );
+        let modes = read_folder_modes(&path);
+        assert_eq!(
+            modes.folders["/Users/me/survey"].mode,
+            FolderMode::Freestyle
+        );
+        // A second folder joins; the first stays.
+        write_folder_mode(
+            &path,
+            "C:/Users/me/repo",
+            FolderModeRecord {
+                mode: FolderMode::Workflow,
+                chosen_at_ms: 1,
+                created_repo: true,
+            },
+        )
+        .unwrap();
+        let modes = read_folder_modes(&path);
+        assert_eq!(modes.folders.len(), 2);
+        assert_eq!(modes.folders["C:/Users/me/repo"].mode, FolderMode::Workflow);
+        assert!(modes.folders["C:/Users/me/repo"].created_repo);
+        assert!(!modes.folders["/Users/me/survey"].created_repo);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"createdRepo\": true"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_broken_record_reads_as_empty() {
+        let dir =
+            std::env::temp_dir().join(format!("bram-folder-modes-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("folders.json");
+        assert!(read_folder_modes(&path).folders.is_empty());
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(read_folder_modes(&path).folders.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 // /__enhance/status `projectFolder`. issue-469-retire-resources: a project
 // folder whose start was held reads as kind "state-held", with the obstacle,
 // state_dir_retry's verdict and any Bram-owned tracked files beside it.
 fn project_folder_status(root: Option<&Path>) -> serde_json::Value {
     let folder = project_folder();
+    // freestyle-mode-host: the launch-time verdict said "not-git", but the
+    // workflow choice may have run `git init` since; report what git says
+    // now, so the pane stops describing a repository that exists as absent.
+    let kind = match (folder, root) {
+        (ProjectFolder::NotGit, Some(r)) if git_toplevel_of(r).is_some() => "ok",
+        _ => folder.kind(),
+    };
     let mut v = serde_json::json!({
-        "kind": folder.kind(),
+        "kind": kind,
         "root": determine_project_root().to_string_lossy(),
         "toplevel": match folder {
             ProjectFolder::Subfolder(top) => Some(top.to_string_lossy().to_string()),
@@ -65764,6 +66384,17 @@ mod project_folder_tests {
             ProjectFolder::NotGit
         );
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    // freestyle-mode-host: a folder with no repository is a project folder;
+    // only home and a subfolder of a repo are refused.
+    #[test]
+    fn no_repo_is_a_project_folder_but_home_and_subfolders_are_not() {
+        assert!(ProjectFolder::Ok.is_ok());
+        assert!(ProjectFolder::NotGit.is_ok());
+        assert_eq!(ProjectFolder::NotGit.kind(), "not-git");
+        assert!(!ProjectFolder::Home.is_ok());
+        assert!(!ProjectFolder::Subfolder(std::path::PathBuf::from("/r")).is_ok());
     }
 
     #[test]
@@ -65969,13 +66600,18 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     let proj = project_root(Some(app)).ok_or("no project root")?;
     // issue-448: Setup only in a project folder, the root of a git repo.
     match project_folder() {
-        ProjectFolder::NotGit => {
+        // freestyle-mode-host: the launch-time verdict says the folder had no
+        // repository; `POST /__mode workflow` may have run `git init` since,
+        // so ask git now rather than the OnceLock.
+        ProjectFolder::NotGit if git_toplevel_of(&proj).is_none() => {
             return Err(format!(
-                "Setup refused: {} isn't in a git repository. Bram works from the root of the \
-                 local git repository for your app: cd there and run bram (issue #448).",
+                "Setup refused: {} isn't in a git repository. Choose Workflow in the agent \
+                 pane to create one here, or cd to your repository's root and run bram \
+                 (issue #448).",
                 proj.display()
             ));
         }
+        ProjectFolder::NotGit => {}
         ProjectFolder::Subfolder(top) => {
             return Err(format!(
                 "Setup refused: {} is inside the git repository at {}. Start Bram from the \
@@ -66327,6 +66963,11 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         ));
     }
 
+    // setup-banner-survives-reload (Jon, 2026-11-22): what this process's
+    // last Setup wrote, and when, so /__enhance/status can say whether the
+    // running agent session predates the instructions. Pane state alone
+    // forgot it on every reload.
+    record_last_setup(&wrote, "run");
     let body = serde_json::json!({
         "enhanced": true,
         "isSourceRepo": is_source_repo,
@@ -68614,6 +69255,9 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         owned("message-drafts", Dir),
         owned("queue-drafts", Dir),
         owned("audit-ledger.jsonl", File),
+        // freestyle-mode-host: the port publisher's lock lives here when the
+        // folder has no `.git` to hold it.
+        owned("bram-port.lock", File),
         // Written by scripts/build.sh, in the source repo only.
         owned("build-log.jsonl", File),
         // Written by scripts/codex-permission-capture.py.
@@ -70767,7 +71411,9 @@ fn capture_claim_tree(root: &Path, untracked_scope: &[String]) -> Option<ClaimCa
     // its pre-boundary state in the snapshot, or those older edits would be
     // credited to the item. Undeclared untracked files do not get that
     // protection; see the late-declaration test.
-    let read = run(&["read-tree", "HEAD"]).and_then(|_| run(&["add", "-u", "--", "."]));
+    // An unborn branch reads the empty tree (freestyle-mode's first commit).
+    let base = git_base_rev(root);
+    let read = run(&["read-tree", base.as_str()]).and_then(|_| run(&["add", "-u", "--", "."]));
     let mut untracked = 0usize;
     let staged = read.and_then(|_| {
         if untracked_scope.is_empty() {
@@ -71769,7 +72415,9 @@ fn membership_line_credit_gaps(
     // The path's HEAD blob: the OLD side of the first step diff listing it
     // (the path equals HEAD until then; a new file's old side is all zeros).
     let mut head_blob: std::collections::HashMap<String, String> = Default::default();
-    let mut prev = "HEAD".to_string();
+    // An unborn branch starts from the empty tree (the first commit).
+    let base = git_base_rev(root);
+    let mut prev = base.clone();
     for (tree, step) in steps {
         if *tree == prev {
             gap = false;
@@ -71808,7 +72456,7 @@ fn membership_line_credit_gaps(
         }
         prev = tree.clone();
     }
-    let text = membership_diff_u0(root, "HEAD", now_tree, paths, spawns)?;
+    let text = membership_diff_u0(root, &base, now_tree, paths, spawns)?;
     for file in parse_line_diff(&text) {
         let Some(credit) = result.get_mut(&file.path) else {
             continue;
@@ -72015,11 +72663,13 @@ fn membership_universe(
         // core.quotePath=false, as membership_diff_u0 runs, so a non-ASCII
         // path's universe key is the raw name the line-credit diff reports
         // (and a literal name the scratch-index add below can stage).
+        // An unborn branch diffs against the empty tree (the first commit).
+        let base = git_base_rev(root);
         let mut args: Vec<&str> = vec![
             "-c",
             "core.quotePath=false",
             "diff",
-            "HEAD",
+            base.as_str(),
             "--no-renames",
             "--numstat",
             "--",
@@ -72119,7 +72769,9 @@ fn membership_seed_now_index(
             Err(e) => Err(e.to_string()),
         }
     };
-    run(&["read-tree", "HEAD"])?;
+    // An unborn branch seeds from the empty tree (the first commit).
+    let base = git_base_rev(root);
+    run(&["read-tree", base.as_str()])?;
     let mut list: Vec<u8> = Vec::new();
     for p in paths {
         list.extend_from_slice(p.as_bytes());
@@ -93132,6 +93784,16 @@ fn route_request<R: tauri::Runtime>(
     }
 
     if path == "__commits" {
+        // freestyle-mode-host: a project folder with no repository has no
+        // commits, not an error. The Commits tab mounts its DataSource
+        // whatever the mode, and git's "not a git repository" as a 500 was
+        // the one console error on a bare folder's first wake (2026-11-22).
+        let bare = project_root(Some(app))
+            .map(|root| git_toplevel_of(&root).is_none())
+            .unwrap_or(false);
+        if bare {
+            return (200, "application/json; charset=utf-8", b"[]".to_vec());
+        }
         return match commits_list_cached(app, 100) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
@@ -100833,7 +101495,8 @@ fn gate_raw_snapshot_in(
     let mut paths: std::collections::BTreeSet<String> = Default::default();
     let mut diff = vec![
         "diff".to_string(),
-        "HEAD".to_string(),
+        // An unborn branch diffs against the empty tree (the first commit).
+        git_base_rev(root),
         "--name-only".to_string(),
         "--no-renames".to_string(),
         "--".to_string(),
@@ -110512,6 +111175,22 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_agent_subagent_release(app, &buf)
         }
+    } else if path == "__mode" {
+        // freestyle-mode-host (decision 2026-11-22): the first-wake chooser's
+        // Workflow / Freestyle, and the Worklist tab's Switch to workflow.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else if let Some(root) = project_root(Some(app)) {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_mode_choice(app, &root, &buf, unix_now_ms())
+        } else {
+            (
+                409,
+                "application/json; charset=utf-8",
+                b"{\"error\":\"no project root\"}".to_vec(),
+            )
+        }
     } else if path == "__state-dir/decision" {
         // issue-469-mixed-folder-dialog: the banner's Move / Not now.
         if method != "POST" {
@@ -112556,11 +113235,18 @@ pub fn run() {
                         proj.display()
                     );
                 } else if wait_for_loopback_http(port, 5000) {
-                    let publication = git_dir_path(app.handle())
-                        .ok_or_else(|| "could not resolve this project's git directory".to_string())
-                        .and_then(|git_dir| {
-                            publish_bram_port_files(proj, &git_dir, port, started_at_ms)
-                        });
+                    // freestyle-mode-host (decision 2026-11-22): a folder with
+                    // no git directory keeps the owner lock in Bram's own
+                    // state folder instead (the lock is per worktree only so
+                    // worktrees don't share it; a bare folder has none).
+                    let lock_dir = git_dir_path(app.handle()).unwrap_or_else(|| {
+                        resource_relative_path(proj, "bram-port.lock")
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| proj.join(BRAM_STATE_DIR_NEW))
+                    });
+                    let publication =
+                        publish_bram_port_files(proj, &lock_dir, port, started_at_ms);
                     let detail = match publication {
                         Ok(None) => format!(
                             "op=publish port={} pid={} started_at_ms={}",

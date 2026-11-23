@@ -258,10 +258,13 @@ status; the user's Commit button judges committability independently.
 ### Lifecycle: propose → triage → mechanical transitions
 
 1. **Propose** — write the draft to `<state>/worklist-drafts/<id>.md`,
-   then the metadata item to `<state>/worklist.json`. Each item small,
-   discrete, independently rejectable. Writing the item is *asking*, not
-   approval. Don't show or instruct on raw `approved:` / `drop:` /
-   `iterate:` payloads — the buttons generate them.
+   then the metadata item to `<state>/worklist.json`, **both with the
+   Write or Edit tool**: the guard validates worklist writes only through
+   the file tools, so a shell redirect or heredoc into either file is
+   refused (`bash-write-no-coverage … token=redirect`) and costs a retry.
+   Each item small, discrete, independently rejectable. Writing the item
+   is *asking*, not approval. Don't show or instruct on raw `approved:` /
+   `drop:` / `iterate:` payloads — the buttons generate them.
 2. **User triages** — ticks rows, optionally types one message, clicks a
    button. The message fans out to every selected item: treat each
    item's feedback on its own terms, but answer identical fanned-out

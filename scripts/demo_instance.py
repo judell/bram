@@ -7,6 +7,12 @@ scenario branch ends at a pending-work commit whose metadata names its clean
 boundary and claim trees.  ``use`` checks out that commit detached, resets it
 mixed to the clean boundary, and recreates the scenario's local claim refs.
 The parked branch therefore survives while Bram sees the intended dirty tree.
+
+``new <name> --from freestyle-survey --bare`` is the exception: a bare fixture
+is a plain folder with no ``.git`` (default ``../bram-freestyle-survey``),
+seeded from ``scripts/fixtures/freestyle-survey/folder/``.  ``status``,
+``launch``, ``stop`` and ``reset`` work on it; ``use``, ``add``, ``capture``
+and ``prune`` refuse, since there is nothing to park.
 """
 
 from __future__ import annotations
@@ -57,6 +63,11 @@ LAYOUT_LEGACY = "legacy"
 UNCAPTURED_STATE = {".gitignore", ".migrated-from", ".state-move", "settings.json"}
 RUNTIME_DIR = "bram-demo"
 FORMAT_VERSION = 1
+# Bare starters are files-only: no board, no git, never part of `--from all`.
+BARE_STARTERS = ("freestyle-survey",)
+FIXTURES_DIR = SOURCE_ROOT / "scripts" / "fixtures"
+DEFAULT_BARE_REPO = SOURCE_ROOT.parent / "bram-freestyle-survey"
+BARE_STATE_DIR = ".bram"
 SCENARIO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 AGENT_ENV_KEYS = (
@@ -443,6 +454,23 @@ def _assert_safe_location(repo: Path) -> Path:
     return resolved
 
 
+def _marker_of(repo: Path) -> dict[str, Any]:
+    """The demo marker if `repo` has a readable one, else {} (never raises)."""
+    try:
+        return read_json(repo.expanduser().resolve() / MARKER)
+    except DemoError:
+        return {}
+
+
+def is_bare(repo: Path) -> bool:
+    return _marker_of(repo).get("bare") is True
+
+
+def refuse_if_bare(repo: Path) -> None:
+    if is_bare(repo):
+        raise DemoError("bare fixture: nothing to park")
+
+
 def validate_demo(repo: Path) -> Path:
     repo = _assert_safe_location(repo)
     marker_path = repo / MARKER
@@ -453,6 +481,9 @@ def validate_demo(repo: Path) -> Path:
     marker = read_json(marker_path)
     if marker.get("kind") != "bram-synthetic-demo" or marker.get("format") != FORMAT_VERSION:
         raise DemoError(f"refusing {repo}: unrecognized {MARKER}")
+    if marker.get("bare") is True:
+        # A bare fixture has no git root or remotes to check.
+        return repo
     top = run_git(repo, "rev-parse", "--show-toplevel")
     if Path(top).resolve() != repo:
         raise DemoError(f"refusing nested or mismatched git root: {top}")
@@ -1179,6 +1210,21 @@ def _scenario_doc(repo: Path, name: str) -> tuple[str, dict[str, Any]]:
 
 
 def _runtime_root(repo: Path) -> Path:
+    if is_bare(repo):
+        # The runtime files live inside the fixture's `.bram/`, which must
+        # read as Bram's own (judell/bram#469: a `.bram/` with neither
+        # `.migrated-from` nor a `.gitignore` of exactly `*` belongs to
+        # another tool, and the host holds the start as
+        # `state-held obstacle=foreign-dot-bram`). Write the marker the way
+        # ensure_new_state_dir does, so the host adopts the folder for its
+        # port, traces and search index.
+        state = repo / BARE_STATE_DIR
+        path = state / RUNTIME_DIR
+        path.mkdir(parents=True, exist_ok=True)
+        ignore = state / ".gitignore"
+        if not ignore.exists():
+            ignore.write_text("*\n", encoding="utf-8")
+        return path
     git_dir = Path(run_git(repo, "rev-parse", "--git-dir"))
     if not git_dir.is_absolute():
         git_dir = repo / git_dir
@@ -1370,6 +1416,120 @@ def add_starter(repo: Path, starter: str) -> None:
     builder.add(starter)
 
 
+def _bare_seed_dir(starter: str) -> Path:
+    if starter not in BARE_STARTERS:
+        raise DemoError(f"--bare takes --from {' or '.join(BARE_STARTERS)}")
+    folder = FIXTURES_DIR / starter / "folder"
+    if not folder.is_dir():
+        raise DemoError(f"missing starter folder: {folder}")
+    return folder
+
+
+def _materialize_folder(src: Path, dst: Path) -> None:
+    """Copy the `src` tree into `dst`, byte for byte."""
+    for path in sorted(src.rglob("*")):
+        target = dst / path.relative_to(src)
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+
+
+def _clear_bare_folder(repo: Path) -> None:
+    """Delete everything in a bare fixture except Bram's state and the marker."""
+    for child in repo.iterdir():
+        if child.name in (BARE_STATE_DIR, MARKER):
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _refuse_running(repo: Path) -> None:
+    process_path = repo / BARE_STATE_DIR / RUNTIME_DIR / "process.json"
+    if process_path.exists():
+        pid = int(read_json(process_path).get("pid", 0) or 0)
+        if pid and _process_alive(pid):
+            raise DemoError(f"stop the running demo PID {pid} before resetting the fixture")
+
+
+def _git_init_bare(repo: Path) -> None:
+    """The `--git` variant: the same folder as a fresh repository with one
+    commit of its contents and no Bram marker, so the chooser's Workflow card
+    can be seen without its "creates a repo" line (Jon, 2026-11-22)."""
+    run_git(repo, "init", "-q")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "Survey folder", env=_fixed_git_env(50))
+
+
+def new_bare(repo: Path, name: str, starter: str, git: bool = False) -> Path:
+    seed = _bare_seed_dir(starter)
+    repo = _assert_safe_location(repo)
+    marker = _marker_of(repo)
+    if repo.exists():
+        if not marker:
+            if not repo.is_dir() or any(repo.iterdir()):
+                raise DemoError(f"refusing {repo}: exists and is not a demo fixture")
+        elif marker.get("bare") is not True:
+            raise DemoError(f"refusing {repo}: a git demo repo, not a bare fixture")
+    repo.mkdir(parents=True, exist_ok=True)
+    if marker:
+        _refuse_running(repo)
+        _clear_bare_folder(repo)
+    _materialize_folder(seed, repo)
+    write_json(
+        repo / MARKER,
+        {
+            "bare": True,
+            "format": FORMAT_VERSION,
+            "git": git,
+            "kind": "bram-synthetic-demo",
+            "name": name,
+            "starter": starter,
+        },
+    )
+    if git:
+        _git_init_bare(repo)
+    write_json(
+        repo / BARE_STATE_DIR / RUNTIME_DIR / "active.json", {"name": name, "starter": starter}
+    )
+    return repo
+
+
+def reset_bare(repo: Path) -> str:
+    repo = validate_demo(repo)
+    marker = read_json(repo / MARKER)
+    starter = str(marker.get("starter", ""))
+    seed = _bare_seed_dir(starter)
+    _refuse_running(repo)
+    _clear_bare_folder(repo)
+    _materialize_folder(seed, repo)
+    if marker.get("git") is True:
+        _git_init_bare(repo)
+    return str(marker.get("name", starter))
+
+
+def check_bare_python(repo: Path) -> None:
+    """The runbook warns that without pandas and matplotlib the agent spends
+    the demo installing packages. Refuse instead; never install anything."""
+    try:
+        result = subprocess.run(
+            ["python3", "-c", "import pandas, matplotlib"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise DemoError(f"cannot run python3: {exc}") from exc
+    if result.returncode != 0:
+        raise DemoError(
+            "python3 in the fixture cannot import pandas and matplotlib; "
+            "run: python3 -m pip install pandas matplotlib"
+        )
+
+
 def new_scenario(
     repo: Path,
     name: str,
@@ -1377,6 +1537,9 @@ def new_scenario(
     force: bool = False,
     layout: str = LAYOUT_NEW,
 ) -> str:
+    for starter in starters:
+        if starter in BARE_STARTERS:
+            raise DemoError(f"starter {starter!r} is bare-only; add --bare")
     scenario_ref(name)
     repo = initialize_repo(repo)
     process_path = _runtime_root(repo) / "process.json"
@@ -1567,6 +1730,8 @@ def _active_scenario(repo: Path) -> str:
 def launch_demo(repo: Path, binary: Path) -> dict[str, Any]:
     repo = validate_demo(repo)
     binary = binary.expanduser().absolute()
+    if is_bare(repo):
+        check_bare_python(repo)
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise DemoError(f"Bram binary is missing or not executable: {binary}")
     assert_binary_current(binary)
@@ -1652,8 +1817,32 @@ def stop_demo(repo: Path, timeout: float = 5.0) -> int:
     return pid
 
 
+def _bare_status(repo: Path) -> dict[str, Any]:
+    runtime = _runtime_root(repo)
+    marker = read_json(repo / MARKER)
+    process_path = runtime / "process.json"
+    process = read_json(process_path) if process_path.exists() else {}
+    pid = int(process.get("pid", 0) or 0)
+    return {
+        "activeScenario": marker.get("name"),
+        "bare": True,
+        "claimRefs": [],
+        "layout": None,
+        "stateDir": BARE_STATE_DIR,
+        "dirty": [],
+        "items": 0,
+        "log": str(runtime / "bram.log"),
+        "pid": pid if pid and _process_alive(pid) else None,
+        "repo": str(repo),
+        "scenarios": [],
+        "starter": marker.get("starter"),
+    }
+
+
 def status(repo: Path) -> dict[str, Any]:
     repo = validate_demo(repo)
+    if is_bare(repo):
+        return _bare_status(repo)
     runtime = _runtime_root(repo)
     active_path = runtime / "active.json"
     active = read_json(active_path) if active_path.exists() else {}
@@ -1739,8 +1928,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     new = sub.add_parser("new", help="create and hydrate a scenario")
     new.add_argument("name")
-    new.add_argument("--from", dest="starters", action="append", choices=(*STARTERS, "all"))
+    new.add_argument("--from", dest="starters", action="append", choices=(*STARTERS, *BARE_STARTERS, "all"))
     new.add_argument("--force", action="store_true")
+    new.add_argument(
+        "--bare",
+        action="store_true",
+        help="plain folder, no .git, seeded from a bare starter "
+        f"({', '.join(BARE_STARTERS)}; default repo {DEFAULT_BARE_REPO})",
+    )
+    new.add_argument(
+        "--git",
+        action="store_true",
+        help="with --bare: the same folder as a fresh git repository with one commit "
+        "(no Bram marker), so the chooser's Workflow card shows its other variant",
+    )
     _layout_flag(new, "hydrate into resources/, the 0.8.3 layout (default: .bram/)")
 
     use = sub.add_parser("use", help="hydrate a parked scenario exactly")
@@ -1792,8 +1993,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
     try:
-        if args.command == "new":
+        if args.command in ("use", "add", "capture", "prune"):
+            refuse_if_bare(args.repo)
+        if args.command == "new" and args.bare:
+            wanted = args.starters or list(BARE_STARTERS)
+            if len(wanted) != 1 or wanted[0] not in BARE_STARTERS:
+                raise DemoError(f"--bare takes exactly one of --from {', '.join(BARE_STARTERS)}")
+            explicit = any(a == "--repo" or a.startswith("--repo=") for a in raw)
+            target = args.repo if explicit else DEFAULT_BARE_REPO
+            made = new_bare(target, args.name, wanted[0], git=bool(args.git))
+            kind = "git fixture" if args.git else "bare fixture"
+            print(f"created {kind} {args.name} ({wanted[0]}) at {made}")
+        elif args.command == "new" and args.git:
+            raise DemoError("--git applies to --bare fixtures only")
+        elif args.command == "reset" and is_bare(args.repo):
+            print(f"reset bare fixture {reset_bare(args.repo)}")
+        elif args.command == "new":
             tip = new_scenario(
                 args.repo, args.name, args.starters or ["all"], args.force, args.layout or LAYOUT_NEW
             )
@@ -1826,6 +2043,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"items: {value['items']}  claims: {len(value['claimRefs'])}")
                 print(f"dirty paths: {len(value['dirty'])}  pid: {value['pid'] or '-'}")
                 print(f"log: {value['log']}")
+                if value.get("bare"):
+                    print(f"bare fixture: {value['starter']} (no .git)")
         elif args.command == "prune":
             removed, skipped = prune_scenarios(
                 args.repo, args.match or ["check-*"], args.keep, args.dry_run, args.gc

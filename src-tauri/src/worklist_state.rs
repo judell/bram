@@ -180,6 +180,12 @@ fn session_id_is_plain(s: &str) -> bool {
 }
 
 /// The item's most recent recorded session: (provider, session id, at_ms).
+///
+/// Only stamps since the item's last prune count (item-session-outlives-
+/// prune, 2026-11-22): an id reused after a prune is a new item, and the
+/// old item's stamp made the gate offer "Last worked on in another session:
+/// 'first commit'" while the running session was that very "first commit",
+/// because the demo's third `initial-commit` inherited the second one's row.
 pub fn latest_item_session(
     conn: &Connection,
     item_id: &str,
@@ -187,6 +193,8 @@ pub fn latest_item_session(
     let row: Option<(String, i64)> = conn
         .query_row(
             "SELECT detail, at_ms FROM transitions WHERE item_id = ?1 AND kind = 'session' \
+             AND id > COALESCE((SELECT MAX(id) FROM transitions \
+                                WHERE item_id = ?1 AND kind = 'item-pruned'), 0) \
              ORDER BY id DESC LIMIT 1",
             params![item_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
@@ -2167,6 +2175,31 @@ mod tests {
             Some(("codex".to_string(), "01a0-x".to_string(), 300))
         );
         assert_eq!(latest_item_session(&conn, "item-b").unwrap(), None);
+    }
+
+    // item-session-outlives-prune: an id reused after a prune starts with no
+    // session, and its next delivery stamps it afresh even to the session the
+    // old item last saw.
+    #[test]
+    fn item_session_does_not_outlive_a_prune() {
+        let conn = open_in_memory().unwrap();
+        assert!(record_item_session(&conn, "item-a", "claude", "s-1", 100).unwrap());
+        append_transition(
+            &conn,
+            200,
+            Some("item-a"),
+            "item-pruned",
+            "{\"status\":\"proposed\"}",
+            "watcher",
+        )
+        .unwrap();
+        assert_eq!(latest_item_session(&conn, "item-a").unwrap(), None);
+        // The reborn item's first delivery writes a row even for the same session.
+        assert!(record_item_session(&conn, "item-a", "claude", "s-1", 300).unwrap());
+        assert_eq!(
+            latest_item_session(&conn, "item-a").unwrap(),
+            Some(("claude".to_string(), "s-1".to_string(), 300))
+        );
     }
 
     #[test]

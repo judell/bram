@@ -486,23 +486,27 @@
           <Link
             when="{window.__bramFilesGroupCollapsible($item.files)}"
             noIndicator="true"
-            onClick="openFiles = window.__bramToggleInArray(openFiles, $item.id)">
+            onClick="openFiles = window.__bramToggleFilesGroup(openFiles, $item.id); atBottom = window.__bramFollowTransition(false, 'file-expand', $props.agentId)">
             <Text
               fontSize="$fontSize-sm"
               color="$textColor-secondary"
               value="{window.__bramFilesGroupLabel(openFiles, $item.id, $item.files)}" />
           </Link>
-          <VStack when="{window.__bramFilesGroupShown(openFiles, $item.id, $item.files)}" gap="$space-1">
+          <VStack when="{window.__bramFilesGroupShown(openFiles, $item.id, $item.files)}" gap="$space-1" automationId="{'files-group-' + $item.id}">
             <Items data="{$item.files || []}">
               <VStack gap="$space-1">
-                <Link noIndicator="true" onClick="openFiles = window.__bramToggleInArray(openFiles, $item.path)">
+                <Link noIndicator="true" onClick="openFiles = window.__bramToggleFileRow(openFiles, $item.path); atBottom = window.__bramFollowTransition(false, 'file-expand', $props.agentId)">
                   <Text
                     fontSize="$fontSize-sm"
                     color="$textColor-secondary"
                     value="{window.__bramFileRowLabel(openFiles, $item)}" />
                 </Link>
+                <VStack
+                  when="{window.__bramFileOpen(openFiles, $item.path)}"
+                  gap="$space-1"
+                  automationId="{'file-open-' + $item.path}">
                 <Link
-                  when="{$item.image &amp;&amp; window.__bramFileOpen(openFiles, $item.path)}"
+                  when="{$item.image}"
                   onClick="fullscreenImage = $item.path"
                   noIndicator="true">
                   <Image
@@ -514,12 +518,13 @@
                   id="filePreview"
                   url="/__local-file-preview"
                   queryParams="{{ path: $item.path }}"
-                  when="{!$item.image &amp;&amp; window.__bramFileOpen(openFiles, $item.path)}" />
+                  when="{!$item.image}" />
                 <Markdown
-                  when="{!$item.image &amp;&amp; window.__bramFileOpen(openFiles, $item.path) &amp;&amp; filePreview.value}"
+                  when="{!$item.image &amp;&amp; filePreview.value}"
                   content="{window.__bramFormatLocalLinkPreview(filePreview.value)}"
                   overflowMode="{window.__bramLocalLinkPreviewOverflow(filePreview.value)}"
                   interpolateBindings="false" allowHtml="false" />
+                </VStack>
               </VStack>
             </Items>
           </VStack>

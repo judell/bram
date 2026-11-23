@@ -19171,6 +19171,38 @@ window.__bramToggleInArray = function (arr, id) {
 window.__bramFileOpen = function (arr, path) {
   return !!arr && arr.indexOf(path) >= 0;
 };
+// transcript-file-row-scrolls-into-view (Jon, 2026-11-23: "expanding the file
+// viewer at the bottom requires a scrolldown, that should be auto if
+// possible"): wait for the opened content to have height, then scroll the
+// minimum. Quoted attribute values need only \ and " escaped; CSS.escape
+// would over-escape the "/" in paths.
+window.__bramRevealFileContent = function (id) {
+  try {
+    var sel = '[data-automation-id="' + String(id).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"]';
+    var tries = 0;
+    var step = function () {
+      var el = document.querySelector(sel);
+      if (el && el.getBoundingClientRect().height > 0) {
+        el.scrollIntoView({ block: "nearest", inline: "nearest" });
+        return;
+      }
+      if (++tries < 120) requestAnimationFrame(step); // ~2 s: a text preview's fetch may take longer than a few frames
+    };
+    requestAnimationFrame(function () { requestAnimationFrame(step); });
+  } catch (e) {}
+};
+// transcript-file-row-scrolls-into-view: toggle a file row, reveal on open.
+window.__bramToggleFileRow = function (arr, path) {
+  var next = window.__bramToggleInArray(arr, path);
+  if (next.indexOf(path) >= 0) window.__bramRevealFileContent("file-open-" + path);
+  return next;
+};
+// transcript-file-row-scrolls-into-view: same for the "Files (n)" group.
+window.__bramToggleFilesGroup = function (arr, id) {
+  var next = window.__bramToggleInArray(arr, id);
+  if (next.indexOf(id) >= 0) window.__bramRevealFileContent("files-group-" + id);
+  return next;
+};
 // The row's label: a disclosure mark and the root-relative path. Reads only
 // its arguments.
 // A turn naming more than one file folds them under "Files (n)", closed at

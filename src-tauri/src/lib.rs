@@ -31712,25 +31712,25 @@ mod agent_startup_policy_tests {
         let view = settings_view_from_config(None);
         assert_eq!(view["sessions"]["suggestOnNewItem"], true);
         assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
-        assert_eq!(view["sessions"]["suggestOnTopicShift"], false);
+        assert_eq!(view["sessions"]["suggestOnTopicShift"], true);
         assert_eq!(view["sessions"]["pairAcrossProviders"], true);
 
         let existing = serde_json::json!({
             "ui": { "showTargetApp": true },
             "shell": { "agent": "codex" }
         });
-        let update = serde_json::json!({ "sessions": { "suggestOnTopicShift": true } });
+        let update = serde_json::json!({ "sessions": { "suggestOnTopicShift": false } });
         let merged = merge_settings_into_config(existing, &update);
         assert_eq!(merged["ui"]["showTargetApp"], true);
         assert_eq!(merged["shell"]["agent"], "codex");
-        assert_eq!(merged["sessions"]["suggestOnTopicShift"], true);
+        assert_eq!(merged["sessions"]["suggestOnTopicShift"], false);
         assert!(merged["sessions"].get("suggestOnNewItem").is_none());
 
         let cfg = serde_json::from_value::<ProjectConfig>(merged).unwrap();
         let view = settings_view_from_config(Some(cfg));
         assert_eq!(view["sessions"]["suggestOnNewItem"], true);
         assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
-        assert_eq!(view["sessions"]["suggestOnTopicShift"], true);
+        assert_eq!(view["sessions"]["suggestOnTopicShift"], false);
         assert_eq!(view["ui"]["showTargetApp"], true);
     }
 
@@ -31754,7 +31754,7 @@ mod agent_startup_policy_tests {
             "sessions": {
                 "suggestOnNewItem": true,
                 "suggestOnNewIssue": true,
-                "suggestOnTopicShift": false,
+                "suggestOnTopicShift": true,
                 "pairAcrossProviders": true
             },
             "traces": { "enabled": true, "inspectorTap": false, "archiveAfterDays": 14 },
@@ -31938,10 +31938,14 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         .as_ref()
         .and_then(|s| s.suggest_on_new_issue)
         .unwrap_or(true);
+    // topic-shift-suggestion-default-on (Jon, 2026-11-23): on, like the
+    // other two triggers. The one real topic shift in session fb876140 was
+    // the point a fresh session should have been offered, and the switch
+    // being off meant it never was.
     let suggest_on_topic_shift = sessions_cfg
         .as_ref()
         .and_then(|s| s.suggest_on_topic_shift)
-        .unwrap_or(false);
+        .unwrap_or(true);
     let pair_across_providers = sessions_cfg
         .as_ref()
         .and_then(|s| s.pair_across_providers)

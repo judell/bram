@@ -202,8 +202,9 @@
     <!-- worklist-freestyle-note-why-switch (Jon, 2026-11-23): the sentence
          above says what switching does; this one says why anyone would. -->
     <Text><Text inline="true" fontWeight="$fontWeight-bold" value="Why switch?" /> In a longer session with more complex analysis the Worklist helps you organize subtasks and complete them in an orderly and accountable way. The Worklist also enables you to conserve tokens by starting new sessions that wake up with focused context courtesy of the Worklist.</Text>
+    <Text when="{window.__bramProjectFolderIs(enhanceMode.value, 'not-git')}" value="This folder has no git repository; switching creates one." />
     <HStack>
-      <Button label="Switch to workflow" onClick="window.__bramChooseMode('workflow')" />
+      <Button label="{window.__bramSwitchToWorkflowLabel(enhanceMode.value)}" onClick="window.__bramChooseMode('workflow')" />
     </HStack>
   </VStack>
   <!-- Until the mode is chosen the chooser at the top of the pane is the

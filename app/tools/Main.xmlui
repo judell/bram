@@ -738,6 +738,9 @@
     </HStack>
     <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
     <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
+    <!-- git-tab-freestyle: shown only in freestyle mode. `when` is a universal
+         component property (https://www.xmlui.org/docs/reference/components/NavLink). -->
+    <NavLink label="Git" to="/git" tooltip="What&apos;s changed in this folder, and commit it" when="{window.__bramStoryFreestyle(enhanceStatus.value)}" />
     <!-- promote-accounting-to-nav (Jon, 2026-11-23): Token accounting leaves
          the Status tab for its own page, between Files and Settings. -->
     <NavLink label="Cost" to="/accounting" tooltip="What the agents&apos; model calls used, this session and every session, and what a fresh session would have saved" />
@@ -880,6 +883,16 @@
               <HStack verticalAlignment="center" gap="0">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Cost" />
                 <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Cost tab" onClick="modeInfoDialog.open(window.__bramModeInfo('cost'))" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Log" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Log tab" onClick="modeInfoDialog.open(window.__bramModeInfo('log'))" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
+              </HStack>
+              <HStack verticalAlignment="center" gap="0">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Git" />
+                <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Git tab" onClick="modeInfoDialog.open(window.__bramModeInfo('git'))" />
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
               </HStack>
               <HStack verticalAlignment="center" gap="0">
@@ -1339,6 +1352,7 @@
       <Page url="/commits"><Commits /></Page>
       <Page url="/history"><History /></Page>
       <Page url="/files"><Files /></Page>
+      <Page url="/git"><Git /></Page>
     </Pages>
   </Theme>
   <!-- worklist-bar-on-every-page (Jon): the Worklist bar under every tab,

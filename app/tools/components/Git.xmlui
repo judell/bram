@@ -1,0 +1,188 @@
+<Component name="Git" var.selected="{[]}" var.commitOpen="{false}" var.diffPath="{null}" var.rawOpen="{false}" var.trackedOpen="{false}" var.lastCommit="{null}" var.commitError="{''}" var.initError="{''}">
+  <!-- git-tab-freestyle: what changed in this folder, and commit it (freestyle
+       mode only; Main.xmlui gates the nav entry). Doc URLs:
+       Checkbox  https://www.xmlui.org/docs/reference/components/Checkbox
+       ModalDialog  https://www.xmlui.org/docs/reference/components/ModalDialog
+       TextArea  https://www.xmlui.org/docs/reference/components/TextArea
+       PushSource  https://www.xmlui.org/docs/reference/components/PushSource
+       Conditional rendering  https://www.xmlui.org/docs/howto/hide-an-element-until-its-datasource-is-ready
+       The commit POST is window.__bramPaneAction (a plain fetch), not an
+       APICall: Commits.xmlui and Sessions.xmlui retired APICall for pane
+       buttons (pane-buttons-acknowledge-clicks, onSuccess reached the pane
+       ~30 s late). -->
+  <DataSource id="enhanceMode" url="/__enhance/status" />
+  <DataSource id="worktree" url="/__git/worktree" />
+  <PushSource
+    id="gitWorktreeEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener
+    listenTo="{gitWorktreeEvt.value &amp;&amp; gitWorktreeEvt.value.tick}"
+    onDidChange="worktree.refetch()" />
+
+  <PushSource
+    id="gitCommitAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('gitCommit')}" />
+  <ChangeListener
+    listenTo="{gitCommitAct.value &amp;&amp; gitCommitAct.value.tick}"
+    onDidChange="() => { const a = gitCommitAct.value; if (a &amp;&amp; !a.busy) { if (a.ok) { lastCommit = a.data; selected = []; commitError = ''; commitOpen = false; worktree.refetch(); } else { commitError = a.error; } } }" />
+
+  <!-- No repository: POST /__git/init through the same pane-action pattern. -->
+  <PushSource
+    id="gitInitAct"
+    initial="{null}"
+    subscribe="{window.__bramSubscribePaneAction('gitInit')}" />
+  <ChangeListener
+    listenTo="{gitInitAct.value &amp;&amp; gitInitAct.value.tick}"
+    onDidChange="() => { const a = gitInitAct.value; if (a &amp;&amp; !a.busy) { if (a.ok) { initError = ''; worktree.refetch(); enhanceMode.refetch(); } else { initError = a.error; } } }" />
+
+  <!-- The diff dialog's data: a tracked file's `git diff`, or an untracked
+       file's content (shown as all additions through the Worklist's
+       __bramIgnoredFilePatch). DiffView annotates its own text, as
+       CommitDetail uses it. -->
+  <DataSource
+    id="fileDiff"
+    url="/__git-diff"
+    queryParams="{{ path: diffPath }}"
+    when="{!!diffPath &amp;&amp; !window.__bramGitIsUntracked(worktree.value, diffPath)}" />
+  <DataSource
+    id="newFilePreview"
+    url="/__local-file-preview"
+    queryParams="{{ path: diffPath }}"
+    when="{!!diffPath &amp;&amp; window.__bramGitIsUntracked(worktree.value, diffPath)}" />
+
+  <VStack gap="$space-3" padding="$space-2">
+    <HStack gap="$space-2" verticalAlignment="center">
+      <Heading level="h2">Git</Heading>
+      <Text color="$textColor-secondary" value="{window.__bramGitBranchLabel(worktree.value)}" />
+    </HStack>
+
+    <Text when="{!worktree.loaded}" color="$textColor-secondary" value="Loading…" />
+
+    <VStack when="{worktree.value &amp;&amp; worktree.value.error === 'not-a-git-repo'}" gap="$space-2">
+      <Text value="This folder is not in git yet. Starting a repository here changes nothing in your files; it only lets you commit them. You stay in freestyle." />
+      <HStack>
+        <Button
+          label="Start a repository"
+          enabled="{!(gitInitAct.value &amp;&amp; gitInitAct.value.busy)}"
+          onClick="window.__bramPaneAction('gitInit', '/__git/init', { method: 'POST' })" />
+      </HStack>
+      <Text when="{initError}" color="$color-danger-600" value="{initError}" />
+    </VStack>
+
+    <VStack when="{window.__bramGitGroup(worktree.value, 'untracked').length > 0}" gap="$space-1">
+      <Heading level="h4">Not yet in git</Heading>
+      <Items data="{window.__bramGitGroup(worktree.value, 'untracked')}">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Checkbox initialValue="{window.__bramGitSelected(selected, $item.path)}" onDidChange="selected = window.__bramToggleInArray(selected, $item.path)" />
+          <Text value="{$item.path}" />
+          <SpaceFiller />
+          <Button label="Diff" variant="ghost" size="xs" onClick="diffPath = $item.path" />
+        </HStack>
+      </Items>
+    </VStack>
+
+    <VStack when="{window.__bramGitGroup(worktree.value, 'changed').length > 0}" gap="$space-1">
+      <Heading level="h4">Changed</Heading>
+      <Items data="{window.__bramGitGroup(worktree.value, 'changed')}">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Checkbox initialValue="{window.__bramGitSelected(selected, $item.path)}" onDidChange="selected = window.__bramToggleInArray(selected, $item.path)" />
+          <Text value="{$item.path}" />
+          <Text when="{window.__bramGitStateWord($item)}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramGitStateWord($item)}" />
+          <SpaceFiller />
+          <Button label="Diff" variant="ghost" size="xs" onClick="diffPath = $item.path" />
+        </HStack>
+      </Items>
+    </VStack>
+
+    <VStack when="{window.__bramGitGroup(worktree.value, 'staged').length > 0}" gap="$space-1">
+      <Heading level="h4">Staged</Heading>
+      <Items data="{window.__bramGitGroup(worktree.value, 'staged')}">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Checkbox initialValue="{window.__bramGitSelected(selected, $item.path)}" onDidChange="selected = window.__bramToggleInArray(selected, $item.path)" />
+          <Text value="{$item.path}" />
+          <Text when="{window.__bramGitStateWord($item)}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramGitStateWord($item)}" />
+          <SpaceFiller />
+          <Button label="Diff" variant="ghost" size="xs" onClick="diffPath = $item.path" />
+        </HStack>
+      </Items>
+    </VStack>
+
+    <Text
+      when="{worktree.value &amp;&amp; !worktree.value.error &amp;&amp; (worktree.value.entries || []).length === 0}"
+      color="$textColor-secondary"
+      value="Nothing to commit: the working tree is clean." />
+
+    <HStack gap="$space-2" verticalAlignment="center" when="{worktree.value &amp;&amp; !worktree.value.error}">
+      <Button label="Commit selected" enabled="{selected.length > 0}" onClick="commitError = ''; commitOpen = true" />
+      <Text when="{lastCommit}" color="$textColor-secondary" value="{window.__bramGitCommittedLine(lastCommit)}" />
+    </HStack>
+
+    <VStack when="{worktree.value &amp;&amp; worktree.value.raw}" gap="$space-1">
+      <Link noIndicator="true" onClick="rawOpen = !rawOpen">
+        <Text fontSize="$fontSize-sm" value="{window.__bramFoldLabel(rawOpen, 'What git says')}" />
+      </Link>
+      <Markdown
+        when="{rawOpen}"
+        content="{window.__bramFenceMarkdown(window.__bramGitStatusTranscript(worktree.value.raw), '')}"
+        interpolateBindings="false" allowHtml="false" />
+    </VStack>
+    <!-- What is tracked now: `git ls-files`, as a transcript, closed at first
+         (Jon, 2026-11-23). -->
+    <VStack when="{worktree.value &amp;&amp; !worktree.value.error}" gap="$space-1">
+      <Link noIndicator="true" onClick="trackedOpen = !trackedOpen">
+        <Text fontSize="$fontSize-sm" value="{window.__bramFoldLabel(trackedOpen, window.__bramGitTrackedTitle(worktree.value))}" />
+      </Link>
+      <Markdown
+        when="{trackedOpen}"
+        content="{window.__bramFenceMarkdown(window.__bramGitTrackedTranscript(worktree.value), '')}"
+        interpolateBindings="false" allowHtml="false" />
+    </VStack>
+  </VStack>
+
+  <!-- Commit dialog: the message is prefilled when the dialog mounts (TextArea
+       initialValue), editable; the server's plain-text refusal shows inline. -->
+  <ModalDialog when="{commitOpen}" title="{window.__bramGitCommitTitle(selected)}" onClose="commitOpen = false">
+    <VStack gap="$space-2" padding="$space-2">
+      <TextArea
+        id="commitMessage"
+        rows="3"
+        initialValue="{window.__bramGitSuggestedMessage(selected, worktree.value)}" />
+      <!-- The commands the host will run, as a terminal transcript, so the
+           dialog teaches the git it does (Jon, 2026-11-23: "show the git
+           command"). -->
+      <Markdown
+        content="{window.__bramFenceMarkdown(window.__bramGitCommitCommands(selected, commitMessage.value), '')}"
+        interpolateBindings="false" allowHtml="false" />
+      <Text when="{commitError}" color="$color-danger-600" value="{commitError}" />
+      <HStack gap="$space-2">
+        <SpaceFiller />
+        <Button label="Cancel" variant="ghost" onClick="commitOpen = false" />
+        <Button
+          label="Commit"
+          enabled="{!(gitCommitAct.value &amp;&amp; gitCommitAct.value.busy)}"
+          onClick="window.__bramPaneAction('gitCommit', '/__git/commit', { body: { paths: selected, message: commitMessage.value } })" />
+      </HStack>
+    </VStack>
+  </ModalDialog>
+
+  <Theme maxWidth-ModalDialog="95vw">
+    <ModalDialog when="{!!diffPath}" title="{diffPath}" onClose="diffPath = null">
+      <VStack gap="$space-2" padding="$space-2">
+        <Text when="{window.__bramGitIsUntracked(worktree.value, diffPath)}" color="$textColor-secondary" value="New file, not yet in git." />
+        <DiffView
+          when="{window.__bramGitIsUntracked(worktree.value, diffPath) &amp;&amp; newFilePreview.value &amp;&amp; newFilePreview.value.ok &amp;&amp; !!newFilePreview.value.content}"
+          text="{cappedDiffText(window.__bramIgnoredFilePatch(diffPath, newFilePreview.value))}" />
+        <DiffView
+          when="{!window.__bramGitIsUntracked(worktree.value, diffPath) &amp;&amp; !!fileDiff.value}"
+          text="{cappedDiffText(fileDiff.value)}" />
+        <Text when="{!window.__bramGitIsUntracked(worktree.value, diffPath) &amp;&amp; fileDiff.loaded &amp;&amp; !fileDiff.value}" color="$textColor-secondary" value="No textual changes." />
+        <HStack>
+          <SpaceFiller />
+          <Button label="Close" variant="ghost" onClick="diffPath = null" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
+  </Theme>
+</Component>

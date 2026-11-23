@@ -8187,6 +8187,16 @@ window.__bramMarkFreestyleNoteSeen = function () {
 // "inside baseball"; each term gets the pane's little-ⓘ modal instead).
 // Plain words for someone who has never used Bram. Markdown bodies.
 window.__bramModeInfoBodies = {
+  git: {
+    title: "Git",
+    body:
+      "The Git tab shows what has changed in this folder since the last commit, lets you see each file's diff, and commits the files you tick with a message you can edit. Push stays on the Commits tab."
+  },
+  log: {
+    title: "Log",
+    body:
+      "The Log tells the session as it goes: each prompt, what the agent read, ran and wrote for it, and a running total of calls and cost."
+  },
   setup: {
     title: "Setup",
     body:
@@ -12700,7 +12710,7 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   // opens a "File unavailable" preview instead of the page (the /queue
   // launch bug, 2026-07-23).
   var routeMatch = raw.match(
-    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|files|accounting|sessions|tips|settings|status|context|log|tasks)(\/.*)?$/
+    /^\/(needs-you|worklist2?|transcript|search|issues|commits|queue|history|files|git|accounting|sessions|tips|settings|status|context|log|tasks)(\/.*)?$/
   );
   if (routeMatch) {
     var rest = routeMatch[2] ? routeMatch[2].slice(1) : "";
@@ -19093,6 +19103,95 @@ window.__bramLogRows = function (entries, expanded, focusId) {
 // read only their arguments.
 window.__bramStoryFreestyle = function (status) {
   return !!status && status.mode === "freestyle";
+};
+// git-tab-freestyle: the Git tab's pure helpers. Each reads only its arguments.
+// "on main", or "no repository here" for the error shape (empty while loading).
+// A fold's label: the disclosure mark and its title. Reads only its arguments.
+// The Worklist freestyle note's button label; a folder with no repo gets one made.
+window.__bramSwitchToWorkflowLabel = function (status) {
+  return window.__bramProjectFolderIs(status, "not-git") ? "Create a repo and switch to workflow" : "Switch to workflow";
+};
+window.__bramFoldLabel = function (open, label) {
+  return (open ? "\u25be " : "\u25b8 ") + label;
+};
+// The commit dialog's title. Reads only its argument.
+window.__bramGitCommitTitle = function (selected) {
+  var n = (selected || []).length;
+  return "Commit " + n + (n === 1 ? " file" : " files");
+};
+// The status fold as a terminal transcript: the command, then what git said
+// (Jon, 2026-11-23: "show the git command"). Reads only its argument.
+window.__bramGitStatusTranscript = function (raw) {
+  return "$ git status\n" + (raw || "");
+};
+// The commands the commit route runs, as the user would type them. The
+// message is single-quoted with any single quote closed and reopened, the
+// shell's own spelling. Reads only its arguments.
+window.__bramGitCommitCommands = function (selected, message) {
+  var paths = (selected || []).join(" ");
+  var m = String(message == null ? "" : message).replace(/'/g, "'\\''");
+  return "$ git add -- " + paths + "\n$ git commit -m '" + m + "'";
+};
+// The tracked-files fold: its title with the count, and `git ls-files` as a
+// transcript. Both read only their argument.
+window.__bramGitTrackedTitle = function (wt) {
+  if (!wt || !Array.isArray(wt.tracked)) return "Tracked files";
+  return "Tracked files (" + wt.tracked.length + ")";
+};
+window.__bramGitTrackedTranscript = function (wt) {
+  // An older host answers without `tracked`; say so rather than "(none yet)",
+  // which read as a fact on a pane ahead of its binary (2026-11-23).
+  if (!wt || !Array.isArray(wt.tracked)) return "$ git ls-files\n(this Bram doesn't report tracked files; relaunch it)";
+  return "$ git ls-files\n" + (wt.tracked.length ? wt.tracked.join("\n") : "(none yet)");
+};
+window.__bramGitBranchLabel = function (wt) {
+  if (!wt) return "";
+  if (wt.error) return "no repository here";
+  return wt.branch ? "on " + wt.branch : "";
+};
+// The entries of one group: untracked, changed (unstaged edits/deletes), or staged.
+window.__bramGitGroup = function (wt, group) {
+  var entries = (wt && wt.entries) || [];
+  return entries.filter(function (e) {
+    if (group === "untracked") return e.state === "untracked";
+    if (group === "staged") return !!e.staged;
+    return !e.staged && e.state !== "untracked";
+  });
+};
+// Whether path is among the ticked paths.
+window.__bramGitSelected = function (selected, path) {
+  return (selected || []).indexOf(path) >= 0;
+};
+// Whether path is an untracked entry (it has no git diff).
+window.__bramGitIsUntracked = function (wt, path) {
+  return ((wt && wt.entries) || []).some(function (e) { return e.path === path && e.state === "untracked"; });
+};
+// The small secondary word on a row for states the group heading does not say.
+window.__bramGitStateWord = function (entry) {
+  var w = { "staged-modified": "staged, edited since", deleted: "deleted", renamed: "renamed" };
+  return (entry && w[entry.state]) || "";
+};
+// A commit message drafted from the ticked paths: "Add a and b", "Update a", "Add a, update b".
+window.__bramGitSuggestedMessage = function (selected, wt) {
+  var paths = selected || [];
+  if (!paths.length) return "";
+  var entries = (wt && wt.entries) || [];
+  var isNew = function (p) { return entries.some(function (e) { return e.path === p && e.state === "untracked"; }); };
+  var name = function (p) { return String(p).split("/").pop(); };
+  var join = function (list) {
+    return list.length < 2 ? list.join("") : list.slice(0, -1).join(", ") + " and " + list[list.length - 1];
+  };
+  var added = paths.filter(isNew).map(name);
+  var changed = paths.filter(function (p) { return !isNew(p); }).map(name);
+  if (paths.length > 4) return (changed.length ? "Update " : "Add ") + paths.length + " files";
+  if (!changed.length) return "Add " + join(added);
+  if (!added.length) return "Update " + join(changed);
+  return "Add " + join(added) + ", update " + join(changed);
+};
+// "Committed abc1234: subject" from the commit route's answer.
+window.__bramGitCommittedLine = function (last) {
+  if (!last || !last.sha) return "";
+  return "Committed " + String(last.sha).slice(0, 7) + ": " + (last.subject || "");
 };
 window.__bramStoryJoin = function (list) {
   if (list.length < 2) return list.join("");

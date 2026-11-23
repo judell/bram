@@ -94409,6 +94409,10 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
+    if path == "__git/worktree" {
+        return handle_git_worktree(app);
+    }
+
     if path == "__git/status" {
         return match git_status_summary(app) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
@@ -99820,6 +99824,455 @@ fn commit_message_closing_keyword(message: &str) -> Option<String> {
         }
     }
     None
+}
+
+// git-tab-freestyle: the Git tab's two host routes. Working-tree state for
+// the pane, and a user-click commit that stages exactly the ticked paths
+// through a temporary index, so the user's own staged work is never swept in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum WorktreeState {
+    Untracked,
+    Modified,
+    Deleted,
+    Staged,
+    StagedModified,
+    Renamed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorktreeEntry {
+    path: String,
+    state: WorktreeState,
+    staged: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorktreeStatus {
+    branch: String,
+    entries: Vec<WorktreeEntry>,
+    raw: String,
+    /// What `git ls-files` lists: the paths now tracked (Jon, 2026-11-23:
+    /// "a git ls-files option to see what is now tracked").
+    tracked: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitTabCommitRequest {
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    message: String,
+}
+
+fn git_in(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String, String> {
+    let mut cmd = hidden_command("git");
+    cmd.current_dir(root).args(args);
+    if let Some(i) = index {
+        cmd.env("GIT_INDEX_FILE", i);
+    }
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn parse_worktree_entry(xy: &str, path: &str) -> WorktreeEntry {
+    let mut it = xy.chars();
+    let x = it.next().unwrap_or(' ');
+    let y = it.next().unwrap_or(' ');
+    let (state, staged) = match (x, y) {
+        ('?', '?') => (WorktreeState::Untracked, false),
+        ('R', _) | ('C', _) if y == ' ' => (WorktreeState::Renamed, true),
+        ('D', ' ') => (WorktreeState::Deleted, true),
+        (' ', 'D') => (WorktreeState::Deleted, false),
+        (' ', _) => (WorktreeState::Modified, false),
+        (_, ' ') => (WorktreeState::Staged, true),
+        (_, _) => (WorktreeState::StagedModified, true),
+    };
+    WorktreeEntry {
+        path: path.replace('\\', "/"),
+        state,
+        staged,
+    }
+}
+
+// `git status --porcelain=v1 -z`: "XY path\0"; a rename or copy carries the
+// old name as a second NUL-terminated field.
+fn parse_worktree_porcelain(raw: &str) -> Vec<WorktreeEntry> {
+    let mut out = Vec::new();
+    let mut fields = raw.split('\0').filter(|f| !f.is_empty());
+    while let Some(f) = fields.next() {
+        if f.len() < 4 {
+            continue;
+        }
+        let (xy, path) = (&f[..2], &f[3..]);
+        if xy.starts_with('R') || xy.starts_with('C') {
+            let _old = fields.next();
+        }
+        out.push(parse_worktree_entry(xy, path));
+    }
+    out
+}
+
+fn git_worktree_status(root: &Path) -> Result<WorktreeStatus, String> {
+    let porcelain = git_in(
+        root,
+        None,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    let raw = git_in(root, None, &["status"]).unwrap_or_default();
+    let branch = git_in(root, None, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .or_else(|_| git_in(root, None, &["rev-parse", "--short", "HEAD"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let tracked: Vec<String> = git_in(root, None, &["ls-files", "-z"])
+        .unwrap_or_default()
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace('\\', "/"))
+        .collect();
+    Ok(WorktreeStatus {
+        branch,
+        entries: parse_worktree_porcelain(&porcelain),
+        raw,
+        tracked,
+    })
+}
+
+// A path from the pane: relative, inside the repo, no `..`. Judged by
+// spelling so Windows absolutes are refused on every platform.
+fn git_tab_clean_path(p: &str) -> Result<String, String> {
+    let folded = p.trim().replace('\\', "/");
+    let b = folded.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    if folded.is_empty()
+        || folded.starts_with('/')
+        || drive
+        || Path::new(&folded).is_absolute()
+        || folded.split('/').any(|s| s == ".." || s == ".")
+    {
+        return Err(format!("path outside the repository: {}", p));
+    }
+    Ok(folded)
+}
+
+// Commit exactly `paths` (working-tree content) on top of HEAD without
+// touching the real index's staged state beyond those paths.
+fn git_tab_commit(
+    root: &Path,
+    paths: &[String],
+    message: &str,
+) -> Result<(String, String), String> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let clean: Vec<String> = paths
+        .iter()
+        .map(|p| git_tab_clean_path(p))
+        .collect::<Result<_, _>>()?;
+    let rel = git_in(
+        root,
+        None,
+        &[
+            "rev-parse",
+            "--git-path",
+            &format!(
+                "index.bram-git-tab-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+        ],
+    )?;
+    let idx = {
+        let p = PathBuf::from(rel.trim());
+        if p.is_absolute() {
+            p
+        } else {
+            root.join(p)
+        }
+    };
+    let _ = std::fs::remove_file(&idx);
+    let result = (|| -> Result<(String, String), String> {
+        let has_head = git_has_head(root);
+        let base = git_base_rev(root);
+        git_in(root, Some(&idx), &["read-tree", base.as_str()])?;
+        let mut add: Vec<&str> = vec!["--literal-pathspecs", "add", "-A", "--"];
+        add.extend(clean.iter().map(|s| s.as_str()));
+        git_in(root, Some(&idx), &add)?;
+        let tree = git_in(root, Some(&idx), &["write-tree"])?
+            .trim()
+            .to_string();
+        let head_tree = if has_head {
+            git_in(root, None, &["rev-parse", "HEAD^{tree}"])?
+                .trim()
+                .to_string()
+        } else {
+            git_base_rev(root)
+        };
+        if tree == head_tree {
+            return Err("nothing to commit: the chosen files match the last commit".to_string());
+        }
+        let msg = message.trim_end();
+        let sha = if has_head {
+            git_in(root, None, &["commit-tree", &tree, "-p", "HEAD", "-m", msg])?
+        } else {
+            git_in(root, None, &["commit-tree", &tree, "-m", msg])?
+        }
+        .trim()
+        .to_string();
+        let subject = msg.lines().next().unwrap_or("").to_string();
+        let log = format!("commit: {}", subject);
+        git_in(root, None, &["update-ref", "-m", &log, "HEAD", &sha])?;
+        // The real index still lacks these paths' new content; bring just
+        // them level with the new HEAD. Other staged work stays as it was.
+        let mut reset: Vec<&str> = vec!["--literal-pathspecs", "reset", "-q", "--"];
+        reset.extend(clean.iter().map(|s| s.as_str()));
+        let _ = git_in(root, None, &reset);
+        Ok((sha, subject))
+    })();
+    let _ = std::fs::remove_file(&idx);
+    result
+}
+
+fn git_tab_init(root: &Path) -> Result<String, String> {
+    if git_toplevel_of(root).is_some() {
+        return Err("already a git repository".to_string());
+    }
+    git_in(root, None, &["init", "-q"])?;
+    let branch = git_in(root, None, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    Ok(branch)
+}
+
+fn handle_git_init<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
+    const TEXT: &str = "text/plain; charset=utf-8";
+    let Some(root) = project_root(Some(app)) else {
+        return (500, TEXT, b"no project root".to_vec());
+    };
+    match git_tab_init(&root) {
+        Ok(branch) => {
+            emit_replayable_signal(app, "git-status-changed");
+            emit_replayable_signal(app, "enhance-status-changed");
+            append_bram_trace_line(
+                app,
+                "git-init",
+                &format!("op=init branch={} source=git-tab", branch),
+            );
+            (
+                200,
+                "application/json; charset=utf-8",
+                serde_json::json!({ "ok": true, "branch": branch })
+                    .to_string()
+                    .into_bytes(),
+            )
+        }
+        Err(e) if e == "already a git repository" => (409, TEXT, e.into_bytes()),
+        Err(e) => (500, TEXT, e.into_bytes()),
+    }
+}
+
+fn handle_git_worktree<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let t0 = std::time::Instant::now();
+    let Some(root) = project_root(Some(app)) else {
+        return (
+            200,
+            JSON,
+            serde_json::json!({ "error": "not-a-git-repo" })
+                .to_string()
+                .into_bytes(),
+        );
+    };
+    match git_worktree_status(&root) {
+        Ok(status) => {
+            append_bram_trace_line(
+                app,
+                "git-worktree",
+                &format!(
+                    "op=read entries={} ms={}",
+                    status.entries.len(),
+                    t0.elapsed().as_millis()
+                ),
+            );
+            (200, JSON, serde_json::to_vec(&status).unwrap_or_default())
+        }
+        Err(e) => (
+            200,
+            JSON,
+            serde_json::json!({ "error": "not-a-git-repo", "detail": e })
+                .to_string()
+                .into_bytes(),
+        ),
+    }
+}
+
+fn handle_git_commit<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const TEXT: &str = "text/plain; charset=utf-8";
+    let bad = |m: &str| (400, TEXT, m.as_bytes().to_vec());
+    let req: GitTabCommitRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return bad(&format!("invalid JSON body: {}", e)),
+    };
+    if req.paths.is_empty() {
+        return bad("no paths to commit");
+    }
+    if req.message.trim().is_empty() {
+        return bad("commit message is empty");
+    }
+    if let Some(phrase) = commit_message_closing_keyword(&req.message) {
+        return bad(&format!(
+            "commit message contains the forge closing keyword \"{}\" — the forge would auto-close that issue at push, bypassing the close-on-commit dialog. Rephrase as \"Refs #N\" (closing is decided in the dialog) and retry.",
+            phrase
+        ));
+    }
+    if guard_policy::contains_session_url(&req.message) {
+        return bad(
+            "commit message contains an agent session URL or Claude-Session trailer — session links are private telemetry and must not enter repository history. Remove the trailer/URL and retry.",
+        );
+    }
+    let Some(root) = project_root(Some(app)) else {
+        return (500, TEXT, b"no project root".to_vec());
+    };
+    match git_tab_commit(&root, &req.paths, &req.message) {
+        Ok((sha, subject)) => {
+            emit_replayable_signal(app, "git-status-changed");
+            append_bram_trace_line(
+                app,
+                "git-commit",
+                &format!(
+                    "op=committed sha={} paths={} source=git-tab",
+                    &sha[..sha.len().min(7)],
+                    req.paths.len()
+                ),
+            );
+            (
+                200,
+                "application/json; charset=utf-8",
+                serde_json::json!({ "ok": true, "sha": sha, "subject": subject })
+                    .to_string()
+                    .into_bytes(),
+            )
+        }
+        Err(e) if e.starts_with("nothing to commit") || e.starts_with("path outside") => bad(&e),
+        Err(e) => {
+            eprintln!("[http /__git/commit] {}", e);
+            (500, TEXT, e.into_bytes())
+        }
+    }
+}
+
+#[cfg(test)]
+mod git_tab_tests {
+    use super::*;
+
+    fn g(dir: &Path, args: &[&str]) -> String {
+        git_in(dir, None, args).unwrap_or_else(|e| panic!("git {:?}: {}", args, e))
+    }
+
+    fn temp_repo(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-git-tab-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        g(&dir, &["init", "-q"]);
+        g(&dir, &["config", "user.email", "t@example.com"]);
+        g(&dir, &["config", "user.name", "T"]);
+        g(&dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("base.txt"), "base\n").unwrap();
+        g(&dir, &["add", "base.txt"]);
+        g(&dir, &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn worktree_status_maps_states() {
+        let dir = temp_repo("status");
+        std::fs::write(dir.join("base.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "n\n").unwrap();
+        std::fs::write(dir.join("staged.txt"), "s\n").unwrap();
+        g(&dir, &["add", "staged.txt"]);
+        let st = git_worktree_status(&dir).unwrap();
+        let find = |p: &str| st.entries.iter().find(|e| e.path == p).cloned().unwrap();
+        assert_eq!(find("new.txt").state, WorktreeState::Untracked);
+        assert!(!find("new.txt").staged);
+        assert_eq!(find("base.txt").state, WorktreeState::Modified);
+        assert!(!find("base.txt").staged);
+        assert_eq!(find("staged.txt").state, WorktreeState::Staged);
+        assert!(find("staged.txt").staged);
+        assert!(!st.branch.is_empty());
+        assert!(st.raw.contains("new.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_takes_only_given_paths() {
+        let dir = temp_repo("commit");
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        std::fs::write(dir.join("other.txt"), "o\n").unwrap();
+        std::fs::write(dir.join("pre.txt"), "p\n").unwrap();
+        g(&dir, &["add", "pre.txt"]);
+        let (sha, subject) = git_tab_commit(&dir, &["a.txt".to_string()], "Add a\n\nbody").unwrap();
+        assert_eq!(subject, "Add a");
+        assert_eq!(g(&dir, &["rev-parse", "HEAD"]).trim(), sha);
+        let tree = g(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(tree.contains("a.txt") && tree.contains("base.txt"));
+        assert!(!tree.contains("other.txt") && !tree.contains("pre.txt"));
+        let st = git_worktree_status(&dir).unwrap();
+        let find = |p: &str| st.entries.iter().find(|e| e.path == p).cloned();
+        assert_eq!(find("other.txt").unwrap().state, WorktreeState::Untracked);
+        assert_eq!(find("pre.txt").unwrap().state, WorktreeState::Staged);
+        assert!(find("a.txt").is_none());
+        // no stray temp index
+        let leftovers = std::fs::read_dir(dir.join(".git"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("bram-git-tab"))
+            .count();
+        assert_eq!(leftovers, 0);
+        assert!(git_tab_commit(&dir, &["../x".to_string()], "m").is_err());
+        assert!(git_tab_commit(&dir, &["a.txt".to_string()], "m")
+            .unwrap_err()
+            .starts_with("nothing to commit"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_creates_repo_once() {
+        let dir = std::env::temp_dir().join(format!("bram-git-tab-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let branch = git_tab_init(&dir).unwrap();
+        assert!(!branch.is_empty());
+        assert!(dir.join(".git").exists());
+        assert_eq!(git_tab_init(&dir).unwrap_err(), "already a git repository");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wire_shape_pinned() {
+        let e = WorktreeEntry {
+            path: "a.py".into(),
+            state: WorktreeState::StagedModified,
+            staged: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"path":"a.py","state":"staged-modified","staged":true}"#
+        );
+    }
 }
 
 #[cfg(test)]
@@ -111950,6 +112403,20 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_issue_close_queue_withdraw(app, &buf)
+        }
+    } else if path == "__git/init" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            handle_git_init(app)
+        }
+    } else if path == "__git/commit" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_git_commit(app, &buf)
         }
     } else if path == "__git/pull-rebase" {
         if method != "POST" {

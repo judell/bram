@@ -25,6 +25,23 @@
   <ChangeListener
     listenTo="{ctxSessionsChangedEvt.value &amp;&amp; ctxSessionsChangedEvt.value.tick}"
     onDidChange="() => { ctxSessions.refetch(); }" />
+  <!-- footer-context-blank-until-first-turn-ends (Jon, 2026-11-23): a new
+       session's switch payload has no tokens, and the next pushed reading
+       comes only at turn end, so the line was blank for the whole first
+       turn. conversation-state-changed is the host's live transcript
+       signal (emitted as the transcript grows, deduplicated), so on it the
+       route value is re-read; /__session-size reads the transcript live,
+       and once it names the current session __bramSessionContextPick shows
+       it. After the first turn end the pushed reading has tokens and wins,
+       so later turns keep the turn-end figure (decision 59c4428a).
+       https://www.xmlui.org/docs/reference/components/PushSource -->
+  <PushSource
+    id="conversationStateEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('conversation-state-changed')}" />
+  <ChangeListener
+    listenTo="{conversationStateEvt.value &amp;&amp; conversationStateEvt.value.tick}"
+    onDidChange="() => { sessionSize.refetch(); }" />
   <PushSource
     id="sessionContextEvt"
     initial="{null}"

@@ -875,6 +875,7 @@
               <HStack verticalAlignment="center" gap="0">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Search" />
                 <Button label="ⓘ" variant="ghost" size="xs" tooltip="The Search tab" onClick="modeInfoDialog.open(window.__bramModeInfo('search'))" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="," />
               </HStack>
               <HStack verticalAlignment="center" gap="0">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="Cost" />

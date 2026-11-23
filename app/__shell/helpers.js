@@ -22243,11 +22243,15 @@ window.__bramSessionContextCost = function (ctx, rates) {
   out += " Output tokens are priced separately ($" + row.output + " per million) and are not counted here. On a subscription this is quota, not dollars.";
   return out;
 };
-// The modal's opening line, in plain terms (Jon, 2026-11-23: "you are
-// above the threshold of {threshold}, switching to a new session will save
-// you {savings}"; everything else folds under it). Savings is per call,
-// since that is what a fresh session changes: the gap between the context
-// now and the floor, in tokens and, when the model has a rate, in dollars.
+// The modal's opening line, grounded in calls and the ratio to a fresh
+// call (Jon, 2026-11-23: "the headline fails to contextualize: not grounded
+// in # of calls happening."). Three bands against the threshold: below half
+// ("early in this session"), half up to it ("at this point in the session"),
+// and at/past it (state "suggest": names the threshold, advises a new
+// session); threshold off uses the first band's wording without "early".
+// Then savings per call, since that is what a fresh session changes: the gap
+// between the context now and the floor, in tokens and, when the model has a
+// rate, in dollars. Pure: reads only its arguments.
 window.__bramSessionContextLead = function (key, ctx, rates) {
   if (!ctx || typeof ctx.tokens !== "number") return "";
   var K = window.__bramTokenK;
@@ -22262,12 +22266,26 @@ window.__bramSessionContextLead = function (key, ctx, rates) {
   if (key === "floor") {
     return "A new session would start at about **" + K(floor) + "** tokens, this session's floor. This one is at " + K(ctx.tokens) + ".";
   }
-  var lim = typeof ctx.suggestTokens === "number" && ctx.suggestTokens > 0 ? K(ctx.suggestTokens) : "";
-  var where = !lim
-    ? "This session's context is **" + K(ctx.tokens) + "** tokens."
-    : ctx.state === "suggest"
-      ? "You are above the threshold of **" + lim + "**, at " + K(ctx.tokens) + "."
-      : "You are below the threshold of **" + lim + "**, at " + K(ctx.tokens) + ".";
+  var limN = typeof ctx.suggestTokens === "number" && ctx.suggestTokens > 0 ? ctx.suggestTokens : 0;
+  var ratio = floor > 0 ? Math.round((ctx.tokens / floor) * 10) / 10 : 0;
+  var hasCalls = typeof ctx.calls === "number";
+  var cost = function (subject, now) {
+    return ratio > 1
+      ? subject + (now ? " now" : "") + " costs **" + ratio.toFixed(1) + "\u00d7** the tokens of a call in a fresh session."
+      : subject + " costs about the same as a call in a fresh session.";
+  };
+  var N = hasCalls ? "**" + ctx.calls + " calls**" : "";
+  var where;
+  if (ctx.state === "suggest" && limN > 0) {
+    where = "You are past the threshold of **" + K(limN) + "**" + (hasCalls ? ": " + N + " so far, and " + cost("each one", true) : ", and " + cost("each call", true)) +
+      " Start a new session at the next natural pause.";
+  } else if (limN === 0) {
+    where = hasCalls ? "This session: " + N + " so far, and " + cost("each one") : "In this session " + cost("each call");
+  } else if (ctx.tokens < limN / 2) {
+    where = hasCalls ? "You are early in this session: " + N + " so far, and " + cost("each one") : "You are early in this session, and " + cost("each call");
+  } else {
+    where = hasCalls ? "At this point in the session you have made " + N + ", and " + cost("each one") : "At this point in the session " + cost("each call");
+  }
   if (gap === 0) return where;
   return where + " Switching to a new session will save you about **" + K(gap) + " tokens" + dollars + "** on every call.";
 };

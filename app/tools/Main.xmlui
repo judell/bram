@@ -738,6 +738,9 @@
     </HStack>
     <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
     <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
+    <!-- promote-accounting-to-nav (Jon, 2026-11-23): Token accounting leaves
+         the Status tab for its own page, between Files and Settings. -->
+    <NavLink label="Accounting" to="/accounting" tooltip="What the agents&apos; model calls used, this session and every session, and what a fresh session would have saved" />
     <NavLink label="Settings" to="/settings" tooltip="Project and personal settings for Bram" />
     <NavLink label="Log" to="/log" tooltip="What Bram did around your work, newest first" />
     <!-- nav-primary-list-and-more-group: less-used pages, collapsed by
@@ -754,7 +757,7 @@
       <NavLink label="Tasks" to="/tasks" tooltip="Commands the agents keep running, and how many ways they've been typed" />
       <NavLink label="Tips" to="/tips" tooltip="All the footer tips, including ones you dismissed" />
       <NavLink label="Context" to="/context" tooltip="What the agent reads: CLAUDE.md, memory, hooks and settings" />
-      <NavLink label="Status" to="/status" tooltip="Bram&apos;s health: guards, session size, state checks" />
+      <NavLink label="Status" to="/status" tooltip="Bram&apos;s health: guards, state checks, the search index" />
     </NavGroup>
   </NavPanel>
 
@@ -1319,6 +1322,7 @@
       <Page url="/search"><Search /></Page>
       <Page url="/queue"><AgentMessageQueue /></Page>
       <Page url="/status"><Status /></Page>
+      <Page url="/accounting"><Accounting /></Page>
       <Page url="/log"><Log /></Page>
       <Page url="/tasks"><Tasks /></Page>
       <Page url="/settings"><Settings /></Page>

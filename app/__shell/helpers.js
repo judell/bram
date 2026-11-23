@@ -22209,7 +22209,7 @@ window.__bramSessionContextInfoBody = function (key, ctx, rates) {
       num(ctx.floor) + "** tokens.\n\n" +
       "A fresh session starts near the floor, so the gap between the context figure and this one is what a new session would save on every call. " +
       "Compaction brings the context down to a summary, not to the floor.\n\n" +
-      "The floor is mostly instruction files; Status › Token accounting › Models splits it into the agent's own share, the project's and Bram's conventions."
+      "The floor is mostly instruction files; Accounting › Models splits it into the agent's own share, the project's and Bram's conventions."
     );
   }
   var lim = typeof ctx.suggestTokens === "number" && ctx.suggestTokens > 0 ? K(ctx.suggestTokens) : "";
@@ -23965,6 +23965,119 @@ window.__bramTokenRegionRows = function (report) {
     };
   });
 };
+// Status > Token accounting > This session (status-session-context-report).
+// Pure functions over the one-session /__token-accounting response and the
+// model-rates.json payload; they read only their arguments.
+// Models table cells for itemStarts (status-session-context-report); each
+// reads only its row, and a row from an older host (no itemStarts) shows a dash.
+window.__bramTokenItemStartP50 = function (row) {
+  return window.__bramTokenK(row && row.itemStarts ? row.itemStarts.p50 : null);
+};
+window.__bramTokenItemStartsAbove = function (row) {
+  var s = row && row.itemStarts;
+  if (!s || typeof s.items !== "number") return "—";
+  return s.above400k + " of " + s.items;
+};
+window.__bramTokenSessionUrl = function (session) {
+  if (!session || !session.provider || !session.id) return "";
+  return "/__token-accounting?session=" + encodeURIComponent(session.provider + ":" + session.id);
+};
+window.__bramTokenMainRow = function (report) {
+  var arr = (report && report.sessions) || [];
+  return arr.find(function (s) { return s && s.thread === "main"; }) || null;
+};
+window.__bramTokenM = function (n) {
+  if (typeof n !== "number" || !isFinite(n)) return "—";
+  return (n / 1e6).toFixed(1) + "M";
+};
+window.__bramTokenRatesFor = function (row, rates) {
+  var models = (row && row.models) || [];
+  return models.length ? window.__bramModelRatesRow(rates, models[models.length - 1]) : null;
+};
+window.__bramTokenSessionLead = function (row, rates) {
+  if (!row) return "";
+  var K = window.__bramTokenK, M = window.__bramTokenM, c = row.context || {};
+  var parts = ["Floor " + K(c.first), "now " + K(c.last), "peak " + K(c.peak)];
+  var n = row.compactions || 0;
+  parts.push(n + (n === 1 ? " compaction" : " compactions"));
+  parts.push(window.__bramTokenInt(row.calls) + " calls");
+  parts.push("cache reads " + M(row.cacheRead));
+  parts.push("output " + M(row.output));
+  var out = parts.join(" · ");
+  var r = window.__bramTokenRatesFor(row, rates);
+  if (r) {
+    var rd = (row.cacheRead / 1e6) * r.cacheRead;
+    var wr = typeof r.cacheWrite5m === "number" && row.cacheCreation ? (row.cacheCreation / 1e6) * r.cacheWrite5m : null;
+    var op = (row.output / 1e6) * (r.output || 0);
+    var total = rd + (wr || 0) + op;
+    out += " · about $" + total.toFixed(0) + " at list prices (cache reads $" + rd.toFixed(0) +
+      (wr === null ? "" : ", cache writes $" + wr.toFixed(0) + " at the 5-minute rate") +
+      ", output $" + op.toFixed(0) + ")";
+  }
+  return out;
+};
+window.__bramTokenHM = function (ms) {
+  if (typeof ms !== "number" || !isFinite(ms)) return "—";
+  var d = new Date(ms);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+};
+window.__bramTokenIdList = function (ids) {
+  var a = ids || [];
+  if (!a.length) return "";
+  return a.slice(0, 2).join(", ") + (a.length > 2 ? " +" + (a.length - 2) : "");
+};
+window.__bramTokenBoundary = function (s) {
+  if (!s) return "";
+  if (s.kind === "start") return "start";
+  if (s.kind === "compaction") return "compaction";
+  var ids = window.__bramTokenIdList(s.ids);
+  var k = s.claimKind;
+  if (s.kind === "claim-opened") {
+    var verb = { approved: "begun", feedback: "feedback", drop: "drop begun", commit: "commit begun" }[k] || (k || "claim opened");
+    return (ids ? ids + " " : "") + verb;
+  }
+  var done = { commit: "committed", drop: "dropped", approved: "finished", feedback: "feedback done" }[k] || "claim closed";
+  return (ids ? ids + " " : "") + done;
+};
+window.__bramTokenStretchRows = function (row, rates) {
+  var list = ((row && row.stretches) || []).slice();
+  if (list.length > 40) {
+    list.sort(function (a, b) { return b.excessOverFloor - a.excessOverFloor; });
+    list = list.slice(0, 40);
+  }
+  list.sort(function (a, b) { return a.atMs - b.atMs; });
+  var r = window.__bramTokenRatesFor(row, rates);
+  return list.map(function (s) {
+    var saved = window.__bramTokenM(s.excessOverFloor) + " tokens";
+    if (r) saved += " ($" + ((s.excessOverFloor / 1e6) * r.cacheRead).toFixed(2) + ")";
+    return {
+      when: window.__bramTokenHM(s.atMs),
+      boundary: window.__bramTokenBoundary(s),
+      contextAt: window.__bramTokenK(s.contextAt),
+      calls: window.__bramTokenInt(s.calls),
+      avgContext: window.__bramTokenK(s.avgContext),
+      cacheRead: window.__bramTokenM(s.cacheRead),
+      saved: saved
+    };
+  });
+};
+window.__bramTokenStretchLead = function (row) {
+  var n = ((row && row.stretches) || []).length;
+  if (!n) return "";
+  return n > 40 ? "Showing the 40 stretches with the most saved, of " + n + ", in time order." : n + (n === 1 ? " stretch." : " stretches.");
+};
+window.__bramTokenListPricesText = function (rates) {
+  var base = "Dollars are list prices from Bram's rates file (`app/tools/resources/model-rates.json`), for the session's last model. " +
+    "Cache reads are priced at the cached-input rate, cache writes at the 5-minute rate, and output separately. " +
+    "On a subscription this is quota, not dollars: it shows relative weight, not a bill.";
+  var m = (rates && rates.sources) || {};
+  var ks = Object.keys(m);
+  if (!ks.length) return base;
+  return base + "\n\nSources:\n\n" + ks.map(function (k) {
+    var s = m[k] || {};
+    return "- " + (s.url || k) + (s.readOn ? ", read " + s.readOn : "");
+  }).join("\n");
+};
 window.__bramTokenInfoTitle = function (key) {
   return {
     covRead: "Through the Read tool", covShell: "Through the shell", covReads: "Reads per line",
@@ -23972,7 +24085,8 @@ window.__bramTokenInfoTitle = function (key) {
     provider: "Provider", calls: "Calls", context: "Context", fit: "Fit",
     floor: "Floor", cache: "Cache hit", reads: "Reads", main: "Main",
     subagents: "Subagents", sessions: "Sessions", mostSession: "Most in one session", perRead: "Per read",
-    total: "All sessions' reads", shell: "Via shell", tests: "Tests"
+    total: "All sessions' reads", shell: "Via shell", tests: "Tests",
+    stretches: "Stretches", listPrices: "List prices", thisSession: "This session", itemStarts: "Items start at"
   }[key] || "";
 };
 window.__bramTokenProviderText = function (report) {
@@ -24001,7 +24115,11 @@ window.__bramTokenTotalText = function (report) {
     window.__bramTokenBytes(f.bytes / f.reads) + ", come to " + window.__bramTokenBytes(f.bytes) + " over " +
     window.__bramTokenInt(f.sessions) + " sessions. The file itself is " + window.__bramTokenFileSize(f) + ".";
 };
-window.__bramTokenInfoText = function (key, report) {
+window.__bramTokenInfoText = function (key, report, rates) {
+  if (key === "stretches") return "A boundary is where the session changed character: its start, a Worklist item's work beginning or ending, or a compaction. A stretch is the calls from one boundary to the next.\n\nThe last column is a counterfactual: what a fresh session started at that boundary would not have re-read. It is calls times (context at the boundary minus the floor), the tokens a fresh session would have skipped re-reading.";
+  if (key === "listPrices") return window.__bramTokenListPricesText(rates);
+  if (key === "thisSession") return "The session you are in now, read on its own so it appears at once. It shows the floor (the first call's context), the context now and at its peak, compactions, calls, cache reads and output, then the session cut into stretches at its boundaries with what a fresh session would have saved at each.";
+  if (key === "itemStarts") return "The context at each item's first credited call on this model. The median (p50) is where items typically start. The count above 400k is how often a fresh session would have been offered at the default threshold (`sessions.suggestAtContextTokens`). Those counts are the evidence for that default: if few items start above it, it rarely interrupts; if many do, it interrupts often.";
   if (key === "provider") {
     return "Which AI coding agent the row belongs to. Each agent keeps a record of every request it sends to its model, " +
       "and these figures are read from those records, so only agents whose records Bram can read are counted." +

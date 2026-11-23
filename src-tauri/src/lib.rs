@@ -51985,6 +51985,58 @@ fn st_command_via(words: &[&str], i: usize, whole: bool) -> &'static str {
     "named"
 }
 
+// transcript-file-rows-bare-basename-false-match (Jon, 2026-11-23: "the
+// readme link displayed ours not hers"): a bare basename in a command
+// (`README.md` in `for f in README.md docs/x.md; do gh api ".../$f"`) matched
+// the project's own README because a file of that name exists at the root.
+// A bare token now counts only when the command addressed it as a local
+// file: its role is already read / wrote / ran, or the nearest command word
+// before it takes a local file. Tokens with a `/` keep the old rule.
+fn st_bare_token_addressed(words: &[&str], i: usize) -> bool {
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        let b = words[j];
+        if b.starts_with('-') || (!b.is_empty() && b.chars().all(|c| c.is_ascii_digit())) {
+            continue;
+        }
+        return matches!(
+            b,
+            "cat"
+                | "head"
+                | "tail"
+                | "less"
+                | "more"
+                | "open"
+                | "sed"
+                | "awk"
+                | "grep"
+                | "cp"
+                | "mv"
+                | "rm"
+                | "ls"
+                | "wc"
+                | "jq"
+                | "touch"
+                | "chmod"
+                | "diff"
+                | "stat"
+                | "file"
+                | "sort"
+                | "uniq"
+                | "cut"
+                | "du"
+                | "shasum"
+                | "md5"
+                | "base64"
+                | "code"
+                | "source"
+        ) || b.starts_with("python")
+            || matches!(b, "node" | "sh" | "bash" | "zsh" | "ruby" | "perl");
+    }
+    false
+}
+
 fn st_collect_command_tokens(cmd: &str, out: &mut Vec<(String, &'static str)>) {
     for line in cmd.lines() {
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -51993,7 +52045,11 @@ fn st_collect_command_tokens(cmd: &str, out: &mut Vec<(String, &'static str)>) {
             st_collect_file_tokens(w, &mut toks);
             let whole = toks.len() == 1 && toks[0] == w.trim_end_matches([':', '.', ';', ')']);
             for t in toks {
-                out.push((t, st_command_via(&words, i, whole)));
+                let via = st_command_via(&words, i, whole);
+                if !t.contains('/') && via == "named" && !st_bare_token_addressed(&words, i) {
+                    continue;
+                }
+                out.push((t, via));
             }
         }
     }
@@ -122273,6 +122329,37 @@ mod st_project_files_tests {
         let rd = serde_json::json!({ "file_path": "figures/a.png" });
         let got = st_project_files_named("Read", &rd, None, &root);
         assert_eq!(got[0].via, "read");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // transcript-file-rows-bare-basename-false-match: a bare basename that
+    // the command never addressed as a local file (here, a path inside
+    // another repository, used to build a URL) is not a row, even when a
+    // file of that name exists at the project root. The same basename after
+    // a file-taking command word still is.
+    #[test]
+    fn st_project_files_bare_basename_needs_a_file_command() {
+        let root = temp_root("bare");
+        std::fs::write(root.join("README.md"), b"x").unwrap();
+        std::fs::write(root.join("s.py"), b"x").unwrap();
+        let url_only = serde_json::json!({
+            "command": "for f in README.md docs/demo-runbook.md; do gh api \"repos/o/r/contents/$f\" --jq .content | base64 -d > \"$S/lab/$(basename $f)\"; done"
+        });
+        assert!(st_project_files_named("Bash", &url_only, None, &root).is_empty());
+        let echoed = serde_json::json!({ "command": "echo README.md" });
+        assert!(st_project_files_named("Bash", &echoed, None, &root).is_empty());
+        for cmd in [
+            "cat README.md",
+            "wc -l README.md",
+            "python3 s.py",
+            "cp README.md s.py",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                !st_project_files_named("Bash", &input, None, &root).is_empty(),
+                "{cmd}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

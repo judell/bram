@@ -370,17 +370,19 @@
         <!-- session-context-pane: thousands in the box, tokens on disk; the
              conversions live in helpers.js. NumberBox label/initialValue/
              integersOnly/minValue: https://www.xmlui.org/docs/reference/components/NumberBox -->
-        <!-- Label above a full-width box, as the other NumberBoxes on this
-             tab (Keep raw traces, Commit depth); beside the box the long
-             label wrapped around a sliver of input (Jon, 2026-11-23,
-             "awkward wrap"). -->
-        <NumberBox
-          label="Ask at the next natural pause once the context passes (thousands of tokens; 0 = never)"
-          width="100%"
-          integersOnly="{true}"
-          minValue="{0}"
-          initialValue="{window.__bramSuggestContextSetting(settingsValue)}"
-          onDidChange="(v) => saveSettings.execute({ sessions: { suggestAtContextTokens: window.__bramSuggestContextTokens(v) } })" />
+        <!-- A fixed-width box first, then the sentence wrapping after it
+             (Jon, 2026-11-23). The fixed width reserves the box's space and
+             width="*" on the Text takes the rest and wraps:
+             https://www.xmlui.org/docs/howto/set-width-for-input-fields-in-a-horizontal-layout -->
+        <HStack gap="$space-3" verticalAlignment="center">
+          <NumberBox
+            width="110px"
+            integersOnly="{true}"
+            minValue="{0}"
+            initialValue="{window.__bramSuggestContextSetting(settingsValue)}"
+            onDidChange="(v) => saveSettings.execute({ sessions: { suggestAtContextTokens: window.__bramSuggestContextTokens(v) } })" />
+          <Text width="*" value="Ask at the next natural pause once the context passes this many thousand tokens (0 = never)" />
+        </HStack>
         <!-- provider-session-pair-offer: a Switch, not a fourth checkbox,
              because it isn't a "when to suggest" trigger: it turns the pair
              offer after a provider switch on or off. Default on, read through

@@ -453,6 +453,13 @@ struct SessionsConfig {
     suggest_on_new_issue: Option<bool>,
     #[serde(default, rename = "suggestOnTopicShift")]
     suggest_on_topic_shift: Option<bool>,
+    // session-context-host (#477 step 2): the live context, in tokens, past
+    // which the footer offers Start a new session and the agent asks at the
+    // next natural pause. 0 turns it off. Default 400k: this Mac's ledger
+    // (176 items since 2026-11-07) starts items at a median 330k, and the
+    // 70 items that started above 400k ran at an average 597k.
+    #[serde(default, rename = "suggestAtContextTokens")]
+    suggest_at_context_tokens: Option<u64>,
     // provider-session-pair-offer: whether a switch that finds no partner
     // offers to pair the two sessions or start a new one. Default on.
     #[serde(default, rename = "pairAcrossProviders")]
@@ -31714,6 +31721,7 @@ mod agent_startup_policy_tests {
         assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
         assert_eq!(view["sessions"]["suggestOnTopicShift"], true);
         assert_eq!(view["sessions"]["pairAcrossProviders"], true);
+        assert_eq!(view["sessions"]["suggestAtContextTokens"], 400000);
 
         let existing = serde_json::json!({
             "ui": { "showTargetApp": true },
@@ -31755,7 +31763,8 @@ mod agent_startup_policy_tests {
                 "suggestOnNewItem": true,
                 "suggestOnNewIssue": true,
                 "suggestOnTopicShift": true,
-                "pairAcrossProviders": true
+                "pairAcrossProviders": true,
+                "suggestAtContextTokens": 400000
             },
             "traces": { "enabled": true, "inspectorTap": false, "archiveAfterDays": 14 },
             "menus": { "parseAndDisplay": false },
@@ -31950,6 +31959,10 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         .as_ref()
         .and_then(|s| s.pair_across_providers)
         .unwrap_or(true);
+    let suggest_at_context_tokens = sessions_cfg
+        .as_ref()
+        .and_then(|s| s.suggest_at_context_tokens)
+        .unwrap_or(SUGGEST_AT_CONTEXT_TOKENS_DEFAULT);
     let (
         agent,
         args,
@@ -32054,7 +32067,8 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             "suggestOnNewItem": suggest_on_new_item,
             "suggestOnNewIssue": suggest_on_new_issue,
             "suggestOnTopicShift": suggest_on_topic_shift,
-            "pairAcrossProviders": pair_across_providers
+            "pairAcrossProviders": pair_across_providers,
+            "suggestAtContextTokens": suggest_at_context_tokens
         },
         "traces": {
             "enabled": tracing_enabled,
@@ -54316,10 +54330,15 @@ mod subagent_spine_tests {
     }
 }
 
-// Session-size thresholds. Calibrated from observation: at ~21 MB the
-// agent pane became unusable; at ~5 MB earlier in the same session
-// everything was responsive. The middle band is a guess and worth
-// tightening once we have more data.
+// Session-size bands, in bytes on disk. They were calibrated in 29f4036d
+// (2026-06-03) on a pane that became unusable at ~21 MB because
+// /__session-turns parsed the whole file per refetch; that route is gone
+// (#214) and scripts/pane-age-health.py (2026-11-04) found size barely
+// moves pane slowness. What megabytes still measure is findability,
+// resume and search (and the indexer's reindex treadmill), so the bands
+// stay as data and the note below says so. Cost is the live context, in
+// `session_context_block` (session-context-host, decision note
+// 2026-11-23-session-size-is-data-context-is-the-trigger).
 const SESSION_SIZE_GREEN_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const SESSION_SIZE_AMBER_MAX_BYTES: u64 = 15 * 1024 * 1024;
 
@@ -54346,13 +54365,9 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
     } else {
         "red"
     };
-    let provider_label = match current_provider(app) {
-        Some(SessionProvider::Codex) => "codex",
-        Some(SessionProvider::Claude) => "claude",
-        Some(SessionProvider::Opencode) => "opencode",
-        Some(SessionProvider::Antigravity) => "antigravity",
-        None => "unknown",
-    };
+    let provider_label = current_provider(app)
+        .map(session_provider_label)
+        .unwrap_or("unknown");
     // session-size-note-not-warning (Jon, 2026-10-04): size is information,
     // not a warning. Past the green band the note says why smaller sessions
     // help, and points at New session (exiting and typing `claude` by hand
@@ -54379,9 +54394,120 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
         "thresholds": {
             "greenMaxBytes": SESSION_SIZE_GREEN_MAX_BYTES,
             "amberMaxBytes": SESSION_SIZE_AMBER_MAX_BYTES,
-        }
+        },
+        // session-context-host (#477 step 2): the live context, which is
+        // what a call costs; the bytes above are what the file weighs.
+        "context": session_context_block(app, provider_label),
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+/// Where the current provider keeps the session the host reads live. The
+/// provider's row in `token_accounting::LIVE_PROVIDERS` says which kind of
+/// locator it takes; this builds that kind from the host's own knowledge of
+/// the active session. `None` for a provider not in the table.
+fn live_at_for<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider_label: &str,
+) -> Option<token_accounting::LiveAt> {
+    use token_accounting::{LiveAt, LiveLocate};
+    match token_accounting::live_provider(provider_label)?.locate {
+        LiveLocate::File => active_session_path(app).ok().flatten().map(LiveAt::File),
+        LiveLocate::SessionId => opencode_live_session_cell()
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .map(LiveAt::SessionId),
+        LiveLocate::Project => project_root(Some(app)).map(LiveAt::Project),
+    }
+}
+
+/// The live-context block of `/__session-size`, also the payload of the
+/// `session-context-changed` event (session-context-host, #477 step 2).
+/// Null for a provider the live reader doesn't know or a session with no
+/// calls yet.
+///
+/// `state` is `suggest` once `tokens` has reached the project's
+/// `sessions.suggestAtContextTokens` (0 turns it off), else `note`. The
+/// boundary reading comes from the claim ledger: an item begun, committed,
+/// dropped or given feedback is a natural pause, and the growth since the
+/// last one is what a fresh session there would have avoided.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionContextBlock {
+    tokens: u64,
+    floor: u64,
+    peak: u64,
+    compactions: usize,
+    calls: usize,
+    since_boundary_tokens: u64,
+    since_boundary_calls: usize,
+    boundary_at_ms: i64,
+    model: String,
+    suggest_tokens: u64,
+    state: &'static str,
+}
+
+const SUGGEST_AT_CONTEXT_TOKENS_DEFAULT: u64 = 400_000;
+
+fn suggest_at_context_tokens<R: tauri::Runtime>(app: &AppHandle<R>) -> u64 {
+    project_root(Some(app))
+        .and_then(|root| load_project_config(&root))
+        .and_then(|c| c.sessions)
+        .and_then(|s| s.suggest_at_context_tokens)
+        .unwrap_or(SUGGEST_AT_CONTEXT_TOKENS_DEFAULT)
+}
+
+fn session_context_block<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider_label: &str,
+) -> serde_json::Value {
+    let Some(at) = live_at_for(app, provider_label) else {
+        return serde_json::Value::Null;
+    };
+    let Some(lc) = token_accounting::live_context(provider_label, &at) else {
+        return serde_json::Value::Null;
+    };
+    let windows = worklist_state_open(app)
+        .and_then(|conn| {
+            worklist_state::claims_overlapping(&conn, lc.first_at_ms, lc.last_at_ms).ok()
+        })
+        .unwrap_or_default();
+    let (since_tokens, since_calls, boundary_at_ms) =
+        token_accounting::since_boundary(&lc.timeline, &windows);
+    let suggest_tokens = suggest_at_context_tokens(app);
+    let block = SessionContextBlock {
+        tokens: lc.tokens,
+        floor: lc.floor,
+        peak: lc.peak,
+        compactions: lc.compactions,
+        calls: lc.calls,
+        since_boundary_tokens: since_tokens,
+        since_boundary_calls: since_calls,
+        boundary_at_ms,
+        model: lc.model,
+        suggest_tokens,
+        state: if suggest_tokens > 0 && lc.tokens >= suggest_tokens {
+            "suggest"
+        } else {
+            "note"
+        },
+    };
+    serde_json::to_value(block).unwrap_or(serde_json::Value::Null)
+}
+
+/// Emit `session-context-changed` with the active session's block, after a
+/// main-thread turn end has been sampled. Replayable, so a pane that loads
+/// later picks the last reading up through `/__event/latest`.
+fn emit_session_context_changed<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(provider_label) = current_provider(app).map(session_provider_label) else {
+        return;
+    };
+    let block = session_context_block(app, provider_label);
+    if block.is_null() {
+        return;
+    }
+    emit_replayable_payload(app, "session-context-changed", block);
 }
 
 // (delete-phase tranche 1, #214: /__session-turns and its dedicated
@@ -77747,6 +77873,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 } else {
                     kill_current_claude_turn_with_finished(app, verb, elapsed);
                     token_accounting::sample_turn_end(app, "claude", path);
+                    emit_session_context_changed(app);
                     // footer-says-proposing-new-item: a genuine (non-stale)
                     // turn end is one of the flag's clear triggers,
                     // independent of whether an inflight claim exists.
@@ -77765,6 +77892,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 }
                 agent_status_emit_finished(app, provider_label, None, None, "jsonl-end-turn");
                 token_accounting::sample_turn_end(app, "codex", path);
+                emit_session_context_changed(app);
                 clear_proposing_flag(app, "turn-finished");
                 // issue-368: the addressed-turn window ends with the turn.
                 end_turn_context_unless_fresh(app, "jsonl-turn-end");
@@ -107069,6 +107197,7 @@ fn opencode_turn_ended<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, at_ms: 
         .map(|(_, _, input)| input);
     agent_status_emit_finished(app, "opencode", None, None, "opencode-event");
     token_accounting::sample_opencode_turn_end(app, sid);
+    emit_session_context_changed(app);
     clear_opencode_prompt_claims(app, "opencode-turn-ended", None);
     // search-index-opencode-sessions: no watcher sees OpenCode's database, so
     // a finished turn asks for a sessions pass (which re-exports the changed
@@ -109494,6 +109623,7 @@ fn antigravity_turn_ended<R: tauri::Runtime>(
     stop_antigravity_turn_watch();
     agent_status_emit_finished(app, "antigravity", None, None, "osc7501");
     token_accounting::sample_antigravity_turn_end(app);
+    emit_session_context_changed(app);
     // The finished conversation's transcript has changed; a sessions pass
     // re-projects and indexes it (antigravity-sessions-browser).
     search_index_request(IndexBucket::Sessions);

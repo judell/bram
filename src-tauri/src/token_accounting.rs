@@ -5651,6 +5651,10 @@ pub struct Sample {
     pub turn_output: u64,
     pub cache_read: u64,
     pub compactions: usize,
+    /// Context at the session's first call (main thread only), so a
+    /// sample line can be read as "now against a fresh start"
+    /// (session-context-host).
+    pub floor: u64,
     pub agents: usize,
     pub five_hour_pct: Option<f64>,
     pub weekly_pct: Option<f64>,
@@ -5677,7 +5681,7 @@ pub fn format_sample(s: &Sample) -> String {
     if s.subagent {
         line.push_str(&format!(" agents={}", s.agents));
     } else {
-        line.push_str(&format!(" compactions={}", s.compactions));
+        line.push_str(&format!(" compactions={} floor={}", s.compactions, s.floor));
     }
     if let Some(p) = s.five_hour_pct {
         line.push_str(&format!(" fiveHourPct={}", p));
@@ -5728,93 +5732,385 @@ fn read_tail(path: &Path, offset: u64) -> Option<(String, u64, bool)> {
 /// Advance the live session's parser over what was appended, and say what the
 /// turn that just ended cost. None when nothing new was recorded since the
 /// last sample.
-fn sample_live(path: &Path, provider: &str) -> Vec<Sample> {
-    let map = LIVE.get_or_init(|| Mutex::new(HashMap::new()));
-    let Ok(mut g) = map.lock() else {
-        return Vec::new();
-    };
-    let Some((chunk, new_offset, reset)) =
-        read_tail(path, g.get(path).map(|s| s.offset).unwrap_or(0))
-    else {
-        return Vec::new();
-    };
+impl LiveParser {
+    fn feed(&mut self, chunk: &str) {
+        match self {
+            LiveParser::Claude(p) => p.feed(chunk),
+            LiveParser::Codex(p) => p.feed(chunk),
+        }
+    }
+
+    /// A snapshot of what the parser has read so far, in the shape every
+    /// live reader returns. `session` falls back to the file stem for a
+    /// transcript that hasn't named itself yet.
+    fn snapshot(&self, stem: &str) -> LiveCalls {
+        match self {
+            LiveParser::Claude(p) => LiveCalls {
+                session: stem.to_string(),
+                calls: p.calls.clone(),
+                compactions: p.compactions,
+                turn_start: p.turn_start,
+                quota: None,
+            },
+            LiveParser::Codex(p) => LiveCalls {
+                session: p.session_id.clone().unwrap_or_else(|| stem.to_string()),
+                calls: p.calls.clone(),
+                compactions: p.compactions,
+                turn_start: p.turn_start,
+                quota: p.quota.clone(),
+            },
+        }
+    }
+}
+
+/// Advance the live parser for `path` over whatever was appended since the
+/// last read (the whole file on first sight, or after it shrank), and hand
+/// back its state. Shared by the turn-end sampler and `live_context`, so a
+/// route read before the first turn end parses the file once and the next
+/// sample starts from there. `None` when the file can't be read.
+fn advance_live<'a>(
+    g: &'a mut HashMap<PathBuf, LiveState>,
+    path: &Path,
+    fresh: fn() -> LiveParser,
+) -> Option<&'a mut LiveState> {
+    let (chunk, new_offset, reset) = read_tail(path, g.get(path).map(|s| s.offset).unwrap_or(0))?;
     let st = g.entry(path.to_path_buf()).or_insert_with(|| LiveState {
         offset: 0,
-        parser: if provider == "codex" {
-            LiveParser::Codex(CodexParser::new(false))
-        } else {
-            LiveParser::Claude(ClaudeParser::new(false))
-        },
+        parser: fresh(),
         emitted: (0, 0),
     });
     if reset {
-        st.parser = if provider == "codex" {
-            LiveParser::Codex(CodexParser::new(false))
-        } else {
-            LiveParser::Claude(ClaudeParser::new(false))
-        };
+        st.parser = fresh();
         st.emitted = (0, 0);
     }
     st.offset = new_offset;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-    let (calls, turn_start, compactions, quota, session): (
-        &Vec<RawCall>,
-        (usize, i64),
-        usize,
-        Option<Quota>,
-        String,
-    ) = match &mut st.parser {
-        LiveParser::Claude(p) => {
-            p.feed(&chunk);
-            (&p.calls, p.turn_start, p.compactions, None, stem.clone())
-        }
-        LiveParser::Codex(p) => {
-            p.feed(&chunk);
-            let id = p.session_id.clone().unwrap_or(stem.clone());
-            (&p.calls, p.turn_start, p.compactions, p.quota.clone(), id)
-        }
+    st.parser.feed(&chunk);
+    Some(st)
+}
+
+// --- the live providers ------------------------------------------------------
+//
+// One row per provider whose active session the host can read live. The
+// turn-end sampler, `/__session-size` and the `session-context-changed`
+// event look the provider up here by its wire label; adding a provider is a
+// row and a reader, not a new match arm in each caller (Jon, 2026-11-23,
+// session-context-host). The row says how the session is located and how
+// its calls are read; the callers know neither.
+
+/// Where a provider keeps the session the host is reading.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiveAt {
+    /// A transcript file whose tail the reader follows (Claude, Codex).
+    File(PathBuf),
+    /// A session id in the provider's own database (OpenCode).
+    SessionId(String),
+    /// The project root; the reader picks the newest main-thread
+    /// conversation under it (Antigravity, whose finished cue names none).
+    Project(PathBuf),
+}
+
+/// Which kind of `LiveAt` a provider's reader takes, so a caller can build
+/// the right one without naming the provider.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LiveLocate {
+    File,
+    SessionId,
+    Project,
+}
+
+/// What a reader returns: the session's main-thread calls in order, with
+/// what the sampler needs to cut the last turn.
+#[derive(Clone, Debug, Default)]
+pub struct LiveCalls {
+    pub session: String,
+    pub calls: Vec<RawCall>,
+    pub compactions: usize,
+    /// (index of the first call of the current turn, its user message time).
+    pub turn_start: (usize, i64),
+    pub quota: Option<Quota>,
+}
+
+pub struct LiveProvider {
+    pub label: &'static str,
+    pub locate: LiveLocate,
+    read: fn(&LiveAt) -> Option<LiveCalls>,
+    /// The subagent calls recorded since the turn began, for a provider
+    /// whose subagents have their own transcripts beside the main one
+    /// (`(main file, session id, turn start)`); `None` where there are none
+    /// to read.
+    subagents: Option<fn(&Path, &str, i64) -> Option<Sample>>,
+}
+
+pub const LIVE_PROVIDERS: &[LiveProvider] = &[
+    LiveProvider {
+        label: "claude",
+        locate: LiveLocate::File,
+        read: read_claude_live,
+        subagents: Some(claude_subagent_sample),
+    },
+    LiveProvider {
+        label: "codex",
+        locate: LiveLocate::File,
+        read: read_codex_live,
+        subagents: None,
+    },
+    LiveProvider {
+        label: "opencode",
+        locate: LiveLocate::SessionId,
+        read: read_opencode_live,
+        subagents: None,
+    },
+    LiveProvider {
+        label: "antigravity",
+        locate: LiveLocate::Project,
+        read: read_antigravity_live,
+        subagents: None,
+    },
+];
+
+/// The row for a wire label, or `None` for a provider the host can't read
+/// live.
+pub fn live_provider(label: &str) -> Option<&'static LiveProvider> {
+    LIVE_PROVIDERS.iter().find(|p| p.label == label)
+}
+
+/// The session's calls, read the way its provider's row says. `None` when
+/// the provider isn't in the table, the locator is the wrong kind, or the
+/// session has nothing readable.
+pub fn live_calls(label: &str, at: &LiveAt) -> Option<LiveCalls> {
+    let p = live_provider(label)?;
+    let kind = match at {
+        LiveAt::File(_) => LiveLocate::File,
+        LiveAt::SessionId(_) => LiveLocate::SessionId,
+        LiveAt::Project(_) => LiveLocate::Project,
     };
-    let Some(last) = calls.last() else {
-        return Vec::new();
-    };
-    let key = (calls.len(), last.at_ms);
-    if key == st.emitted {
-        return Vec::new();
+    if kind != p.locate {
+        return None;
     }
-    st.emitted = key;
-    let turn: &[RawCall] = &calls[turn_start.0.min(calls.len())..];
-    let mut out = vec![Sample {
-        provider: if provider == "codex" {
-            "codex"
-        } else {
-            "claude"
-        },
-        session: session.clone(),
+    (p.read)(at)
+}
+
+fn read_file_live(at: &LiveAt, fresh: fn() -> LiveParser) -> Option<LiveCalls> {
+    let LiveAt::File(path) = at else {
+        return None;
+    };
+    let map = LIVE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = map.lock().ok()?;
+    let st = advance_live(&mut g, path, fresh)?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    Some(st.parser.snapshot(stem))
+}
+
+fn read_claude_live(at: &LiveAt) -> Option<LiveCalls> {
+    read_file_live(at, || LiveParser::Claude(ClaudeParser::new(false)))
+}
+
+fn read_codex_live(at: &LiveAt) -> Option<LiveCalls> {
+    read_file_live(at, || LiveParser::Codex(CodexParser::new(false)))
+}
+
+/// OpenCode keeps its sessions in SQLite; a turn starts at each `user` row.
+fn read_opencode_live(at: &LiveAt) -> Option<LiveCalls> {
+    let LiveAt::SessionId(sid) = at else {
+        return None;
+    };
+    let conn = crate::opencode_open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, data, time_created FROM session_message \
+             WHERE session_id = ?1 AND type IN ('assistant', 'user') ORDER BY seq",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map(rusqlite::params![sid], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .ok()?;
+    let mut calls: Vec<RawCall> = Vec::new();
+    let mut turn_start = (0, 0);
+    for (kind, data, created) in rows.flatten() {
+        if kind == "user" {
+            turn_start = (calls.len(), created);
+        } else if let Ok(Some(c)) = opencode_call(&data, created) {
+            calls.push(c);
+        }
+    }
+    Some(LiveCalls {
+        session: sid.clone(),
+        calls,
+        compactions: 0,
+        turn_start,
+        quota: None,
+    })
+}
+
+/// Antigravity's finished cue names no conversation, so the reader takes
+/// the project's most recently modified main-thread one. Its transcript has
+/// no user-message cue, so a turn is the trailing run of calls with gaps
+/// under `TURN_GAP_MS`.
+fn read_antigravity_live(at: &LiveAt) -> Option<LiveCalls> {
+    let LiveAt::Project(root) = at else {
+        return None;
+    };
+    let sources = antigravity_sources(root);
+    let newest = sources
+        .iter()
+        .filter(|s| matches!(s, Source::Antigravity { parent: None, .. }))
+        .filter_map(|s| file_key(s.path()).map(|k| (k.0, s)))
+        .max_by_key(|(m, _)| *m)
+        .map(|(_, s)| s)?;
+    let pf = parse_source(newest)?;
+    let mut start = pf.calls.len().saturating_sub(1);
+    while start > 0 && pf.calls[start].at_ms - pf.calls[start - 1].at_ms <= TURN_GAP_MS {
+        start -= 1;
+    }
+    let turn_at = pf.calls.get(start).map(|c| c.at_ms).unwrap_or(0);
+    Some(LiveCalls {
+        session: pf.session_id.clone(),
+        calls: pf.calls.clone(),
+        compactions: pf.compactions,
+        turn_start: (start, turn_at),
+        quota: pf.quota.clone(),
+    })
+}
+
+/// The live session's context figures, for `/__session-size` and the
+/// `session-context-changed` event (session-context-host, #477 step 2).
+/// `timeline` is every main-thread call's `(at_ms, context)`, for the
+/// since-boundary reading; it is not serialized.
+#[derive(Clone, Debug, PartialEq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveContext {
+    pub tokens: u64,
+    pub floor: u64,
+    pub peak: u64,
+    pub calls: usize,
+    pub compactions: usize,
+    pub model: String,
+    pub cache_read: u64,
+    pub first_at_ms: i64,
+    pub last_at_ms: i64,
+    #[serde(skip)]
+    pub timeline: Vec<(i64, u64)>,
+}
+
+/// The live session's context, for any provider in `LIVE_PROVIDERS`.
+/// `None` when the provider isn't readable live or the session has no
+/// calls yet.
+pub fn live_context(label: &str, at: &LiveAt) -> Option<LiveContext> {
+    let lc = live_calls(label, at)?;
+    let first = lc.calls.first()?;
+    let last = lc.calls.last()?;
+    Some(LiveContext {
+        tokens: last.context,
+        floor: first.context,
+        peak: lc.calls.iter().map(|c| c.context).max().unwrap_or(0),
+        calls: lc.calls.len(),
+        compactions: lc.compactions,
+        model: last.model.clone(),
+        cache_read: lc.calls.iter().map(|c| c.cache_read).sum(),
+        first_at_ms: first.at_ms,
+        last_at_ms: last.at_ms,
+        timeline: lc.calls.iter().map(|c| (c.at_ms, c.context)).collect(),
+    })
+}
+
+/// The sample line for one reading of a main-thread session: the last
+/// call's context and the turn since `turn_start`.
+fn main_sample(label: &'static str, lc: &LiveCalls) -> Option<Sample> {
+    let last = lc.calls.last()?;
+    let turn: &[RawCall] = &lc.calls[lc.turn_start.0.min(lc.calls.len())..];
+    Some(Sample {
+        provider: label,
+        session: lc.session.clone(),
         subagent: false,
         model: last.model.clone(),
         tokens: last.context,
         turn_calls: turn.len(),
         turn_output: turn.iter().map(|c| c.output).sum(),
-        cache_read: calls.iter().map(|c| c.cache_read).sum(),
-        compactions,
+        cache_read: lc.calls.iter().map(|c| c.cache_read).sum(),
+        compactions: lc.compactions,
+        floor: lc.calls.first().map(|c| c.context).unwrap_or(0),
         agents: 0,
-        five_hour_pct: quota
+        five_hour_pct: lc
+            .quota
             .as_ref()
             .and_then(|q| q.primary.as_ref())
             .and_then(|w| w.used_percent),
-        weekly_pct: quota
+        weekly_pct: lc
+            .quota
             .as_ref()
             .and_then(|q| q.secondary.as_ref())
             .and_then(|w| w.used_percent),
-    }];
-    if provider != "codex" {
-        if let Some(sub) = claude_subagent_sample(path, &session, turn_start.1) {
-            out.push(sub);
-        }
+    })
+}
+
+/// Growth since the last boundary: `(tokens, calls, boundary_at_ms)`.
+/// A boundary is either edge of a claim window (an item begun, committed,
+/// dropped or given feedback) at or before the last call; with no window,
+/// the session's first call. Tokens saturate at zero, since a compaction
+/// between the boundary and now makes the difference negative.
+pub fn since_boundary(timeline: &[(i64, u64)], windows: &[ClaimWindow]) -> (u64, usize, i64) {
+    let Some(&(first_at, first_ctx)) = timeline.first() else {
+        return (0, 0, 0);
+    };
+    let (last_at, last_ctx) = *timeline.last().unwrap_or(&(first_at, first_ctx));
+    let boundary = windows
+        .iter()
+        .flat_map(|w| [w.from_ms, w.to_ms])
+        .filter(|t| *t >= first_at && *t <= last_at)
+        .max()
+        .unwrap_or(first_at);
+    let at_boundary = timeline
+        .iter()
+        .filter(|(t, _)| *t <= boundary)
+        .map(|(_, c)| *c)
+        .last()
+        .unwrap_or(first_ctx);
+    let calls_after = timeline.iter().filter(|(t, _)| *t > boundary).count();
+    (last_ctx.saturating_sub(at_boundary), calls_after, boundary)
+}
+
+/// Mark `(calls, last call time)` as emitted for the file, and say whether
+/// it is new: a turn end detected again with no new calls samples nothing.
+fn first_sight(path: &Path, key: (usize, i64)) -> bool {
+    let map = LIVE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut g) = map.lock() else {
+        return false;
+    };
+    let Some(st) = g.get_mut(path) else {
+        return false;
+    };
+    if st.emitted == key {
+        return false;
+    }
+    st.emitted = key;
+    true
+}
+
+fn sample_live(path: &Path, provider: &str) -> Vec<Sample> {
+    let Some(p) = live_provider(provider) else {
+        return Vec::new();
+    };
+    let Some(lc) = live_calls(p.label, &LiveAt::File(path.to_path_buf())) else {
+        return Vec::new();
+    };
+    let Some(last) = lc.calls.last() else {
+        return Vec::new();
+    };
+    if !first_sight(path, (lc.calls.len(), last.at_ms)) {
+        return Vec::new();
+    }
+    let mut out: Vec<Sample> = main_sample(p.label, &lc).into_iter().collect();
+    if let Some(sub) = p
+        .subagents
+        .and_then(|read| read(path, &lc.session, lc.turn_start.1))
+    {
+        out.push(sub);
     }
     out
 }
@@ -5971,45 +6267,12 @@ pub fn sample_opencode_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>, si
     if !crate::bram_trace_enabled() {
         return;
     }
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT type, data, time_created FROM session_message \
-         WHERE session_id = ?1 AND type IN ('assistant', 'user') ORDER BY seq",
-    ) else {
+    let Some(lc) = live_calls("opencode", &LiveAt::SessionId(sid.to_string())) else {
         return;
     };
-    let Ok(rows) = stmt.query_map(rusqlite::params![sid], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    }) else {
-        return;
-    };
-    let mut calls: Vec<RawCall> = Vec::new();
-    let mut turn_start = 0;
-    for (kind, data, created) in rows.flatten() {
-        if kind == "user" {
-            turn_start = calls.len();
-        } else if let Ok(Some(c)) = opencode_call(&data, created) {
-            calls.push(c);
-        }
+    if let Some(s) = main_sample("opencode", &lc) {
+        crate::append_bram_trace_line(app, "session-context", &format_sample(&s));
     }
-    let Some(last) = calls.last() else {
-        return;
-    };
-    let turn = &calls[turn_start.min(calls.len())..];
-    let s = Sample {
-        provider: "opencode",
-        session: sid.to_string(),
-        model: last.model.clone(),
-        tokens: last.context,
-        turn_calls: turn.len(),
-        turn_output: turn.iter().map(|c| c.output).sum(),
-        cache_read: calls.iter().map(|c| c.cache_read).sum(),
-        ..Default::default()
-    };
-    crate::append_bram_trace_line(app, "session-context", &format_sample(&s));
 }
 
 /// Antigravity's turn end. The finished cue names no conversation, so this
@@ -6038,35 +6301,10 @@ pub fn sample_antigravity_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
     if !crate::bram_trace_enabled() {
         return;
     }
-    let newest = sources
-        .iter()
-        .filter(|s| matches!(s, Source::Antigravity { parent: None, .. }))
-        .filter_map(|s| file_key(s.path()).map(|k| (k.0, s)))
-        .max_by_key(|(m, _)| *m)
-        .map(|(_, s)| s);
-    let Some(src) = newest else {
+    let Some(lc) = live_calls("antigravity", &LiveAt::Project(root.clone())) else {
         return;
     };
-    let Some(pf) = parse_source(src) else {
-        return;
-    };
-    let Some(last) = pf.calls.last() else {
-        return;
-    };
-    let mut start = pf.calls.len() - 1;
-    while start > 0 && pf.calls[start].at_ms - pf.calls[start - 1].at_ms <= TURN_GAP_MS {
-        start -= 1;
+    if let Some(s) = main_sample("antigravity", &lc) {
+        crate::append_bram_trace_line(app, "session-context", &format_sample(&s));
     }
-    let turn = &pf.calls[start..];
-    let s = Sample {
-        provider: "antigravity",
-        session: pf.session_id.clone(),
-        model: last.model.clone(),
-        tokens: last.context,
-        turn_calls: turn.len(),
-        turn_output: turn.iter().map(|c| c.output).sum(),
-        cache_read: pf.calls.iter().map(|c| c.cache_read).sum(),
-        ..Default::default()
-    };
-    crate::append_bram_trace_line(app, "session-context", &format_sample(&s));
 }

@@ -527,6 +527,45 @@ fn lib_rs_reads_report_test_lines_and_bytes_and_shell_reads_stay_apart() {
     );
 }
 
+// session-context-host: growth since the last claim-window edge, or since
+// the first call when no window touches the session; a compaction after the
+// boundary can't go negative.
+#[test]
+fn since_boundary_reads_the_last_claim_edge() {
+    let w = |from: i64, to: i64| ClaimWindow {
+        from_ms: from,
+        to_ms: to,
+        kind: "approved".into(),
+        ids: vec!["x".into()],
+    };
+    let timeline = vec![
+        (100, 74_000),
+        (200, 230_000),
+        (300, 390_000),
+        (400, 525_000),
+        (500, 610_000),
+    ];
+    // No windows: everything since the first call.
+    assert_eq!(since_boundary(&timeline, &[]), (536_000, 4, 100));
+    // A claim written at 250 and cleared at 350: the clear is the boundary,
+    // the context there is the last call at or before it (300 → 390k).
+    assert_eq!(since_boundary(&timeline, &[w(250, 350)]), (220_000, 2, 350));
+    // An open claim written at 450 reads as 450..451; its start is the edge.
+    assert_eq!(
+        since_boundary(&timeline, &[w(250, 350), w(450, 451)]),
+        (85_000, 1, 451)
+    );
+    // A window edge after the last call is ignored.
+    assert_eq!(
+        since_boundary(&timeline, &[w(250, 350), w(900, 950)]),
+        (220_000, 2, 350)
+    );
+    // Compaction after the boundary: saturates at zero.
+    let compacted = vec![(100, 74_000), (200, 900_000), (300, 137_000)];
+    assert_eq!(since_boundary(&compacted, &[w(150, 250)]), (0, 1, 250));
+    assert_eq!(since_boundary(&[], &[]), (0, 0, 0));
+}
+
 #[test]
 fn the_sample_line_names_the_turn() {
     let s = Sample {
@@ -538,13 +577,14 @@ fn the_sample_line_names_the_turn() {
         turn_output: 400,
         cache_read: 123456,
         compactions: 1,
+        floor: 18200,
         five_hour_pct: Some(7.0),
         weekly_pct: Some(43.0),
         ..Default::default()
     };
     assert_eq!(
         format_sample(&s),
-        "op=sample provider=codex session=abc model=gpt-6-astra tokens=79324 turnCalls=3 turnOutput=400 cacheRead=123456 compactions=1 fiveHourPct=7 weeklyPct=43"
+        "op=sample provider=codex session=abc model=gpt-6-astra tokens=79324 turnCalls=3 turnOutput=400 cacheRead=123456 compactions=1 floor=18200 fiveHourPct=7 weeklyPct=43"
     );
     let sub = Sample {
         subagent: true,

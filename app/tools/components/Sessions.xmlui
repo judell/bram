@@ -277,13 +277,9 @@
               enabled="{!$item.pending &amp;&amp; !(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
               tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : ($item.current ? 'Reload this session (restarts the agent)' : 'Switch to this session (restarts the agent on it)')))}"
               onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
-            <Button
-              label="{deleteSessionAct.value &amp;&amp; deleteSessionAct.value.busy &amp;&amp; lastDeleteId === $item.id ? '…' : '✕'}"
-              variant="ghost"
-              size="xs"
-              enabled="{window.__bramSessionEditEnabled($item, 'delete', pendingDeletes, pendingRenames) &amp;&amp; !(deleteSessionAct.value &amp;&amp; deleteSessionAct.value.busy)}"
-              tooltip="{window.__bramSessionEditTooltip($item, 'delete', pendingDeletes, pendingRenames)}"
-              onClick="lastDeleteId = $item.id; if (confirm('Delete session?', 'This cannot be undone.', 'Delete')) window.__bramPaneAction('deleteSession', '/__sessions/delete', { query: { id: $item.id, provider: $item.provider } })" />
+            <!-- Rename before delete (Jon, 2026-11-23): the common action sits
+                 next to the switch button, the destructive one at the end.
+                 Delete confirms before it sends. -->
             <Button
               label="✎"
               variant="ghost"
@@ -291,6 +287,13 @@
               enabled="{window.__bramSessionEditEnabled($item, 'rename', pendingDeletes, pendingRenames)}"
               tooltip="{window.__bramSessionEditTooltip($item, 'rename', pendingDeletes, pendingRenames)}"
               onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
+            <Button
+              label="{deleteSessionAct.value &amp;&amp; deleteSessionAct.value.busy &amp;&amp; lastDeleteId === $item.id ? '…' : '✕'}"
+              variant="ghost"
+              size="xs"
+              enabled="{window.__bramSessionEditEnabled($item, 'delete', pendingDeletes, pendingRenames) &amp;&amp; !(deleteSessionAct.value &amp;&amp; deleteSessionAct.value.busy)}"
+              tooltip="{window.__bramSessionEditTooltip($item, 'delete', pendingDeletes, pendingRenames)}"
+              onClick="lastDeleteId = $item.id; if (confirm('Delete session?', 'This cannot be undone.', 'Delete')) window.__bramPaneAction('deleteSession', '/__sessions/delete', { query: { id: $item.id, provider: $item.provider } })" />
             <!-- session-groups: a loose session can join a group that has no
                  session on this agent yet, and takes the group's name. Each
                  entry carries this row's id (inside Items, $item is the

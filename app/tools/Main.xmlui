@@ -1674,6 +1674,8 @@
               allowHtml="false"
               content="{window.__bramFooterStatusMarkdown(window.__bramFooterSessionLine(window.__bramCurrentSessionOf(footerSessions.value), footerAgents.value), null)}" />
           </Theme>
+          <!-- session-context-pane: the context figure, after the session text. -->
+          <FooterSessionContext sessionTitle="{window.__bramSessionContextTitle(window.__bramCurrentSessionOf(footerSessions.value))}" />
           <HStack
             when="{window.__bramVisibleFooterAgents(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(window.__bramRosterForSession(footerAgents.value, footerSessions.value), dismissedAgentIds).length : 0) > 0}"
             gap="$space-1"

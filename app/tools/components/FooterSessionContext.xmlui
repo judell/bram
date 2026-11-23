@@ -1,0 +1,95 @@
+<Component name="FooterSessionContext">
+  <!-- session-context-pane: the session line's context figure. Owns its
+       sources like FooterContextLine (judell/bram#470): the boot read is
+       /__session-size, and the host's replayable `session-context-changed`
+       event (emitted at each turn end; payload is the route's `context`
+       object) is pushed, not polled. Contract:
+         props   sessionTitle — the current session's title, for the
+                 "continue: <title>" name of the new session
+       Renders nothing until the host sends a `context` with `tokens`.
+       https://www.xmlui.org/docs/reference/components/PushSource
+       https://www.xmlui.org/docs/reference/components/DataSource -->
+  <DataSource id="sessionSize" url="/__session-size" />
+  <!-- List prices per model, a file the agent maintains (resources/
+       model-rates.json, with asOf and source): not fetched live, not in
+       the host (Jon, 2026-11-23). Served from the pane's own tree, so the
+       path is absolute within the xmlui:// origin. -->
+  <DataSource id="modelRates" url="/tools/resources/model-rates.json" />
+  <PushSource
+    id="sessionContextEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('session-context-changed')}" />
+  <HStack
+    when="{!!window.__bramSessionContextLine(window.__bramSessionContextPick(sessionContextEvt.value, sessionSize.value &amp;&amp; sessionSize.value.context))}"
+    gap="$space-1"
+    wrapContent="true"
+    verticalAlignment="center">
+    <HStack
+      gap="$space-1"
+      wrapContent="true"
+      verticalAlignment="center"
+      var.ctx="{window.__bramSessionContextPick(sessionContextEvt.value, sessionSize.value &amp;&amp; sessionSize.value.context)}"
+      var.dismissedBoundaryMs="{0}"
+      var.infoKey="{''}">
+      <!-- Each figure carries a little-i that opens a modal explaining it,
+           the Settings tab's pattern (settingInfoDialog); no tooltips, the
+           modal is the explanation (Jon, 2026-11-23). Warning color only
+           together with the Start a new session button (developing-bram.md,
+           "Warning color is earned").
+           https://www.xmlui.org/docs/reference/components/ModalDialog -->
+      <Text
+        fontSize="$fontSize-sm"
+        color="{window.__bramSessionContextColor(ctx)}"
+        value="{window.__bramSessionContextTokensLabel(ctx)}" />
+      <Button icon="info" size="xs" variant="ghost"
+        onClick="infoKey = 'context'; contextInfoDialog.open()" />
+      <Text
+        when="{!!window.__bramSessionContextFloorLabel(ctx)}"
+        fontSize="$fontSize-sm"
+        color="{window.__bramSessionContextColor(ctx)}"
+        value="{window.__bramSessionContextFloorLabel(ctx)}" />
+      <Button
+        when="{!!window.__bramSessionContextFloorLabel(ctx)}"
+        icon="info" size="xs" variant="ghost"
+        onClick="infoKey = 'floor'; contextInfoDialog.open()" />
+      <Text
+        when="{!!window.__bramSessionContextCompactionsLabel(ctx)}"
+        fontSize="$fontSize-sm"
+        color="{window.__bramSessionContextColor(ctx)}"
+        value="{window.__bramSessionContextCompactionsLabel(ctx)}" />
+      <HStack
+        when="{window.__bramSessionContextShowButton(ctx, dismissedBoundaryMs)}"
+        gap="$space-0_5"
+        verticalAlignment="center">
+        <!-- Two statements, as the peer buttons do (Main.xmlui skills
+             dialog: a helper call, then navigate('/sessions')); the POST
+             makes the Sessions tab open its New session dialog pre-filled.
+             https://www.xmlui.org/docs/reference/components/Button -->
+        <Button
+          label="Start a new session"
+          size="xs"
+          variant="outlined"
+          onClick="window.__bramSessionContextNewSession(ctx, $props.sessionTitle); navigate('/sessions')" />
+        <Button
+          label="✕"
+          size="xs"
+          variant="ghost"
+          onClick="dismissedBoundaryMs = (ctx &amp;&amp; ctx.boundaryAtMs) || 0" />
+      </HStack>
+      <!-- One plain sentence first (the threshold and what a new session
+           saves); the rest folds under Details (Jon, 2026-11-23).
+           https://www.xmlui.org/docs/reference/components/ExpandableItem -->
+      <ModalDialog id="contextInfoDialog" title="{window.__bramSessionContextInfoTitle(infoKey)}">
+        <VStack gap="$space-3" padding="$space-2" paddingTop="0">
+          <Markdown content="{window.__bramSessionContextLead(infoKey, ctx, modelRates.value)}" />
+          <ExpandableItem summary="Details" initiallyExpanded="{false}" iconPosition="start">
+            <Markdown content="{window.__bramSessionContextInfoBody(infoKey, ctx, modelRates.value)}" />
+          </ExpandableItem>
+          <HStack>
+            <Button label="Got it" onClick="contextInfoDialog.close()" />
+          </HStack>
+        </VStack>
+      </ModalDialog>
+    </HStack>
+  </HStack>
+</Component>

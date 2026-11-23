@@ -4112,7 +4112,7 @@ window.settingsInfoBodies = {
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
-    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: on.*\n\n## Pair new sessions across providers\n\nWhen you switch between Claude and Codex and the session you're leaving has no partner on the other side, the other agent resumes its most recent session and Bram asks what you want: **Keep these together** pairs the two, so switching back and forth moves between them; **Start a new … session** starts one for the session you left. Bram never pairs sessions on its own. Turning this off stops the question; pairs you already made keep working, and **Unpair** on the Sessions tab ends one.\n\n*Project setting, saved in `.bram.json` as `sessions.pairAcrossProviders` and shared with everyone who works in this repo. Default: on.*",
+    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: on.*\n\n## Ask at the next natural pause once the context passes\n\nEach call re-sends the whole live context, so a long session pays for its history on every turn. Past this many tokens the footer shows **Start a new session** and the agent offers one at a natural pause. The figure beside the session line in the footer is what the model re-read on its last call, with the floor (the size of a fresh session) beside it.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestAtContextTokens` and shared with everyone who works in this repo. Default: 400,000 tokens; 0 turns it off.*\n\n## Pair new sessions across providers\n\nWhen you switch between Claude and Codex and the session you're leaving has no partner on the other side, the other agent resumes its most recent session and Bram asks what you want: **Keep these together** pairs the two, so switching back and forth moves between them; **Start a new … session** starts one for the session you left. Bram never pairs sessions on its own. Turning this off stops the question; pairs you already made keep working, and **Unpair** on the Sessions tab ends one.\n\n*Project setting, saved in `.bram.json` as `sessions.pairAcrossProviders` and shared with everyone who works in this repo. Default: on.*",
   batchCommitActions:
     "## Mirror Worklist lifecycle to GitHub issues\n\nPost Worklist lifecycle comments to linked GitHub issues.\n\n*Project setting, saved in `.bram.json` as `mirrorWorklistLifecycleToIssue` and shared with everyone who works in this repo. Default: off.*" +
     "\n\n## Pause Worklist enforcement for Claude\n\nAn advanced, experimental setting. While it is on, Bram's guard stops denying Claude's edits that no Worklist item covers, and Claude is told the Worklist is paused, so it edits directly and proposes no items. You define the work and manage commits yourself. The guard's other checks (session URLs, forge signatures) still apply. Codex, OpenCode and Antigravity stay enforced. Edits made while paused belong to no item: before turning enforcement back on, commit or stash them, or the next whole-file commit of a begun item may take them.\n\n*Saved for this computer in `.bram/settings.json` as `worklist.enforcement` (`paused` or `on`). A repo can also set it for everyone in a committed `.bram.json`; your own setting wins. Default: on.*",
@@ -22075,6 +22075,186 @@ window.__bramSuggestSetting = function (settings, key) {
   var s = settings && settings.sessions;
   if (s && typeof s[key] === "boolean") return s[key];
   return true;
+};
+// session-context-pane: the context-limit setting, thousands in the box and
+// tokens on disk (sessions.suggestAtContextTokens; default 400,000; 0 = off).
+window.__bramSuggestContextSetting = function (settings) {
+  var s = settings && settings.sessions;
+  var n = s && s.suggestAtContextTokens;
+  if (typeof n === "number" && isFinite(n) && n >= 0) return Math.round(n / 1000);
+  return 400;
+};
+window.__bramSuggestContextTokens = function (v) {
+  var n = Number(v);
+  if (v === null || v === undefined || v === "" || !isFinite(n) || n < 0) return 0;
+  return Math.round(n) * 1000;
+};
+
+// session-context-pane: the footer's context figure (FooterSessionContext).
+// Pure helpers; each reads only its arguments.
+window.__bramSessionContextPick = function (pushValue, routeValue) {
+  if (pushValue && typeof pushValue === "object") {
+    var p = pushValue.payload !== undefined ? pushValue.payload : pushValue;
+    if (p && typeof p === "object" && typeof p.tokens === "number") return p;
+  }
+  return routeValue && typeof routeValue === "object" ? routeValue : null;
+};
+window.__bramSessionContextTitle = function (s) {
+  return (s && s.title) || "";
+};
+window.__bramSessionContextLine = function (ctx) {
+  if (!ctx || typeof ctx.tokens !== "number" || !isFinite(ctx.tokens)) return "";
+  var out = "· context " + window.__bramTokenK(ctx.tokens);
+  if (typeof ctx.floor === "number" && isFinite(ctx.floor)) out += " · floor " + window.__bramTokenK(ctx.floor);
+  var c = ctx.compactions;
+  if (typeof c === "number" && c > 0) out += " · " + c + (c === 1 ? " compaction" : " compactions");
+  return out;
+};
+// The line's three parts, so each figure can carry its own little-i
+// (Jon, 2026-11-23: "a little-i modal for both context and floor").
+window.__bramSessionContextTokensLabel = function (ctx) {
+  if (!ctx || typeof ctx.tokens !== "number" || !isFinite(ctx.tokens)) return "";
+  return "· context " + window.__bramTokenK(ctx.tokens);
+};
+window.__bramSessionContextFloorLabel = function (ctx) {
+  if (!ctx || typeof ctx.floor !== "number" || !isFinite(ctx.floor)) return "";
+  return "· floor " + window.__bramTokenK(ctx.floor);
+};
+window.__bramSessionContextCompactionsLabel = function (ctx) {
+  var c = ctx && ctx.compactions;
+  if (typeof c !== "number" || c <= 0) return "";
+  return "· " + c + (c === 1 ? " compaction" : " compactions");
+};
+// The little-i modals. Markdown bodies read only the context block they
+// are given, so the figures in the text match the figures on the line.
+window.__bramSessionContextInfoTitle = function (key) {
+  return key === "floor" ? "Floor" : "Context";
+};
+// The cost paragraph of the context modal, from the rates file
+// (app/tools/resources/model-rates.json) and the context block. Cache reads
+// are nearly the whole of a call's input once a session is past its first
+// turns, so a call's re-read cost is tokens × the cache-read rate; the
+// output is priced separately and is not in the block. "" when the model
+// has no row, so a missing price shows nothing rather than a guess.
+// The rates row for a model id, through `aliases` (Antigravity reports
+// display labels such as "Gemini 4 Neon (High)"), or null.
+window.__bramModelRatesRow = function (rates, model) {
+  if (!rates || !rates.models || !model) return null;
+  var id = (rates.aliases && rates.aliases[model]) || model;
+  var row = rates.models[id];
+  return row && typeof row.cacheRead === "number" ? row : null;
+};
+window.__bramSessionContextCost = function (ctx, rates) {
+  if (!ctx || typeof ctx.tokens !== "number") return "";
+  var row = window.__bramModelRatesRow(rates, ctx.model);
+  if (!row) return "";
+  var src = (rates.sources && rates.sources[row.source]) || {};
+  var K = window.__bramTokenK;
+  var usd = function (tokens) {
+    var d = (tokens / 1e6) * row.cacheRead;
+    if (row.cacheRead === 0) return "nothing";
+    return d < 0.01 ? "under a cent" : "$" + d.toFixed(2);
+  };
+  var floor = typeof ctx.floor === "number" ? ctx.floor : 0;
+  var cite = src.url ? " Source: " + src.url + ", read " + (src.readOn || "?") +
+    (src.read === "summary" ? " (from a summary of the page, not its text; recheck before relying on it)" : "") + "." :
+    " Source: none published; " + (src.note || "priced at 0") + ".";
+  var out =
+    "**What that costs**, at list prices for `" + ctx.model + "` (cached input $" + row.cacheRead + " per million): " +
+    "re-reading " + K(ctx.tokens) + " is about " + usd(ctx.tokens) + " per call, against about " +
+    usd(floor) + " for a call at the floor." + cite;
+  var gapCalls = typeof ctx.sinceBoundaryCalls === "number" ? ctx.sinceBoundaryCalls : 0;
+  if (gapCalls > 0 && ctx.tokens > floor) {
+    out += " Over the " + gapCalls + " calls since the last natural pause, that gap came to roughly " +
+      usd((ctx.tokens - floor) * gapCalls) + " more than a fresh session would have paid.";
+  }
+  out += " Output tokens are priced separately ($" + row.output + " per million) and are not counted here. On a subscription this is quota, not dollars.";
+  return out;
+};
+// The modal's opening line, in plain terms (Jon, 2026-11-23: "you are
+// above the threshold of {threshold}, switching to a new session will save
+// you {savings}"; everything else folds under it). Savings is per call,
+// since that is what a fresh session changes: the gap between the context
+// now and the floor, in tokens and, when the model has a rate, in dollars.
+window.__bramSessionContextLead = function (key, ctx, rates) {
+  if (!ctx || typeof ctx.tokens !== "number") return "";
+  var K = window.__bramTokenK;
+  var floor = typeof ctx.floor === "number" ? ctx.floor : 0;
+  var gap = Math.max(0, ctx.tokens - floor);
+  var row = window.__bramModelRatesRow(rates, ctx.model);
+  var dollars = "";
+  if (row && row.cacheRead > 0) {
+    var d = (gap / 1e6) * row.cacheRead;
+    dollars = d < 0.01 ? " (under a cent)" : " ($" + d.toFixed(2) + " at list prices)";
+  }
+  if (key === "floor") {
+    return "A new session would start at about **" + K(floor) + "** tokens, this session's floor. This one is at " + K(ctx.tokens) + ".";
+  }
+  var lim = typeof ctx.suggestTokens === "number" && ctx.suggestTokens > 0 ? K(ctx.suggestTokens) : "";
+  var where = !lim
+    ? "This session's context is **" + K(ctx.tokens) + "** tokens."
+    : ctx.state === "suggest"
+      ? "You are above the threshold of **" + lim + "**, at " + K(ctx.tokens) + "."
+      : "You are below the threshold of **" + lim + "**, at " + K(ctx.tokens) + ".";
+  if (gap === 0) return where;
+  return where + " Switching to a new session will save you about **" + K(gap) + " tokens" + dollars + "** on every call.";
+};
+window.__bramSessionContextInfoBody = function (key, ctx, rates) {
+  var K = window.__bramTokenK;
+  var num = function (n) { return typeof n === "number" && isFinite(n) ? K(n) : "—"; };
+  if (!ctx) return "";
+  if (key === "floor") {
+    return (
+      "**Floor** is the context of this session's first call: Bram's instructions and the project's, before any work. Here it is **" +
+      num(ctx.floor) + "** tokens.\n\n" +
+      "A fresh session starts near the floor, so the gap between the context figure and this one is what a new session would save on every call. " +
+      "Compaction brings the context down to a summary, not to the floor.\n\n" +
+      "The floor is mostly instruction files; Status › Token accounting › Models splits it into the agent's own share, the project's and Bram's conventions."
+    );
+  }
+  var lim = typeof ctx.suggestTokens === "number" && ctx.suggestTokens > 0 ? K(ctx.suggestTokens) : "";
+  var out =
+    "**Context** is what the model re-read on its last call: everything in this session since the last compaction, now **" +
+    num(ctx.tokens) + "** tokens. Each call re-sends all of it, so a long session pays for its history on every turn; a 600k call re-reads eight times what a fresh one does.\n\n";
+  out += "This session: peak " + num(ctx.peak) + ", " +
+    (typeof ctx.calls === "number" ? ctx.calls + " calls, " : "") +
+    (typeof ctx.compactions === "number" ? ctx.compactions + (ctx.compactions === 1 ? " compaction" : " compactions") : "") + ".";
+  if (typeof ctx.sinceBoundaryTokens === "number") {
+    out += " Since the last natural pause (an item begun, committed or dropped): " + num(ctx.sinceBoundaryTokens) + " of growth over " +
+      (ctx.sinceBoundaryCalls || 0) + " calls.";
+  }
+  out += "\n\n";
+  if (lim) {
+    out += ctx.state === "suggest"
+      ? "It is past the limit in Settings (" + lim + "), so **Start a new session** is offered here, and the agent offers one at the next natural pause. Saying no keeps the work here; ✕ hides the button until the next pause."
+      : "Past the limit in Settings (" + lim + ") the footer offers **Start a new session**, and the agent offers one at the next natural pause.";
+  } else {
+    out += "The fresh-session offer is off in Settings (the limit is 0).";
+  }
+  var cost = window.__bramSessionContextCost(ctx, rates);
+  if (cost) out += "\n\n" + cost;
+  out += "\n\nThe KB figure beside the session name is the transcript file on disk. It only grows, so it says how much there is to find and search, not what a call costs.";
+  return out;
+};
+// Warning color only in the suggest state, where the Start a new session
+// button names the action (developing-bram.md, "Warning color is earned").
+window.__bramSessionContextColor = function (ctx) {
+  return ctx && ctx.state === "suggest" ? "$color-warn-700" : "$textColor-secondary";
+};
+window.__bramSessionContextShowButton = function (ctx, dismissedBoundaryMs) {
+  if (!ctx || ctx.state !== "suggest") return false;
+  var b = ctx.boundaryAtMs || 0;
+  return !(dismissedBoundaryMs && dismissedBoundaryMs === b);
+};
+window.__bramSessionContextNewSession = function (ctx, title) {
+  var name = "continue: " + (title || "this session");
+  return window
+    .fetch("/__sessions/suggest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name, whatsNext: "" }),
+    })
+    .catch(function () {});
 };
 
 // issue-466-pause-install-uninstall (v1): worklist.enforcement, Claude only.

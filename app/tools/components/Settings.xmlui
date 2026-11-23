@@ -367,6 +367,16 @@
           labelPosition="end"
           initialValue="{window.__bramSuggestSetting(settingsValue, 'suggestOnTopicShift')}"
           onDidChange="(v) => saveSettings.execute({ sessions: { suggestOnTopicShift: v } })" />
+        <!-- session-context-pane: thousands in the box, tokens on disk; the
+             conversions live in helpers.js. NumberBox label/initialValue/
+             integersOnly/minValue: https://www.xmlui.org/docs/reference/components/NumberBox -->
+        <NumberBox
+          label="Ask at the next natural pause once the context passes (thousands of tokens; 0 = never)"
+          labelPosition="end"
+          integersOnly="{true}"
+          minValue="{0}"
+          initialValue="{window.__bramSuggestContextSetting(settingsValue)}"
+          onDidChange="(v) => saveSettings.execute({ sessions: { suggestAtContextTokens: window.__bramSuggestContextTokens(v) } })" />
         <!-- provider-session-pair-offer: a Switch, not a fourth checkbox,
              because it isn't a "when to suggest" trigger: it turns the pair
              offer after a provider switch on or off. Default on, read through

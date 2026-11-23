@@ -798,6 +798,10 @@ the choice, then lands), `already_setup` (the cross-machine re-run from
 `legacy_hooks` (retired generic hook names, #173), and `nested` (a
 managed parent). The refused scenarios find the port from Bram's stderr
 (`[bram] loopback port=`), since a refused launch writes no port file.
+A refused or held launch opens no trace file either; with `BRAM_TRACE=1`
+set explicitly the trace lines go to stderr instead, so a scenario's
+`<work>/<scenario>.log` carries the pane's side of a refusal (what it
+fetched, what it saw).
 Every launch sets `BRAM_USER_STATE_DIR` under the work directory, so no
 scenario's mode choice reaches your own `~/.bram/folders.json`; the
 spawn refuses to run without it.

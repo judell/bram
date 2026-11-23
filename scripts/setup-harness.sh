@@ -637,9 +637,7 @@ scenario_subfolder() {
   git -C "$repo" init -q
   printf '# repo\n' > "$repo/README.md"
   launch_refused "$dir" || return
-  # No snap: the status names the subfolder (asserted below), but the pane
-  # showed no refusal banner in the 2026-11-22 narrative; the picture returns
-  # with the fix (item pane-follow-ups-from-harness-narrative).
+  snap refused "A folder inside a repo but not its root: refused, named as a subfolder, nothing written; no chooser."
   assert_refused "$dir" "subfolder"
   local top; top="$(status_field projectFolder.toplevel)"
   if [ "$top" = "$(native_path "$(cd "$repo" && pwd -P)")" ]; then
@@ -923,9 +921,7 @@ scenario_antigravity_reasons() {
   jq 'del(.["bram-worklist-guard"])' "$dir/.agents/hooks.json" > "$dir/.agents/hooks.json.tmp" \
     && mv "$dir/.agents/hooks.json.tmp" "$dir/.agents/hooks.json"
   sleep 1
-  # No snap: the status flips (asserted below) but the pane showed no banner
-  # in the 2026-11-22 narrative; the refetch after a hooks.json edit is an
-  # open question, not something to picture yet.
+  snap hook-missing "Antigravity active, its guard group removed from .agents/hooks.json: the needs-setup banner names the missing hook (the watcher now covers .agents/)."
   assert_field antigravityNeedsSetup true
   assert_field providerNeedsSetup true
   assert_field antigravityHooks missing

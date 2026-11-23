@@ -7866,6 +7866,18 @@ window.__bramProjectTooltip = function (info) {
 window.__bramProjectFolderKind = function (status) {
   return (status && status.projectFolder && status.projectFolder.kind) || "ok";
 };
+// pane-follow-ups-from-harness-narrative: the first-wake chooser shows only
+// where a choice can act. A held or refused launch (state-held, subfolder,
+// home) has no mode record either, so "undecided" alone put the chooser
+// above "Bram hasn't started" in the harness narrative; a nested child
+// shows the nesting warning instead, whose own text says nothing is seeded
+// until Setup runs. Reads only its argument.
+window.__bramChooserVisible = function (status) {
+  if (!status || status.mode !== "undecided") return false;
+  var kind = window.__bramProjectFolderKind(status);
+  if (kind !== "ok" && kind !== "not-git") return false;
+  return !status.nestedUnder;
+};
 window.__bramProjectFolderIs = function (status, kind) {
   return window.__bramProjectFolderKind(status) === kind;
 };

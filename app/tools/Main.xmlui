@@ -793,7 +793,7 @@
     </ModalDialog>
   </Theme>
   <VStack
-    when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.mode === 'undecided'}"
+    when="{window.__bramChooserVisible(enhanceStatus.value)}"
     padding="$space-4"
     gap="$space-3"
     backgroundColor="$color-info-50"

@@ -4456,6 +4456,19 @@ fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str,
         return;
     }
     let Some(path) = bram_trace_log_file(app) else {
+        // pane-follow-ups-from-harness-narrative: a refused or held launch
+        // never establishes a state folder, so its trace had nowhere to go
+        // and the pane's side of a refusal (what it fetched, what it saw)
+        // was unobservable. With BRAM_TRACE=1 set explicitly, the line goes
+        // to stderr instead, where the harness keeps each scenario's log.
+        if bram_trace_env_override() == Some(true) {
+            eprintln!(
+                "[{}] [{}] {}",
+                format_iso_utc_ms(unix_now_ms()),
+                category,
+                body
+            );
+        }
         return;
     };
     let Ok(mut guard) = bram_trace_file_cell().lock() else {
@@ -43275,6 +43288,10 @@ const REPO_STARTUP_GREETING: &str = "Hello, this is Bram. I just woke up in a re
 // Orient me appears only after the workflow choice, in a repo that already
 // existed.
 const FOLDER_STARTUP_GREETING_UNDECIDED: &str = "Hello, this is Bram. I just woke up in a folder I haven't seen before. Choose how you want to work here at the top of this pane, Workflow or Freestyle. Either way, you can ask me to look around.";
+// pane-follow-ups-from-harness-narrative: a child of a managed project shows
+// the nesting warning, not the chooser (the pane hides it there), so the
+// greeting must not point at a chooser that isn't on the pane.
+const FOLDER_STARTUP_GREETING_NESTED: &str = "Hello, this is Bram. This folder is inside a project Bram already manages; the note at the top of this pane says what that means. You can still ask me to look around.";
 // The workflow choice created this repository: no history to orient in, and
 // the first commit is the first job (routed through the Worklist as an
 // introduction to it, Jon 2026-11-22).
@@ -43907,6 +43924,13 @@ fn repo_startup_greeting_turn() -> serde_json::Value {
         FolderModeState::Workflow if created_repo => FOLDER_STARTUP_GREETING_NEW_REPO,
         FolderModeState::Workflow => REPO_STARTUP_GREETING,
         FolderModeState::Freestyle => FOLDER_STARTUP_GREETING_FREESTYLE,
+        FolderModeState::Undecided
+            if nested_managed_parent(&root, home_dir().as_deref())
+                .0
+                .is_some() =>
+        {
+            FOLDER_STARTUP_GREETING_NESTED
+        }
         FolderModeState::Undecided => FOLDER_STARTUP_GREETING_UNDECIDED,
     };
     repo_startup_greeting_turn_from(default_copy, &announcement)
@@ -114034,8 +114058,22 @@ pub fn run() {
                             .as_ref()
                             .map_or(false, |ah| p.starts_with(ah));
                         let in_bram_dir = bram_dir.as_ref().map_or(false, |bd| p.starts_with(bd));
+                        // pane-follow-ups-from-harness-narrative: the status
+                        // also reads Antigravity's hook group and rules and
+                        // OpenCode's plugin and config, but a change there
+                        // never reached the pane (the harness's
+                        // antigravity_reasons flipped antigravityNeedsSetup
+                        // with no banner, 2026-11-22).
+                        let in_agents_dir = p.components().any(|c| c.as_os_str() == ".agents");
+                        let in_opencode_dir = p.components().any(|c| c.as_os_str() == ".opencode");
                         name == "CLAUDE.md"
                             || name == "AGENTS.md"
+                            || (in_agents_dir
+                                && (name == "hooks.json"
+                                    || p.components().any(|c| c.as_os_str() == "rules")))
+                            || (in_opencode_dir
+                                && (name == "opencode.json"
+                                    || p.components().any(|c| c.as_os_str() == "plugins")))
                             || (in_claude_dir
                                 && (name == "settings.json"
                                     || name == "settings.local.json"

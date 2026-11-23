@@ -1,7 +1,7 @@
 <!doctype html><meta charset="utf-8"><title>Startup harness narrative</title>
 <style>body{font:16px/1.5 -apple-system,Helvetica,Arial,sans-serif;max-width:960px;margin:2em auto;padding:0 1em;color:#222}h2{margin-top:2em;font-size:1.15em}h2 .tally{font-weight:normal;color:#555;font-size:.9em;margin-left:.6em}figure{margin:1em 0}img{max-width:100%;border:1px solid #ccc;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.15)}figcaption{font-size:.95em;margin-bottom:.4em}details{margin:.5em 0}summary{cursor:pointer;color:#555;font-size:.9em}pre{background:#f6f6f6;padding:.6em .8em;border-radius:4px;font-size:.85em;overflow:auto}.bad{color:#b00020;font-weight:600}</style>
 <h1>Startup harness narrative</h1>
-<p>199 passed, 0 failed. Binary built Sun Nov 22 19:59:32 PST 2026. Every scenario lists its assertions; the ones that change what the pane shows carry a picture of it.</p>
+<p>199 passed, 0 failed. Binary built Sun Nov 22 20:51:12 PST 2026. Every scenario lists its assertions; the ones that change what the pane shows carry a picture of it.</p>
 <section><h2>nogit_undecided<span class="tally">7 ok</span></h2>
 <figure><figcaption>A plain folder, first wake: the chooser at the top of the Transcript (the Workflow card offers to create a repo), the undecided greeting, nothing seeded.</figcaption><img src="01-nogit_undecided-wake.png" alt="wake"></figure>
 <details><summary>assertions</summary><pre>ok   projectFolder.kind == not-git
@@ -50,7 +50,7 @@ ok   mode == workflow
 ok   modeCreatedRepo == true
 ok   repoUnborn == true
 ok   record says workflow
-ok   a session postdates Setup (launched 1795408676693 &gt; setup 1795408674908)
+ok   a session postdates Setup (launched 1795409838278 &gt; setup 1795409836458)
 ok   seeded .bram/.worklist-authorization.json
 ok   seeded .claude/bram-conventions.md
 ok   seeded .claude/settings.json
@@ -80,6 +80,7 @@ ok   second Setup is byte-idempotent
 </pre></details>
 </section>
 <section><h2>subfolder<span class="tally">5 ok</span></h2>
+<figure><figcaption>A folder inside a repo but not its root: refused, named as a subfolder, nothing written; no chooser.</figcaption><img src="04-subfolder-refused.png" alt="refused"></figure>
 <details><summary>assertions</summary><pre>ok   projectFolder.kind is subfolder
 ok   autostart held (subfolder)
 ok   nothing written in src
@@ -88,13 +89,13 @@ ok   nothing written at the repo root
 </pre></details>
 </section>
 <section><h2>pristine_git<span class="tally">38 ok</span></h2>
-<figure><figcaption>Agent chosen and started after Setup: Orient me offered, no Setup banner (the session already has the instructions).</figcaption><img src="04-pristine_git-orient.png" alt="orient"></figure>
+<figure><figcaption>Agent chosen and started after Setup: Orient me offered, no Setup banner (the session already has the instructions).</figcaption><img src="05-pristine_git-orient.png" alt="orient"></figure>
 <details><summary>assertions</summary><pre>ok   auto-setup skipped on first launch: mode undecided
 ok   mode == undecided
 ok   nothing seeded before the choice
 ok   mode == workflow
 ok   lastSetup.source == mode
-ok   a session postdates Setup (launched 1795408688727 &gt; setup 1795408686996)
+ok   a session postdates Setup (launched 1795409854432 &gt; setup 1795409852695)
 ok   modeCreatedRepo == false
 ok   record says workflow
 ok   seeded .bram/.worklist-authorization.json
@@ -138,7 +139,7 @@ ok   record says none
 </pre></details>
 </section>
 <section><h2>stale_instructions<span class="tally">5 ok</span></h2>
-<figure><figcaption>Conventions copy staled by hand: the needs-setup banner names stale instructions (#465).</figcaption><img src="05-stale_instructions-stale.png" alt="stale"></figure>
+<figure><figcaption>Conventions copy staled by hand: the needs-setup banner names stale instructions (#465).</figcaption><img src="06-stale_instructions-stale.png" alt="stale"></figure>
 <details><summary>assertions</summary><pre>ok   claudeNeedsSetup == false
 ok   claudeNeedsSetup == true
 ok   claudeDocsCurrent == false
@@ -147,6 +148,7 @@ ok   setupReasons names stale instructions only
 </pre></details>
 </section>
 <section><h2>antigravity_reasons<span class="tally">12 ok</span></h2>
+<figure><figcaption>Antigravity active, its guard group removed from .agents/hooks.json: the needs-setup banner names the missing hook (the watcher now covers .agents/).</figcaption><img src="07-antigravity_reasons-hook-missing.png" alt="hook-missing"></figure>
 <details><summary>assertions</summary><pre>ok   activeProvider == antigravity
 ok   antigravityNeedsSetup == false
 ok   providerNeedsSetup == false
@@ -190,14 +192,14 @@ ok   no stale legacy hook shims
 </pre></details>
 </section>
 <section><h2>nested<span class="tally">3 ok</span></h2>
-<figure><figcaption>A repo nested under a managed parent: the nesting warning; Setup not run.</figcaption><img src="06-nested-nested.png" alt="nested"></figure>
-<details><summary>assertions</summary><pre>ok   nestedUnder reported (/private/var/folders/9d/ffn1sscs6bgdm20v54qmyth80000gn/T/bram-setup-harness.QHLmGn/nested_parent)
+<figure><figcaption>A repo nested under a managed parent: the nesting warning; Setup not run.</figcaption><img src="08-nested-nested.png" alt="nested"></figure>
+<details><summary>assertions</summary><pre>ok   nestedUnder reported (/private/var/folders/9d/ffn1sscs6bgdm20v54qmyth80000gn/T/bram-setup-harness.L0n17v/nested_parent)
 ok   auto-setup skipped on nested launch
 ok   nested launch not seeded
 </pre></details>
 </section>
 <section><h2>held_mixed<span class="tally">12 ok</span></h2>
-<figure><figcaption>A live board in resources/ beside a file that isn't Bram's: the start holds and asks about the move; the held board still reads.</figcaption><img src="07-held_mixed-held.png" alt="held"></figure>
+<figure><figcaption>A live board in resources/ beside a file that isn't Bram's: the start holds and asks about the move; the held board still reads.</figcaption><img src="09-held_mixed-held.png" alt="held"></figure>
 <details><summary>assertions</summary><pre>ok   projectFolder.kind is state-held
 ok   obstacle is mixed
 ok   autostart held (state-held)
@@ -221,7 +223,7 @@ ok   projectFolder.kind is ok
 </pre></details>
 </section>
 <section><h2>foreign_dot_bram<span class="tally">12 ok</span></h2>
-<figure><figcaption>Another tool's .bram/ with no Bram marker: the start holds (foreign-dot-bram) and writes nothing.</figcaption><img src="08-foreign_dot_bram-held.png" alt="held"></figure>
+<figure><figcaption>Another tool's .bram/ with no Bram marker: the start holds (foreign-dot-bram) and writes nothing.</figcaption><img src="10-foreign_dot_bram-held.png" alt="held"></figure>
 <details><summary>assertions</summary><pre>ok   projectFolder.kind is state-held
 ok   obstacle is foreign-dot-bram
 ok   autostart held (state-held)

@@ -302,10 +302,13 @@
          to know how to proceed, not how to switch back (Jon, 2026-11-22).
          Shown while the folder is in freestyle until read once (the Orient
          me persistence). WORDING is Jon's to settle. -->
+    <!-- pane-follow-ups-from-harness-narrative (Jon, 2026-11-22: "banner
+         not tinted?"): the Setup-complete banner's tint, so the two banners
+         of the first-wake flow read as one family. -->
     <HStack
       when="{!$props.agentId &amp;&amp; !freestyleNoteSeen &amp;&amp; orientStatus.value &amp;&amp; orientStatus.value.mode === 'freestyle'}"
       width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2"
-      paddingHorizontal="$space-4">
+      paddingHorizontal="$space-4" backgroundColor="$color-info-100">
       <Text width="*"
         value="You're freestyling! Talk to the agent in the message box below or in the terminal; this Transcript shows the conversation, Sessions keeps every session, and Search finds anything said before. If you decide you want changes proposed and committed through a Worklist, switch to workflow from the Worklist tab." />
       <Button label="✕" variant="ghost" size="sm"

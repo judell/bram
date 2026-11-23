@@ -53,6 +53,21 @@
   <ChangeListener listenTo="{storyChanged.value &amp;&amp; storyChanged.value.tick}"
     onDidChange="storyTick = storyTick + 1" />
 
+  <!-- log-tells-the-freestyle-session: in a freestyle folder the Log also
+       tells each prompt (from /__turns) and a Session so far line. The turns
+       refetch on agent-turn-end, only in freestyle (`when` gates both the
+       DataSources and the PushSource).
+       https://www.xmlui.org/docs/reference/components/DataSource
+       https://www.xmlui.org/docs/reference/components/ChangeListener -->
+  <DataSource id="enhanceMode" url="/__enhance/status" />
+  <DataSource id="freestyleTurns" url="/__turns" when="{window.__bramStoryFreestyle(enhanceMode.value)}" />
+  <DataSource id="sessionSize" url="/__session-size" when="{window.__bramStoryFreestyle(enhanceMode.value)}" />
+  <DataSource id="logRates" url="/tools/resources/model-rates.json" when="{window.__bramStoryFreestyle(enhanceMode.value)}" />
+  <PushSource id="turnEndEvt" initial="{null}" when="{window.__bramStoryFreestyle(enhanceMode.value)}"
+    subscribe="{window.bramSubscribeTauriEvent('agent-turn-end')}" />
+  <ChangeListener listenTo="{turnEndEvt.value &amp;&amp; turnEndEvt.value.tick}" when="{window.__bramStoryFreestyle(enhanceMode.value)}"
+    onDidChange="freestyleTurns.refetch()" />
+
   <!-- A queue message's screenshot opens full size, as in Transcript.xmlui. -->
   <Theme maxWidth-ModalDialog="95vw">
     <ModalDialog
@@ -77,7 +92,7 @@
          otherwise retain the old expanded array in both bindings and click
          handlers, even while the parent ChangeListener sees the update.
          https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop -->
-    <List id="logList" data="{window.__bramLogRows(window.__bramStoryTell(story.value), expanded, focusId)}" idKey="id">
+    <List id="logList" data="{window.__bramLogRows(window.__bramStoryWithPrompts(window.__bramStoryTell(story.value), freestyleTurns.value, enhanceMode.value, sessionSize.value, logRates.value), expanded, focusId)}" idKey="id">
       <!-- While the story loads, a spinner; once loaded, an empty Log is
            just empty (Jon, 2026-11-07: remove "Nothing to show yet").
            https://www.xmlui.org/docs/reference/components/Spinner -->
@@ -183,14 +198,14 @@
             onClick="expanded = window.__bramLogRowToggle(null, expanded, $item.id)">
             <Theme textColor-Link="$textColor-secondary" textColor-Link--hover="$textColor-primary"
               textColor-Link--active="$textColor-secondary">
-              <Text lineHeight="1.5rem" color="$textColor-secondary" value="{$item.isExpanded ? '▾' : '▸'}" />
+              <Text when="{$item.kind !== 'prompt'}" lineHeight="1.5rem" color="$textColor-secondary" value="{$item.isExpanded ? '▾' : '▸'}" />
             </Theme>
             <Markdown when="{!$item.surprising}" width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             <Theme when="{$item.surprising}" textColor-Text="$color-warn-700">
               <Markdown width="*" lineHeight="1.5rem" content="{$item.text}" openLinkInNewTab="{false}" />
             </Theme>
           </HStack>
-          <VStack when="{$item.isExpanded}" paddingLeft="$space-5" gap="$space-0_5">
+          <VStack when="{$item.isExpanded &amp;&amp; $item.kind !== 'prompt'}" paddingLeft="$space-5" gap="$space-0_5">
             <!-- A skip-worklist turn's own words (the host's outboundTurns),
                  so two such lines can be told apart without opening the
                  Transcript. -->

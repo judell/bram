@@ -51921,6 +51921,82 @@ struct NamedFile {
     path: String,
     repo_path: String,
     image: bool,
+    // How the turn touched it: "wrote" > "ran" > "read" > "named".
+    via: String,
+}
+
+fn st_via_rank(via: &str) -> u8 {
+    match via {
+        "wrote" => 3,
+        "ran" => 2,
+        "read" => 1,
+        _ => 0,
+    }
+}
+
+// Merge a file into a turn's list: first-seen order, strongest `via` kept.
+fn st_merge_named(list: &mut Vec<NamedFile>, f: NamedFile) {
+    if let Some(x) = list.iter_mut().find(|x| x.path == f.path) {
+        if st_via_rank(&f.via) > st_via_rank(&x.via) {
+            x.via = f.via;
+        }
+    } else {
+        list.push(f);
+    }
+}
+
+// How a command touches the word at `i` (a plain scan over one line's
+// whitespace-split words; not a shell parser). `whole` is true when the token
+// is the entire word.
+fn st_command_via(words: &[&str], i: usize, whole: bool) -> &'static str {
+    let w = words[i];
+    let prev = if i > 0 { words[i - 1] } else { "" };
+    let prev2 = if i > 1 { words[i - 2] } else { "" };
+    if matches!(prev, ">" | ">>" | "tee")
+        || (prev == "-a" && prev2 == "tee")
+        || (w.starts_with('>') && !whole)
+    {
+        return "wrote";
+    }
+    let starts_cmd = i == 0 || matches!(prev, "&&" | "||" | "|" | ";") || prev.ends_with(';');
+    if (starts_cmd && whole)
+        || w.starts_with("./")
+        || prev.starts_with("python")
+        || matches!(prev, "node" | "sh" | "bash" | "zsh")
+        || (prev == "run" && prev2 == "uv")
+    {
+        return "ran";
+    }
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        let b = words[j];
+        if b.starts_with('-') || (!b.is_empty() && b.chars().all(|c| c.is_ascii_digit())) {
+            continue;
+        }
+        if matches!(b, "cat" | "head" | "tail" | "less" | "more" | "open") {
+            return "read";
+        }
+        if b == "sed" && words[j + 1..i].contains(&"-n") {
+            return "read";
+        }
+        break;
+    }
+    "named"
+}
+
+fn st_collect_command_tokens(cmd: &str, out: &mut Vec<(String, &'static str)>) {
+    for line in cmd.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            let mut toks = Vec::new();
+            st_collect_file_tokens(w, &mut toks);
+            let whole = toks.len() == 1 && toks[0] == w.trim_end_matches([':', '.', ';', ')']);
+            for t in toks {
+                out.push((t, st_command_via(&words, i, whole)));
+            }
+        }
+    }
 }
 
 // A token names a file when it ends in `.` plus 1-8 alphanumerics, after
@@ -51965,20 +52041,44 @@ fn st_collect_file_tokens_from_value(v: &serde_json::Value, out: &mut Vec<String
 // against `cwd` when present, else root. Canonicalized, so `../` and symlinks
 // cannot escape the root. Deduped by absolute path, first-seen order.
 fn st_project_files_named(
+    name: &str,
     input: &serde_json::Value,
     cwd: Option<&Path>,
     root: &Path,
 ) -> Vec<NamedFile> {
-    let mut tokens: Vec<String> = Vec::new();
+    let mut tokens: Vec<(String, &'static str)> = Vec::new();
     match input {
         serde_json::Value::Object(o) => {
+            let path_via = match name {
+                "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "wrote",
+                "Read" => "read",
+                _ => "named",
+            };
             for key in ["file_path", "path", "command", "cmd", "input"] {
-                if let Some(v) = o.get(key) {
-                    st_collect_file_tokens_from_value(v, &mut tokens);
+                let Some(v) = o.get(key) else { continue };
+                if matches!(key, "file_path" | "path") {
+                    let mut ts = Vec::new();
+                    st_collect_file_tokens_from_value(v, &mut ts);
+                    tokens.extend(ts.into_iter().map(|t| (t, path_via)));
+                } else {
+                    let joined = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Array(a) => a
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        _ => continue,
+                    };
+                    st_collect_command_tokens(&joined, &mut tokens);
                 }
             }
         }
-        other => st_collect_file_tokens_from_value(other, &mut tokens),
+        other => {
+            let mut ts = Vec::new();
+            st_collect_file_tokens_from_value(other, &mut ts);
+            tokens.extend(ts.into_iter().map(|t| (t, "named")));
+        }
     }
     if tokens.is_empty() {
         return Vec::new();
@@ -51986,7 +52086,7 @@ fn st_project_files_named(
     let canon_root = strip_unc_prefix(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
     let base = cwd.unwrap_or(root);
     let mut out: Vec<NamedFile> = Vec::new();
-    for tok in tokens {
+    for (tok, via) in tokens {
         let raw = Path::new(&tok);
         let full = if tok.starts_with('/') || raw.is_absolute() {
             raw.to_path_buf()
@@ -52004,20 +52104,21 @@ fn st_project_files_named(
             continue;
         };
         let path = canon.to_string_lossy().replace('\\', "/");
-        if out.iter().any(|f| f.path == path) {
-            continue;
-        }
         let repo_path = rel.to_string_lossy().replace('\\', "/");
         let image = canon
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| ST_IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
             .unwrap_or(false);
-        out.push(NamedFile {
-            path,
-            repo_path,
-            image,
-        });
+        st_merge_named(
+            &mut out,
+            NamedFile {
+                path,
+                repo_path,
+                image,
+                via: via.to_string(),
+            },
+        );
     }
     out
 }
@@ -52106,10 +52207,8 @@ fn st_parse_lines_to_turns_in(jsonl_text: &str, root: Option<&Path>) -> Vec<serd
                         let summary = st_tool_summary(name, input);
                         if let Some(root) = root {
                             let cwd = r.get("cwd").and_then(|v| v.as_str()).map(Path::new);
-                            for f in st_project_files_named(input, cwd, root) {
-                                if !named_files.iter().any(|x| x.path == f.path) {
-                                    named_files.push(f);
-                                }
+                            for f in st_project_files_named(name, input, cwd, root) {
+                                st_merge_named(&mut named_files, f);
                             }
                         }
                         // promote-tool-descriptions-to-row iterate: the
@@ -52331,10 +52430,8 @@ fn st_parse_lines_to_turns_in(jsonl_text: &str, root: Option<&Path>) -> Vec<serd
                     let summary = st_codex_tool_summary(p);
                     if let Some(root) = root {
                         let input = st_codex_tool_input(p);
-                        for f in st_project_files_named(&input, None, root) {
-                            if !named_files.iter().any(|x| x.path == f.path) {
-                                named_files.push(f);
-                            }
+                        for f in st_project_files_named(&name, &input, None, root) {
+                            st_merge_named(&mut named_files, f);
                         }
                     }
                     let mut command_display = st_codex_tool_command_display(p);
@@ -52606,10 +52703,8 @@ fn st_parse_lines_to_turns_in(jsonl_text: &str, root: Option<&Path>) -> Vec<serd
                 }
                 if let Some(t) = e.get("text").and_then(|v| v.as_str()) {
                     let v = serde_json::Value::String(t.to_string());
-                    for f in st_project_files_named(&v, None, root) {
-                        if !named_files.iter().any(|x| x.path == f.path) {
-                            named_files.push(f);
-                        }
+                    for f in st_project_files_named("", &v, None, root) {
+                        st_merge_named(&mut named_files, f);
                     }
                 }
             }
@@ -121630,7 +121725,7 @@ mod st_project_files_tests {
         let input = serde_json::json!({
             "command": "cat > s.py <<'EOF'\nplt.savefig('figures/a.png')\nEOF\npython s.py /etc/passwd.png"
         });
-        let got = st_project_files_named(&input, None, &root);
+        let got = st_project_files_named("Bash", &input, None, &root);
         assert_eq!(got.len(), 2);
         let png = got.iter().find(|f| f.repo_path == "figures/a.png").unwrap();
         assert!(png.image);
@@ -121648,7 +121743,7 @@ mod st_project_files_tests {
         std::fs::write(root.join("figures/a.png"), b"x").unwrap();
         std::fs::write(root.join("scripts/x.py"), b"x").unwrap();
         let v = serde_json::Value::String("I wrote `scripts/x.py` and `figures/a.png`.".into());
-        let got = st_project_files_named(&v, None, &root);
+        let got = st_project_files_named("", &v, None, &root);
         let repo: Vec<&str> = got.iter().map(|f| f.repo_path.as_str()).collect();
         assert_eq!(repo, vec!["scripts/x.py", "figures/a.png"]);
         let _ = std::fs::remove_dir_all(&root);
@@ -121666,11 +121761,11 @@ mod st_project_files_tests {
         std::fs::write(&outside, b"x").unwrap();
         let sub = root.join("sub");
         let inside = serde_json::json!({ "command": "ls ../figures/a.png" });
-        let got = st_project_files_named(&inside, Some(&sub), &root);
+        let got = st_project_files_named("Bash", &inside, Some(&sub), &root);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].path, canon(&root.join("figures/a.png")));
         let esc = serde_json::json!({ "command": format!("ls ../../{}", outside.file_name().unwrap().to_string_lossy()) });
-        assert!(st_project_files_named(&esc, Some(&sub), &root).is_empty());
+        assert!(st_project_files_named("Bash", &esc, Some(&sub), &root).is_empty());
         let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -121681,10 +121776,36 @@ mod st_project_files_tests {
             path: "/p/figures/a.png".into(),
             repo_path: "figures/a.png".into(),
             image: true,
+            via: "wrote".into(),
         };
         assert_eq!(
             serde_json::to_string(&f).unwrap(),
-            r#"{"path":"/p/figures/a.png","repoPath":"figures/a.png","image":true}"#
+            r#"{"path":"/p/figures/a.png","repoPath":"figures/a.png","image":true,"via":"wrote"}"#
         );
+    }
+
+    #[test]
+    fn st_project_files_via_from_one_bash_heredoc() {
+        let root = temp_root("via");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("figures/a.png"), b"x").unwrap();
+        std::fs::write(root.join("scripts/plot.py"), b"x").unwrap();
+        std::fs::write(root.join("data/survey.csv"), b"x").unwrap();
+        let input = serde_json::json!({
+            "command": "mkdir -p figures && cat > scripts/plot.py <<'EOF'\nimport matplotlib.pyplot as plt\nplt.savefig('figures/a.png')\nEOF\npython3 scripts/plot.py && head data/survey.csv"
+        });
+        let got = st_project_files_named("Bash", &input, None, &root);
+        let via = |p: &str| got.iter().find(|f| f.repo_path == p).unwrap().via.clone();
+        assert_eq!(via("scripts/plot.py"), "wrote");
+        assert_eq!(via("figures/a.png"), "named");
+        assert_eq!(via("data/survey.csv"), "read");
+        let ran = serde_json::json!({ "command": "python3 scripts/plot.py" });
+        let got = st_project_files_named("Bash", &ran, None, &root);
+        assert_eq!(got[0].via, "ran");
+        let rd = serde_json::json!({ "file_path": "figures/a.png" });
+        let got = st_project_files_named("Read", &rd, None, &root);
+        assert_eq!(got[0].via, "read");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

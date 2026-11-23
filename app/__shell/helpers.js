@@ -19088,6 +19088,95 @@ window.__bramLogRows = function (entries, expanded, focusId) {
     });
   });
 };
+// Freestyle Log (log-tells-the-freestyle-session): prompts and a session line
+// told from /__turns, the footer's context block and the rates. All of these
+// read only their arguments.
+window.__bramStoryFreestyle = function (status) {
+  return !!status && status.mode === "freestyle";
+};
+window.__bramStoryJoin = function (list) {
+  if (list.length < 2) return list.join("");
+  return list.slice(0, -1).join(", ") + " and " + list[list.length - 1];
+};
+window.__bramStoryPromptLines = function (turnsPayload) {
+  var turns = (turnsPayload && turnsPayload.turns) || [];
+  var out = [];
+  for (var i = 0; i < turns.length; i++) {
+    var u = turns[i];
+    var text = u && u.role === "user" && typeof u.text === "string" ? u.text.trim() : "";
+    if (!text) continue;
+    // A host-written note leads a user turn ([bram: …]); it is not the prompt.
+    text = text.replace(/^\[bram:[^\]]*\]\s*/, "").trim();
+    // A skill's own record ("Base directory for this skill: …") rides as a
+    // user turn; nobody typed it.
+    if (!text || text.indexOf("Base directory for this skill") === 0) continue;
+    // One row per file across the prompt's turns, keeping the strongest way
+    // it was touched (a script written then run is "wrote").
+    var rank = { wrote: 3, ran: 2, read: 1 };
+    var calls = 0, strongest = {}, order = [];
+    for (var j = i + 1; j < turns.length && turns[j].role !== "user"; j++) {
+      if (turns[j].role !== "assistant") continue;
+      calls++;
+      (turns[j].files || []).forEach(function (f) {
+        if (!rank[f.via]) return;
+        if (!strongest[f.repoPath]) order.push(f.repoPath);
+        if (!strongest[f.repoPath] || rank[f.via] > rank[strongest[f.repoPath]]) strongest[f.repoPath] = f.via;
+      });
+    }
+    var by = { read: [], ran: [], wrote: [] };
+    order.forEach(function (p) { by[strongest[p]].push(p); });
+    var first = text.split("\n")[0];
+    if (first.length > 80) first = first.slice(0, 80) + "…";
+    var parts = [];
+    ["read", "ran", "wrote"].forEach(function (v) {
+      if (by[v].length) parts.push(v + " " + window.__bramStoryJoin(by[v]));
+    });
+    var sentence = "“" + first + "”. " + (parts.length ? parts.join(", ") : "read, ran and wrote nothing") + ". " + calls + (calls === 1 ? " call." : " calls.");
+    var t = Date.parse(u.ts);
+    var d = new Date(t);
+    out.push({
+      id: "prompt-" + u.ts, kind: "prompt", t: t, surprising: false, text: sentence,
+      at: ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2),
+    });
+  }
+  return out;
+};
+window.__bramStorySessionLine = function (contextBlock, rates, turnsPayload, topT) {
+  var turns = (turnsPayload && turnsPayload.turns) || [];
+  var prompts = 0, wrote = {}, nWrote = 0;
+  turns.forEach(function (x) {
+    if (x.role === "user" && typeof x.text === "string" && x.text.trim()) prompts++;
+    (x.files || []).forEach(function (f) {
+      if (f.via === "wrote" && !wrote[f.repoPath]) { wrote[f.repoPath] = true; nWrote++; }
+    });
+  });
+  var ctx = contextBlock && contextBlock.context;
+  if (!ctx || !prompts) return null;
+  var K = window.__bramTokenK;
+  var s = "Session so far: " + prompts + (prompts === 1 ? " prompt, " : " prompts, ") + ctx.calls + (ctx.calls === 1 ? " call, " : " calls, ") +
+    nWrote + (nWrote === 1 ? " file written" : " files written");
+  if (typeof ctx.floor === "number") s += ", context from " + K(ctx.floor) + " to " + K(ctx.tokens);
+  var row = window.__bramModelRatesRow(rates, ctx.model);
+  if (row && typeof ctx.calls === "number" && typeof ctx.tokens === "number") {
+    // The context grew from the floor to now over the session, so price each
+    // call at the midpoint rather than at today's size; it is an estimate.
+    var mid = typeof ctx.floor === "number" ? (ctx.floor + ctx.tokens) / 2 : ctx.tokens;
+    var cost = ctx.calls * mid * row.cacheRead / 1e6;
+    s += ", about $" + cost.toFixed(2) + " at list prices for " + ctx.model;
+  }
+  return { id: "session-so-far", kind: "prompt", t: topT, at: "", surprising: false, text: s + "." };
+};
+window.__bramStoryWithPrompts = function (entries, turnsPayload, status, contextBlock, rates) {
+  if (!window.__bramStoryFreestyle(status)) return entries;
+  var lines = window.__bramStoryPromptLines(turnsPayload);
+  var top = 0;
+  (entries || []).concat(lines).forEach(function (e) { if (e.t > top) top = e.t; });
+  var sess = window.__bramStorySessionLine(contextBlock, rates, turnsPayload, top + 1);
+  var all = (entries || []).concat(lines);
+  if (sess) all.push(sess);
+  all.sort(function (a, b) { return b.t - a.t; });
+  return all;
+};
 // The Log's deep link (/log?focus=<row id>): a queue-send row's sentence
 // links to the queue-add row for the message it sent. The focused row is
 // expanded (__bramLogFocusExpand), scrolled to (List.scrollToId) and tinted.

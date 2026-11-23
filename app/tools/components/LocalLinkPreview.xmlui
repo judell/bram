@@ -27,8 +27,13 @@
           when="{localLinkPreviewEvt.value &amp;&amp; localLinkPreviewEvt.value.renderMode === 'loading'}"
           color="$textColor-secondary"
           value="Loading..." />
+        <Image
+          when="{localLinkPreviewEvt.value &amp;&amp; localLinkPreviewEvt.value.renderMode === 'image'}"
+          src="{window.imageSrcForPath(localLinkPreviewEvt.value.path)}"
+          maxHeight="70vh"
+          fit="contain" />
         <Markdown
-          when="{localLinkPreviewEvt.value &amp;&amp; localLinkPreviewEvt.value.renderMode !== 'loading'}"
+          when="{localLinkPreviewEvt.value &amp;&amp; localLinkPreviewEvt.value.renderMode !== 'loading' &amp;&amp; localLinkPreviewEvt.value.renderMode !== 'image'}"
           overflowMode="{window.__bramLocalLinkPreviewOverflow(localLinkPreviewEvt.value)}"
           content="{window.__bramFormatLocalLinkPreview(localLinkPreviewEvt.value)}"
           interpolateBindings="false" allowHtml="false" />

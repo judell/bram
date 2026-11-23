@@ -48011,7 +48011,7 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
         None => "",
     };
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let turns = st_parse_lines_to_turns(&text);
+    let turns = st_parse_lines_to_turns_in(&text, project_root(Some(app)).as_deref());
 
     // last_assistant_text sub-payload
     let mut last_assistant = String::new();
@@ -51907,6 +51907,122 @@ fn st_strip_control_chars(s: &str) -> String {
 }
 
 fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
+    st_parse_lines_to_turns_in(jsonl_text, None)
+}
+
+const ST_IMAGE_EXTS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "svg", "webp"];
+
+// transcript-shows-produced-images: a project file a turn named, for the
+// Transcript's per-file expander row. `path` is absolute (`/`-folded),
+// `repo_path` is relative to the canonical project root.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct NamedFile {
+    path: String,
+    repo_path: String,
+    image: bool,
+}
+
+// A token names a file when it ends in `.` plus 1-8 alphanumerics, after
+// stripping trailing `:` `.` `;` `)`.
+fn st_token_has_extension(tok: &str) -> bool {
+    let t = tok.trim_end_matches([':', '.', ';', ')']);
+    match t.rfind('.') {
+        Some(i) => {
+            let ext = &t[i + 1..];
+            !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
+}
+
+fn st_collect_file_tokens(text: &str, out: &mut Vec<String>) {
+    for tok in
+        text.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '`' | '(' | ')' | ','))
+    {
+        let t = tok.trim_end_matches([':', '.', ';', ')']);
+        if !t.is_empty() && st_token_has_extension(tok) {
+            out.push(t.to_string());
+        }
+    }
+}
+
+fn st_collect_file_tokens_from_value(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => st_collect_file_tokens(s, out),
+        serde_json::Value::Array(a) => {
+            for x in a {
+                st_collect_file_tokens_from_value(x, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+// Files a tool input (a Write/Edit/Read `file_path`, a Bash `command`, a
+// Codex call's arguments) or an assistant text string (a `Value::String`)
+// names that exist as files under the project root. Relative tokens resolve
+// against `cwd` when present, else root. Canonicalized, so `../` and symlinks
+// cannot escape the root. Deduped by absolute path, first-seen order.
+fn st_project_files_named(
+    input: &serde_json::Value,
+    cwd: Option<&Path>,
+    root: &Path,
+) -> Vec<NamedFile> {
+    let mut tokens: Vec<String> = Vec::new();
+    match input {
+        serde_json::Value::Object(o) => {
+            for key in ["file_path", "path", "command", "cmd", "input"] {
+                if let Some(v) = o.get(key) {
+                    st_collect_file_tokens_from_value(v, &mut tokens);
+                }
+            }
+        }
+        other => st_collect_file_tokens_from_value(other, &mut tokens),
+    }
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let canon_root = strip_unc_prefix(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+    let base = cwd.unwrap_or(root);
+    let mut out: Vec<NamedFile> = Vec::new();
+    for tok in tokens {
+        let raw = Path::new(&tok);
+        let full = if tok.starts_with('/') || raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            base.join(raw)
+        };
+        let Ok(canon) = full.canonicalize() else {
+            continue;
+        };
+        let canon = strip_unc_prefix(canon);
+        if !canon.is_file() || !canon.starts_with(&canon_root) {
+            continue;
+        }
+        let Ok(rel) = canon.strip_prefix(&canon_root) else {
+            continue;
+        };
+        let path = canon.to_string_lossy().replace('\\', "/");
+        if out.iter().any(|f| f.path == path) {
+            continue;
+        }
+        let repo_path = rel.to_string_lossy().replace('\\', "/");
+        let image = canon
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| ST_IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+            .unwrap_or(false);
+        out.push(NamedFile {
+            path,
+            repo_path,
+            image,
+        });
+    }
+    out
+}
+
+fn st_parse_lines_to_turns_in(jsonl_text: &str, root: Option<&Path>) -> Vec<serde_json::Value> {
     let mut turns: Vec<serde_json::Value> = Vec::new();
     // tool_entry_locations maps tool_use_id → (turn_idx, entry_idx) so
     // tool_result records can backfill errored/errorText on the
@@ -51959,6 +52075,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
         let mut role: Option<&str> = None;
         let mut entries: Vec<serde_json::Value> = Vec::new();
         let mut inline_images: Vec<String> = Vec::new();
+        let mut named_files: Vec<NamedFile> = Vec::new();
 
         if typ == "user" || typ == "assistant" {
             let Some(content) = r.get("message").and_then(|m| m.get("content")) else {
@@ -51987,6 +52104,14 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                         let empty = serde_json::json!({});
                         let input = c_obj.get("input").unwrap_or(&empty);
                         let summary = st_tool_summary(name, input);
+                        if let Some(root) = root {
+                            let cwd = r.get("cwd").and_then(|v| v.as_str()).map(Path::new);
+                            for f in st_project_files_named(input, cwd, root) {
+                                if !named_files.iter().any(|x| x.path == f.path) {
+                                    named_files.push(f);
+                                }
+                            }
+                        }
                         // promote-tool-descriptions-to-row iterate: the
                         // command words behind a Bash call ("grep" /
                         // "rg, sed, grep"), so the row reads
@@ -52204,6 +52329,14 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                     let name = st_codex_tool_name(p);
                     let summary = st_codex_tool_summary(p);
+                    if let Some(root) = root {
+                        let input = st_codex_tool_input(p);
+                        for f in st_project_files_named(&input, None, root) {
+                            if !named_files.iter().any(|x| x.path == f.path) {
+                                named_files.push(f);
+                            }
+                        }
+                    }
                     let mut command_display = st_codex_tool_command_display(p);
                     let mut description = String::new();
                     if p.get("name").and_then(|v| v.as_str()) == Some("wait") {
@@ -52466,6 +52599,21 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
         } else {
             paths_from_text
         };
+        if let (Some(root), "assistant") = (root, role) {
+            for e in &entries {
+                if e.get("kind").and_then(|v| v.as_str()) != Some("text") {
+                    continue;
+                }
+                if let Some(t) = e.get("text").and_then(|v| v.as_str()) {
+                    let v = serde_json::Value::String(t.to_string());
+                    for f in st_project_files_named(&v, None, root) {
+                        if !named_files.iter().any(|x| x.path == f.path) {
+                            named_files.push(f);
+                        }
+                    }
+                }
+            }
+        }
 
         if st_is_duplicate_adjacent_turn(&turns, role, &text_joined, &entries, &images) {
             continue;
@@ -52476,6 +52624,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             "text": text_joined,
             "entries": entries,
             "images": images,
+            "files": named_files,
         });
         // log-rows-baseline-and-spacing: when the record was written (Claude
         // and Codex both stamp a top-level ISO timestamp), so a Log entry can
@@ -61622,7 +61771,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
     if update_ledger {
         update_send_ledger_from_slice(app, &text, text_base_offset, None);
     }
-    let mut tail_turns = st_parse_lines_to_turns(&text);
+    let mut tail_turns = st_parse_lines_to_turns_in(&text, project_root(Some(app)).as_deref());
     project_user_turns(app, &mut tail_turns);
     st_tag_agent_tool_entries(path, &mut tail_turns);
     st_report_orphan_subagents(app, path, &tail_turns);
@@ -61865,7 +62014,7 @@ fn read_projected_turns<R: tauri::Runtime>(
         update_send_ledger(app, &text, None);
     }
     let parse_started = std::time::Instant::now();
-    let mut turns = st_parse_lines_to_turns(&text);
+    let mut turns = st_parse_lines_to_turns_in(&text, project_root(Some(app)).as_deref());
     let parse_ms = parse_started.elapsed().as_millis();
     let project_started = std::time::Instant::now();
     project_user_turns(app, &mut turns);
@@ -93746,6 +93895,32 @@ fn route_request<R: tauri::Runtime>(
             if !meta.is_file() {
                 return Err("Not a regular file.".to_string());
             }
+            let is_image = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| ST_IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+                .unwrap_or(false);
+            if is_image {
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("File")
+                    .to_string();
+                let repo_path = path
+                    .strip_prefix(&root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned());
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "path": path.to_string_lossy(),
+                    "displayPath": path.to_string_lossy(),
+                    "repoPath": repo_path,
+                    "name": name,
+                    "title": name,
+                    "renderMode": "image",
+                    "size": meta.len()
+                }));
+            }
             let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
             let mut bytes = Vec::new();
             let mut limited = (&mut file).take(max_bytes + 1);
@@ -121424,5 +121599,92 @@ mod landed_by_merge_tests {
         let (dir, paths) = repo_with_merge("Merge\n\nItem: my-item", true);
         assert!(landed_by_merge_in(&dir, SINCE_ALL, "my-item", &paths, &|_| true).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod st_project_files_tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "bram-st-project-files-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("figures")).unwrap();
+        d
+    }
+
+    fn canon(p: &Path) -> String {
+        strip_unc_prefix(p.canonicalize().unwrap())
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    #[test]
+    fn st_project_files_bash_heredoc_names_script_and_figure() {
+        let root = temp_root("bash");
+        std::fs::write(root.join("figures/a.png"), b"x").unwrap();
+        std::fs::write(root.join("s.py"), b"x").unwrap();
+        let input = serde_json::json!({
+            "command": "cat > s.py <<'EOF'\nplt.savefig('figures/a.png')\nEOF\npython s.py /etc/passwd.png"
+        });
+        let got = st_project_files_named(&input, None, &root);
+        assert_eq!(got.len(), 2);
+        let png = got.iter().find(|f| f.repo_path == "figures/a.png").unwrap();
+        assert!(png.image);
+        assert_eq!(png.path, canon(&root.join("figures/a.png")));
+        let py = got.iter().find(|f| f.repo_path == "s.py").unwrap();
+        assert!(!py.image);
+        assert!(!got.iter().any(|f| f.path.contains("passwd")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn st_project_files_assistant_text_code_spans() {
+        let root = temp_root("text");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("figures/a.png"), b"x").unwrap();
+        std::fs::write(root.join("scripts/x.py"), b"x").unwrap();
+        let v = serde_json::Value::String("I wrote `scripts/x.py` and `figures/a.png`.".into());
+        let got = st_project_files_named(&v, None, &root);
+        let repo: Vec<&str> = got.iter().map(|f| f.repo_path.as_str()).collect();
+        assert_eq!(repo, vec!["scripts/x.py", "figures/a.png"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn st_project_files_dotdot_accepted_only_within_root() {
+        let root = temp_root("dotdot");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("figures/a.png"), b"x").unwrap();
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("bram-outside-{}.png", std::process::id()));
+        std::fs::write(&outside, b"x").unwrap();
+        let sub = root.join("sub");
+        let inside = serde_json::json!({ "command": "ls ../figures/a.png" });
+        let got = st_project_files_named(&inside, Some(&sub), &root);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, canon(&root.join("figures/a.png")));
+        let esc = serde_json::json!({ "command": format!("ls ../../{}", outside.file_name().unwrap().to_string_lossy()) });
+        assert!(st_project_files_named(&esc, Some(&sub), &root).is_empty());
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn st_project_files_wire_shape() {
+        let f = NamedFile {
+            path: "/p/figures/a.png".into(),
+            repo_path: "figures/a.png".into(),
+            image: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&f).unwrap(),
+            r#"{"path":"/p/figures/a.png","repoPath":"figures/a.png","image":true}"#
+        );
     }
 }

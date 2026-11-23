@@ -16532,6 +16532,11 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu, turnEnd) {
       if (t.images && t.images.length) {
         slice.push({ id: baseId + "-images", kind: "images", role: t.role || "", images: t.images });
       }
+      // transcript-shows-produced-images: project files the turn named, one
+      // expander row each (Transcript.xmlui kind === "files").
+      if (Array.isArray(t.files) && t.files.length) {
+        slice.push({ id: baseId + "-files", kind: "files", role: t.role || "", files: t.files });
+      }
       // log-rows-baseline-and-spacing: the turn's time (the host's `ts`) on
       // its first event, so a Log entry's link can find the turn at its
       // moment (__bramTranscriptIndexAt).
@@ -19159,6 +19164,33 @@ window.__bramToggleInArray = function (arr, id) {
   arr = arr || [];
   if (arr.indexOf(id) >= 0) return arr.filter(function (x) { return x !== id; });
   return arr.concat([id]);
+};
+
+// transcript-shows-produced-images: whether a file row's path is open in the
+// Transcript's openFiles array. Reads only its arguments.
+window.__bramFileOpen = function (arr, path) {
+  return !!arr && arr.indexOf(path) >= 0;
+};
+// The row's label: a disclosure mark and the root-relative path. Reads only
+// its arguments.
+// A turn naming more than one file folds them under "Files (n)", closed at
+// first; a single file shows its row directly. All three read only their
+// arguments.
+window.__bramFilesGroupCollapsible = function (files) {
+  return Array.isArray(files) && files.length > 1;
+};
+window.__bramFilesGroupShown = function (arr, id, files) {
+  if (!Array.isArray(files) || files.length <= 1) return true;
+  return !!arr && arr.indexOf(id) >= 0;
+};
+window.__bramFilesGroupLabel = function (arr, id, files) {
+  var n = Array.isArray(files) ? files.length : 0;
+  var open = !!arr && arr.indexOf(id) >= 0;
+  return (open ? "\u25be " : "\u25b8 ") + "Files (" + n + ")";
+};
+window.__bramFileRowLabel = function (arr, f) {
+  var open = !!arr && !!f && arr.indexOf(f.path) >= 0;
+  return (open ? "\u25be " : "\u25b8 ") + ((f && (f.repoPath || f.path)) || "");
 };
 
 // Tasks page (issue-483-task-candidates-report; tasks-page-prioritizes,

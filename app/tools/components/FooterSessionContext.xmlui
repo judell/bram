@@ -15,12 +15,22 @@
        the host (Jon, 2026-11-23). Served from the pane's own tree, so the
        path is absolute within the xmlui:// origin. -->
   <DataSource id="modelRates" url="/tools/resources/model-rates.json" />
+  <!-- The footer's current session, for ignoring a reading that names
+       another (Main's footerSessions, mirrored here to keep Main untouched). -->
+  <DataSource id="ctxSessions" url="/__sessions/list" queryParams="{{ limit: 20 }}" />
+  <PushSource
+    id="ctxSessionsChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
+  <ChangeListener
+    listenTo="{ctxSessionsChangedEvt.value &amp;&amp; ctxSessionsChangedEvt.value.tick}"
+    onDidChange="() => { ctxSessions.refetch(); }" />
   <PushSource
     id="sessionContextEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('session-context-changed')}" />
   <HStack
-    when="{!!window.__bramSessionContextLine(window.__bramSessionContextPick(sessionContextEvt.value, sessionSize.value &amp;&amp; sessionSize.value.context))}"
+    when="{!!window.__bramSessionContextLine(window.__bramSessionContextPick(sessionContextEvt.value, sessionSize.value &amp;&amp; sessionSize.value.context, window.__bramSessionContextKey(window.__bramCurrentSessionOf(ctxSessions.value))))}"
     gap="$space-1"
     wrapContent="true"
     verticalAlignment="center">
@@ -28,7 +38,7 @@
       gap="$space-1"
       wrapContent="true"
       verticalAlignment="center"
-      var.ctx="{window.__bramSessionContextPick(sessionContextEvt.value, sessionSize.value &amp;&amp; sessionSize.value.context)}"
+      var.ctx="{window.__bramSessionContextPick(sessionContextEvt.value, sessionSize.value &amp;&amp; sessionSize.value.context, window.__bramSessionContextKey(window.__bramCurrentSessionOf(ctxSessions.value)))}"
       var.dismissedBoundaryMs="{0}"
       var.infoKey="{''}">
       <!-- Each figure carries a little-i that opens a modal explaining it,

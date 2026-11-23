@@ -29676,6 +29676,7 @@ fn resync_transcript_to_session<R: tauri::Runtime>(
     // read in the talk emit below — so the `[current]` flag and meta lines
     // update promptly instead of waiting for the file watcher to notice.
     emit_replayable_signal(app, "sessions-list-changed");
+    emit_session_context_for_session_change(app);
     emit_talk_session_changed_for_provider(app, Some(provider));
 }
 
@@ -30255,6 +30256,7 @@ fn apply_pending_session_title<R: tauri::Runtime>(
                     );
                 }
                 emit_replayable_signal(app, "sessions-list-changed");
+                emit_session_context_for_session_change(app);
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         app,
@@ -54435,6 +54437,10 @@ fn live_at_for<R: tauri::Runtime>(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionContextBlock {
+    /// `<provider>:<id>`, the spelling `/__token-accounting?session=` takes;
+    /// empty when the host can't name the session. The pane ignores a
+    /// pushed reading whose session isn't the one on its footer.
+    session: String,
     tokens: u64,
     floor: u64,
     peak: u64,
@@ -54458,6 +54464,15 @@ fn suggest_at_context_tokens<R: tauri::Runtime>(app: &AppHandle<R>) -> u64 {
         .unwrap_or(SUGGEST_AT_CONTEXT_TOKENS_DEFAULT)
 }
 
+fn session_context_key<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider_label: &str,
+) -> Option<String> {
+    let provider = current_provider(app)?;
+    let id = live_session_id(app, provider)?;
+    Some(format!("{provider_label}:{id}"))
+}
+
 fn session_context_block<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider_label: &str,
@@ -54477,6 +54492,7 @@ fn session_context_block<R: tauri::Runtime>(
         token_accounting::since_boundary(&lc.timeline, &windows);
     let suggest_tokens = suggest_at_context_tokens(app);
     let block = SessionContextBlock {
+        session: session_context_key(app, provider_label).unwrap_or_default(),
         tokens: lc.tokens,
         floor: lc.floor,
         peak: lc.peak,
@@ -54508,6 +54524,89 @@ fn emit_session_context_changed<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     }
     emit_replayable_payload(app, "session-context-changed", block);
+}
+
+/// The payload for a session change: the block when the new session has
+/// calls, else `{ session, tokens: null }` so the pane drops the previous
+/// session's reading. `None` when the host can't name the session.
+fn session_context_change_payload<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider_label: &str,
+) -> Option<serde_json::Value> {
+    let block = session_context_block(app, provider_label);
+    if !block.is_null() {
+        return Some(block);
+    }
+    let session = session_context_key(app, provider_label)?;
+    Some(serde_json::json!({ "session": session, "tokens": null }))
+}
+
+/// Emit `session-context-changed` when the ACTIVE session changes (a
+/// resume or a new session adopted), so a replayed reading for the old
+/// session never stands in for the new one.
+fn emit_session_context_for_session_change<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(provider_label) = current_provider(app).map(session_provider_label) else {
+        return;
+    };
+    let Some(payload) = session_context_change_payload(app, provider_label) else {
+        return;
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "session-context",
+            &format!(
+                "op=session-change session={} tokens={}",
+                payload["session"].as_str().unwrap_or(""),
+                payload["tokens"]
+            ),
+        );
+    }
+    emit_replayable_payload(app, "session-context-changed", payload);
+}
+
+#[cfg(test)]
+mod session_context_wire_tests {
+    use super::*;
+
+    #[test]
+    fn session_context_block_names_its_session_in_the_wire_shape() {
+        let block = SessionContextBlock {
+            session: "claude:abc-123".to_string(),
+            tokens: 1,
+            floor: 2,
+            peak: 3,
+            compactions: 4,
+            calls: 5,
+            since_boundary_tokens: 6,
+            since_boundary_calls: 7,
+            boundary_at_ms: 8,
+            model: "m".to_string(),
+            suggest_tokens: 9,
+            state: "note",
+        };
+        let v = serde_json::to_value(block).unwrap();
+        assert_eq!(v["session"], "claude:abc-123");
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "boundaryAtMs",
+                "calls",
+                "compactions",
+                "floor",
+                "model",
+                "peak",
+                "session",
+                "sinceBoundaryCalls",
+                "sinceBoundaryTokens",
+                "state",
+                "suggestTokens",
+                "tokens"
+            ]
+        );
+    }
 }
 
 // (delete-phase tranche 1, #214: /__session-turns and its dedicated

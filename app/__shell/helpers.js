@@ -22092,12 +22092,29 @@ window.__bramSuggestContextTokens = function (v) {
 
 // session-context-pane: the footer's context figure (FooterSessionContext).
 // Pure helpers; each reads only its arguments.
-window.__bramSessionContextPick = function (pushValue, routeValue) {
+window.__bramSessionContextPick = function (pushValue, routeValue, currentSession) {
+  var route = routeValue && typeof routeValue === "object" ? routeValue : null;
   if (pushValue && typeof pushValue === "object") {
     var p = pushValue.payload !== undefined ? pushValue.payload : pushValue;
-    if (p && typeof p === "object" && typeof p.tokens === "number") return p;
+    if (p && typeof p === "object") {
+      // A reading for another session is stale (replayed after a switch).
+      var other = typeof p.session === "string" && p.session && typeof currentSession === "string" && currentSession && p.session !== currentSession;
+      if (!other) {
+        if (typeof p.tokens === "number") return p;
+        // tokens: null for this session means no reading yet; a route value
+        // naming a different session is the old one's.
+        if (p.tokens === null && typeof p.session === "string" && p.session) {
+          return route && route.session === p.session ? route : null;
+        }
+      }
+    }
   }
-  return routeValue && typeof routeValue === "object" ? routeValue : null;
+  return route;
+};
+// The footer's current session as `<provider>:<id>`, the spelling pushed
+// readings carry; "" when there is none.
+window.__bramSessionContextKey = function (s) {
+  return s && s.provider && s.id ? s.provider + ":" + s.id : "";
 };
 window.__bramSessionContextTitle = function (s) {
   return (s && s.title) || "";

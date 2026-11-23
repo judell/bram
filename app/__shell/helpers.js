@@ -22235,6 +22235,78 @@ window.__bramSessionContextLead = function (key, ctx, rates) {
   if (gap === 0) return where;
   return where + " Switching to a new session will save you about **" + K(gap) + " tokens" + dollars + "** on every call.";
 };
+// accounting-actionable-units: the saving in the units a person works in.
+// Pure: reads only its arguments. ctx is { tokens, floor, model, pace };
+// byModel is constrained.byModel from the full report or null (footer).
+// Every row carries the ratio to a fresh call; dollars are list prices.
+window.__bramContextSavingRows = function (ctx, rates, byModel) {
+  if (!ctx || typeof ctx.tokens !== "number" || typeof ctx.floor !== "number" || ctx.floor <= 0 || ctx.tokens <= ctx.floor) return [];
+  var row = window.__bramModelRatesRow(rates, ctx.model);
+  if (!row) return [];
+  var per = ctx.tokens - ctx.floor;
+  var ratio = Math.round((ctx.tokens / ctx.floor) * 10) / 10;
+  var usd = function (tokens, rate) {
+    if (!rate) return "nothing";
+    var d = (tokens / 1e6) * rate;
+    return d < 0.01 ? "under a cent" : "$" + (d < 10 ? d.toFixed(2) : Math.round(d));
+  };
+  var mk = function (unit, calls, note) {
+    return { unit: unit, calls: calls, tokens: per * calls, usd: usd(per * calls, row.cacheRead), ratio: ratio, note: note || "" };
+  };
+  var out = [mk("one call", 1)];
+  var pace = ctx.pace;
+  if (pace && pace.callsPerTurn > 0) out.push(mk("one turn at this session's pace", pace.callsPerTurn));
+  if (pace && pace.callsPerActiveHour > 0) out.push(mk("one active hour at this session's pace", pace.callsPerActiveHour));
+  var mrow = null;
+  var arr = Array.isArray(byModel) ? byModel : [];
+  var id = (rates && rates.aliases && rates.aliases[ctx.model]) || ctx.model;
+  for (var i = 0; i < arr.length; i++) {
+    if (arr[i] && (arr[i].model === ctx.model || arr[i].model === id)) { mrow = arr[i]; break; }
+  }
+  var ic = mrow && mrow.itemCalls;
+  if (ic && ic.items > 0) {
+    if (ic.p50 > 0) out.push(mk("a median item on this machine", ic.p50));
+    if (ic.p90 > 0) out.push(mk("a p90 item on this machine", ic.p90));
+  }
+  if (typeof row.cacheWrite5m === "number" && row.cacheWrite5m > 0) {
+    var cost = (ctx.floor / 1e6) * row.cacheWrite5m;
+    var perCall = (per / 1e6) * row.cacheRead;
+    var n = perCall > 0 ? Math.ceil(cost / perCall) : 0;
+    out.push({
+      unit: "the switch itself (one cache write of the floor)", calls: 0, tokens: ctx.floor,
+      usd: usd(ctx.floor, row.cacheWrite5m), ratio: ratio,
+      note: n > 0 ? "repaid in " + n + (n === 1 ? " call" : " calls") : ""
+    });
+  }
+  return out;
+};
+window.__bramContextSavingMarkdown = function (ctx, rates, byModel) {
+  var rows = window.__bramContextSavingRows(ctx, rates, byModel);
+  if (!rows.length) return "";
+  var K = function (n) { return n >= 1e6 ? window.__bramTokenM(n) : window.__bramTokenK(n); };
+  var calls = function (n) { return n >= 10 ? String(Math.round(n)) : String(Math.round(n * 10) / 10); };
+  // The ratio is the same on every row, so it is said once, in the closing
+  // sentence that needs it, rather than repeated down a column (Jon,
+  // 2026-11-23: "what ratio? none shown").
+  var lines = ["| unit | calls | tokens saved | at list prices |", "|---|---|---|---|"];
+  rows.forEach(function (r) {
+    var isSwitch = r.calls === 0;
+    lines.push("| " + r.unit + " | " + (isSwitch ? "—" : calls(r.calls)) + " | " +
+      (isSwitch ? "costs " : "") + K(r.tokens) + " | " + r.usd + (r.note ? " (" + r.note + ")" : "") + " |");
+  });
+  lines.push("");
+  lines.push(
+    "On a subscription these dollars are usage against your plan, not a bill. What holds either way is the proportion: each call here re-reads **" +
+      rows[0].ratio.toFixed(1) + "×** what a fresh one would."
+  );
+  return lines.join("\n");
+};
+// The context block's shape, built from a /__token-accounting session row.
+window.__bramContextFromSessionRow = function (row) {
+  if (!row || !row.context) return null;
+  var models = row.models || [];
+  return { tokens: row.context.last, floor: row.context.first, model: models.length ? models[models.length - 1] : "", pace: row.pace || null };
+};
 window.__bramSessionContextInfoBody = function (key, ctx, rates) {
   var K = window.__bramTokenK;
   var num = function (n) { return typeof n === "number" && isFinite(n) ? K(n) : "—"; };
@@ -22267,8 +22339,8 @@ window.__bramSessionContextInfoBody = function (key, ctx, rates) {
   } else {
     out += "The fresh-session offer is off in Settings (the limit is 0).";
   }
-  var cost = window.__bramSessionContextCost(ctx, rates);
-  if (cost) out += "\n\n" + cost;
+  var saving = window.__bramContextSavingMarkdown(ctx, rates, null);
+  if (saving) out += "\n\n**What a new session saves**, at list prices for `" + ctx.model + "`:\n\n" + saving;
   out += "\n\nThe KB figure beside the session name is the transcript file on disk. It only grows, so it says how much there is to find and search, not what a call costs.";
   return out;
 };

@@ -2397,3 +2397,90 @@ fn a_bodiless_mod_declaration_is_not_a_module() {
     assert_eq!(mod_names, vec!["tests"]);
     assert!(fns.iter().any(|f| f.name == "serve"));
 }
+
+fn pace_fixture() -> Vec<RawCall> {
+    vec![
+        raw(0, "m", 1000, 800, 1),
+        raw(10_000, "m", 1100, 900, 1),
+        raw(20_000, "m", 1200, 1000, 1),
+        raw(620_000, "m", 1300, 1100, 1),
+    ]
+}
+
+#[test]
+fn pace_counts_turns_by_the_gap_rule_and_pins_its_wire_shape() {
+    let times: Vec<i64> = pace_fixture().iter().map(|c| c.at_ms).collect();
+    let p = pace_of(&times).unwrap();
+    assert_eq!(p.turns, 2);
+    assert_eq!(p.active_ms, 20_000);
+    assert_eq!(p.calls_per_turn, 2.0);
+    assert_eq!(p.calls_per_active_hour, 720.0);
+    assert!(pace_of(&[5]).is_none(), "one call has no pace");
+    assert!(pace_of(&[]).is_none());
+
+    let report = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![session("p", Thread::Main, pace_fixture())],
+            windows: None,
+            since_ms: None,
+            session_filter: None,
+            include_calls: false,
+            instruction_bytes: vec![],
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    let v = serde_json::to_value(&report.sessions[0]).unwrap();
+    let pace = v["pace"].as_object().unwrap();
+    let mut keys: Vec<_> = pace.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["activeMs", "callsPerActiveHour", "callsPerTurn", "turns"]
+    );
+    assert_eq!(v["pace"]["turns"], 2);
+    assert_eq!(v["pace"]["activeMs"], 20_000);
+}
+
+#[test]
+fn item_calls_count_main_thread_calls_credited_to_each_item_per_model() {
+    let windows = vec![
+        ClaimWindow {
+            from_ms: 0,
+            to_ms: 25_000,
+            kind: "approved".into(),
+            ids: vec!["a".into(), "b".into()],
+        },
+        ClaimWindow {
+            from_ms: 600_000,
+            to_ms: 700_000,
+            kind: "approved".into(),
+            ids: vec!["a".into()],
+        },
+    ];
+    let report = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![session("p", Thread::Main, pace_fixture())],
+            windows: Some(windows),
+            since_ms: None,
+            session_filter: None,
+            include_calls: false,
+            instruction_bytes: vec![],
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    let row = &report.constrained.by_model[0];
+    assert_eq!(row.item_calls.items, 2);
+    assert_eq!(row.item_calls.p50, 3);
+    assert_eq!(row.item_calls.p90, 4);
+    assert_eq!(row.item_calls.max, 4);
+    let v = serde_json::to_value(&row.item_calls).unwrap();
+    let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["items", "max", "p25", "p50", "p75", "p90"]);
+}

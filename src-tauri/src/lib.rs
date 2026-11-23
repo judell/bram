@@ -54526,6 +54526,8 @@ struct SessionContextBlock {
     model: String,
     suggest_tokens: u64,
     state: &'static str,
+    /// Calls per turn and per active hour; null below two calls.
+    pace: Option<token_accounting::Pace>,
 }
 
 const SUGGEST_AT_CONTEXT_TOKENS_DEFAULT: u64 = 400_000;
@@ -54582,6 +54584,7 @@ fn session_context_block<R: tauri::Runtime>(
         } else {
             "note"
         },
+        pace: lc.pace,
     };
     serde_json::to_value(block).unwrap_or(serde_json::Value::Null)
 }
@@ -54658,9 +54661,12 @@ mod session_context_wire_tests {
             model: "m".to_string(),
             suggest_tokens: 9,
             state: "note",
+            pace: token_accounting::pace_of(&[0, 10_000, 20_000, 30_000, 630_000]),
         };
         let v = serde_json::to_value(block).unwrap();
         assert_eq!(v["session"], "claude:abc-123");
+        assert_eq!(v["pace"]["callsPerTurn"], 2.5);
+        assert_eq!(v["pace"]["activeMs"], 30_000);
         let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         assert_eq!(
@@ -54671,6 +54677,7 @@ mod session_context_wire_tests {
                 "compactions",
                 "floor",
                 "model",
+                "pace",
                 "peak",
                 "session",
                 "sinceBoundaryCalls",

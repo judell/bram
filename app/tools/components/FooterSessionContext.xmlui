@@ -89,6 +89,9 @@
       <!-- One plain sentence first (the threshold and what a new session
            saves); the rest folds under Details (Jon, 2026-11-23).
            https://www.xmlui.org/docs/reference/components/ExpandableItem -->
+      <!-- Wide enough for the five-column saving table: maxWidth-ModalDialog
+           defaults to 450px (https://www.xmlui.org/docs/reference/components/ModalDialog). -->
+      <Theme maxWidth-ModalDialog="min(760px, 95vw)">
       <ModalDialog id="contextInfoDialog" title="{window.__bramSessionContextInfoTitle(infoKey)}">
         <VStack gap="$space-3" padding="$space-2" paddingTop="0">
           <Markdown content="{window.__bramSessionContextLead(infoKey, ctx, modelRates.value)}" />
@@ -100,6 +103,7 @@
           </HStack>
         </VStack>
       </ModalDialog>
+      </Theme>
     </HStack>
   </HStack>
 </Component>

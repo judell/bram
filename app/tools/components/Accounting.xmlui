@@ -67,6 +67,11 @@
           <Button size="xs" variant="ghost" icon="info" label="Stretches" onClick="tokenInfoKey = 'stretches'" />
           <Button size="xs" variant="ghost" icon="info" label="List prices" onClick="tokenInfoKey = 'listPrices'" />
         </HStack>
+        <!-- What a fresh session saves, per call, turn, hour and item, with the
+             ratio beside each figure (accounting-actionable-units). byModel
+             comes from the full report and may still be loading.
+             https://www.xmlui.org/docs/reference/components/Markdown -->
+        <Markdown content="{window.__bramContextSavingMarkdown(window.__bramContextFromSessionRow(window.__bramTokenMainRow(thisSession.value)), tokenRates.value, tokens.value &amp;&amp; tokens.value.constrained &amp;&amp; tokens.value.constrained.byModel)}" />
         <Text fontSize="$fontSize-sm" color="$textColor-secondary"
           value="{window.__bramTokenStretchLead(window.__bramTokenMainRow(thisSession.value))}" />
         <Table data="{window.__bramTokenStretchRows(window.__bramTokenMainRow(thisSession.value), tokenRates.value)}">

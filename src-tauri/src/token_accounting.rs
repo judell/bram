@@ -3016,6 +3016,9 @@ pub struct SessionRow {
     /// fresh-session counterfactual per stretch.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stretches: Vec<Stretch>,
+    /// Main thread only: calls per turn and per active hour; null below
+    /// two calls (and for subagent rows).
+    pub pace: Option<Pace>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -3103,6 +3106,7 @@ pub struct ModelRow {
     pub gap_ms: P50,
     pub output_per_call: P50,
     pub item_starts: ItemStarts,
+    pub item_calls: ItemCalls,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -3937,6 +3941,7 @@ pub fn build_report(
             unreadable: pf.unreadable,
             compactions: pf.compactions,
             stretches: Vec::new(),
+            pace: None,
         };
         let mut items: BTreeMap<String, ItemRow> = BTreeMap::new();
         let mut chat_calls = 0f64;
@@ -3968,6 +3973,7 @@ pub fn build_report(
                             .entry((pf.provider.to_string(), c.model.clone()))
                             .or_default();
                         for id in ids {
+                            *a.item_calls.entry(id.clone()).or_default() += 1;
                             let e = a
                                 .item_starts
                                 .entry(id.clone())
@@ -4031,6 +4037,7 @@ pub fn build_report(
         if thread == Thread::Main {
             accumulate_models(&mut model_acc, pf.provider, &pf.session_id, &calls);
             row.stretches = stretches(&calls, &windows);
+            row.pace = pace_of(&calls.iter().map(|c| c.at_ms).collect::<Vec<_>>());
         }
         sessions.push(row);
     }
@@ -4138,6 +4145,8 @@ struct ModelAcc {
     floors: HashMap<String, u64>,
     /// item id -> (time, context) of its first credited main-thread call
     item_starts: HashMap<String, (i64, u64)>,
+    /// item id -> main-thread calls credited to it on this model
+    item_calls: HashMap<String, u64>,
 }
 
 fn accumulate_models(
@@ -4301,6 +4310,7 @@ fn finish_models(
                     p50: nearest_rank(&a.outputs, 50.0),
                 },
                 item_starts: item_starts_of(&a.item_starts),
+                item_calls: item_calls_of(&a.item_calls),
             }
         })
         .collect();
@@ -6020,6 +6030,7 @@ pub struct LiveContext {
     pub last_at_ms: i64,
     #[serde(skip)]
     pub timeline: Vec<(i64, u64)>,
+    pub pace: Option<Pace>,
 }
 
 /// The live session's context, for any provider in `LIVE_PROVIDERS`.
@@ -6040,6 +6051,7 @@ pub fn live_context(label: &str, at: &LiveAt) -> Option<LiveContext> {
         first_at_ms: first.at_ms,
         last_at_ms: last.at_ms,
         timeline: lc.calls.iter().map(|c| (c.at_ms, c.context)).collect(),
+        pace: pace_of(&lc.calls.iter().map(|c| c.at_ms).collect::<Vec<_>>()),
     })
 }
 
@@ -6199,6 +6211,75 @@ fn item_starts_of(starts: &HashMap<String, (i64, u64)>) -> ItemStarts {
         above400k: v.iter().filter(|c| **c > 400_000).count(),
         above500k: v.iter().filter(|c| **c > 500_000).count(),
     }
+}
+
+/// Main-thread calls credited to each item on a model, as percentiles
+/// (accounting-actionable-units): what a median or p90 item costs in calls.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemCalls {
+    pub items: usize,
+    pub p25: u64,
+    pub p50: u64,
+    pub p75: u64,
+    pub p90: u64,
+    pub max: u64,
+}
+
+fn item_calls_of(calls: &HashMap<String, u64>) -> ItemCalls {
+    let mut v: Vec<u64> = calls.values().copied().collect();
+    v.sort_unstable();
+    ItemCalls {
+        items: v.len(),
+        p25: nearest_rank(&v, 25.0),
+        p50: nearest_rank(&v, 50.0),
+        p75: nearest_rank(&v, 75.0),
+        p90: nearest_rank(&v, 90.0),
+        max: v.last().copied().unwrap_or(0),
+    }
+}
+
+/// How fast a session spends calls, in the units a person works in. A turn
+/// is a run of calls each within `TURN_GAP_MS` of the last; a larger gap is
+/// idle and adds no active time.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pace {
+    pub calls_per_turn: f64,
+    pub calls_per_active_hour: f64,
+    pub turns: u64,
+    pub active_ms: u64,
+}
+
+/// `None` below two calls. `active_ms` sums the within-turn gaps.
+pub fn pace_of(times: &[i64]) -> Option<Pace> {
+    if times.len() < 2 {
+        return None;
+    }
+    let mut t = times.to_vec();
+    t.sort_unstable();
+    let mut turns = 1u64;
+    let mut active = 0u64;
+    for w in t.windows(2) {
+        let gap = w[1] - w[0];
+        if gap > TURN_GAP_MS {
+            turns += 1;
+        } else {
+            active += gap as u64;
+        }
+    }
+    let n = t.len() as f64;
+    let round1 = |x: f64| (x * 10.0).round() / 10.0;
+    Some(Pace {
+        calls_per_turn: round1(n / turns as f64),
+        calls_per_active_hour: if active == 0 {
+            0.0
+        } else {
+            round1(n / (active as f64 / 3_600_000.0))
+        },
+        turns,
+        active_ms: active,
+    })
 }
 
 /// Growth since the last boundary: `(tokens, calls, boundary_at_ms)`.

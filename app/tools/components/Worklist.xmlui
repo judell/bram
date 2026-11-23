@@ -199,6 +199,9 @@
     padding="$space-4"
     gap="$space-3">
     <Text>This folder is in freestyle mode: you work with the agent directly, in the message box or the terminal, with no Worklist in between. Switch to workflow when you want changes proposed and committed through one.</Text>
+    <!-- worklist-freestyle-note-why-switch (Jon, 2026-11-23): the sentence
+         above says what switching does; this one says why anyone would. -->
+    <Text><Text inline="true" fontWeight="$fontWeight-bold" value="Why switch?" /> In a longer session with more complex analysis the Worklist helps you organize subtasks and complete them in an orderly and accountable way. The Worklist also enables you to conserve tokens by starting new sessions that wake up with focused context courtesy of the Worklist.</Text>
     <HStack>
       <Button label="Switch to workflow" onClick="window.__bramChooseMode('workflow')" />
     </HStack>

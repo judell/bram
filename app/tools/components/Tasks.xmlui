@@ -157,6 +157,12 @@
           <!-- A saved row's runs by name, one row per task: a small Table, as
                the Worklist's files table and Status use.
                https://www.xmlui.org/docs/reference/components/Table -->
+          <!-- table-headers-explained: the columns' little-i, beside the
+               table (a Column header takes no markup), opening the tab's
+               info dialog with the byName key.
+               https://www.xmlui.org/docs/reference/components/Column -->
+          <Button when="{window.__bramTaskByNameRows($item, cands.value).length > 0}"
+            icon="info" size="xs" variant="ghost" label="What the columns mean" onClick="infoKey = 'byName'" />
           <Table when="{window.__bramTaskByNameRows($item, cands.value).length > 0}"
             data="{window.__bramTaskByNameRows($item, cands.value)}" idKey="name">
             <Column header="Saved task" width="2*">

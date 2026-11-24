@@ -4112,7 +4112,7 @@ window.settingsInfoBodies = {
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
-    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: on.*\n\n## Ask at the next natural pause once the context passes a share of the compaction point\n\nEach call re-sends the whole live context, so a long session pays for its history on every turn, and when the context reaches the agent's own limit the agent compacts it into a summary at a moment you don't choose. The setting is a share of that limit: past it the footer shows **Start a new session** and the agent offers one at a natural pause. Bram works the limit out per provider and model: where that model has compacted in this project, else the window the provider records (Codex), else a per-provider fallback you can set here. The lines under the box show the figure each provider gets today and where it comes from.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestAtContextShare` (percent) and `sessions.compactionPointByProvider` (the fallbacks), shared with everyone who works in this repo. Default: 40%; 0 turns it off. A `sessions.suggestAtContextTokens` written before the share existed is a fixed override until you drop it with **Use the share**.*\n\n## Pair new sessions across providers\n\nWhen you switch between Claude and Codex and the session you're leaving has no partner on the other side, the other agent resumes its most recent session and Bram asks what you want: **Keep these together** pairs the two, so switching back and forth moves between them; **Start a new … session** starts one for the session you left. Bram never pairs sessions on its own. Turning this off stops the question; pairs you already made keep working, and **Unpair** on the Sessions tab ends one.\n\n*Project setting, saved in `.bram.json` as `sessions.pairAcrossProviders` and shared with everyone who works in this repo. Default: on.*",
+    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: on.*\n\n## Ask at the next natural pause once the context passes a share of the compaction point\n\nA call is one request to the model, and a turn is usually several. Each call re-sends the whole live context, mostly as cheap cache reads but on every call, so a long session pays for its history on every turn, and when the context reaches the agent's own limit the agent compacts it into a summary at a moment you don't choose. The setting is a share of that limit: past it the footer shows **Start a new session** and the agent offers one at a natural pause. Bram works the limit out per provider and model: where that model has compacted in this project, else the window the provider records (Codex), else a per-provider fallback you can set here. The lines under the box show the figure each provider gets today and where it comes from.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestAtContextShare` (percent) and `sessions.compactionPointByProvider` (the fallbacks), shared with everyone who works in this repo. Default: 40%; 0 turns it off. A `sessions.suggestAtContextTokens` written before the share existed is a fixed override until you drop it with **Use the share**.*\n\n## Pair new sessions across providers\n\nWhen you switch between Claude and Codex and the session you're leaving has no partner on the other side, the other agent resumes its most recent session and Bram asks what you want: **Keep these together** pairs the two, so switching back and forth moves between them; **Start a new … session** starts one for the session you left. Bram never pairs sessions on its own. Turning this off stops the question; pairs you already made keep working, and **Unpair** on the Sessions tab ends one.\n\n*Project setting, saved in `.bram.json` as `sessions.pairAcrossProviders` and shared with everyone who works in this repo. Default: on.*",
   batchCommitActions:
     "## Mirror Worklist lifecycle to GitHub issues\n\nPost Worklist lifecycle comments to linked GitHub issues.\n\n*Project setting, saved in `.bram.json` as `mirrorWorklistLifecycleToIssue` and shared with everyone who works in this repo. Default: off.*" +
     "\n\n## Pause Worklist enforcement for Claude\n\nAn advanced, experimental setting. While it is on, Bram's guard stops denying Claude's edits that no Worklist item covers, and Claude is told the Worklist is paused, so it edits directly and proposes no items. You define the work and manage commits yourself. The guard's other checks (session URLs, forge signatures) still apply. Codex, OpenCode and Antigravity stay enforced. Edits made while paused belong to no item: before turning enforcement back on, commit or stash them, or the next whole-file commit of a begun item may take them.\n\n*Saved for this computer in `.bram/settings.json` as `worklist.enforcement` (`paused` or `on`). A repo can also set it for everyone in a committed `.bram.json`; your own setting wins. Default: on.*",
@@ -19552,11 +19552,12 @@ window.__bramTaskByNameRows = function (row, report) {
 // useful"). The Command and Saved entries carry what the page used to show
 // as two summary lines.
 window.__bramTaskInfoTitle = function (key) {
-  return { command: "Command", runs: "Runs", sessions: "Sessions", agents: "Agents", ways: "Ways typed", saved: "Saved" }[key] || "";
+  return { command: "Command", runs: "Runs", sessions: "Sessions", agents: "Agents", ways: "Ways typed", saved: "Saved", byName: "What the columns mean" }[key] || "";
 };
 window.__bramTaskInfoText = function (key, report) {
   var r = report || {};
   var x = r.excluded || {};
+  if (key === "byName") return window.__bramColumnInfoText("taskByName");
   if (key === "command") {
     return "Each row is a command the agents ran in this project's sessions, from every agent, " +
       "counted from " + (r.commands || 0) + " shell commands in " + (r.sessions || 0) + " sessions. " +
@@ -22567,9 +22568,16 @@ window.__bramSessionContextLead = function (key, ctx, rates, points) {
   var gap = Math.max(0, ctx.tokens - floor);
   var row = window.__bramModelRatesRow(rates, ctx.model);
   var dollars = "";
+  var cold = "";
   if (row && row.cacheRead > 0) {
     var d = (gap / 1e6) * row.cacheRead;
     dollars = d < 0.01 ? " (under a cent)" : " ($" + d.toFixed(2) + " at list prices)";
+    // table-headers-explained: the re-read is cheap per call because it is
+    // cached; the cold start after an idle hour re-writes it all at the
+    // premium, and that is the figure a person coming back should know.
+    var w = row.cacheWrite1h || row.cacheWrite5m || 0;
+    var c = (gap / 1e6) * w;
+    if (c >= 0.01) cold = ", and about **$" + c.toFixed(2) + "** the first time you come back after an hour away, when the cache has gone cold";
   }
   if (key === "floor") {
     return "A new session would start at about **" + K(floor) + "** tokens, this session's floor. This one is at " + K(ctx.tokens) + ".";
@@ -22600,7 +22608,7 @@ window.__bramSessionContextLead = function (key, ctx, rates, points) {
   var range = window.__bramCompactionRangeClause(ctx, points, limN);
   var tail = range ? " " + range : "";
   if (gap === 0) return where + tail;
-  return where + tail + " Switching to a new session will save you about **" + K(gap) + " tokens" + dollars + "** on every call.";
+  return where + tail + " Switching to a new session will save you about **" + K(gap) + " tokens" + dollars + "** on every call" + cold + ".";
 };
 // accounting-actionable-units: the saving in the units a person works in.
 // Pure: reads only its arguments. ctx is { tokens, floor, model, pace };
@@ -22682,7 +22690,8 @@ window.__bramSessionContextInfoBody = function (key, ctx, rates, points) {
     );
   }
   var lim = typeof ctx.suggestTokens === "number" && ctx.suggestTokens > 0 ? K(ctx.suggestTokens) : "";
-  var out =
+  // table-headers-explained: say what a call is where the word is first used.
+  var out = window.__bramGlossaryText("call") + "\n\n" +
     "**Context** is what the model re-read on its last call: everything in this session since the last compaction, now **" +
     num(ctx.tokens) + "** tokens. Each call re-sends all of it, so a long session pays for its history on every turn; a 600k call re-reads eight times what a fresh one does.\n\n";
   out += "This session: peak " + num(ctx.peak) + ", " +
@@ -24725,12 +24734,97 @@ window.__bramCostFixedLines = function (report) {
     : " No subagent ran in this period.";
   return out;
 };
+// table-headers-explained (Jon, 2026-11-24: "all table headers need little-i
+// explainers"; "every call re-sends the whole context, but is mostly cached
+// right?"): one glossary, so a term defined twice reads the same everywhere,
+// and a "What the columns mean" text per table. XMLUI's Column header is a
+// plain string (no template, no tooltip), so the little-i sits beside the
+// table's heading and opens the surface's existing modal. Pure functions.
+var __BRAM_GLOSSARY = {
+  call: "**Call.** One request to the model. The agent makes one for your message and one more after each tool result it reads, so a turn is usually several calls. Every call sends the whole context again.",
+  cache: "**Cache.** Most of what a call sends was sent before, and the provider reads it from a cache at a fraction of the input price (Claude: 2.5%). Each new token is written to the cache once, at a premium (Claude: twice the input price). The cache goes cold after an idle gap (an hour here), and the first call after that re-writes the whole context at the premium. So a long context costs a little on every call while you work, and a lot once when you come back to it.",
+};
+window.__bramGlossaryText = function (term) {
+  return __BRAM_GLOSSARY[term] || "";
+};
+var __BRAM_COLUMN_INFO = {
+  costSessions: {
+    title: "What the columns mean",
+    lead: ["call", "cache"],
+    columns: [
+      ["When", "the day of the session's first call."],
+      ["Session", "its title, as on the Sessions tab."],
+      ["Hours", "wall-clock time from the session's first call to its last, gaps included."],
+      ["Calls", "requests to the model, main thread and subagents together."],
+      ["Peak context", "the largest context any one call sent."],
+      ["Compactions", "how many times the agent folded the history above a point into a summary."],
+      ["Tokens sent", "the context of every call added up. It grows with calls, not just with size, and most of it is cache reads."],
+      ["At list", "the four kinds of tokens (uncached input, cache reads, cache writes, the agent's answers) priced at the model's list rates; **How dollars are figured** has the rates. On a subscription this is usage, not a bill."],
+      ["The orange note", "a session whose peak passed the fresh-session threshold in Settings."],
+      ["Open", "the session's transcript, under the table."],
+    ],
+  },
+  costItems: {
+    title: "What the columns mean",
+    lead: ["call"],
+    columns: [
+      ["Item", "the Worklist item whose work the calls were credited to, by id; **chat (no item)** is everything outside an item's claim. **What this credits and omits** has the rules."],
+      ["Calls", "requests to the model made while the item was being worked, main thread and subagents together."],
+      ["Tokens sent", "the context of every one of those calls added up, mostly cache reads."],
+      ["At list", "those calls' tokens priced at the model's list rates."],
+    ],
+  },
+  taskByName: {
+    title: "What the columns mean",
+    lead: [],
+    columns: [
+      ["Saved task", "a target in the project's `Makefile` that this command was saved as."],
+      ["Runs by name", "how many times agents ran it by that name (`make <name>`), across this project's sessions."],
+      ["Sessions", "how many sessions ran it by name."],
+    ],
+  },
+  worklistOverlaps: {
+    title: "What the columns mean",
+    lead: [],
+    columns: [
+      ["file", "a file that two or more items say they will change."],
+      ["which items", "those items; **· planned** marks a row no item has started yet. Hover a row to light its items up, click to pin."],
+      ["items", "how many items name the file."],
+    ],
+  },
+  worklistFiles: {
+    title: "What the columns mean",
+    lead: [],
+    columns: [
+      ["files expected to change", "the files the item named when it was proposed; once it has begun, the ones that changed."],
+      ["changes", "what changed in that file, lines added and removed; the little-i in the cell says which item owns them."],
+      ["also changing", "other items that name the same file. A second item can't start on a shared file until the first is committed or dropped."],
+    ],
+  },
+};
+window.__bramColumnInfoTitle = function (table) {
+  var t = __BRAM_COLUMN_INFO[table];
+  return t ? t.title : "";
+};
+window.__bramColumnInfoText = function (table) {
+  var t = __BRAM_COLUMN_INFO[table];
+  if (!t) return "";
+  var lead = t.lead.map(function (k) { return __BRAM_GLOSSARY[k]; }).filter(Boolean);
+  var cols = t.columns.map(function (c) { return "- **" + c[0] + "**: " + c[1]; });
+  return (lead.length ? lead.join("\n\n") + "\n\n" : "") + cols.join("\n");
+};
+// For dialogs opened with a {title, body} param (the Worklist's).
+window.__bramColumnInfo = function (table) {
+  return { title: window.__bramColumnInfoTitle(table), body: window.__bramColumnInfoText(table) };
+};
 window.__bramCostInfoTitle = function (key) {
-  return { listPrices: "How dollars are figured", itemCredit: "Credit by item" }[key] || "";
+  return { listPrices: "How dollars are figured", itemCredit: "Credit by item", sessionColumns: "What the columns mean", itemColumns: "What the columns mean" }[key] || "";
 };
 window.__bramCostInfoText = function (key, rates) {
   if (key === "listPrices") return window.__bramTokenListPricesText(rates);
-  if (key === "itemCredit") return "Each call an agent made while an item was being worked is credited to that item; nothing is estimated. Main thread and subagents are added together.\n\n- **Calls** is how many requests; **Tokens sent** adds up the context of every call, and since each call sends the whole conversation again it grows with calls, not just with size.\n- Discussion outside any item's claim counts as **chat (no item)**, so a conversation about an item before it was started is not credited to it.\n- When one approval covers several items at once, every item in that window is credited the same full amount, so those rows overlap and adding the rows double-counts.\n- Subagents are credited by time: a subagent's calls go to the item that was being worked when it ran, because a subagent does not say which item it serves.";
+  if (key === "sessionColumns") return window.__bramColumnInfoText("costSessions");
+  if (key === "itemColumns") return window.__bramColumnInfoText("costItems");
+  if (key === "itemCredit") return "Each call an agent made while an item was being worked is credited to that item; nothing is estimated. Main thread and subagents are added together.\n\n- **Calls**: a call is one request to the model; the agent makes one for your message and one more after each tool result it reads. **Tokens sent** adds up the context of every call: each call sends the whole conversation again, mostly as cache reads, so it grows with calls, not just with size.\n- Discussion outside any item's claim counts as **chat (no item)**, so a conversation about an item before it was started is not credited to it.\n- When one approval covers several items at once, every item in that window is credited the same full amount, so those rows overlap and adding the rows double-counts.\n- Subagents are credited by time: a subagent's calls go to the item that was being worked when it ran, because a subagent does not say which item it serves.";
   return "";
 };
 

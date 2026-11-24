@@ -62,6 +62,11 @@
           <Heading level="h4">By session</Heading>
           <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="— costliest first" />
           <Button size="xs" variant="ghost" icon="info" label="How dollars are figured" onClick="tokenInfoKey = 'listPrices'" />
+          <!-- table-headers-explained: Column header is a plain string in
+               XMLUI 0.14.28 (no template, no tooltip), so the columns'
+               little-i sits here and opens the same modal.
+               https://www.xmlui.org/docs/reference/components/Column -->
+          <Button size="xs" variant="ghost" icon="info" label="What the columns mean" onClick="tokenInfoKey = 'sessionColumns'" />
         </HStack>
         <Table data="{window.__bramCostSessionRows(tokens.value, costSessions.value, tokenRates.value, costSettings.value, showAllSessions)}">
           <Column bindTo="when" header="When" width="95px" />
@@ -96,6 +101,7 @@
           <Heading level="h4">By item</Heading>
           <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="— what each Worklist item's work used" />
           <Button size="xs" variant="ghost" icon="info" label="What this credits and omits" onClick="tokenInfoKey = 'itemCredit'" />
+          <Button size="xs" variant="ghost" icon="info" label="What the columns mean" onClick="tokenInfoKey = 'itemColumns'" />
         </HStack>
         <Table data="{window.__bramCostItemRows(tokens.value, tokenRates.value, showAllItems)}">
           <Column bindTo="item" header="Item"><Text breakMode="anywhere" value="{$item.item}" /></Column>

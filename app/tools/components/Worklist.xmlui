@@ -341,6 +341,11 @@
            cell wrappers because Table has no row-click event yet (the
            xmlui-side board is proposing one; collapse to onRowClick when
            it lands). The cell tint doubles as the pinned-row cue. -->
+      <!-- table-headers-explained: the columns' little-i, beside the table
+           (a Column header takes no markup), through the files table's
+           {title, body} dialog. https://www.xmlui.org/docs/reference/components/Column -->
+      <Button icon="info" size="xs" variant="ghost" label="What the columns mean"
+        onClick="fileCellInfoDialog.open(window.__bramColumnInfo('worklistOverlaps'))" />
       <Table
         data="{window.__bramOverlapDisplayIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
         onRowEnter="(item) => window.__bramSetOverlapFocus(item.claimants)"
@@ -772,6 +777,10 @@
             <VStack
               when="{(expandedKeys || []).includes($item.id + '::files')}"
               gap="$space-1">
+            <!-- table-headers-explained: the columns' little-i for the files
+                 table, same dialog as its cells. -->
+            <Button when="{$item.changedFiles}" icon="info" size="xs" variant="ghost" label="What the columns mean"
+              onClick="fileCellInfoDialog.open(window.__bramColumnInfo('worklistFiles'))" />
             <Table
               when="{$item.changedFiles}"
               data="{window.__bramFilesTableRows($item.changedFiles, diffKeys, rowId)}"

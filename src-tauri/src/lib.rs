@@ -32590,6 +32590,11 @@ fn bram_port_serves_project(port: u16, proj: &Path) -> Result<bool, String> {
     {
         Ok(response) => response,
         Err(ureq::Error::Status(_, _)) => return Ok(false),
+        // port-probe-refused-http-is-dead: a refused connect at either step
+        // (TCP or HTTP) is a dead port, not a probe error.
+        Err(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed => {
+            return Ok(false)
+        }
         Err(e) => return Err(format!("probe port {}: {}", port, e)),
     };
     let mut body = String::new();

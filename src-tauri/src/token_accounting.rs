@@ -642,8 +642,12 @@ pub fn patch_paths(text: &str) -> Vec<String> {
 /// path segment must be a dotfile (`.env`) or have a letter before its first
 /// dot (`lib.rs`), and the word must not be a size (`1.2KB`, `3.4MB`, `12kb`):
 /// a size word quoted in a command is not a file (session-orientation-instrument).
+/// A Windows spelling is folded first (`\` to `/`, a leading `\\?\` dropped), so
+/// `C:\proj\a.rs` passes (handoff-start-is-begun's release follow-up, item
+/// token-accounting-write-paths-windows).
 fn plausible_write_target(w: &str) -> bool {
-    let w = w.trim_matches(|c| c == '"' || c == '\'');
+    let w = w.trim_matches(|c| c == '"' || c == '\'').replace('\\', "/");
+    let w = w.strip_prefix("//?/").unwrap_or(&w);
     let last = w.rsplit('/').next().unwrap_or(w);
     let named = last.starts_with('.')
         || last

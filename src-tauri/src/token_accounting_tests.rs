@@ -3596,6 +3596,25 @@ fn plausible_write_target_rejects_size_words() {
 }
 
 #[test]
+fn windows_spelled_write_paths_are_plausible_and_resolve() {
+    assert!(plausible_write_target(r"C:\Users\x\proj\src\a.rs"));
+    assert!(plausible_write_target(r"\\?\C:\proj\a.rs"));
+    assert!(plausible_write_target("src/a.rs"));
+    assert!(!plausible_write_target("1.2KB"));
+    let writes = vec![SessionWrite {
+        at_ms: 160,
+        path: r"C:\proj\src\a.rs".to_string(),
+        cwd: None,
+        thread: Thread::Main,
+    }];
+    let got = first_project_edit(&writes, 0, "C:\\proj", None);
+    assert_eq!(
+        got.map(|(at, p, _)| (at, p)),
+        Some((160, "src/a.rs".to_string()))
+    );
+}
+
+#[test]
 fn folder_mode_info_reads_the_marker_then_the_record() {
     let state = ledger_dir("fm-state");
     let root = ledger_dir("fm-root");
@@ -3603,11 +3622,7 @@ fn folder_mode_info_reads_the_marker_then_the_record() {
     std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
     std::env::set_var("BRAM_USER_STATE_DIR", &state);
     let marker = folder_mode_info(&root).unwrap();
-    let key = root
-        .canonicalize()
-        .unwrap()
-        .to_string_lossy()
-        .replace('\\', "/");
+    let key = crate::folder_mode_key(&root);
     let body = serde_json::json!({
         "folders": { key: { "mode": "freestyle", "chosenAtMs": 123 } }
     });

@@ -151,6 +151,34 @@ invoke("log_from_right_pane", {
   };
   document.addEventListener("pointerdown", onInput, true);
   document.addEventListener("keydown", onInput, true);
+
+  // pane-click-miss (pane-wedge-instrumentation, #515): a pointerdown the
+  // parent sees inside the tools iframe's rectangle is one the pane did not
+  // get, which names an overlay or a misplaced iframe. One per second.
+  let lastMiss = 0;
+  document.addEventListener("pointerdown", (ev) => {
+    try {
+      const pane = document.getElementById("tools-pane");
+      if (!pane || ev.target === pane) return;
+      const rect = pane.getBoundingClientRect();
+      if (ev.clientX < rect.left || ev.clientX >= rect.right
+        || ev.clientY < rect.top || ev.clientY >= rect.bottom) return;
+      const now = Date.now();
+      if (now - lastMiss < 1000) return;
+      lastMiss = now;
+      invoke("log_from_right_pane", {
+        payload: {
+          kind: "iframe-trace",
+          subkind: "pane-click-miss",
+          context: "parent",
+          target: describe(ev.target),
+          x: Math.round(ev.clientX - rect.left),
+          y: Math.round(ev.clientY - rect.top),
+          swapping: window.__bramToolsSwapping === true,
+        },
+      }).catch(() => {});
+    } catch (e) {}
+  }, true);
 })();
 
 const TERM_FONT_KEY = "bram.terminal.fontSize";
@@ -2047,6 +2075,7 @@ listen("pty-send-sent", (e) => {
     const parent = oldTools.parentElement;
     if (!parent || toolsSwapping) return;
     toolsSwapping = true;
+    window.__bramToolsSwapping = true; // read by pane-click-miss (#515)
 
     // Preserve the current XMLUI route across hot-reload. Without this,
     // the new iframe loads tools/index.html with no hash → router
@@ -2075,6 +2104,7 @@ listen("pty-send-sent", (e) => {
       newTools.id = "tools-pane";
       parent.replaceChild(newTools, oldTools);
       toolsSwapping = false;
+      window.__bramToolsSwapping = false;
     }
     newTools.addEventListener("load", onLoad);
     parent.appendChild(newTools);

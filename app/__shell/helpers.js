@@ -572,6 +572,58 @@ window.__bramPaneFlushDecision = function (state) {
   };
 })();
 
+// pane-wedge-instrumentation (judell/bram#515): the pane's Tauri bridge and
+// subscriptions, counted. Read by `pane-boot` (once, 5 s after load) and
+// `pane-alive` (every 5 min from the heartbeat). `events` is comma-joined so
+// __bramTraceSafeValue doesn't sample it down to three names.
+window.__bramPaneHealthFields = function () {
+  var out = {
+    listeners: 0, pending: 0, events: "", subscribers: 0, bridge: false,
+    hidden: false, focused: false, active: "", route: "",
+  };
+  try {
+    var parent = (window.parent && window.parent !== window) ? window.parent : window;
+    var store = parent.__bramTauriListenerUnsubs || {};
+    var suffix = "::" + window.location.pathname;
+    var names = [];
+    Object.keys(store).forEach(function (k) {
+      if (k.length < suffix.length || k.slice(-suffix.length) !== suffix) return;
+      var v = store[k];
+      if (typeof v === "function") out.listeners += 1;
+      else if (v && typeof v.then === "function") out.pending += 1;
+      else return;
+      names.push(k.slice(0, -suffix.length));
+    });
+    out.events = names.join(",");
+  } catch (e) {}
+  try {
+    var subs = typeof __tauriEventSubscribers === "object" && __tauriEventSubscribers ? __tauriEventSubscribers : {};
+    Object.keys(subs).forEach(function (n) { out.subscribers += (subs[n] && subs[n].length) || 0; });
+  } catch (e) {}
+  try { out.bridge = typeof window.getTauriInvoke === "function" && typeof window.getTauriInvoke() === "function"; } catch (e) {}
+  try { out.hidden = document.hidden === true; } catch (e) {}
+  try { out.focused = typeof document.hasFocus === "function" ? document.hasFocus() : true; } catch (e) {}
+  try { out.active = ((document.activeElement && document.activeElement.tagName) || "").toLowerCase(); } catch (e) {}
+  try { out.route = String(window.location.hash || "").split("?")[0]; } catch (e) {}
+  return out;
+};
+
+// pane-boot: one line when the pane has mounted, saying whether this load
+// is a pane-flush reload. The flush key is read synchronously at load, before
+// paneIdleFlush's 2 s `reloaded` tracer removes it.
+(function paneBoot() {
+  if (window.location.pathname.indexOf("/tools/") === -1) return;
+  var fromFlush = false;
+  try { fromFlush = !!window.sessionStorage.getItem(PANE_FLUSH_KEY); } catch (e) {}
+  setTimeout(function () {
+    try {
+      window.__bramIframeTrace("pane-boot", Object.assign(window.__bramPaneHealthFields(), {
+        source: fromFlush ? "flush" : "load",
+      }));
+    } catch (e) {}
+  }, 5000);
+})();
+
 // Main-thread heartbeat for the drawer iframe. setInterval scheduled
 // every 200ms; if the actual gap exceeds the threshold the main thread
 // was blocked (typically by heavy Markdown re-renders during JSONL
@@ -601,6 +653,8 @@ window.__bramPaneFlushDecision = function (state) {
   var DRIFT_THRESHOLD_MS =
     (window.appGlobals && Number(window.appGlobals.heartbeatDriftThresholdMs)) || 500;
   var last = performance.now();
+  var ALIVE_MS = 5 * 60 * 1000;
+  var lastAliveAt = Date.now();
   var batch = { fires: 0, sumDrift: 0, maxDrift: 0, spikes: 0, sinceMs: 0, bgFires: 0 };
   // Batch summary every 50 fires (~10s nominal). Emits aggregate
   // drift stats so we can see overall main-thread health independent
@@ -657,6 +711,23 @@ window.__bramPaneFlushDecision = function (state) {
     batchTick(drift, bg);
     // pane-idle-flush-when-degraded: feed the workaround's spike window.
     if (window.__bramPaneFlushTick) window.__bramPaneFlushTick(drift, !bg);
+    // pane-wedge-instrumentation (#515): a liveness line every 5 minutes.
+    var wallNow = Date.now();
+    if (wallNow - lastAliveAt >= ALIVE_MS) {
+      lastAliveAt = wallNow;
+      if (!window.__bramMenuPending) {
+        try {
+          var counts = window.__bramPaneInputCounts || { clicks: 0, keys: 0 };
+          var lastEv = window.__bramLastTauriEventMs;
+          window.__bramIframeTrace("pane-alive", Object.assign(window.__bramPaneHealthFields(), {
+            sinceEventMs: typeof lastEv === "number" ? wallNow - lastEv : null,
+            clicks: counts.clicks || 0,
+            keys: counts.keys || 0,
+          }));
+        } catch (e) {}
+        window.__bramPaneInputCounts = { clicks: 0, keys: 0 };
+      }
+    }
     if (drift >= DRIFT_THRESHOLD_MS && !window.__bramMenuPending) {
       try {
         window.logToHost({
@@ -723,6 +794,22 @@ window.__bramPaneFlushDecision = function (state) {
       });
     } catch (le) {}
   }, true);
+})();
+
+// pane-wedge-instrumentation (#515): count every pointerdown and keydown that
+// reaches the pane's document, below any tracer threshold; `pane-alive`
+// reports and resets the counts. Counts only, no targets or keys.
+(function countPaneInput() {
+  if (window.location.pathname.indexOf("/tools/") === -1) return;
+  window.__bramPaneInputCounts = { clicks: 0, keys: 0 };
+  function bump(field) {
+    try {
+      var c = window.__bramPaneInputCounts || (window.__bramPaneInputCounts = { clicks: 0, keys: 0 });
+      c[field] = (c[field] || 0) + 1;
+    } catch (e) {}
+  }
+  document.addEventListener("pointerdown", function () { bump("clicks"); }, true);
+  document.addEventListener("keydown", function () { bump("keys"); }, true);
 })();
 
 // Outbound right-pane → PTY intents route through `queue_pty_intent`
@@ -10779,6 +10866,7 @@ function __bramListenWithDedup(ev, eventName, callback) {
 try {
   if (window.parent && window.parent.__TAURI__ && window.parent.__TAURI__.event) {
     __bramListenWithDedup(window.parent.__TAURI__.event, "talk-session-changed", function (event) {
+      window.__bramLastTauriEventMs = Date.now(); // pane-alive sinceEventMs (#515)
       var t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
       // Per-emit correlation id from the host (see Rust
       // emit_talk_session_changed). Logged here so the trace records
@@ -10835,6 +10923,7 @@ function __ensureTauriEventListener(eventName) {
   __tauriEventListening[eventName] = true;
   try {
     var listenResult = __bramListenWithDedup(ev, eventName, function (e) {
+      window.__bramLastTauriEventMs = Date.now(); // pane-alive sinceEventMs (#515)
       var subs = __tauriEventSubscribers[eventName] || [];
       try {
         if (typeof window.logToHost === "function") {

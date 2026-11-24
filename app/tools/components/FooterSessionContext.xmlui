@@ -130,8 +130,16 @@
           <ExpandableItem summary="Details" initiallyExpanded="{false}" iconPosition="start">
             <Markdown content="{window.__bramSessionContextInfoBody(infoKey, ctx, modelRates.value, compactionPoints.value)}" />
           </ExpandableItem>
-          <HStack>
+          <HStack gap="$space-3" verticalAlignment="center">
             <Button label="Got it" onClick="contextInfoDialog.close()" />
+            <!-- context-stack-viewer: the figure's blocks live on the Context
+                 tab; close first so the dialog, which belongs to the footer,
+                 does not stay over the new page
+                 (https://www.xmlui.org/docs/howto/navigate-programmatically). -->
+            <Button
+              label="See what's in context"
+              variant="ghost"
+              onClick="contextInfoDialog.close(); navigate('/context')" />
           </HStack>
         </VStack>
       </ModalDialog>

@@ -44,6 +44,7 @@ doing:
 - **The pane's memory, or a claim about it (`scripts/pane-memory-bisect.sh`)** → read [`docs/developing-bram-reference.md` §Where the pane's memory goes](developing-bram-reference.md#where-the-panes-memory-goes).
 - **Working on the Tasks report (#483)** → read [`docs/developing-bram-reference.md` §What the agents keep running: the Tasks report](developing-bram-reference.md#what-the-agents-keep-running-the-tasks-report).
 - **Working on token accounting (#486), or reading its numbers** → read [`docs/developing-bram-reference.md` §What the agents spend: token accounting](developing-bram-reference.md#what-the-agents-spend-token-accounting).
+- **Working on the Context tab's stack (`/__context-stack`, `src/context_stack.rs`), or adding a provider's reader** → read [`docs/developing-bram-reference.md` §What the model was sent: the context stack](developing-bram-reference.md#what-the-model-was-sent-the-context-stack).
 - **Making a claim about build time (`scripts/build-timings.sh`)** → read [`docs/developing-bram-reference.md` §Measuring build time, not guessing at it](developing-bram-reference.md#measuring-build-time-not-guessing-at-it).
 - **Builds are slow or fail for disk space** → read [`docs/developing-bram-reference.md` §When builds get slow, check `target/debug/deps` first](developing-bram-reference.md#when-builds-get-slow-check-targetdebugdeps-first).
 - **Hand-testing the Worklist gate** → read [`docs/developing-bram-reference.md` §Hand-testing the Worklist gate](developing-bram-reference.md#hand-testing-the-worklist-gate).

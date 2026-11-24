@@ -23,6 +23,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# context-stack-viewer: a Claude session file names each request's messages
+# by the SHA-256 of their canonical JSON; the stack resolves them the same way.
+sha2 = "0.10"
 portable-pty = "0.9.0"
 notify = "8.2.0"
 tiny_http = "0.12"

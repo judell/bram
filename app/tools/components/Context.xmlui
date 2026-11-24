@@ -1,8 +1,29 @@
+<!-- context-stack-viewer (Jon, 2026-11-24): the Context tab is the stack
+     the model is sent this session, block by block. The instruction files
+     and the memory index are blocks in the stack, so the old list of files
+     is gone, and so are the old file search and the hooks/settings/skills
+     list (Jon: "too confusing"; "remove the items"). The right half shows
+     a clicked block's exact text, or the memory file another surface asked
+     this tab to open. -->
 <Component name="Context"
   var.selectedPath="{null}"
   var.selectedDisplay="{null}"
-  var.selectedLine="{null}"
-  var.searchQuery="">
+  var.selectedBlock="{null}">
+
+  <!-- The stack for the active session; refetched when the host samples a
+       new context reading at turn end (push over polling).
+       https://www.xmlui.org/docs/reference/components/DataSource -->
+  <DataSource id="stack" url="/__context-stack" />
+  <PushSource
+    id="stackTick"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('session-context-changed')}" />
+  <ChangeListener listenTo="{stackTick.value}" onDidChange="stack.refetch()" />
+  <DataSource
+    id="blockText"
+    url="/__context-stack/block"
+    queryParams="{{ i: selectedBlock &amp;&amp; selectedBlock.i }}"
+    when="{!!selectedBlock}" />
 
   <DataSource id="ctxList" url="/__context/list" queryParams="{{ provider: activeProvider || '' }}" />
   <DataSource
@@ -10,140 +31,85 @@
     url="/__context/file"
     queryParams="{{ path: selectedPath }}"
     when="{!!selectedPath}" />
-  <DataSource
-    id="ctxSearch"
-    url="/__context/search"
-    queryParams="{{ q: searchQuery, provider: activeProvider || '' }}"
-    when="{!!searchQuery &amp;&amp; searchQuery.trim().length >= 2}" />
 
   <ChangeListener
     listenTo="{activeProvider}"
-    onDidChange="selectedPath = null; selectedDisplay = null; selectedLine = null" />
+    onDidChange="selectedPath = null; selectedDisplay = null; selectedBlock = null; stack.refetch()" />
 
   <HSplitter height="100%"
-    initialPrimarySize="{window.__bramRestoreSplitterSize('context', '40%')}"
+    initialPrimarySize="{window.__bramRestoreSplitterSize('context', '45%')}"
     onResize="(px) => window.__bramSaveSplitterSize('context', px)">
     <VStack
       padding="$space-4"
       gap="$space-4"
       overflowY="auto"
-      onInit="registerContextMemorySelector((basename) => { let memorySection = ((ctxList.value &amp;&amp; ctxList.value.sections) || []).find((s) => s.key === 'memory'); let f = ((memorySection &amp;&amp; memorySection.items) || []).find((x) => x.display === basename); if (f) { selectedPath = f.path; selectedDisplay = f.display; selectedLine = null; } })"
+      onInit="registerContextMemorySelector((basename) => { let memorySection = ((ctxList.value &amp;&amp; ctxList.value.sections) || []).find((s) => s.key === 'memory'); let f = ((memorySection &amp;&amp; memorySection.items) || []).find((x) => x.display === basename); if (f) { selectedPath = f.path; selectedDisplay = f.display; selectedBlock = null; } })"
       onCleanup="clearContextMemorySelector()">
       <ModalDialog id="contextInfoDialog" title="About Context">
-        <Text value="{ctxList.value &amp;&amp; ctxList.value.summary}" />
+        <VStack gap="$space-3">
+          <Text value="{window.__bramStackIntro()}" />
+          <Text value="Sizes are the bytes each block takes in the session file, scaled by a bytes-per-token figure measured on this session so they total the context the last call reported. The remainder no block accounts for is shown as such." />
+          <!-- One line per kind, the way the tables say what their columns
+               mean (table-headers-explained). -->
+          <VStack gap="$space-1">
+            <Text fontWeight="$fontWeight-bold" value="What the kinds are" />
+            <Items data="{window.__bramStackKindGlossary()}">
+              <HStack gap="$space-2" verticalAlignment="start">
+                <Stack width="10px" height="10px" backgroundColor="{$item.color}" marginTop="$space-1" />
+                <Text fontSize="$fontSize-sm" width="*" value="{$item.line}" />
+              </HStack>
+            </Items>
+          </VStack>
+        </VStack>
       </ModalDialog>
       <HStack verticalAlignment="center" gap="$space-2">
         <Heading level="h4">Context</Heading>
         <Button
-          when="{ctxList.value &amp;&amp; ctxList.value.summary}"
           label="ⓘ"
           variant="ghost"
           size="sm"
           tooltip="About Context"
           onClick="contextInfoDialog.open()" />
-        <SpaceFiller />
-        <SearchBox
-          id="contextSearchBox"
-          boxWidth="20rem"
-          placeholder="Search..."
-          onQueryChange="(q) => searchQuery = q"
-          onClear="searchQuery = ''; selectedPath = null; selectedDisplay = null; selectedLine = null" />
       </HStack>
 
-      <VStack
-        gap="$space-3"
-        when="{searchQuery &amp;&amp; searchQuery.trim().length >= 2 &amp;&amp; ctxSearch.value &amp;&amp; ctxSearch.value.results}">
-        <Text
-          when="{ctxSearch.value.results.length === 0}"
-          color="$textColor-secondary"
-          fontSize="$fontSize-sm">
-          No matches.
-        </Text>
-        <Items data="{ctxSearch.value.results}">
-          <VStack gap="$space-1" var.filePath="{$item.path}" var.fileDisplay="{$item.display}">
-            <Link
-              onClick="selectedPath = filePath; selectedDisplay = fileDisplay; selectedLine = null"
-              noIndicator="true">
-              <Text
-                value="{fileDisplay}"
-                fontFamily="$fontFamily-monospace"
-                fontSize="$fontSize-sm"
-                fontWeight="$fontWeight-bold" />
-            </Link>
-            <Items data="{$item.hits}">
-              <Link
-                onClick="selectedPath = filePath; selectedDisplay = fileDisplay; selectedLine = $item.line"
-                noIndicator="true">
-                <HStack gap="$space-2">
-                  <Text value="{$item.line}" fontSize="$fontSize-xs" color="$textColor-secondary" />
-                  <Text value="{$item.snippet}" fontSize="$fontSize-xs" whiteSpace="nowrap" overflowMode="ellipsis" maxLines="1" />
-                </HStack>
-              </Link>
-            </Items>
-          </VStack>
-        </Items>
-        <Text
-          when="{ctxSearch.value.truncated}"
-          color="$textColor-secondary"
-          fontSize="$fontSize-xs">
-          (first 50 hits)
-        </Text>
-      </VStack>
-
-      <Items
-        when="{(!searchQuery || searchQuery.trim().length &lt; 2) &amp;&amp; ctxList.value &amp;&amp; ctxList.value.sections}"
-        data="{ctxList.value.sections}">
-        <VStack gap="$space-1" when="{$item.items &amp;&amp; $item.items.length > 0}">
-          <Heading level="h4">{$item.label}</Heading>
-          <Items data="{$item.items}">
-            <Link
-              onClick="selectedPath = $item.path; selectedDisplay = $item.display; selectedLine = null"
-              noIndicator="true">
-              <Text
-                value="{$item.display}"
-                fontFamily="$fontFamily-monospace"
-                fontSize="$fontSize-sm"
-                fontWeight="{selectedPath === $item.path ? '$fontWeight-bold' : '$fontWeight-normal'}" />
-            </Link>
-          </Items>
-        </VStack>
-      </Items>
+      <ContextStack
+        stack="{stack.value}"
+        onSelect="(b) => { selectedBlock = b; selectedPath = null; selectedDisplay = null; }" />
     </VStack>
 
-    <VStack when="{selectedPath}" padding="$space-4" gap="$space-2" overflowY="auto">
-      <VStack gap="$space-2">
-        <Text value="{selectedPath}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" />
-        <VStack when="{selectedLine}" gap="$space-1">
-          <Link onClick="selectedLine = null" noIndicator="true">
-            <Text value="↥ Show full file" fontSize="$fontSize-xs" />
-          </Link>
-          <Items data="{snippetAroundLine(ctxFile.value &amp;&amp; ctxFile.value.content, selectedLine, 6)}">
-            <HStack
-              gap="$space-2"
-              backgroundColor="{$item.isMatch ? '$color-warn-100' : 'transparent'}"
-              padding="$space-0_5">
-              <Text
-                value="{$item.line}"
-                fontFamily="$fontFamily-monospace"
-                fontSize="$fontSize-xs"
-                color="$textColor-secondary"
-                width="40px"
-                textAlign="right" />
-              <Text
-                value="{$item.text}"
-                fontFamily="$fontFamily-monospace"
-                fontSize="$fontSize-sm"
-                whiteSpace="pre"
-                fontWeight="{$item.isMatch ? '$fontWeight-bold' : '$fontWeight-normal'}" />
-            </HStack>
-          </Items>
-        </VStack>
+    <VStack when="{selectedPath || selectedBlock}" padding="$space-4" gap="$space-2" overflowY="auto">
+      <!-- A closer, so the right half can be put away (Jon, 2026-11-24). -->
+      <HStack verticalAlignment="center">
+        <SpaceFiller />
+        <Button label="✕" variant="ghost" size="xs" tooltip="Close" onClick="selectedBlock = null; selectedPath = null; selectedDisplay = null" />
+      </HStack>
+      <!-- A block: its label, what it weighs, and the exact text sent; a
+           Markdown file renders as Markdown, as the Runs under files do. -->
+      <VStack when="{!!selectedBlock &amp;&amp; !selectedPath}" gap="$space-2">
+        <Text value="{window.__bramStackRowLabel(selectedBlock)}" fontWeight="$fontWeight-bold" />
+        <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{window.__bramStackBlockHeader(selectedBlock)}" />
+        <Text when="{selectedBlock.onDisk}" value="{selectedBlock.onDisk}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" />
         <Markdown
-          when="{!selectedLine &amp;&amp; selectedDisplay &amp;&amp; selectedDisplay.endsWith('.md')}"
+          when="{selectedBlock.onDisk &amp;&amp; selectedBlock.onDisk.endsWith('.md')}"
+          content="{window.__bramStackBlockBody(selectedBlock, blockText.value)}"
+          interpolateBindings="false" allowHtml="false" />
+        <Text
+          when="{!(selectedBlock.onDisk &amp;&amp; selectedBlock.onDisk.endsWith('.md'))}"
+          fontFamily="$fontFamily-monospace"
+          fontSize="$fontSize-sm"
+          whiteSpace="pre-wrap"
+          value="{window.__bramStackBlockBody(selectedBlock, blockText.value)}" />
+      </VStack>
+      <!-- A file the memory selector opened here (the composer's memory
+           widget calls registerContextMemorySelector). -->
+      <VStack when="{!!selectedPath}" gap="$space-2">
+        <Text value="{selectedPath}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" />
+        <Markdown
+          when="{selectedDisplay &amp;&amp; selectedDisplay.endsWith('.md')}"
           content="{ctxFile.value &amp;&amp; ctxFile.value.content}"
           interpolateBindings="false" allowHtml="false" />
         <Text
-          when="{!selectedLine &amp;&amp; selectedDisplay &amp;&amp; !selectedDisplay.endsWith('.md')}"
+          when="{selectedDisplay &amp;&amp; !selectedDisplay.endsWith('.md')}"
           fontFamily="$fontFamily-monospace"
           fontSize="$fontSize-sm"
           whiteSpace="pre"

@@ -24874,3 +24874,231 @@ window.__bramStatusActionColor = function (row) {
   if (row && row.level === "warn") return "$color-warn-700";
   return "$textColor-secondary";
 };
+
+// ---------------------------------------------------------------------------
+// context-stack-viewer (Jon, 2026-11-24: "we know what we sent to the agent,
+// right, can we not build an interactive context viewer?"): the Context
+// tab's stack, read from GET /__context-stack (src/context_stack.rs). Pure
+// functions; each reads only its arguments.
+window.__bramStackKindLabel = function (kind) {
+  var names = {
+    harness: "prompt", instructions: "instructions", memory: "memory",
+    user: "you", agent: "agent", "tool-call": "call", "tool-result": "result",
+    attachment: "note", thinking: "thinking", "compaction-summary": "summary"
+  };
+  return names[kind] || String(kind || "");
+};
+// One sentence per kind, for the chips' tooltips, the block header and the
+// About dialog (Jon, 2026-11-24: "don't understand. what are thinking
+// tokens?").
+window.__bramStackKindExplain = function (kind) {
+  var text = {
+    harness: "The system prompt Claude Code sends first on every call, and the definitions of the tools the agent may call.",
+    instructions: "CLAUDE.md and the files it imports, sent on every call.",
+    memory: "The memory index the harness sends beside the instructions.",
+    user: "What you typed.",
+    agent: "What the agent wrote back to you.",
+    "tool-call": "Each tool the agent called, with the input it gave it.",
+    "tool-result": "What each tool returned, read back into the context.",
+    attachment: "Notes the harness slips in: reminders, hook output, tools added mid-session.",
+    thinking: "Each row is one bout of reasoning before a step. The API hands the reasoning back as a block only Anthropic can decrypt, and Claude Code sends every one of them again on every later call, so the model keeps its own train of thought through the session. Some bouts also carry the one-line progress note you saw in the terminal while the agent worked; that note is the only readable part. They all take context room like anything else, and a fresh session is what clears them.",
+    "compaction-summary": "What a compaction left of the conversation before it.",
+    unaccounted: "Tokens in the measured total that no block accounts for."
+  };
+  return text[kind] || "";
+};
+window.__bramStackKindGlossary = function () {
+  return ["harness", "instructions", "memory", "user", "agent", "tool-call", "tool-result", "attachment", "thinking", "compaction-summary"]
+    .map(function (k) {
+      var title = window.__bramStackKindTitle(k);
+      var explain = window.__bramStackKindExplain(k);
+      return { kind: k, title: title, explain: explain, line: title + ": " + explain, color: window.__bramStackKindColor(k) };
+    });
+};
+window.__bramStackKindTitle = function (kind) {
+  var names = {
+    harness: "Claude's own prompt and tools", instructions: "Instruction files",
+    memory: "Memory", user: "Your messages", agent: "The agent's words",
+    "tool-call": "Tool calls", "tool-result": "Tool results",
+    attachment: "Notes from the harness", thinking: "Thinking",
+    "compaction-summary": "Compaction summary"
+  };
+  return names[kind] || String(kind || "");
+};
+window.__bramStackBytes = function (n) {
+  if (typeof n !== "number" || !isFinite(n)) return "";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return Math.round(n) + " B";
+};
+window.__bramStackTokens = function (n) {
+  if (typeof n !== "number" || !isFinite(n)) return "";
+  if (n >= 10000) return Math.round(n / 1000) + "k";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(Math.round(n));
+};
+window.__bramStackSizeLabel = function (block) {
+  if (!block) return "";
+  if (block.resent === false) return window.__bramStackBytes(block.bytes) + ", not re-sent";
+  var t = window.__bramStackTokens(block.tokens);
+  var pct = typeof block.share === "number" && block.share >= 0.005 ? " · " + Math.round(block.share * 100) + "%" : "";
+  return t + pct;
+};
+// A thinking row reads "Thinking", or "Thinking · “<note>”" when the bout
+// came with the one-line progress note Claude Code shows in the terminal;
+// the note is the only readable part (Jon, 2026-11-24: "do not understand
+// the mix").
+window.__bramStackRowLabel = function (block) {
+  if (!block) return "";
+  var label = String(block.label || "");
+  if (block.kind !== "thinking") return label;
+  if (label === "Thinking (encrypted)" || label === "Thinking (redacted)") return "Thinking";
+  if (label.indexOf("Thinking: ") === 0) return "Thinking · “" + label.slice("Thinking: ".length) + "”";
+  return label;
+};
+window.__bramStackLabelFont = function (block) {
+  return block && block.onDisk ? "$fontFamily-monospace" : "$fontFamily";
+};
+// What the tab is, in one sentence; the figures line says what this
+// session's stack measures.
+window.__bramStackIntro = function () {
+  return "Every block the model is sent in this session, since the last compaction, sized to the measured total.";
+};
+// The one sentence that answered "what are thinking tokens?" (Jon,
+// 2026-11-24: "finally a clear answer. include that prominently").
+window.__bramStackThinkingLine = function (stack) {
+  var total = (stack && stack.measured && stack.measured.tokens) || 0;
+  var think = ((stack && stack.byKind) || []).find(function (k) { return k.kind === "thinking"; });
+  if (!think || !think.tokens || !total) return "";
+  var pct = Math.round((think.tokens / total) * 100);
+  return window.__bramStackTokens(think.tokens) + " of “Thinking” tokens (" + pct + "%) are the model's own past reasoning riding along, unreadable to you, filling the window like anything else. A fresh session is what clears them.";
+};
+// The headline stays in view; the rest folds under "How these figures are
+// made" (Jon, 2026-11-24: "keep but collapse the eye-watering details").
+window.__bramStackHeadline = function (stack) {
+  if (!stack || !stack.supported || !stack.measured) return "";
+  var m = stack.measured;
+  var parts = [(stack.blocks || []).length + " blocks", window.__bramStackTokens(m.tokens) + " tokens at the last call"];
+  if (m.calls) parts.push(m.calls + (m.calls === 1 ? " call" : " calls"));
+  return parts.join(" · ");
+};
+window.__bramStackUnsupportedLine = function (stack) {
+  if (!stack) return "";
+  if (stack.supported === false) {
+    var p = String(stack.provider || "this provider");
+    var name = p === "codex" ? "Codex" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p === "claude" ? "Claude" : p;
+    return "Bram does not read " + name + " sessions into blocks yet.";
+  }
+  if (!stack.session) return "No session yet.";
+  return "";
+};
+window.__bramStackCompactedLine = function (stack) {
+  var c = stack && stack.compacted;
+  if (!c || !c.blocks) return "";
+  return c.blocks + " earlier blocks (" + window.__bramStackBytes(c.bytes) + ") were sent on earlier calls and are not sent now: compacted away, or cleared.";
+};
+// The bar: one stacked horizontal bar, a series per kind in the stack's own
+// order, the unaccounted remainder last in grey.
+// One colour per kind, shared by the strip's segments, the legend chips and
+// the rows' swatches.
+window.__bramStackKindColor = function (kind) {
+  var colors = {
+    harness: "#4c6ef5", instructions: "#15aabf", memory: "#12b886",
+    user: "#e8590c", agent: "#f59f00", "tool-call": "#7950f2", "tool-result": "#5c7cfa",
+    attachment: "#868e96", thinking: "#ffd8a8", "compaction-summary": "#c92a2a",
+    unaccounted: "#ced4da"
+  };
+  return colors[kind] || "#adb5bd";
+};
+// The strip's segments: largest kind first, each a percentage of the width,
+// a kind under one percent drawn at one percent so its colour shows (Jon,
+// 2026-11-24: "where's the red?"); the tooltip says the true figure. The
+// unaccounted remainder, when it is a thousand tokens or more, is a grey
+// segment whose click clears the filter.
+window.__bramStackSegments = function (stack) {
+  var byKind = (stack && stack.byKind) || [];
+  var total = (stack && stack.measured && stack.measured.tokens) || 0;
+  var floor = Math.ceil(total * 0.01);
+  var parts = byKind.filter(function (k) { return k.tokens > 0; }).slice()
+    .sort(function (a, b) { return b.tokens - a.tokens; })
+    .map(function (k) {
+      return { kind: k.kind, color: window.__bramStackKindColor(k.kind), tokens: k.tokens, drawn: Math.max(k.tokens, floor), title: window.__bramStackKindTitle(k.kind) };
+    });
+  var u = stack && stack.unaccountedTokens;
+  if (typeof u === "number" && u >= 1000) {
+    parts.push({ kind: "all", color: window.__bramStackKindColor("unaccounted"), tokens: u, drawn: u, title: "Unaccounted" });
+  }
+  var drawn = parts.reduce(function (sum, p) { return sum + p.drawn; }, 0) || 1;
+  return parts.map(function (p) {
+    var share = total ? Math.round((p.tokens / total) * 1000) / 10 : 0;
+    return {
+      kind: p.kind,
+      color: p.color,
+      width: (Math.round((p.drawn / drawn) * 10000) / 100) + "%",
+      tip: p.title + ": " + window.__bramStackTokens(p.tokens) + " tokens (" + share + "%). " + window.__bramStackKindExplain(p.kind === "all" ? "unaccounted" : p.kind)
+    };
+  });
+};
+// A click on a segment filters like a chip; a second click on the same kind
+// clears the filter.
+window.__bramStackToggleKind = function (current, kind) {
+  return current === kind ? "all" : kind;
+};
+// The legend chips, which are also the kind filter: "All" first, then each
+// kind in the stack with its share; `active` marks the current filter.
+window.__bramStackLegend = function (stack, kind) {
+  var total = (stack && stack.measured && stack.measured.tokens) || 0;
+  var out = [{ kind: "all", label: "All kinds", color: null, active: !kind || kind === "all", tip: "Every block, in the order the model sees them or by size." }];
+  // Largest share first, the bar's order (Jon, 2026-11-24).
+  var ordered = ((stack && stack.byKind) || []).slice().sort(function (a, b) { return b.tokens - a.tokens; });
+  ordered.forEach(function (k) {
+    var pct = total ? Math.round((k.tokens / total) * 100) : 0;
+    out.push({
+      kind: k.kind,
+      label: window.__bramStackKindTitle(k.kind) + " " + (pct >= 1 ? pct + "%" : "<1%"),
+      color: window.__bramStackKindColor(k.kind),
+      active: kind === k.kind,
+      tip: window.__bramStackKindExplain(k.kind) + " " + k.blocks + (k.blocks === 1 ? " block, " : " blocks, ") + window.__bramStackTokens(k.tokens) + " tokens. Click to show only these."
+    });
+  });
+  return out;
+};
+window.__bramStackLegendWeight = function (entry) {
+  return entry && entry.active ? "$fontWeight-extra-bold" : "$fontWeight-normal";
+};
+window.__bramStackLegendColor = function (entry) {
+  return entry && entry.active ? "$textColor-primary" : "$textColor-secondary";
+};
+window.__bramStackRows = function (stack, sort, kind) {
+  var blocks = (stack && stack.blocks) || [];
+  var rows = kind && kind !== "all" ? blocks.filter(function (b) { return b.kind === kind; }) : blocks.slice();
+  if (sort === "size") {
+    rows.sort(function (a, b) { return (b.tokens - a.tokens) || (b.bytes - a.bytes) || (a.i - b.i); });
+  }
+  return rows;
+};
+window.__bramStackBlockHeader = function (block) {
+  if (!block) return "";
+  var parts = [window.__bramStackKindTitle(block.kind), window.__bramStackBytes(block.bytes)];
+  if (block.resent === false) parts.push("not re-sent on later calls");
+  else {
+    parts.push(window.__bramStackTokens(block.tokens) + " tokens");
+    if (typeof block.share === "number") parts.push(Math.round(block.share * 1000) / 10 + "% of the context");
+  }
+  if (block.turn) parts.push("turn " + block.turn);
+  var line = parts.join(" · ");
+  var why = window.__bramStackKindExplain(block.kind);
+  return why ? line + "\n" + why : line;
+};
+window.__bramStackBlockBody = function (block, payload) {
+  if (!block || !payload) return "";
+  var text = typeof payload.text === "string" ? payload.text : "";
+  if (block.label === "Pasted image" || (block.onDisk && /\.(png|jpe?g|gif|webp|bmp)$/i.test(block.onDisk))) {
+    return "(image data, " + window.__bramStackBytes(block.bytes) + ")";
+  }
+  if (block.kind === "thinking") {
+    var encrypted = "(" + window.__bramStackBytes(block.opaqueBytes || block.bytes) + " of encrypted reasoning the model carries forward; there is nothing more to read)";
+    return text.trim() ? text + "\n\n" + encrypted : encrypted;
+  }
+  return text;
+};

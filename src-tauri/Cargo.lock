@@ -310,6 +310,7 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "sqlformat",
  "tauri",

@@ -1578,3 +1578,67 @@ files, so a 12-line fix would ship as a 900-line diff under your item's
 id. That is what normalizing bought: the rule stopped depending on
 anyone remembering it. The cross-machine coordination that landing it
 required is on judell/bram#322.
+
+### What the model was sent: the context stack
+
+`context-stack-viewer` (2026-11-24) answers the question Elle's students
+asked, "how can I see what the agent has in its context?", with the blocks
+the model is sent, each sized, on the Context tab. The route is
+`GET /__context-stack` (shape in `apis.md`), the module
+`src-tauri/src/context_stack.rs`, the pane `Context.xmlui` and
+`ContextStack.xmlui`. The per-row weights tried on the Transcript the day
+before were dropped as "non-actionable noise" (`transcript-shows-context-weight`,
+in `stash@{0}` for a while); the stack is a surface built for the question
+instead.
+
+**The file holds the requests.** A Claude Code session file records every
+API request it makes: `api-request` (a `base` request, how many of its
+messages to `keep`, and the `tail` of message hashes appended),
+`api-request-blob` (the harness-made messages those hashes name: the
+reminders, the environment block, tools added mid-session) and
+`api-request-shape` (the system prompt and tool list, by `shapeHash`). A
+hash is the SHA-256 of the message as canonical JSON (sorted keys, no
+spaces), so the ordinary user and assistant records resolve too, in four
+forms: as stored, wrapped in a text block, one turn's parallel tool results
+merged into one user message, and an assistant message with or without its
+thinking signatures. On session `4f3501d7` (105 requests, 1,246 tail
+references, 302 distinct hashes) every hash resolved: 123 to blobs, the
+rest to records. The last request's list, with its shape in front, is
+exactly what the model was sent; the earlier idea that the harness's own
+prompt was "knowable only by subtraction" was wrong. Files without request
+records (older Claude Code) fall back to the record walk, which takes the
+latest `prompt_snapshot` attachment as the harness block.
+
+**Sizing.** The wire bytes are exact; the tokenizer is the one guess. A
+least-squares fit of each request's context growth on the text and opaque
+(thinking-signature) bytes its tail appended, over the 99 usable request
+pairs of `4f3501d7`, gave 2.51 bytes a token for text and 3.73 for
+signatures, with residuals of median -93 tokens and quartiles -296 to 132;
+the 15 pairs with no signature at all read 2.20 (quartiles 2.10 to 2.60).
+One rate would have put thinking at 35% of the context; two put it at 27%.
+`fit_rates` fits the pair per session and refuses fewer than six rows, under
+1,000 signature bytes, or a rate outside 1 to 12; then one factor scales both
+so the live blocks total the measured figure less the images' estimate. An
+image is costed at a fixed 1,600 tokens (the API's cap for a full-size
+image); the one image in the fitting data priced at about 660, so that is a
+ceiling, not a measurement.
+
+**Baseline, session `4f3501d7` at its last request** (`cargo test
+context_stack::tests::probe_a_real_session_file -- --ignored --nocapture`
+with `BRAM_STACK_FILE` and `BRAM_STACK_ROOT` set): 744 blocks, 397,240
+tokens measured, floor 75,434, text 2.63 bytes a token after scaling,
+accounted within 9 tokens. By kind: tool results 27.2% (187 blocks, 281
+KB), thinking 27.1% (100 blocks, 420 KB of signatures), tool calls 16.3%
+(187, 171 KB), the harness 9.5% (the tool definitions 30k tokens, the
+system prompt 6.6k), attachments 7.4% (192 notes, 78 KB), instruction files
+6.8% (`conventions.md` 13k, `developing-bram.md` 6.9k, `CLAUDE.md` 4.1k),
+the agent's words 3.5%, the user's 1.9%, memory 0.3%. Three blocks (1.9 KB)
+had been dropped by a request that kept 35 of its base's 38 messages, with
+no compaction: the harness clears, too. The single largest tool result was
+`xmlui_component_docs` at 10.6k tokens.
+
+**Adding a provider.** `reader_for` maps the session's provider label to a
+`Reader`; a provider without one answers `supported: false` and the pane
+says so in the provider's name. A Codex reader is a walk over the rollout's
+records into `Block`s plus `parse_codex_text` for the measured side; the
+scaling and the by-kind totals are shared.

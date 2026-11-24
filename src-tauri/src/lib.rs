@@ -19,6 +19,8 @@ mod worklist_state;
 // issue-486-token-accounting-instrument: per-call token accounting, its own
 // module so the instrument for #487 does not grow lib.rs.
 mod token_accounting;
+// context-stack-viewer: the sending view of a Claude session, block by block.
+mod context_stack;
 
 // authorization-step-0-grant-semantics: the target grant lifecycle (docs/authorization.md, "Target grant semantics"). Pure and not yet called; migration step 1 is its first caller.
 mod grant_lifecycle;
@@ -64648,6 +64650,86 @@ mod skill_frontmatter_tests {
     }
 }
 
+// context-stack-viewer: the sending view of a session (src/context_stack.rs).
+// The file resolves the way /__turns resolves it: no id is the active
+// session (or the given provider's latest), an id is looked up in that
+// provider's list. A provider with no reader in `context_stack::reader_for`
+// answers `supported: false` without the file being read. `block` asks for
+// one block's exact text instead of the stack.
+fn context_stack_response<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    provider: Option<SessionProvider>,
+    block: Option<usize>,
+) -> Result<(u16, &'static str, Vec<u8>), String> {
+    const JSON: &str = "application/json; charset=utf-8";
+    const TEXT: &str = "text/plain; charset=utf-8";
+    let json = |s: &context_stack::Stack| -> Result<(u16, &'static str, Vec<u8>), String> {
+        serde_json::to_vec(s)
+            .map(|b| (200u16, JSON, b))
+            .map_err(|e| e.to_string())
+    };
+    let path_opt = if id.is_empty() {
+        match provider {
+            Some(p) => latest_session_path_for_provider(app, p)?,
+            None => active_session_path(app)?,
+        }
+    } else {
+        if !session_id_is_safe(id) {
+            return Err("invalid session id".to_string());
+        }
+        let (_, sessions) = sessions_for_provider(app, provider, None)?;
+        sessions.into_iter().find(|s| s.id == id).map(|s| s.path)
+    };
+    let Some(path) = path_opt else {
+        let label = provider
+            .or_else(|| current_provider(app))
+            .map(session_provider_label)
+            .unwrap_or("");
+        return match block {
+            Some(_) => Ok((404, TEXT, b"no session".to_vec())),
+            None => json(&context_stack::empty(
+                label,
+                context_stack::reader_for(label).is_some(),
+            )),
+        };
+    };
+    let label = projected_turns_provider_label(&path);
+    if context_stack::reader_for(label).is_none() {
+        // No reader for this provider's records yet: say so without
+        // reading the file.
+        return match block {
+            Some(_) => Ok((404, TEXT, b"no stack reader for this provider".to_vec())),
+            None => json(&context_stack::empty(label, false)),
+        };
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let sid = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let root = project_root(Some(app));
+    let stack = context_stack::build(label, &text, &sid, root.as_deref());
+    match block {
+        Some(i) => match stack.blocks.get(i) {
+            // JSON like /__context/file, so the pane's DataSource reads
+            // `.text` the way it reads `.content` there.
+            Some(b) => serde_json::to_vec(&serde_json::json!({
+                "i": i,
+                "kind": b.kind,
+                "label": b.label,
+                "bytes": b.bytes,
+                "tokens": b.tokens,
+                "text": b.text,
+            }))
+            .map(|body| (200u16, JSON, body))
+            .map_err(|e| e.to_string()),
+            None => Ok((404, TEXT, b"no such block".to_vec())),
+        },
+        None => json(&stack),
+    }
+}
+
 fn context_list<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -93586,6 +93668,35 @@ fn route_request<R: tauri::Runtime>(
     path: &str,
     query: &str,
 ) -> (u16, &'static str, Vec<u8>) {
+    // context-stack-viewer: GET /__context-stack[?provider=&id=] is the
+    // stack the model is sent (src/context_stack.rs); /__context-stack/block
+    // with i=N is one block's exact text. The session resolves as /__turns
+    // resolves it.
+    if path == "__context-stack" || path == "__context-stack/block" {
+        let mut provider: Option<SessionProvider> = None;
+        let mut session_id = String::new();
+        let mut block: Option<usize> = None;
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("provider=") {
+                provider = SessionProvider::from_str(&percent_decode(v));
+            } else if let Some(v) = pair.strip_prefix("id=") {
+                session_id = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("i=") {
+                block = percent_decode(v).parse::<usize>().ok();
+            }
+        }
+        if path == "__context-stack/block" && block.is_none() {
+            return (400, "text/plain; charset=utf-8", b"i required".to_vec());
+        }
+        return match context_stack_response(app, &session_id, provider, block) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[http /__context-stack] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
     if path == "__context/list" {
         let mut provider: Option<SessionProvider> = None;
         for pair in query.split('&') {

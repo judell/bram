@@ -22562,12 +22562,6 @@ window.__bramContextSavingMarkdown = function (ctx, rates, byModel) {
   );
   return lines.join("\n");
 };
-// The context block's shape, built from a /__token-accounting session row.
-window.__bramContextFromSessionRow = function (row) {
-  if (!row || !row.context) return null;
-  var models = row.models || [];
-  return { tokens: row.context.last, floor: row.context.first, model: models.length ? models[models.length - 1] : "", pace: row.pace || null };
-};
 window.__bramSessionContextInfoBody = function (key, ctx, rates) {
   var K = window.__bramTokenK;
   var num = function (n) { return typeof n === "number" && isFinite(n) ? K(n) : "—"; };
@@ -24252,9 +24246,8 @@ window.__bramStoryTell = (function () {
 })();
 // END bram-story
 
-// Status > Token accounting (token-accounting-status-explains-columns, Jon
-// 2026-11-12). Formatting and the header ⓘ texts for the two tables, called
-// from Status.xmlui as window.__bramToken*. Pure functions; definitions only.
+// Token figures, formatted. Shared by the footer's context figure, the Cost
+// page and the Log; pure. (token-accounting-status-explains-columns, 2026-11-12.)
 window.__bramTokenK = function (n) {
   if (typeof n !== "number" || !isFinite(n)) return "—";
   return n >= 1000 ? Math.round(n / 1000) + "k" : String(Math.round(n));
@@ -24267,94 +24260,51 @@ window.__bramTokenPct = function (x) {
   if (typeof x !== "number" || !isFinite(x)) return "—";
   return Math.round(x * 100) + "%";
 };
-window.__bramTokenFit = function (row, key) {
-  return window.__bramTokenPct(row && row.fits ? row.fits[key] : null);
-};
-// No session started on the model: the host reports sessions 0 and p50 0,
-// which is "none", not a measurement.
-window.__bramTokenFloor = function (row) {
-  var f = row && row.floor;
-  if (!f || !f.sessions || !f.p50) return "—";
-  return window.__bramTokenK(f.p50);
-};
-// "18k + 11k + 52k": the agent's own, Bram's conventions, the project's own.
-// A dash when the agent's own part was not measured. A trailing * marks an
-// agent figure taken from the same provider's other models.
-window.__bramTokenFloorParts = function (row) {
-  var p = row && row.floorParts;
-  var f = row && row.floor;
-  if (!p || !p.native || typeof p.project !== "number" || !f || !f.sessions) return "—";
-  var K = window.__bramTokenK;
-  var text = K(p.native.p50) + " + " + K(p.conventions.approxTokens) + " + " + K(p.project);
-  return p.nativeBasis === "same model" ? text : text + " *";
+window.__bramTokenM = function (n) {
+  if (typeof n !== "number" || !isFinite(n)) return "—";
+  return (n / 1e6).toFixed(1) + "M";
 };
 window.__bramTokenDate = function (ms) {
   if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "";
   return new Date(ms).toISOString().slice(0, 10);
 };
-// token-accounting-files-one-row-per-file: the columns cover different
-// periods by provider (only Claude has a Read tool; Codex's reading is all
-// shell), so the lead says each one's dates, from the report's providerRanges.
+window.__bramTokenUsd = function (d) {
+  if (typeof d !== "number" || !isFinite(d)) return "—";
+  if (d < 0.005) return "under a cent";
+  return "$" + (d < 10 ? d.toFixed(2) : String(Math.round(d)));
+};
 window.__bramTokenProviderName = function (key) {
   return { claude: "Claude", codex: "Codex", opencode: "OpenCode", antigravity: "Antigravity" }[key] || key;
 };
-window.__bramTokenFilesLead = function (report) {
-  var pr = (report && report.providerRanges) || {};
-  var D = window.__bramTokenDate;
-  var N = window.__bramTokenProviderName;
-  var tool = [];
-  var shell = [];
-  Object.keys(pr).forEach(function (k) {
-    if (pr[k].readTool) tool.push(N(k) + ", from " + D(pr[k].readTool.fromMs) + " to " + D(pr[k].readTool.toMs));
-    if (pr[k].shell) shell.push(N(k) + " from " + D(pr[k].shell.fromMs));
-  });
-  return "Which files the agents pull into their context, and how, main threads and subagents together. " +
-    "Read tool: " + (tool.length ? tool.join("; ") : "none") + ". " +
-    "Shell: " + (shell.length ? shell.join(", ") : "none") + ". " +
-    "One row per file in this project; reads of other checkouts of it are counted apart, below the table. " +
-    "The figures show how much a read returns compared with the file, " +
-    "which is the evidence for whether splitting a big file such as lib.rs would change what they read.";
+window.__bramTokenSessionUrl = function (session) {
+  if (!session || !session.provider || !session.id) return "";
+  return "/__token-accounting?session=" + encodeURIComponent(session.provider + ":" + session.id);
 };
-window.__bramTokenElsewhere = function (report) {
-  var e = report && report.elsewhere;
-  if (!e || (!e.reads && !e.shellReads)) return "";
-  var I = window.__bramTokenInt;
-  return "Elsewhere, not in the rows above: " + I(e.reads) + " reads and " + I(e.shellReads) +
-    " shell commands on " + I(e.paths) + " paths that are not in this project's folder (other worktrees and checkouts, " +
-    "files outside it, and spellings that can't be resolved). Their bytes: " +
-    window.__bramTokenBytes(e.bytes) + " read, " + window.__bramTokenBytes(e.viaShellBytes) + " via shell.";
+window.__bramTokenMainRow = function (report) {
+  var arr = (report && report.sessions) || [];
+  return arr.find(function (s) { return s && s.thread === "main"; }) || null;
 };
-window.__bramTokenBytes = function (n) {
-  if (typeof n !== "number" || !isFinite(n)) return "—";
-  if (n < 1024) return Math.round(n) + " B";
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
-  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
-  return (n / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+// A session row's list prices: its last model's row in model-rates.json.
+window.__bramTokenRatesFor = function (row, rates) {
+  var models = (row && row.models) || [];
+  return models.length ? window.__bramModelRatesRow(rates, models[models.length - 1]) : null;
 };
-window.__bramTokenPerRead = function (row) {
-  if (!row || !row.reads) return "—";
-  return window.__bramTokenBytes(row.bytes / row.reads);
-};
-window.__bramTokenFileSize = function (row) {
-  if (!row || typeof row.sizeBytes !== "number") return "—";
-  return window.__bramTokenBytes(row.sizeBytes);
-};
-window.__bramTokenShellCell = function (row) {
-  if (!row || !row.viaShellBytes) return "—";
-  return window.__bramTokenInt(row.shellReads || 0) + " · " + window.__bramTokenBytes(row.viaShellBytes);
-};
-window.__bramTokenTests = function (row) {
-  if (!row || typeof row.testBytes !== "number" || !row.bytes) return "—";
-  return window.__bramTokenPct(row.testBytes / row.bytes);
-};
-window.__bramTokenFileRows = function (report) {
-  return ((report && report.files) || []).slice(0, 15);
+window.__bramTokenListPricesText = function (rates) {
+  var base = "Dollars are list prices from Bram's rates file (`app/tools/resources/model-rates.json`), for the session's last model. " +
+    "Cache reads are priced at the cached-input rate, uncached input at the input rate, cache writes at the 5-minute rate, and output at the output rate. " +
+    "An item's dollars are approximate: its context is priced at the cached-input rate and its output at the output rate of the session it ran in. " +
+    "On a subscription this is quota, not dollars: it shows relative weight, not a bill.";
+  var m = (rates && rates.sources) || {};
+  var ks = Object.keys(m);
+  if (!ks.length) return base;
+  return base + "\n\nSources:\n\n" + ks.map(function (k) {
+    var s = m[k] || {};
+    return "- " + (s.url || k) + (s.readOn ? ", read " + s.readOn : "");
+  }).join("\n");
 };
 // Per-item credit (issue-486-per-item-token-table). One pass over
-// sessions[].items[] and sessions[].chat: rows of item, thread (Main thread /
-// Subagents), calls, summed context, peak context, output. A chat row per
-// thread carries work outside any claim; BucketRow has no peak, so its peak is
-// null ("—"). Items sort by summed context, main + subagents, largest first.
+// sessions[].items[] and sessions[].chat: {items: {id: {main, subagent}},
+// chat: {main, subagent}} with calls, context, output and peak per bucket.
 window.__bramTokenItemAgg = function (report) {
   var items = {};
   var chat = { main: null, subagent: null };
@@ -24376,321 +24326,226 @@ window.__bramTokenItemAgg = function (report) {
   });
   return { items: items, chat: chat };
 };
-window.__bramTokenItemRows = function (report, limit) {
-  var agg = window.__bramTokenItemAgg(report);
-  var I = window.__bramTokenInt, K = window.__bramTokenK;
-  function row(label, thread, t, noPeak) {
-    return {
-      item: label, thread: thread,
-      calls: t ? I(t.calls) : "—", context: t ? I(t.context) : "—",
-      peak: t && !noPeak ? K(t.peak) : "—", output: t ? I(t.output) : "—"
-    };
-  }
-  var ids = Object.keys(agg.items);
-  function tot(id) {
-    var e = agg.items[id];
-    return (e.main ? e.main.context : 0) + (e.subagent ? e.subagent.context : 0);
-  }
-  ids.sort(function (a, b) { return tot(b) - tot(a); });
-  var rows = [];
-  ids.slice(0, limit || 25).forEach(function (id) {
-    var e = agg.items[id];
-    if (e.main) rows.push(row(id, "Main thread", e.main, false));
-    if (e.subagent) rows.push(row(id, "Subagents", e.subagent, false));
-  });
-  if (agg.chat.main) rows.push(row("chat (outside any item)", "Main thread", agg.chat.main, true));
-  if (agg.chat.subagent) rows.push(row("chat (outside any item)", "Subagents", agg.chat.subagent, true));
-  return rows;
+
+// cost-page-is-a-bill (Jon, 2026-11-23): the Cost page as a bill for a
+// period. Pure functions over /__token-accounting?since=, model-rates.json,
+// /__sessions/list and /__settings; each reads only its arguments.
+var __bramCostPeriods = { "7d": { minutes: 7 * 1440, label: "Last 7 days" }, "30d": { minutes: 30 * 1440, label: "Last 30 days" }, all: { minutes: 0, label: "All history" } };
+window.__bramCostPeriod = function (v) {
+  return __bramCostPeriods[v] ? v : "7d";
 };
-window.__bramTokenItemLead = function (report) {
-  var n = Object.keys(window.__bramTokenItemAgg(report).items).length;
-  if (!n) return "No call fell inside an item's claim yet.";
-  return n + " items had calls credited to them" + (n > 25 ? "; the 25 that used the most context are shown" : "") +
-    ", across every session above. Work outside any item's claim is on the chat rows.";
+// The period's start as ISO, through the Log's clock-reading helper (keyed
+// by the period, so it is computed once per choice); "" means no bound.
+window.__bramCostSince = function (period) {
+  var p = __bramCostPeriods[period] || __bramCostPeriods["7d"];
+  return p.minutes > 0 ? window.__bramStorySince(p.minutes, "cost:" + period) : "";
 };
-// Coverage of lib.rs by line, mapped onto the file at HEAD (token-accounting-
-// files-one-row-per-file). Rows for a Table: measure, share of the file, and
-// what it covers (providers and dates).
-window.__bramTokenCoverageOf = function (report) {
-  var c = report && report.coverage;
-  return c && c.length ? c[0] : null;
+window.__bramCostUrl = function (since) {
+  return "/__token-accounting" + (since ? "?since=" + encodeURIComponent(since) : "");
 };
-window.__bramTokenShare = function (x) {
-  if (!x || typeof x.share !== "number") return "—";
-  var p = x.share * 100;
-  return (p >= 10 ? p.toFixed(0) : p.toFixed(1)) + "%";
-};
-window.__bramTokenCoverageLead = function (report) {
-  var c = window.__bramTokenCoverageOf(report);
-  if (!c) return "";
-  return "How much of " + c.path + " the agents ever read, by line. Each line a read returned is placed in today's " +
-    "file (as committed at HEAD, " + window.__bramTokenInt(c.fileLines) + " lines) through the changes made since, " +
-    "so a line pushed down by later edits still counts as the same code. A line the changes deleted or rewrote " +
-    "counts as since changed. Edits not yet committed when a read happened can't be seen.";
-};
-window.__bramTokenCoverageRows = function (report) {
-  var c = window.__bramTokenCoverageOf(report);
-  if (!c) return [];
-  var I = window.__bramTokenInt;
-  var S = window.__bramTokenShare;
-  var D = window.__bramTokenDate;
-  var N = window.__bramTokenProviderName;
-  var pr = (report && report.providerRanges) || {};
-  var rt = c.readTool || {};
-  var toolWho = rt.range ? "Claude " + D(rt.range.fromMs) + " to " + D(rt.range.toMs) : "";
-  var shellRanges = (c.shell && c.shell.ranges) || {};
-  var shellWho = Object.keys(shellRanges).map(function (k) {
-    return N(k) + " " + D(shellRanges[k].fromMs) + " to " + D(shellRanges[k].toMs);
-  }).join("; ");
-  var sh = c.shell || {};
-  return [
-    { measure: "Through the Read tool", share: S(rt.distinct),
-      detail: I(rt.distinct && rt.distinct.lines) + " lines in " + I(rt.reads) + " reads. " + (toolWho || "no reads") + "." },
-    { measure: "Through the shell", share: S(sh.distinct),
-      detail: I(sh.distinct && sh.distinct.lines) + " lines. " + I(sh.placed) + " of " + I(sh.reads) +
-        " commands say which lines they return (sed, head, tail, cat, grep -n); " + I(sh.unplaced) + " don't (" +
-        window.__bramTokenBytes(sh.unplacedBytes) + " returned, not placed). " + (shellWho || "no commands") + "." },
-    { measure: "Either way", share: S(c.combined),
-      detail: I(c.combined && c.combined.lines) + " of " + I(c.fileLines) + " lines were read at least once." },
-    { measure: "Both ways", share: S(c.both),
-      detail: I(c.both && c.both.lines) + " lines were read through the tool and through the shell." },
-    { measure: "Reads per line", share: typeof c.readsPerLine === "number" ? c.readsPerLine.toFixed(1) : "—",
-      detail: "The average line that was read, read that many times. " + I(c.read3Plus) + " lines were read three or more times." },
-    { measure: "Test code", share: S(c.test),
-      detail: I(c.test && c.test.lines) + " of " + I(c.test && c.test.of) + " lines inside test modules." },
-    { measure: "Other code", share: S(c.nonTest),
-      detail: I(c.nonTest && c.nonTest.lines) + " of " + I(c.nonTest && c.nonTest.of) + " lines outside test modules." },
-    { measure: "Since changed", share: "—",
-      detail: I(c.sinceChangedLineReads) + " line readings were of lines later deleted or rewritten; they are in none of the shares above." }
-  ];
-};
-window.__bramTokenRegionRows = function (report) {
-  var c = window.__bramTokenCoverageOf(report);
-  if (!c) return [];
-  return (c.regions || []).map(function (r) {
-    var fns = (r.topFns || []).map(function (f) { return f.name; }).join(", ");
-    return {
-      lines: window.__bramTokenInt(r.fromLine) + "–" + window.__bramTokenInt(r.toLine),
-      lineReads: window.__bramTokenInt(r.lineReads),
-      distinct: window.__bramTokenInt(r.distinctLines) + " of " + (r.toLine - r.fromLine + 1),
-      where: (fns || "no function") + (r.module ? " (in " + r.module + ")" : "")
-    };
-  });
-};
-// Status > Token accounting > This session (status-session-context-report).
-// Pure functions over the one-session /__token-accounting response and the
-// model-rates.json payload; they read only their arguments.
-// Models table cells for itemStarts (status-session-context-report); each
-// reads only its row, and a row from an older host (no itemStarts) shows a dash.
-window.__bramTokenItemStartP50 = function (row) {
-  return window.__bramTokenK(row && row.itemStarts ? row.itemStarts.p50 : null);
-};
-window.__bramTokenItemStartsAbove = function (row) {
-  var s = row && row.itemStarts;
-  if (!s || typeof s.items !== "number") return "—";
-  return s.above400k + " of " + s.items;
-};
-window.__bramTokenSessionUrl = function (session) {
-  if (!session || !session.provider || !session.id) return "";
-  return "/__token-accounting?session=" + encodeURIComponent(session.provider + ":" + session.id);
-};
-window.__bramTokenMainRow = function (report) {
-  var arr = (report && report.sessions) || [];
-  return arr.find(function (s) { return s && s.thread === "main"; }) || null;
-};
-window.__bramTokenM = function (n) {
+// Totals read in billions once they get there ("1.66B"), millions below.
+window.__bramCostTokens = function (n) {
   if (typeof n !== "number" || !isFinite(n)) return "—";
-  return (n / 1e6).toFixed(1) + "M";
+  return n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : window.__bramTokenM(n);
 };
-window.__bramTokenRatesFor = function (row, rates) {
-  var models = (row && row.models) || [];
-  return models.length ? window.__bramModelRatesRow(rates, models[models.length - 1]) : null;
+// Dollars for one session fold at its rates; null when the model has none.
+var __bramCostUsdOf = function (f, rate) {
+  if (!rate) return null;
+  return (f.cacheRead / 1e6) * rate.cacheRead + (f.input / 1e6) * (rate.input || 0) +
+    (f.cacheCreation / 1e6) * (rate.cacheWrite5m || 0) + (f.output / 1e6) * (rate.output || 0);
 };
-window.__bramTokenSessionLead = function (row, rates) {
-  if (!row) return "";
-  var K = window.__bramTokenK, M = window.__bramTokenM, c = row.context || {};
-  var parts = ["Floor " + K(c.first), "now " + K(c.last), "peak " + K(c.peak)];
-  var n = row.compactions || 0;
-  parts.push(n + (n === 1 ? " compaction" : " compactions"));
-  parts.push(window.__bramTokenInt(row.calls) + " calls");
-  parts.push("cache reads " + M(row.cacheRead));
-  parts.push("output " + M(row.output));
-  var out = parts.join(" · ");
-  var r = window.__bramTokenRatesFor(row, rates);
-  if (r) {
-    var rd = (row.cacheRead / 1e6) * r.cacheRead;
-    var wr = typeof r.cacheWrite5m === "number" && row.cacheCreation ? (row.cacheCreation / 1e6) * r.cacheWrite5m : null;
-    var op = (row.output / 1e6) * (r.output || 0);
-    var total = rd + (wr || 0) + op;
-    // cost-headline-cents-and-boundary-column (Jon, 2026-11-23): the parts
-    // rounded to whole dollars beside a total that did not, "about $1 (cache
-    // reads $0, cache writes $0, output $0)". One formatter for all four.
-    var usd = window.__bramTokenUsd;
-    out += " · about " + usd(total) + " at list prices (cache reads " + usd(rd) +
-      (wr === null ? "" : ", cache writes " + usd(wr) + " at the 5-minute rate") +
-      ", output " + usd(op) + ")";
-  }
+// Fold the report's session rows by provider:id: the main thread's figures
+// with its subagents' calls and context added, plus what only the main row
+// knows (first/peak context, compactions, item count, time span).
+window.__bramCostSessionFolds = function (report, rates) {
+  var by = {};
+  var order = [];
+  ((report && report.sessions) || []).forEach(function (s) {
+    if (!s || !s.provider || !s.id) return;
+    var key = s.provider + ":" + s.id;
+    var f = by[key];
+    if (!f) {
+      f = by[key] = {
+        key: key, provider: s.provider, id: s.id, calls: 0, context: 0, cacheRead: 0, input: 0, cacheCreation: 0, output: 0,
+        subCalls: 0, subContext: 0, peak: 0, floor: 0, compactions: 0, items: 0, firstMs: 0, lastMs: 0, models: [], hasMain: false,
+      };
+      order.push(key);
+    }
+    var c = s.context || {};
+    f.calls += s.calls || 0;
+    f.context += c.total || 0;
+    f.cacheRead += s.cacheRead || 0;
+    f.input += s.input || 0;
+    f.cacheCreation += s.cacheCreation || 0;
+    f.output += s.output || 0;
+    f.peak = Math.max(f.peak, c.peak || 0);
+    if (s.thread === "subagent") {
+      f.subCalls += s.calls || 0;
+      f.subContext += c.total || 0;
+    } else {
+      f.hasMain = true;
+      f.floor = c.first || 0;
+      f.compactions += s.compactions || 0;
+      f.items = (s.items || []).length;
+      f.models = s.models || f.models;
+    }
+    if (s.firstMs && (!f.firstMs || s.firstMs < f.firstMs)) f.firstMs = s.firstMs;
+    if (s.lastMs && s.lastMs > f.lastMs) f.lastMs = s.lastMs;
+  });
+  return order.map(function (k) {
+    var f = by[k];
+    f.rate = window.__bramTokenRatesFor({ models: f.models }, rates);
+    f.usd = __bramCostUsdOf(f, f.rate);
+    return f;
+  });
+};
+var __bramCostSortKey = function (f) { return f.usd !== null ? f.usd * 1e12 + f.context : f.context; };
+window.__bramCostHeadline = function (report, rates, period) {
+  var folds = window.__bramCostSessionFolds(report, rates);
+  var label = (__bramCostPeriods[period] || __bramCostPeriods["7d"]).label;
+  if (!folds.length) return "**" + label + ":** no model calls recorded.";
+  var calls = 0, context = 0, usd = 0, unpriced = 0;
+  folds.forEach(function (f) {
+    calls += f.calls; context += f.context;
+    if (f.usd === null) unpriced += 1; else usd += f.usd;
+  });
+  var K = window.__bramTokenInt;
+  var out = "**" + label + ":** " + folds.length + (folds.length === 1 ? " session, " : " sessions, ") + K(calls) + " calls, " +
+    window.__bramCostTokens(context) + " tokens sent (each call sends the whole conversation again), about **" + window.__bramTokenUsd(usd) + "** at list prices";
+  if (unpriced) out += " (" + unpriced + (unpriced === 1 ? " session has" : " sessions have") + " no listed price and is left out)";
+  out += ". On a subscription these dollars are usage against your plan, not a bill; what holds either way is the proportion between the lines below.";
   return out;
 };
-// Dollars the way the savings table prints them: under a cent, cents below
-// $10, whole dollars from $10. Reads only its argument.
-window.__bramTokenUsd = function (d) {
-  if (typeof d !== "number" || !isFinite(d)) return "—";
-  if (d < 0.005) return "under a cent";
-  return "$" + (d < 10 ? d.toFixed(2) : String(Math.round(d)));
-};
-window.__bramTokenHM = function (ms) {
-  if (typeof ms !== "number" || !isFinite(ms)) return "—";
-  var d = new Date(ms);
-  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-};
-window.__bramTokenIdList = function (ids) {
-  var a = ids || [];
-  if (!a.length) return "";
-  return a.slice(0, 2).join(", ") + (a.length > 2 ? " +" + (a.length - 2) : "");
-};
-window.__bramTokenBoundary = function (s) {
-  if (!s) return "";
-  if (s.kind === "start") return "start";
-  if (s.kind === "compaction") return "compaction";
-  var ids = window.__bramTokenIdList(s.ids);
-  var k = s.claimKind;
-  if (s.kind === "claim-opened") {
-    var verb = { approved: "begun", feedback: "feedback", drop: "drop begun", commit: "commit begun" }[k] || (k || "claim opened");
-    return (ids ? ids + " " : "") + verb;
+var __bramCostTitleOf = function (list, f) {
+  var arr = Array.isArray(list) ? list : [];
+  for (var i = 0; i < arr.length; i++) {
+    var s = arr[i];
+    if (s && s.id === f.id && s.provider === f.provider && s.title) return s.title;
   }
-  var done = { commit: "committed", drop: "dropped", approved: "finished", feedback: "feedback done" }[k] || "claim closed";
-  return (ids ? ids + " " : "") + done;
+  return window.__bramTokenProviderName(f.provider) + " " + String(f.id).slice(0, 8);
 };
-window.__bramTokenStretchRows = function (row, rates) {
-  var list = ((row && row.stretches) || []).slice();
-  if (list.length > 40) {
-    list.sort(function (a, b) { return b.excessOverFloor - a.excessOverFloor; });
-    list = list.slice(0, 40);
-  }
-  list.sort(function (a, b) { return a.atMs - b.atMs; });
-  var r = window.__bramTokenRatesFor(row, rates);
-  return list.map(function (s) {
-    var saved = window.__bramTokenM(s.excessOverFloor) + " tokens";
-    if (r) saved += " ($" + ((s.excessOverFloor / 1e6) * r.cacheRead).toFixed(2) + ")";
+var __bramCostHours = function (f) {
+  if (!f.firstMs || !f.lastMs || f.lastMs <= f.firstMs) return "—";
+  var h = (f.lastMs - f.firstMs) / 3.6e6;
+  return h < 10 ? h.toFixed(1) : String(Math.round(h));
+};
+var COST_ROWS_CAP = 10;
+// Rows for By session, costliest first. `settings` is /__settings (the
+// threshold is sessions.suggestAtContextTokens; 0 means never).
+window.__bramCostSessionRows = function (report, sessionsList, rates, settings, showAll) {
+  var folds = window.__bramCostSessionFolds(report, rates);
+  folds.sort(function (a, b) { return __bramCostSortKey(b) - __bramCostSortKey(a); });
+  var threshold = settings && settings.sessions && typeof settings.sessions.suggestAtContextTokens === "number" ? settings.sessions.suggestAtContextTokens : 0;
+  var K = window.__bramTokenK, I = window.__bramTokenInt;
+  return (showAll ? folds : folds.slice(0, COST_ROWS_CAP)).map(function (f) {
     return {
-      when: window.__bramTokenHM(s.atMs),
-      boundary: window.__bramTokenBoundary(s),
-      contextAt: window.__bramTokenK(s.contextAt),
-      calls: window.__bramTokenInt(s.calls),
-      avgContext: window.__bramTokenK(s.avgContext),
-      cacheRead: window.__bramTokenM(s.cacheRead),
-      saved: saved
+      key: f.key,
+      when: window.__bramTokenDate(f.firstMs),
+      title: __bramCostTitleOf(sessionsList, f),
+      hours: __bramCostHours(f),
+      calls: I(f.calls),
+      peak: K(f.peak),
+      compactions: f.compactions ? String(f.compactions) : "—",
+      context: window.__bramTokenM(f.context),
+      usd: f.usd === null ? "—" : window.__bramTokenUsd(f.usd),
+      note: threshold > 0 && f.peak > threshold ? "peaked past " + K(threshold) : "",
     };
   });
 };
-window.__bramTokenStretchLead = function (row) {
-  var n = ((row && row.stretches) || []).length;
-  if (!n) return "";
-  return n > 40 ? "Showing the 40 stretches with the most saved, of " + n + ", in time order." : n + (n === 1 ? " stretch." : " stretches.");
+window.__bramCostSessionsMoreLabel = function (report, showAll) {
+  var n = window.__bramCostSessionFolds(report, null).length;
+  if (n <= COST_ROWS_CAP) return "";
+  return showAll ? "Show the top " + COST_ROWS_CAP : "Show all " + n + " sessions";
 };
-window.__bramTokenListPricesText = function (rates) {
-  var base = "Dollars are list prices from Bram's rates file (`app/tools/resources/model-rates.json`), for the session's last model. " +
-    "Cache reads are priced at the cached-input rate, cache writes at the 5-minute rate, and output separately. " +
-    "On a subscription this is quota, not dollars: it shows relative weight, not a bill.";
-  var m = (rates && rates.sources) || {};
-  var ks = Object.keys(m);
-  if (!ks.length) return base;
-  return base + "\n\nSources:\n\n" + ks.map(function (k) {
-    var s = m[k] || {};
-    return "- " + (s.url || k) + (s.readOn ? ", read " + s.readOn : "");
-  }).join("\n");
+window.__bramCostOpenLabel = function (expandedKey, key) {
+  return expandedKey && expandedKey === key ? "Close" : "Open";
 };
-window.__bramTokenInfoTitle = function (key) {
-  return {
-    covRead: "Through the Read tool", covShell: "Through the shell", covReads: "Reads per line",
-    covChanged: "Since changed", covRegions: "Busiest stretches", itemCredit: "Credit by item",
-    provider: "Provider", calls: "Calls", context: "Context", fit: "Fit",
-    floor: "Floor", cache: "Cache hit", reads: "Reads", main: "Main",
-    subagents: "Subagents", sessions: "Sessions", mostSession: "Most in one session", perRead: "Per read",
-    total: "All sessions' reads", shell: "Via shell", tests: "Tests",
-    stretches: "Stretches", listPrices: "List prices", thisSession: "This session", itemStarts: "Items start at"
-  }[key] || "";
+window.__bramCostToggleKey = function (expandedKey, key) {
+  return expandedKey === key ? "" : key;
 };
-window.__bramTokenProviderText = function (report) {
-  var p = (report && report.providers) || {};
-  var names = { claude: "Claude", codex: "Codex", opencode: "OpenCode", antigravity: "Antigravity" };
-  var lines = Object.keys(p).map(function (k) {
-    var s = p[k] || {};
-    var name = names[k] || k;
-    if (s.status === "read") {
-      return "- **" + name + "**: read, " + window.__bramTokenInt(s.sessions || 0) + " sessions, " +
-        window.__bramTokenInt(s.calls || 0) + " calls." +
-        (s.modelSource === "selection-log" ? " Its records name no model, so the model shown is the one selected in " + name + "'s own log at the time of each call." : "");
+window.__bramCostKeyProvider = function (key) {
+  var i = String(key || "").indexOf(":");
+  return i > 0 ? key.slice(0, i) : "";
+};
+window.__bramCostKeyId = function (key) {
+  var i = String(key || "").indexOf(":");
+  return i > 0 ? key.slice(i + 1) : "";
+};
+// Rows for By item: main thread and subagents together, costliest first,
+// chat outside any item last. Dollars price each session's share of the
+// item at that session's rates (context at cached input, output at output).
+var __bramCostItemAgg = function (report, rates) {
+  var items = {};
+  var chat = { calls: 0, context: 0, usd: 0, priced: false };
+  var folds = window.__bramCostSessionFolds(report, rates);
+  var rateByKey = {};
+  folds.forEach(function (f) { rateByKey[f.key] = f.rate; });
+  ((report && report.sessions) || []).forEach(function (s) {
+    if (!s) return;
+    var rate = rateByKey[s.provider + ":" + s.id] || null;
+    var price = function (r) { return rate ? (r.context || 0) / 1e6 * rate.cacheRead + (r.output || 0) / 1e6 * (rate.output || 0) : null; };
+    (s.items || []).forEach(function (it) {
+      var e = items[it.id] || (items[it.id] = { id: it.id, calls: 0, context: 0, usd: 0, priced: false });
+      e.calls += it.calls || 0;
+      e.context += it.context || 0;
+      var d = price(it);
+      if (d !== null) { e.usd += d; e.priced = true; }
+    });
+    if (s.chat && s.chat.calls) {
+      chat.calls += s.chat.calls || 0;
+      chat.context += s.chat.context || 0;
+      var dc = price(s.chat);
+      if (dc !== null) { chat.usd += dc; chat.priced = true; }
     }
-    return "- **" + name + "**: not read. " + (s.reason || "No reason was given.");
   });
-  return lines.length ? "\n\n" + lines.join("\n") : "";
+  var list = Object.keys(items).map(function (k) { return items[k]; });
+  list.sort(function (a, b) { return b.context - a.context; });
+  return { items: list, chat: chat };
 };
-// "All sessions' reads" column: the arithmetic, from the table's own top row.
-window.__bramTokenTotalText = function (report) {
-  var f = ((report && report.files) || [])[0];
-  var base = "Everything the Read and Grep tools returned for the file, added up over every session and date in the line above the table. " +
-    "It is Reads times Per read. It is not the file's size and not one session's cost: it adds up reads from many sessions, so it can be many times the file's size. " +
-    "For one session, compare Most in one session with File size.";
-  if (!f || !f.reads) return base;
-  return base + "\n\nFor example, " + f.path + ": " + window.__bramTokenInt(f.reads) + " reads, each about " +
-    window.__bramTokenBytes(f.bytes / f.reads) + ", come to " + window.__bramTokenBytes(f.bytes) + " over " +
-    window.__bramTokenInt(f.sessions) + " sessions. The file itself is " + window.__bramTokenFileSize(f) + ".";
+window.__bramCostItemRows = function (report, rates, showAll) {
+  var agg = __bramCostItemAgg(report, rates);
+  var I = window.__bramTokenInt;
+  var row = function (label, t) {
+    return { item: label, calls: I(Math.round(t.calls)), context: window.__bramTokenM(t.context), usd: t.priced ? window.__bramTokenUsd(t.usd) : "—" };
+  };
+  var rows = (showAll ? agg.items : agg.items.slice(0, COST_ROWS_CAP)).map(function (e) { return row(e.id, e); });
+  if (agg.chat.calls) rows.push(row("chat (no item)", agg.chat));
+  return rows;
 };
-window.__bramTokenInfoText = function (key, report, rates) {
-  if (key === "stretches") return "A boundary is where the session changed character: its start, a Worklist item's work beginning or ending, or a compaction. A stretch is the calls from one boundary to the next.\n\nThe last column is a counterfactual: what a fresh session started at that boundary would not have re-read. It is calls times (context at the boundary minus the floor), the tokens a fresh session would have skipped re-reading.";
+window.__bramCostItemsMoreLabel = function (report, showAll) {
+  var n = __bramCostItemAgg(report, null).items.length;
+  if (n <= COST_ROWS_CAP) return "";
+  return showAll ? "Show the top " + COST_ROWS_CAP : "Show all " + n + " items";
+};
+// Two sentences: the instruction floor's share of everything re-sent (main
+// rows: first-call context times calls, against total context) and the
+// subagents' share.
+window.__bramCostFixedLines = function (report) {
+  var rows = (report && report.sessions) || [];
+  var floorTokens = 0, mainContext = 0, subContext = 0, subCalls = 0, allContext = 0;
+  rows.forEach(function (s) {
+    if (!s) return;
+    var c = s.context || {};
+    allContext += c.total || 0;
+    if (s.thread === "subagent") { subContext += c.total || 0; subCalls += s.calls || 0; return; }
+    mainContext += c.total || 0;
+    floorTokens += (c.first || 0) * (s.calls || 0);
+  });
+  if (!allContext) return "";
+  var pct = function (a, b) { return b > 0 ? Math.round((a / b) * 100) + "%" : "—"; };
+  var out = "**Fixed costs.** Bram's instruction floor, the context every session starts with, was " + pct(floorTokens, mainContext) +
+    " of everything the main threads sent (" + window.__bramCostTokens(floorTokens) + " of " + window.__bramCostTokens(mainContext) + " tokens).";
+  out += subCalls
+    ? " Subagents were " + pct(subContext, allContext) + " of all context, over " + window.__bramTokenInt(subCalls) + " calls."
+    : " No subagent ran in this period.";
+  return out;
+};
+window.__bramCostInfoTitle = function (key) {
+  return { listPrices: "How dollars are figured", itemCredit: "Credit by item" }[key] || "";
+};
+window.__bramCostInfoText = function (key, rates) {
   if (key === "listPrices") return window.__bramTokenListPricesText(rates);
-  if (key === "thisSession") return "The session you are in now, read on its own so it appears at once. It shows the floor (the first call's context), the context now and at its peak, compactions, calls, cache reads and output, then the session cut into stretches at its boundaries with what a fresh session would have saved at each.";
-  if (key === "itemStarts") return "The context at each item's first credited call on this model. The median (p50) is where items typically start. The count above 400k is how often a fresh session would have been offered at the default threshold (`sessions.suggestAtContextTokens`). Those counts are the evidence for that default: if few items start above it, it rarely interrupts; if many do, it interrupts often.";
-  if (key === "provider") {
-    return "Which AI coding agent the row belongs to. Each agent keeps a record of every request it sends to its model, " +
-      "and these figures are read from those records, so only agents whose records Bram can read are counted." +
-      window.__bramTokenProviderText(report);
-  }
-  if (key === "calls") return "How many requests this agent sent to this model. One call is one request. A single turn of work usually makes many calls, because the agent asks, reads a result, then asks again.";
-  if (key === "context") {
-    return "Context is everything the model is sent on one call: the whole conversation so far plus the standing instructions. " +
-      "Bigger context means a bigger model window is needed.\n\n" +
-      "- **p50** is the typical call: half of the calls were smaller than this.\n" +
-      "- **p90** is a large call: nine in ten were smaller.\n" +
-      "- **peak** is the largest call seen.\n\n" +
-      "Sizes are in thousands (364k is about 364,000 tokens, a token being roughly three-quarters of a word).";
-  }
-  if (key === "fit") {
-    return "The share of calls whose context would have fit inside a model with that much room (64k, 128k, 200k or 256k tokens). " +
-      "This is the question of whether the same work could run on a smaller or self-hosted model. " +
-      "A low percentage means most calls needed more room than that model has.";
-  }
-  if (key === "floor") {
-    return "How much context the first call of a session already needed, before any work was done. " +
-      "That is the least any model must be able to hold. A dash means no session started on that model, so there is nothing to measure.\n\n" +
-      "**Floor parts** splits it into three, written as *agent + Bram + project*:\n\n" +
-      "- **The agent's own** instructions and tools. This is measured: the typical first call of that agent's sessions in folders with no instruction files, on this machine. It includes whatever skills and servers you have enabled, so it differs between machines. When no session on that exact model qualifies, the figure comes from the same agent's other models and is marked with an asterisk.\n" +
-      "- **Bram's conventions**, the standing instructions Bram installs. This is estimated from the file's size at about 4 bytes per token.\n" +
-      "- **This project's own** instructions, such as its CLAUDE.md and the files it pulls in. This is what is left after the other two, so it carries the estimate's error.\n\n" +
-      "A dash in Floor parts means there was no folder without instructions to measure the agent's own part from.";
-  }
-  if (key === "cache") {
-    return "The share of the context the provider served from its cache instead of processing again. " +
-      "Most of each call repeats the one before it, so this is usually very high. " +
-      "A server with no such cache would have to process all of the context on every call.";
-  }
-  if (key === "reads") return "How many times an agent's Read or Grep tool pulled text out of this file, across the sessions and dates in the line above the table, main threads and subagents together. Only Claude has these tools, so these counts are Claude's alone; Codex reads files only through the shell, and its reads are counted under Via shell. A repeated record of the same tool call counts once.";
-  if (key === "main") return "Of the reads, how many were made by the agent you talk to, in its own conversation.";
-  if (key === "subagents") return "Of the reads, how many were made by helper agents the main agent started for a piece of work. Each helper starts with an empty context, so it reads a file again even when the main agent already has.";
-  if (key === "sessions") return "How many separate sessions read this file. A helper counts toward the session that started it.";
-  if (key === "mostSession") return "The most any one session read of this file, its own reads and its helpers' together. This is the figure to compare with the file's size.";
-  if (key === "perRead") return "The average amount returned by one read (Read in total divided by Reads). Agents take pieces of a file rather than the whole thing, so this is usually far smaller than the file itself.";
-  if (key === "total") return window.__bramTokenTotalText(report);
-  if (key === "shell") return "Shell commands that name this file, such as `sed -n` or `grep -n`: how many, then the bytes they returned. Claude's go back to its first transcript and Codex's to its first, as the line above the table says. This is approximate: a command naming several files has its output split evenly between them, and the output can include other text. Which lines a command returned is worked out separately, in the coverage table.";
-  if (key === "covRead") return "Of today's file, the share of lines that at least one Read or content Grep result returned. Each line number is carried through the changes made after the read, up to HEAD, so the same code counts once even when edits moved it. Only Claude has this tool.";
-  if (key === "covShell") return "The same count for lines that shell commands returned. Only commands that say which lines count: `sed -n 'a,bp'` (several ranges too), `head -n`, `tail -n`, `cat` of the whole file, and `grep -n` or `rg -n` (the line number before each match, with at most `head`, `tail`, `sort` or `uniq` after it). Piped filters, `awk`, `grep` without `-n`, and results cut short count their bytes but no lines; they are the commands that don't say, in the detail. Both Claude and Codex run these.";
-  if (key === "covReads") return "Line readings are each time a line came back in a result. Divide by the lines read at all and you get reads per line. A line read three or more times is one the agents keep coming back to.";
-  if (key === "covChanged") return "A line read at an older commit that the changes since deleted or rewrote has no place in today's file. These are counted apart. lib.rs was reformatted in one sweep and has grown from about 85,000 to 115,000 lines, so many early readings are of code that no longer exists as it was.";
-  if (key === "covRegions") return "The ten busiest stretches of 200 lines by how many times their lines were read, none overlapping, each with the functions that took most of the reading. A split of the file helps where readings gather; stretches the agents never read are not worth moving.";
-  if (key === "itemCredit") return "Each call an agent made while an item was being worked is credited to that item; nothing is estimated.\n\n- **Calls** is how many requests; **Summed context** adds up the context of every call (so it grows with calls, not just with size); **Peak** is the largest single call; **Output** is what the model wrote.\n- Discussion outside any item's claim counts as **chat**, so a conversation about an item before it was started is not credited to it. Chat has no peak.\n- When one approval covers several items at once, every item in that window is credited the same full amount, so those rows overlap and adding the rows double-counts.\n- Subagents are credited by time: a subagent's calls go to the item that was being worked when it ran, because a subagent does not say which item it serves.";
-  if (key === "tests") return "The share of what Read returned that fell inside test code. It is only worked out for `src-tauri/src/lib.rs`; other files show a dash.";
+  if (key === "itemCredit") return "Each call an agent made while an item was being worked is credited to that item; nothing is estimated. Main thread and subagents are added together.\n\n- **Calls** is how many requests; **Tokens sent** adds up the context of every call, and since each call sends the whole conversation again it grows with calls, not just with size.\n- Discussion outside any item's claim counts as **chat (no item)**, so a conversation about an item before it was started is not credited to it.\n- When one approval covers several items at once, every item in that window is credited the same full amount, so those rows overlap and adding the rows double-counts.\n- Subagents are credited by time: a subagent's calls go to the item that was being worked when it ran, because a subagent does not say which item it serves.";
   return "";
 };
 
@@ -24699,8 +24554,7 @@ window.__bramTokenInfoText = function (key, report, rates) {
 // project; null key means the project is unknown, so neither read nor write.
 // Default is all closed.
 // Default is all closed. (Until 2026-11-23 the Token accounting Models
-// table opened by default; it now lives on the Accounting tab, which starts
-// with every fold closed, see __bramAccountingOpenLoad.)
+// table opened by default; the Cost tab has no folds since cost-page-is-a-bill.)
 window.__bramStatusOpenDefault = [];
 window.__bramStatusOpenLoad = function () {
   try {
@@ -24724,15 +24578,6 @@ window.__bramStatusToggle = function (list, key) {
   var next = window.__bramToggleInArray(list, key);
   window.__bramStatusOpenSave(next);
   return next;
-};
-// The Accounting tab's folds at load: the saved list, with Models closed
-// whatever it said (accounting-loads-on-open, Jon, 2026-11-23: "collapse
-// models at load"). The full walk fills the folds in while the quick This
-// session block is read, and a closed Models table keeps the page from
-// jumping when it lands. Opening it is a click; it stays open within the
-// pane's life through the same saved list.
-window.__bramAccountingOpenLoad = function () {
-  return window.__bramStatusOpenLoad().filter(function (k) { return k !== "tokens-models"; });
 };
 // Status rows with no verdict read "N/A", not "none" / "n/a" / blank
 // (status-warns-only-with-an-action).

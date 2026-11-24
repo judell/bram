@@ -483,7 +483,20 @@ curl -4 -sS "http://127.0.0.1:<port>/__token-accounting?session=claude:<id>"
 
 The first is the whole history for Claude, Codex and OpenCode; the second is
 one window with a row per call; the third is one live session and its
-subagents. Each turn end also traces `[session-context] op=sample … tokens=`
+subagents.
+
+**What the pane shows of this** (`cost-page-is-a-bill`, 2026-11-23): the Cost
+tab is a bill for a period, not the instrument. It takes `since` from a period
+select (7 days, 30 days, all) and shows one headline (sessions, calls, tokens
+re-read, dollars at list prices), By session costliest first (subagents folded
+into their parent, a note when the peak passed `sessions.suggestAtContextTokens`,
+Open mounting `SessionDetail`), By item with chat as the last row, and two
+fixed-cost sentences (the instruction floor's share of what main threads
+re-sent; the subagents' share). The constrained-environment readings
+(`constrained.byModel`), the per-file reads and the `lib.rs` coverage below
+are **CLI and JSON only** now; the baselines that follow were taken from the
+JSON and remain the way to repeat the comparison. The this-session story is
+the footer's context figure and its modal. Each turn end also traces `[session-context] op=sample … tokens=`
 (the last call's context), so the log carries the curve as it happens. The
 shapes and definitions are in `apis.md`. Two matter most: context is
 `input + cacheRead + cacheCreation` for Claude and OpenCode, but plain

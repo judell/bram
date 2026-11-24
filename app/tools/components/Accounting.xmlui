@@ -1,228 +1,124 @@
 <Component
   name="Accounting"
-  var.tokensNonce="{1}"
+  var.period="{'7d'}"
   var.tokenInfoKey="{''}"
-  var.statusOpen="{window.__bramAccountingOpenLoad()}">
+  var.expandedKey="{''}"
+  var.showAllSessions="{false}"
+  var.showAllItems="{false}">
 
-  <!-- promote-accounting-to-nav (Jon, 2026-11-23, "promote status / token
-       accounting to between files and settings in the nav, as Accounting"):
-       the Token accounting section of Status.xmlui, moved whole. Its folds
-       keep their keys (tokens-models, tokens-items, …) and the Status
-       persistence (window.__bramStatusOpenLoad / __bramStatusToggle), so the
-       pane remembers them as before; the top-level fold is gone because the
-       page is the section. -->
-  <!-- status-session-context-report: the current session, found the way the
-       footer finds it (/__sessions/list + __bramCurrentSessionOf), so the
-       This session block loads with the page, without the Load button. -->
-  <DataSource id="statusSessions" url="/__sessions/list" queryParams="{{ limit: 20 }}" />
+  <!-- cost-page-is-a-bill (Jon, 2026-11-23: "the cost page is full of data
+       that i can make no sense of. if we cannot tell a story with the data
+       let's dial back"): the page is a bill for a period. Period first, the
+       total second, the top lines third: by session, by item, two fixed-cost
+       sentences. The research readings the earlier page carried (Models,
+       Files, lib.rs coverage, This session's stretches) live in the CLI's
+       token-accounting flag's JSON and docs/developing-bram-reference.md
+       §What the agents spend; the footer's context modal tells the
+       this-session story.
+       One DataSource: /__token-accounting?since=<ISO>, which already carries
+       every figure below. The period's start is the one clock read on the
+       page (__bramStorySince, allowlisted); everything else reads the report,
+       the rates file, the sessions list (titles) and Settings (the threshold).
+       https://www.xmlui.org/docs/howto/hide-an-element-until-its-datasource-is-ready -->
+  <DataSource id="costSessions" url="/__sessions/list" queryParams="{{ limit: 500 }}" />
   <DataSource id="tokenRates" url="/tools/resources/model-rates.json" />
-  <DataSource id="thisSession"
-    url="{window.__bramTokenSessionUrl(window.__bramCurrentSessionOf(statusSessions.value))}"
-    when="{statusSessions.loaded &amp;&amp; !!window.__bramTokenSessionUrl(window.__bramCurrentSessionOf(statusSessions.value))}" />
+  <DataSource id="costSettings" url="/__settings" />
+  <DataSource id="tokens" url="{window.__bramCostUrl(window.__bramCostSince(period))}" />
 
   <VStack padding="$space-6" gap="$space-4">
-    <!-- issue-486-token-accounting-instrument: a plain dump of
-         /__token-accounting until we know what the UI needs (Jon,
-         2026-11-12). The read walks every session (6-7 s), so it runs only
-         on Load: `when` holds the DataSource until the nonce moves
-         (https://www.xmlui.org/docs/howto/hide-an-element-until-its-datasource-is-ready).
-         Columns format with `type` (https://www.xmlui.org/docs/reference/components/Column). -->
-    <DataSource id="tokens" url="/__token-accounting?t={tokensNonce}" when="{tokensNonce > 0}" />
-    <VStack gap="$space-2">
-      <HStack gap="$space-3" verticalAlignment="center">
-        <Heading level="h2">Cost</Heading>
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Token accounting')}" />
-        <!-- accounting-loads-on-open (Jon, 2026-11-23): the full walk starts
-             with the page (tokensNonce begins at 1) and fills the folds below
-             while This session, which is quick, is read; Models starts
-             collapsed so the page doesn't jump when it lands. -->
-        <Button
-          label="Reload"
-          size="sm"
-          enabled="{!tokens.inProgress}"
-          onClick="tokensNonce = tokensNonce + 1" />
-        <Text
-          when="{tokens.inProgress}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="Reading every session, this fills in below…" />
-        <Text
-          when="{tokens.loaded &amp;&amp; !!tokens.value}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="{(tokens.value.sessions || []).length + ' sessions, ' + tokens.value.ms + ' ms'}" />
-      </HStack>
-      <!-- This session: loads on open, no Load button
-           (https://www.xmlui.org/docs/howto/hide-an-element-until-its-datasource-is-ready). -->
-      <VStack when="{thisSession.loaded &amp;&amp; !!window.__bramTokenMainRow(thisSession.value)}" gap="$space-2">
-        <HStack gap="$space-3" verticalAlignment="center">
-          <Heading level="h4">This session</Heading>
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="— where this conversation's context went, and what a fresh session would have saved" />
+    <HStack gap="$space-3" verticalAlignment="center" wrapContent="true">
+      <Heading level="h2">Cost</Heading>
+      <!-- https://www.xmlui.org/docs/reference/components/Select -->
+      <Select
+        automationId="cost-period"
+        width="180px"
+        initialValue="{period}"
+        onDidChange="(v) => period = window.__bramCostPeriod(v)">
+        <Option value="7d" label="Last 7 days" />
+        <Option value="30d" label="Last 30 days" />
+        <Option value="all" label="All history" />
+      </Select>
+      <Text
+        when="{tokens.inProgress}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="Adding up every session…" />
+    </HStack>
+
+    <!-- The headline: one sentence with the total at list prices, and the
+         subscription caveat. https://www.xmlui.org/docs/reference/components/Markdown -->
+    <Markdown
+      when="{tokens.loaded &amp;&amp; !!tokens.value}"
+      interpolateBindings="false" allowHtml="false"
+      content="{window.__bramCostHeadline(tokens.value, tokenRates.value, period)}" />
+
+    <VStack when="{tokens.loaded &amp;&amp; !!tokens.value}" gap="$space-4">
+      <!-- By session: costliest first. Subagent threads fold into their
+           parent's row. A row whose peak passed the Settings threshold says
+           so in words. Open mounts the same SessionDetail the Sessions tab
+           uses, under the table. -->
+      <VStack gap="$space-2">
+        <HStack gap="$space-3" verticalAlignment="center" wrapContent="true">
+          <Heading level="h4">By session</Heading>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="— costliest first" />
+          <Button size="xs" variant="ghost" icon="info" label="How dollars are figured" onClick="tokenInfoKey = 'listPrices'" />
         </HStack>
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="{window.__bramTokenSessionLead(window.__bramTokenMainRow(thisSession.value), tokenRates.value)}" />
-        <HStack gap="$space-1" verticalAlignment="center" wrapContent="true">
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About this block:" />
-          <Button size="xs" variant="ghost" icon="info" label="This session" onClick="tokenInfoKey = 'thisSession'" />
-          <Button size="xs" variant="ghost" icon="info" label="Stretches" onClick="tokenInfoKey = 'stretches'" />
-          <Button size="xs" variant="ghost" icon="info" label="List prices" onClick="tokenInfoKey = 'listPrices'" />
-        </HStack>
-        <!-- What a fresh session saves, per call, turn, hour and item, with the
-             ratio beside each figure (accounting-actionable-units). byModel
-             comes from the full report and may still be loading.
-             https://www.xmlui.org/docs/reference/components/Markdown -->
-        <Markdown content="{window.__bramContextSavingMarkdown(window.__bramContextFromSessionRow(window.__bramTokenMainRow(thisSession.value)), tokenRates.value, tokens.value &amp;&amp; tokens.value.constrained &amp;&amp; tokens.value.constrained.byModel)}" />
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="{window.__bramTokenStretchLead(window.__bramTokenMainRow(thisSession.value))}" />
-        <Table data="{window.__bramTokenStretchRows(window.__bramTokenMainRow(thisSession.value), tokenRates.value)}">
-          <Column bindTo="when" header="When" width="70px" />
-          <!-- cost-headline-cents-and-boundary-column (Jon, 2026-11-23): this
-               was the one column without a width and the fixed widths of the
-               other six left it "BO" / "st"; it takes 110px and the last
-               column flexes instead. -->
-          <Column bindTo="boundary" header="Boundary" width="110px"><Text breakMode="anywhere" value="{$item.boundary}" /></Column>
-          <Column bindTo="contextAt" header="Context at boundary" width="140px" />
+        <Table data="{window.__bramCostSessionRows(tokens.value, costSessions.value, tokenRates.value, costSettings.value, showAllSessions)}">
+          <Column bindTo="when" header="When" width="95px" />
+          <Column bindTo="title" header="Session"><Text breakMode="anywhere" value="{$item.title}" /></Column>
+          <Column bindTo="hours" header="Hours" width="70px" />
           <Column bindTo="calls" header="Calls" width="70px" />
-          <Column bindTo="avgContext" header="Avg context" width="100px" />
-          <Column bindTo="cacheRead" header="Cache reads" width="100px" />
-          <Column bindTo="saved" header="A fresh session here would have saved" />
+          <Column bindTo="peak" header="Peak context" width="105px" />
+          <Column bindTo="compactions" header="Compactions" width="105px" />
+          <Column bindTo="context" header="Tokens sent" width="100px" />
+          <Column bindTo="usd" header="At list" width="80px" />
+          <Column bindTo="note" header="" width="150px"><Text color="$color-warn-700" value="{$item.note}" /></Column>
+          <Column header="" width="70px">
+            <Button size="xs" variant="ghost" label="{window.__bramCostOpenLabel(expandedKey, $item.key)}" onClick="expandedKey = window.__bramCostToggleKey(expandedKey, $item.key)" />
+          </Column>
         </Table>
-      </VStack>
-      <VStack when="{tokens.loaded &amp;&amp; !!tokens.value}" gap="$space-2">
-        <!-- Real Tables (Jon, 2026-11-12). Column has no header template
-             (https://www.xmlui.org/docs/reference/components/Column), so the
-             ⓘ explanations sit in a row of labelled buttons above each table,
-             each setting tokenInfoKey for the dialog below. Cells format
-             through the __bramToken* helpers. -->
-        <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
-          onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-models')">
-          <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-models')}" />
-          <Heading level="h4">Models</Heading>
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Models')}" />
-        </HStack>
-        <HStack when="{statusOpen.includes('tokens-models')}" gap="$space-1" verticalAlignment="center" wrapContent="true">
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About the columns:" />
-          <Button size="xs" variant="ghost" icon="info" label="Provider" onClick="tokenInfoKey = 'provider'" />
-          <Button size="xs" variant="ghost" icon="info" label="Calls" onClick="tokenInfoKey = 'calls'" />
-          <Button size="xs" variant="ghost" icon="info" label="Context" onClick="tokenInfoKey = 'context'" />
-          <Button size="xs" variant="ghost" icon="info" label="Fit" onClick="tokenInfoKey = 'fit'" />
-          <Button size="xs" variant="ghost" icon="info" label="Floor" onClick="tokenInfoKey = 'floor'" />
-          <Button size="xs" variant="ghost" icon="info" label="Cache hit" onClick="tokenInfoKey = 'cache'" />
-          <Button size="xs" variant="ghost" icon="info" label="Items start at" onClick="tokenInfoKey = 'itemStarts'" />
-        </HStack>
-        <Table when="{statusOpen.includes('tokens-models')}" data="{tokens.value.constrained.byModel}">
-          <Column bindTo="provider" header="Provider" width="90px" />
-          <Column bindTo="model" header="Model" />
-          <Column bindTo="calls" header="Calls" width="90px"><Text value="{window.__bramTokenInt($item.calls)}" /></Column>
-          <Column header="Context p50" width="100px"><Text value="{window.__bramTokenK($item.context.p50)}" /></Column>
-          <Column header="p90" width="70px"><Text value="{window.__bramTokenK($item.context.p90)}" /></Column>
-          <Column header="Peak" width="70px"><Text value="{window.__bramTokenK($item.context.peak)}" /></Column>
-          <Column header="Fit 64k" width="75px"><Text value="{window.__bramTokenFit($item, '64k')}" /></Column>
-          <Column header="128k" width="65px"><Text value="{window.__bramTokenFit($item, '128k')}" /></Column>
-          <Column header="200k" width="65px"><Text value="{window.__bramTokenFit($item, '200k')}" /></Column>
-          <Column header="256k" width="65px"><Text value="{window.__bramTokenFit($item, '256k')}" /></Column>
-          <Column header="Floor" width="70px"><Text value="{window.__bramTokenFloor($item)}" /></Column>
-          <Column header="Floor parts" width="150px"><Text value="{window.__bramTokenFloorParts($item)}" /></Column>
-          <Column header="Items start at (p50)" width="130px"><Text value="{window.__bramTokenItemStartP50($item)}" /></Column>
-          <Column header="Above 400k" width="100px"><Text value="{window.__bramTokenItemStartsAbove($item)}" /></Column>
-          <Column bindTo="cacheHitShare" header="Cache hit" width="90px"><Text value="{window.__bramTokenPct($item.cacheHitShare)}" /></Column>
-        </Table>
-        <!-- Per-item credit (issue-486-per-item-token-table): rows shaped by
-             window.__bramTokenItemRows; a fold, closed by default. -->
-        <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
-          onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-items')">
-          <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-items')}" />
-          <Heading level="h4">By item</Heading>
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="— what each Worklist item's work used" />
-        </HStack>
-        <Text when="{statusOpen.includes('tokens-items')}" fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="{window.__bramTokenItemLead(tokens.value)}" />
-        <HStack when="{statusOpen.includes('tokens-items')}" gap="$space-1" verticalAlignment="center" wrapContent="true">
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About the credit:" />
-          <Button size="xs" variant="ghost" icon="info" label="What this credits and omits" onClick="tokenInfoKey = 'itemCredit'" />
-        </HStack>
-        <Table when="{statusOpen.includes('tokens-items')}" data="{window.__bramTokenItemRows(tokens.value, 25)}">
-          <Column bindTo="item" header="Item"><Text breakMode="anywhere" value="{$item.item}" /></Column>
-          <Column bindTo="thread" header="Thread" width="110px" />
-          <Column bindTo="calls" header="Calls" width="80px" />
-          <Column bindTo="context" header="Summed context" width="130px" />
-          <Column bindTo="peak" header="Peak context" width="110px" />
-          <Column bindTo="output" header="Output" width="100px" />
-        </Table>
-        <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
-          onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-files')">
-          <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-files')}" />
-          <Heading level="h4">Files</Heading>
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Files')}" />
-        </HStack>
-        <Text when="{statusOpen.includes('tokens-files')}" fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="{window.__bramTokenFilesLead(tokens.value)}" />
-        <HStack when="{statusOpen.includes('tokens-files')}" gap="$space-1" verticalAlignment="center" wrapContent="true">
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About the columns:" />
-          <Button size="xs" variant="ghost" icon="info" label="Reads" onClick="tokenInfoKey = 'reads'" />
-          <Button size="xs" variant="ghost" icon="info" label="Main" onClick="tokenInfoKey = 'main'" />
-          <Button size="xs" variant="ghost" icon="info" label="Subagents" onClick="tokenInfoKey = 'subagents'" />
-          <Button size="xs" variant="ghost" icon="info" label="Sessions" onClick="tokenInfoKey = 'sessions'" />
-          <Button size="xs" variant="ghost" icon="info" label="Most in one session" onClick="tokenInfoKey = 'mostSession'" />
-          <Button size="xs" variant="ghost" icon="info" label="Per read" onClick="tokenInfoKey = 'perRead'" />
-          <Button size="xs" variant="ghost" icon="info" label="All sessions' reads" onClick="tokenInfoKey = 'total'" />
-          <Button size="xs" variant="ghost" icon="info" label="Via shell" onClick="tokenInfoKey = 'shell'" />
-          <Button size="xs" variant="ghost" icon="info" label="Tests" onClick="tokenInfoKey = 'tests'" />
-        </HStack>
-        <Table when="{statusOpen.includes('tokens-files')}" data="{window.__bramTokenFileRows(tokens.value)}">
-          <Column bindTo="path" header="Path"><Text variant="code" breakMode="anywhere" value="{$item.path}" /></Column>
-          <Column bindTo="reads" header="Reads" width="80px"><Text value="{window.__bramTokenInt($item.reads)}" /></Column>
-          <Column header="Main" width="80px"><Text value="{window.__bramTokenInt($item.mainReads)}" /></Column>
-          <Column header="Subagents" width="90px"><Text value="{window.__bramTokenInt($item.subagentReads)}" /></Column>
-          <Column header="Sessions" width="85px"><Text value="{window.__bramTokenInt($item.sessions)}" /></Column>
-          <Column header="Most in one session" width="130px"><Text value="{window.__bramTokenBytes($item.maxSessionBytes)}" /></Column>
-          <Column header="Per read" width="90px"><Text value="{window.__bramTokenPerRead($item)}" /></Column>
-          <Column bindTo="bytes" header="All sessions' reads" width="130px"><Text value="{window.__bramTokenBytes($item.bytes)}" /></Column>
-          <Column bindTo="sizeBytes" header="File size" width="90px"><Text value="{window.__bramTokenFileSize($item)}" /></Column>
-          <Column bindTo="viaShellBytes" header="Via shell" width="140px"><Text value="{window.__bramTokenShellCell($item)}" /></Column>
-          <Column header="Tests" width="70px"><Text value="{window.__bramTokenTests($item)}" /></Column>
-        </Table>
-        <Text when="{statusOpen.includes('tokens-files')}" fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="{window.__bramTokenElsewhere(tokens.value)}" />
-        <!-- Line coverage of lib.rs (token-accounting-files-one-row-per-file):
-             two Tables of cells computed by the __bramToken* helpers. -->
-        <VStack when="{!!(tokens.value.coverage || []).length}" gap="$space-2">
-          <HStack gap="$space-3" verticalAlignment="center" cursor="pointer"
-            onClick="statusOpen = window.__bramStatusToggle(statusOpen, 'tokens-coverage')">
-            <Text fontSize="$fontSize-xl" color="$textColor-secondary" value="{window.__bramTaskChevron(statusOpen, 'tokens-coverage')}" />
-            <Heading level="h4">Which lines of lib.rs get read</Heading>
-            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'— ' + statusSectionSubhead('Which lines of lib.rs get read')}" />
-          </HStack>
-          <Text when="{statusOpen.includes('tokens-coverage')}" fontSize="$fontSize-sm" color="$textColor-secondary"
-            value="{window.__bramTokenCoverageLead(tokens.value)}" />
-          <HStack when="{statusOpen.includes('tokens-coverage')}" gap="$space-1" verticalAlignment="center" wrapContent="true">
-            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="About the rows:" />
-            <Button size="xs" variant="ghost" icon="info" label="Read tool" onClick="tokenInfoKey = 'covRead'" />
-            <Button size="xs" variant="ghost" icon="info" label="Shell" onClick="tokenInfoKey = 'covShell'" />
-            <Button size="xs" variant="ghost" icon="info" label="Reads per line" onClick="tokenInfoKey = 'covReads'" />
-            <Button size="xs" variant="ghost" icon="info" label="Since changed" onClick="tokenInfoKey = 'covChanged'" />
-            <Button size="xs" variant="ghost" icon="info" label="Busiest stretches" onClick="tokenInfoKey = 'covRegions'" />
-          </HStack>
-          <Table when="{statusOpen.includes('tokens-coverage')}" data="{window.__bramTokenCoverageRows(tokens.value)}">
-            <Column bindTo="measure" header="Measure" width="170px" />
-            <Column bindTo="share" header="Of today's file" width="120px" />
-            <Column bindTo="detail" header="What it covers"><Text breakMode="anywhere" value="{$item.detail}" /></Column>
-          </Table>
-          <Table when="{statusOpen.includes('tokens-coverage')}" data="{window.__bramTokenRegionRows(tokens.value)}">
-            <Column bindTo="lines" header="Lines" width="130px" />
-            <Column bindTo="lineReads" header="Line readings" width="120px" />
-            <Column bindTo="distinct" header="Distinct lines read" width="150px" />
-            <Column bindTo="where" header="Where"><Text variant="code" breakMode="anywhere" value="{$item.where}" /></Column>
-          </Table>
+        <Link when="{!!window.__bramCostSessionsMoreLabel(tokens.value, showAllSessions)}" noIndicator="true" onClick="showAllSessions = !showAllSessions">
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramCostSessionsMoreLabel(tokens.value, showAllSessions)}" />
+        </Link>
+        <VStack when="{!!expandedKey}" gap="$space-1" paddingTop="$space-2">
+          <SessionDetail
+            sessionId="{window.__bramCostKeyId(expandedKey)}"
+            provider="{window.__bramCostKeyProvider(expandedKey)}"
+            height="600px"
+            query="" />
         </VStack>
       </VStack>
+
+      <!-- By item: what each Worklist item's work used, main thread and
+           subagents together; chat outside any item is the last row. -->
+      <VStack gap="$space-2">
+        <HStack gap="$space-3" verticalAlignment="center" wrapContent="true">
+          <Heading level="h4">By item</Heading>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="— what each Worklist item's work used" />
+          <Button size="xs" variant="ghost" icon="info" label="What this credits and omits" onClick="tokenInfoKey = 'itemCredit'" />
+        </HStack>
+        <Table data="{window.__bramCostItemRows(tokens.value, tokenRates.value, showAllItems)}">
+          <Column bindTo="item" header="Item"><Text breakMode="anywhere" value="{$item.item}" /></Column>
+          <Column bindTo="calls" header="Calls" width="80px" />
+          <Column bindTo="context" header="Tokens sent" width="110px" />
+          <Column bindTo="usd" header="At list" width="90px" />
+        </Table>
+        <Link when="{!!window.__bramCostItemsMoreLabel(tokens.value, showAllItems)}" noIndicator="true" onClick="showAllItems = !showAllItems">
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramCostItemsMoreLabel(tokens.value, showAllItems)}" />
+        </Link>
+      </VStack>
+
+      <!-- Fixed costs: two sentences from the same rows. -->
+      <Markdown
+        interpolateBindings="false" allowHtml="false"
+        content="{window.__bramCostFixedLines(tokens.value)}" />
     </VStack>
 
     <Theme maxWidth-ModalDialog="50vw">
-      <ModalDialog when="{!!tokenInfoKey}" title="{window.__bramTokenInfoTitle(tokenInfoKey)}" onClose="tokenInfoKey = ''">
+      <ModalDialog when="{!!tokenInfoKey}" title="{window.__bramCostInfoTitle(tokenInfoKey)}" onClose="tokenInfoKey = ''">
         <VStack gap="$space-3" padding="$space-2">
           <Markdown interpolateBindings="false" allowHtml="false"
-            content="{window.__bramTokenInfoText(tokenInfoKey, tokens.value, tokenRates.value)}" />
+            content="{window.__bramCostInfoText(tokenInfoKey, tokenRates.value)}" />
         </VStack>
       </ModalDialog>
     </Theme>

@@ -195,6 +195,44 @@ pub struct ReadEvent {
     pub shell_lines: Option<LineSpec>,
 }
 
+/// A file the agent wrote (handoff-recovery-instrument): a Claude Edit, Write,
+/// MultiEdit or NotebookEdit whose result was not an error, a shell command
+/// that writes a named file, or one file line of a Codex `apply_patch`. The
+/// ledger stores every write; whether it counts as an edit of the project is
+/// decided at report time, from the resolved path.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct WriteEvent {
+    /// `<tool call id>#w<n>`: unique within its source; the ledger's key.
+    pub key: String,
+    pub path: String,
+    pub at_ms: i64,
+    /// The session's working directory when the write happened.
+    pub cwd: Option<String>,
+}
+
+/// A search of the project's history or tree (handoff-recovery-instrument):
+/// `history` for a command hitting `/__search?`, `grep` for a Claude Grep with
+/// no path (or the session's folder), `tree` for `rg` or `grep -r` with no
+/// file argument.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SearchEvent {
+    /// `<tool call id>#s`: unique within its source; the ledger's key.
+    pub key: String,
+    pub kind: String,
+    pub at_ms: i64,
+}
+
+/// A turn the user sent (handoff-recovery-instrument): a Claude `user` record
+/// with text and no tool result, less what the agent did not hand back
+/// (`isCompactSummary`, `isMeta`, an interruption, a task notification, a
+/// bare system reminder); a Codex `task_started` event.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct TurnEvent {
+    /// Unique within its source; the ledger's key.
+    pub key: String,
+    pub at_ms: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ParsedFile {
     pub provider: &'static str,
@@ -204,6 +242,9 @@ pub struct ParsedFile {
     pub label: Option<String>,
     pub calls: Vec<RawCall>,
     pub reads: Vec<ReadEvent>,
+    pub writes: Vec<WriteEvent>,
+    pub searches: Vec<SearchEvent>,
+    pub turns: Vec<TurnEvent>,
     pub unreadable: usize,
     pub compactions: usize,
     pub compaction_points: Vec<CompactionPoint>,
@@ -310,6 +351,10 @@ struct Block {
     text: Option<String>,
     #[serde(default)]
     content: Option<Box<Content>>,
+    /// A tool result that failed: an Edit whose result is an error wrote
+    /// nothing.
+    #[serde(default)]
+    is_error: Option<bool>,
 }
 
 impl Block {
@@ -333,6 +378,9 @@ struct ToolInput {
     command: Option<String>,
     #[serde(default)]
     output_mode: Option<String>,
+    /// NotebookEdit names its file here.
+    #[serde(default)]
+    notebook_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -371,6 +419,13 @@ struct ClaudeRecord {
     message: Option<ClaudeMessage>,
     #[serde(default)]
     cwd: Option<String>,
+    /// The hand-off summary Claude Code writes as a `user` record when it
+    /// compacts: not a turn the user sent.
+    #[serde(default, rename = "isCompactSummary")]
+    is_compact_summary: Option<bool>,
+    /// A record the harness injected (not typed by the user).
+    #[serde(default, rename = "isMeta")]
+    is_meta: Option<bool>,
 }
 
 /// Just the folder a Claude session ran in.
@@ -522,8 +577,15 @@ enum PendingTool {
     },
     GrepContent {
         default_path: Option<String>,
+        /// A Grep with no path, or the session's folder: a search of the tree
+        /// as well as a read of what it returns.
+        #[serde(default)]
+        search: bool,
     },
-    GrepFiles,
+    GrepFiles {
+        #[serde(default)]
+        search: bool,
+    },
     Shell {
         files: Vec<String>,
         /// The command lines, kept only when one names a `lib.rs` (its line
@@ -534,7 +596,269 @@ enum PendingTool {
         /// Codex's `workdir`).
         #[serde(default)]
         dir: Option<String>,
+        /// Files the command writes (`sed -i`, `tee`, a redirect target, a
+        /// `cp`/`mv` destination, `rm`), and the file lines of a Codex
+        /// `apply_patch` quoted in the call.
+        #[serde(default)]
+        writes: Vec<String>,
+        /// `history`, `tree`, or None when the command searches nothing.
+        #[serde(default)]
+        search: Option<String>,
     },
+    /// A Claude Edit, Write, MultiEdit or NotebookEdit.
+    Edit {
+        path: String,
+    },
+}
+
+/// The Codex `apply_patch` file lines in `text`, raw or quoted inside an
+/// `exec` script (where the patch's newlines are the two characters `\n`).
+pub fn patch_paths(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for marker in ["*** Update File: ", "*** Add File: ", "*** Delete File: "] {
+        let mut rest = text;
+        while let Some(i) = rest.find(marker) {
+            rest = &rest[i + marker.len()..];
+            let end = rest
+                .find("\\n")
+                .into_iter()
+                .chain(rest.find('\n'))
+                .chain(rest.find('"'))
+                .min()
+                .unwrap_or(rest.len());
+            let path = rest[..end].trim();
+            if !path.is_empty() && !out.iter().any(|p| p == path) {
+                out.push(path.to_string());
+            }
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+/// True for a word that can name a file to write: it has a letter and a `/`
+/// or an extension (so `0`, `deadline` and `s` from code quoted in a command
+/// are not files), no shell expansion, not a flag, not a device.
+fn plausible_write_target(w: &str) -> bool {
+    let w = w.trim_matches(|c| c == '"' || c == '\'');
+    !w.is_empty()
+        && !w.starts_with('-')
+        && !w.starts_with("/dev/")
+        && !w.starts_with('&')
+        && !w.contains('$')
+        && !w.contains('*')
+        && !w.contains('`')
+        && w.chars().any(|c| c.is_ascii_alphabetic())
+        && (w.contains('/') || w.contains('.') || w.starts_with('~'))
+        && w.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '/' | '.' | '_' | '-' | '~' | '#' | '+' | '@' | ':')
+        })
+}
+
+/// The files a shell command line writes: redirect targets (`>`, `>>`, `&>`),
+/// `sed -i` and `tee` files, `cp`/`mv` destinations, `rm` targets. A command
+/// may both read and write; this reads nothing about the reads.
+pub fn shell_write_targets(cmd: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |w: &str| {
+        let w = w.trim_matches(|c| c == '"' || c == '\'' || c == ',');
+        if plausible_write_target(w) {
+            let w = w.strip_prefix("./").unwrap_or(w).to_string();
+            if !out.contains(&w) {
+                out.push(w);
+            }
+        }
+    };
+    for stmt in shell_stages(cmd) {
+        for words in stmt {
+            let Some(first) = words.first() else { continue };
+            let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+            match first.as_str() {
+                "sed"
+                    if args
+                        .iter()
+                        .any(|a| a.starts_with("-i") || *a == "--in-place") =>
+                {
+                    // The expression is the first non-flag word, unless `-e`
+                    // (or `-f`) carries it.
+                    let mut skip_expr = !args.iter().any(|a| matches!(*a, "-e" | "-f"));
+                    let mut after_e = false;
+                    for a in &args {
+                        if after_e {
+                            after_e = false;
+                            continue;
+                        }
+                        if matches!(*a, "-e" | "-f") {
+                            after_e = true;
+                            continue;
+                        }
+                        // `-i ''` (BSD sed) leaves an empty word.
+                        if a.starts_with('-') || a.is_empty() {
+                            continue;
+                        }
+                        if skip_expr {
+                            skip_expr = false;
+                            continue;
+                        }
+                        push(a);
+                    }
+                }
+                "tee" => {
+                    for a in &args {
+                        if !a.starts_with('-') {
+                            push(a);
+                        }
+                    }
+                }
+                "cp" | "mv" => {
+                    let files: Vec<&&str> = args.iter().filter(|a| !a.starts_with('-')).collect();
+                    if files.len() >= 2 {
+                        push(files[files.len() - 1]);
+                    }
+                }
+                "rm" => {
+                    for a in &args {
+                        if !a.starts_with('-') {
+                            push(a);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Redirections are dropped by `shell_stages`, so find them in the text,
+    // outside quotes: a `>` in a quoted grep pattern, jq filter or code
+    // snippet is not a redirect.
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        if let Some(q) = quote {
+            if bytes[i] == q {
+                quote = None;
+            } else if q == b'"' && bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\'' || bytes[i] == b'"' {
+            quote = Some(bytes[i]);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'>' {
+            let two = i + 1 < bytes.len() && bytes[i + 1] == b'>';
+            let mut j = i + if two { 2 } else { 1 };
+            // `2>`, `&>` and `>&2`: the fd forms. `>&` names a descriptor.
+            if j < bytes.len() && bytes[j] == b'&' {
+                i = j + 1;
+                continue;
+            }
+            // Not a heredoc marker or a `->` arrow in prose.
+            let before = if i > 0 { bytes[i - 1] } else { b' ' };
+            if before == b'-' || before == b'<' || before == b'=' {
+                i += 1;
+                continue;
+            }
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            let start = j;
+            let quote = bytes.get(j).copied().filter(|c| *c == b'"' || *c == b'\'');
+            if let Some(q) = quote {
+                j += 1;
+                while j < bytes.len() && bytes[j] != q {
+                    j += 1;
+                }
+                push(&cmd[start + 1..j.min(cmd.len())]);
+                i = j + 1;
+                continue;
+            }
+            while j < bytes.len() && !matches!(bytes[j], b' ' | b';' | b'|' | b'&' | b'\n' | b')') {
+                j += 1;
+            }
+            push(&cmd[start..j]);
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// What a shell command searches, if anything: `history` for the project's
+/// search route, `tree` for `rg` or `grep -r`/`-R` with no file argument.
+pub fn shell_search_kind(cmd: &str) -> Option<String> {
+    if cmd.contains("/__search?") {
+        return Some("history".into());
+    }
+    for stmt in shell_stages(cmd) {
+        for words in stmt {
+            let Some(first) = words.first() else { continue };
+            let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+            let recursive = match first.as_str() {
+                "rg" => true,
+                "grep" => args.iter().any(|a| {
+                    a.starts_with('-')
+                        && !a.starts_with("--")
+                        && (a.contains('r') || a.contains('R'))
+                        || *a == "--recursive"
+                }),
+                "git" => args.first() == Some(&"grep"),
+                _ => false,
+            };
+            if !recursive {
+                continue;
+            }
+            let args: Vec<&str> = if first == "git" {
+                args[1..].to_vec()
+            } else {
+                args
+            };
+            // Positional words after the flags: the pattern, then any paths.
+            let mut positional: Vec<&str> = Vec::new();
+            let mut skip_next = false;
+            for a in &args {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if matches!(
+                    *a,
+                    "-e" | "-g"
+                        | "--glob"
+                        | "-t"
+                        | "--type"
+                        | "-m"
+                        | "--max-count"
+                        | "-A"
+                        | "-B"
+                        | "-C"
+                        | "--include"
+                        | "--exclude"
+                ) {
+                    skip_next = true;
+                    continue;
+                }
+                if a.starts_with('-') && a.len() > 1 {
+                    continue;
+                }
+                positional.push(a);
+            }
+            let paths = &positional[1.min(positional.len())..];
+            let files_named = paths.iter().any(|p| {
+                let name = p.rsplit('/').next().unwrap_or(p);
+                name.contains('.') && !name.ends_with('.') && *p != "."
+            });
+            if !positional.is_empty() && !files_named {
+                return Some("tree".into());
+            }
+        }
+    }
+    None
 }
 
 fn is_lib_rs(path: &str) -> bool {
@@ -678,18 +1002,127 @@ fn key_reads(reads: &mut [ReadEvent], tool_call_id: &str) {
 }
 
 /// A shell call waiting for its result. The command lines are kept only when
-/// one names a `lib.rs`, whose line numbers the result will place.
-fn shell_pending(files: Vec<String>, cmds: Vec<String>, workdir: Option<String>) -> PendingTool {
+/// one names a `lib.rs`, whose line numbers the result will place. `raw` is
+/// the call's text as recorded (for Claude the command itself; for Codex the
+/// exec script or JSON the commands were decoded from), where a quoted
+/// `apply_patch` or the search route shows even when the decoding missed it.
+/// None when the call reads, writes and searches nothing.
+fn shell_pending(
+    files: Vec<String>,
+    cmds: Vec<String>,
+    workdir: Option<String>,
+    raw: &str,
+) -> Option<PendingTool> {
     let dir = shell_dir(&cmds, workdir);
+    let mut writes = patch_paths(raw);
+    for c in cmds.iter().map(String::as_str).chain(std::iter::once(raw)) {
+        for w in shell_write_targets(c) {
+            if !writes.contains(&w) {
+                writes.push(w);
+            }
+        }
+    }
+    let search = cmds
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(raw))
+        .find_map(shell_search_kind);
+    if files.is_empty() && writes.is_empty() && search.is_none() {
+        return None;
+    }
     let cmds = if cmds.iter().any(|c| c.contains("lib.rs")) {
         cmds
     } else {
         Vec::new()
     };
-    PendingTool::Shell { files, cmds, dir }
+    Some(PendingTool::Shell {
+        files,
+        cmds,
+        dir,
+        writes,
+        search,
+    })
 }
 
+/// What one tool result produced, besides reads.
+#[derive(Default)]
+struct Credited {
+    reads: Vec<ReadEvent>,
+    writes: Vec<WriteEvent>,
+    searches: Vec<SearchEvent>,
+}
+
+/// Key the events of one tool result `<id>#<n>`, `<id>#w<n>`, `<id>#s`.
+fn key_credited(c: &mut Credited, tool_call_id: &str) {
+    key_reads(&mut c.reads, tool_call_id);
+    for (i, w) in c.writes.iter_mut().enumerate() {
+        w.key = format!("{tool_call_id}#w{i}");
+    }
+    for s in c.searches.iter_mut() {
+        s.key = format!("{tool_call_id}#s");
+    }
+}
+
+/// Credit one tool result. `failed` is the result reporting an error: the
+/// reads still count (the text came back), the writes do not.
 fn credit_result(
+    pending: &PendingTool,
+    text: &str,
+    at_ms: i64,
+    cwd: Option<&str>,
+    failed: bool,
+) -> Credited {
+    let mut c = Credited::default();
+    let cwd_s = cwd.map(str::to_string);
+    match pending {
+        PendingTool::Edit { path } => {
+            if !failed {
+                c.writes.push(WriteEvent {
+                    key: String::new(),
+                    path: path.clone(),
+                    at_ms,
+                    cwd: cwd_s.clone(),
+                });
+            }
+        }
+        PendingTool::GrepContent { search: true, .. } | PendingTool::GrepFiles { search: true } => {
+            c.searches.push(SearchEvent {
+                key: String::new(),
+                kind: "grep".into(),
+                at_ms,
+            });
+        }
+        PendingTool::Shell {
+            writes,
+            search,
+            dir,
+            ..
+        } => {
+            if !failed {
+                for w in writes {
+                    c.writes.push(WriteEvent {
+                        key: String::new(),
+                        path: w.clone(),
+                        at_ms,
+                        cwd: dir.clone().or_else(|| cwd_s.clone()),
+                    });
+                }
+            }
+            if let Some(kind) = search {
+                c.searches.push(SearchEvent {
+                    key: String::new(),
+                    kind: kind.clone(),
+                    at_ms,
+                });
+            }
+        }
+        _ => {}
+    }
+    credit_reads(pending, text, at_ms, cwd, &mut c.reads);
+    c
+}
+
+fn credit_reads(
     pending: &PendingTool,
     text: &str,
     at_ms: i64,
@@ -698,6 +1131,7 @@ fn credit_result(
 ) {
     let cwd = cwd.map(str::to_string);
     match pending {
+        PendingTool::Edit { .. } => {}
         PendingTool::Read { path } => {
             let lines = if is_lib_rs(path) {
                 read_result_lines(text)
@@ -713,7 +1147,7 @@ fn credit_result(
                 ..Default::default()
             });
         }
-        PendingTool::GrepContent { default_path } => {
+        PendingTool::GrepContent { default_path, .. } => {
             for (path, bytes, lines) in grep_content_by_file(text, default_path.as_deref()) {
                 out.push(ReadEvent {
                     path,
@@ -725,7 +1159,7 @@ fn credit_result(
                 });
             }
         }
-        PendingTool::GrepFiles => {
+        PendingTool::GrepFiles { .. } => {
             for line in text.split('\n') {
                 let l = line.trim();
                 if l.is_empty()
@@ -744,7 +1178,9 @@ fn credit_result(
                 });
             }
         }
-        PendingTool::Shell { files, cmds, dir } => {
+        PendingTool::Shell {
+            files, cmds, dir, ..
+        } => {
             if files.is_empty() {
                 return;
             }
@@ -1263,6 +1699,9 @@ pub struct ClaudeParser {
     pub calls: Vec<RawCall>,
     idx: HashMap<String, usize>,
     pub reads: Vec<ReadEvent>,
+    pub writes: Vec<WriteEvent>,
+    pub searches: Vec<SearchEvent>,
+    pub turns: Vec<TurnEvent>,
     pub unreadable: usize,
     pub compactions: usize,
     pub compaction_points: Vec<CompactionPoint>,
@@ -1402,16 +1841,33 @@ impl ClaudeParser {
             "Read" => input
                 .and_then(|i| i.file_path.clone())
                 .map(|path| PendingTool::Read { path }),
-            "Grep" => match input.and_then(|i| i.output_mode.as_deref()) {
-                Some("content") => Some(PendingTool::GrepContent {
-                    default_path: input.and_then(|i| i.path.clone()),
-                }),
-                _ => Some(PendingTool::GrepFiles),
-            },
+            "Grep" => {
+                let path = input.and_then(|i| i.path.clone());
+                // No path, or the session's own folder: the whole tree.
+                let search = match &path {
+                    None => true,
+                    Some(p) => {
+                        let p = p.trim_end_matches('/');
+                        p == "." || Some(p) == self.cwd.as_deref().map(|c| c.trim_end_matches('/'))
+                    }
+                };
+                match input.and_then(|i| i.output_mode.as_deref()) {
+                    Some("content") => Some(PendingTool::GrepContent {
+                        default_path: path,
+                        search,
+                    }),
+                    _ => Some(PendingTool::GrepFiles { search }),
+                }
+            }
             "Bash" => input.and_then(|i| i.command.as_deref()).and_then(|cmd| {
-                let files = shell_named_files(cmd);
-                (!files.is_empty()).then(|| shell_pending(files, vec![cmd.to_string()], None))
+                shell_pending(shell_named_files(cmd), vec![cmd.to_string()], None, cmd)
             }),
+            "Edit" | "Write" | "MultiEdit" => input
+                .and_then(|i| i.file_path.clone())
+                .map(|path| PendingTool::Edit { path }),
+            "NotebookEdit" => input
+                .and_then(|i| i.notebook_path.clone())
+                .map(|path| PendingTool::Edit { path }),
             _ => None,
         };
         if let Some(p) = pending {
@@ -1425,12 +1881,14 @@ impl ClaudeParser {
             .as_deref()
             .and_then(crate::parse_iso_to_epoch_ms)
             .unwrap_or(0);
+        let injected = rec.is_compact_summary == Some(true) || rec.is_meta == Some(true);
         let Some(msg) = rec.message else {
             return;
         };
         match msg.content {
             Some(Content::Blocks(blocks)) => {
                 let mut has_result = false;
+                let mut text = String::new();
                 for b in &blocks {
                     if b.kind.as_deref() == Some("tool_result") {
                         has_result = true;
@@ -1441,20 +1899,48 @@ impl ClaudeParser {
                             continue;
                         };
                         if let Some(p) = self.pending.remove(id) {
-                            let text = b.content.as_ref().map(|c| c.text()).unwrap_or_default();
-                            let before = self.reads.len();
-                            credit_result(&p, &text, at_ms, self.cwd.as_deref(), &mut self.reads);
-                            key_reads(&mut self.reads[before..], id);
+                            let result = b.content.as_ref().map(|c| c.text()).unwrap_or_default();
+                            let mut c = credit_result(
+                                &p,
+                                &result,
+                                at_ms,
+                                self.cwd.as_deref(),
+                                b.is_error == Some(true),
+                            );
+                            key_credited(&mut c, id);
+                            self.reads.extend(c.reads);
+                            self.writes.extend(c.writes);
+                            self.searches.extend(c.searches);
+                        }
+                    } else if b.kind.as_deref() == Some("text") {
+                        if let Some(t) = &b.text {
+                            text.push_str(t);
                         }
                     }
                 }
                 if !has_result {
                     self.turn_start = (self.calls.len(), at_ms);
+                    self.turn(at_ms, &text, injected);
                 }
             }
-            Some(Content::Text(_)) => self.turn_start = (self.calls.len(), at_ms),
+            Some(Content::Text(t)) => {
+                self.turn_start = (self.calls.len(), at_ms);
+                self.turn(at_ms, &t, injected);
+            }
             _ => {}
         }
+    }
+
+    /// Record a turn the user sent, unless the record is one the agent did
+    /// not hand back to them.
+    fn turn(&mut self, at_ms: i64, text: &str, injected: bool) {
+        if !self.collect_reads || injected || !user_sent(text) {
+            return;
+        }
+        self.turns.push(TurnEvent {
+            key: format!("t{}", self.cur_offset),
+            at_ms,
+        });
     }
 
     /// A parser that carries on from a stored pass (tool calls still waiting
@@ -1488,12 +1974,27 @@ impl ClaudeParser {
             agent_id: agent,
             calls: self.calls,
             reads: self.reads,
+            writes: self.writes,
+            searches: self.searches,
+            turns: self.turns,
             unreadable: self.unreadable,
             compactions: self.compactions,
             compaction_points: self.compaction_points,
             ..Default::default()
         }
     }
+}
+
+/// Whether a user record's text is something the user sent, as opposed to an
+/// interruption, a background task's notification, or a bare system reminder
+/// the harness appended.
+fn user_sent(text: &str) -> bool {
+    let t = text.trim_start();
+    !t.starts_with("[Request interrupted")
+        && !t.starts_with("<task-notification>")
+        && !(t.starts_with("<system-reminder>")
+            && t.trim_end().ends_with("</system-reminder>")
+            && t.matches("<system-reminder>").count() == 1)
 }
 
 pub fn parse_claude_text(
@@ -1513,6 +2014,9 @@ pub fn parse_claude_text(
 pub struct CodexParser {
     pub calls: Vec<RawCall>,
     pub reads: Vec<ReadEvent>,
+    pub writes: Vec<WriteEvent>,
+    pub searches: Vec<SearchEvent>,
+    pub turns: Vec<TurnEvent>,
     pub unreadable: usize,
     pub compactions: usize,
     pub compaction_points: Vec<CompactionPoint>,
@@ -1601,7 +2105,17 @@ impl CodexParser {
             }
             "event_msg" => match p.kind.as_deref() {
                 Some("token_count") => self.token_count(p, at_ms, ordinal),
-                Some("task_started") => self.turn_start = (self.calls.len(), at_ms),
+                Some("task_started") => {
+                    self.turn_start = (self.calls.len(), at_ms);
+                    // A forked subagent's copied history is the parent's.
+                    let copied = self.start_ordinal.is_some_and(|s| ordinal < s);
+                    if self.collect_reads && !copied {
+                        self.turns.push(TurnEvent {
+                            key: format!("t{ordinal}"),
+                            at_ms,
+                        });
+                    }
+                }
                 _ => {}
             },
             "compacted" => {
@@ -1689,20 +2203,37 @@ impl CodexParser {
         match p.kind.as_deref() {
             Some("function_call") | Some("custom_tool_call") => {
                 let name = p.name.as_deref().unwrap_or("");
-                if !CODEX_SHELL_TOOLS.contains(&name) {
-                    return;
-                }
-                let cmd = p
+                let text = p
                     .input
                     .as_ref()
                     .or(p.arguments.as_ref())
                     .map(|c| c.text())
                     .unwrap_or_default();
+                // `apply_patch` as its own tool: its text is the patch.
+                if name == "apply_patch" {
+                    let writes = patch_paths(&text);
+                    if !writes.is_empty() {
+                        self.pending.insert(
+                            id,
+                            PendingTool::Shell {
+                                files: Vec::new(),
+                                cmds: Vec::new(),
+                                dir: None,
+                                writes,
+                                search: None,
+                            },
+                        );
+                    }
+                    return;
+                }
+                if !CODEX_SHELL_TOOLS.contains(&name) {
+                    return;
+                }
                 // The raw text, and the commands decoded from it: a JSON
                 // `{"command": [...]}` or the quoted `cmd:` of an exec call
                 // hides its file names from a split on spaces.
-                let (cmds, workdir) = shell_call(&cmd);
-                let mut files = shell_named_files(&cmd);
+                let (cmds, workdir) = shell_call(&text);
+                let mut files = shell_named_files(&text);
                 for c in &cmds {
                     for f in shell_named_files(c) {
                         if !files.contains(&f) {
@@ -1710,16 +2241,18 @@ impl CodexParser {
                         }
                     }
                 }
-                if !files.is_empty() {
-                    self.pending.insert(id, shell_pending(files, cmds, workdir));
+                if let Some(pend) = shell_pending(files, cmds, workdir, &text) {
+                    self.pending.insert(id, pend);
                 }
             }
             Some("function_call_output") | Some("custom_tool_call_output") => {
                 if let Some(pend) = self.pending.remove(&id) {
                     let text = p.output.as_ref().map(|c| c.text()).unwrap_or_default();
-                    let before = self.reads.len();
-                    credit_result(&pend, &text, at_ms, self.cwd.as_deref(), &mut self.reads);
-                    key_reads(&mut self.reads[before..], &id);
+                    let mut c = credit_result(&pend, &text, at_ms, self.cwd.as_deref(), false);
+                    key_credited(&mut c, &id);
+                    self.reads.extend(c.reads);
+                    self.writes.extend(c.writes);
+                    self.searches.extend(c.searches);
                 }
             }
             _ => {}
@@ -1788,6 +2321,9 @@ impl CodexParser {
             label: self.nickname,
             calls: self.calls,
             reads: self.reads,
+            writes: self.writes,
+            searches: self.searches,
+            turns: self.turns,
             unreadable: self.unreadable,
             compactions: self.compactions,
             compaction_points: self.compaction_points,
@@ -2292,6 +2828,9 @@ fn fetch_antigravity(
         quota: None,
         calls,
         reads: Vec::new(),
+        writes: Vec::new(),
+        searches: Vec::new(),
+        turns: Vec::new(),
     }
 }
 
@@ -3031,6 +3570,96 @@ pub struct ItemRow {
     pub context: u64,
     pub output: u64,
     pub peak_context: u64,
+    /// Main-thread rows only: what the session did to get ready to edit
+    /// (handoff-recovery-instrument).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
+}
+
+/// Reads of one kind between a start and the first edit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ReadPile {
+    pub n: u64,
+    pub bytes: u64,
+}
+
+/// The recovery: reads of files the item did not declare, with their paths
+/// (project-relative, or raw when outside the root).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct OtherReads {
+    pub n: u64,
+    pub bytes: u64,
+    pub paths: Vec<String>,
+}
+
+/// What happened between the counting window's start and the first edit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToFirstEdit {
+    /// Main-thread calls in the window.
+    pub calls: u64,
+    /// Turns the user sent inside the window (the agent handed back).
+    pub user_turns: u64,
+    /// Reads of the item's declared files (a directory entry covers what is
+    /// under it).
+    pub declared_reads: ReadPile,
+    /// Reads under `.bram/`: the draft, the worklist, the feedback. The
+    /// carrier itself, neither declared nor recovery.
+    pub carrier_reads: ReadPile,
+    pub other_reads: OtherReads,
+    pub searches: u64,
+    /// `history`, `grep`, `tree`: how many of each.
+    pub search_kinds: BTreeMap<String, u64>,
+}
+
+/// One item's start in one session (handoff-recovery-instrument): how the
+/// session stood when the item's work began here, what the draft had declared,
+/// and what the session read, searched and asked before its first edit.
+///
+/// The unit is the (item, session) pair: an item worked in two sessions has a
+/// block in each. `start` is `fresh` (no earlier item in this session and the
+/// item never credited before), `resumed` (no earlier item here, but an
+/// earlier session credited the item: a handoff), or `continued` (an earlier
+/// item in this session). For a fresh or resumed start the counting window
+/// opens at the session's first call, because the brief names the item and the
+/// orientation before Start is the recovery; for a continued start it opens at
+/// the item's first credited call. The first edit is the first write on any
+/// thread of the session that resolves to a project path outside `.bram/`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Handoff {
+    /// The item's first credited main-thread call in this session.
+    pub start_ms: i64,
+    pub start: String,
+    /// No other item was credited earlier in this session.
+    pub fresh: bool,
+    /// The session compacted before the start (a call's context fell under
+    /// half the previous call's, from over 100k): the window was rebuilt from
+    /// a summary nobody reviewed.
+    pub compacted_before: bool,
+    pub prior_items: usize,
+    pub context_at_start: u64,
+    /// Where counting begins: the session's first call for a fresh or resumed
+    /// start, `startMs` for a continued one.
+    pub window_from_ms: i64,
+    /// Calls between `windowFromMs` and `startMs`.
+    pub pre_start_calls: u64,
+    /// The item's `files` in the newest worklist-history snapshot at or before
+    /// the start that lists it.
+    pub declared_files: Vec<String>,
+    /// That snapshot's time, or null when none lists the item.
+    pub declared_source: Option<i64>,
+    pub first_edit_ms: Option<i64>,
+    pub first_edit_path: Option<String>,
+    /// No edit in this session: `toFirstEdit` runs to the item's last credited
+    /// call here instead.
+    pub no_edit: bool,
+    /// Counted from `windowFromMs`.
+    pub to_first_edit: ToFirstEdit,
+    /// The same counts from `startMs`, when the window opened earlier (a fresh
+    /// or resumed start); null when the two coincide. This is the like-for-like
+    /// comparison with a continued start, whose window opens at its Start.
+    pub from_start: Option<ToFirstEdit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -3853,6 +4482,48 @@ pub fn build_report(
     let mut cwd_unknown_reads = 0u64;
     let mut lib_events: Vec<LibEvent> = Vec::new();
 
+    // handoff-recovery-instrument: what the whole record says before the
+    // per-session loop. An item's earliest credited call anywhere tells a
+    // resumed start from a fresh one; a session's writes on every thread
+    // (subagents edit too) find the first edit.
+    let attribution_of = |c: &RawCall| -> Attribution {
+        match &c.attribution {
+            Some(a) => a.clone(),
+            None if input.windows.is_some() => attribute(&windows, c.at_ms),
+            None => Attribution::Chat,
+        }
+    };
+    let mut item_first_ms: HashMap<String, i64> = HashMap::new();
+    let mut session_writes: HashMap<(String, String), Vec<SessionWrite>> = HashMap::new();
+    for pf in &input.files {
+        let Some(thread) = pf.thread else { continue };
+        for w in pf.writes.iter().filter(|w| w.at_ms >= since) {
+            session_writes
+                .entry((pf.provider.to_string(), pf.session_id.clone()))
+                .or_default()
+                .push(SessionWrite {
+                    at_ms: w.at_ms,
+                    path: w.path.clone(),
+                    cwd: w.cwd.clone(),
+                });
+        }
+        if thread != Thread::Main {
+            continue;
+        }
+        for c in pf.calls.iter().filter(|c| c.at_ms >= since) {
+            if let Attribution::Items(ids) = attribution_of(c) {
+                for id in ids {
+                    let e = item_first_ms.entry(id).or_insert(c.at_ms);
+                    *e = (*e).min(c.at_ms);
+                }
+            }
+        }
+    }
+    for w in session_writes.values_mut() {
+        w.sort_by_key(|w| w.at_ms);
+    }
+    let mut snapshots = Snapshots::new(Path::new(input.root));
+
     for pf in &input.files {
         let Some(thread) = pf.thread else { continue };
         if let Some((prov, id)) = &input.session_filter {
@@ -3994,6 +4665,7 @@ pub fn build_report(
         let (mut chat_ctx, mut chat_out) = (0f64, 0f64);
         let mut item_ctx: BTreeMap<String, f64> = BTreeMap::new();
         let mut item_out: BTreeMap<String, f64> = BTreeMap::new();
+        let mut attrs: Vec<Attribution> = Vec::with_capacity(calls.len());
         for c in &calls {
             row.context.total += c.context;
             row.context.peak = row.context.peak.max(c.context);
@@ -4047,6 +4719,7 @@ pub fn build_report(
                     chat_out += c.output as f64;
                 }
             }
+            attrs.push(attribution.clone());
             if input.include_calls {
                 readings.push(CallReading {
                     provider: pf.provider.to_string(),
@@ -4084,6 +4757,26 @@ pub fn build_report(
             accumulate_models(&mut model_acc, pf.provider, &pf.session_id, &calls);
             row.stretches = stretches(&calls, &windows);
             row.pace = pace_of(&calls.iter().map(|c| c.at_ms).collect::<Vec<_>>());
+            if !row.items.is_empty() {
+                let writes = session_writes
+                    .get(&(pf.provider.to_string(), pf.session_id.clone()))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let mut blocks = item_handoffs(
+                    &calls,
+                    &attrs,
+                    pf,
+                    since,
+                    writes,
+                    &item_first_ms,
+                    input.root,
+                    input.home.as_deref(),
+                    &mut snapshots,
+                );
+                for it in row.items.iter_mut() {
+                    it.handoff = blocks.remove(&it.id);
+                }
+            }
         }
         sessions.push(row);
     }
@@ -4175,6 +4868,281 @@ pub fn build_report(
         calls: input.include_calls.then_some(readings),
         ms: started.elapsed().as_millis(),
     }
+}
+
+// --- handoff recovery (handoff-recovery-instrument) -------------------------
+
+/// A write on any thread of a session, for finding an item's first edit.
+struct SessionWrite {
+    at_ms: i64,
+    path: String,
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SnapshotItem {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    files: Vec<String>,
+    /// The older single-file spelling.
+    #[serde(default)]
+    file: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Snapshot {
+    #[serde(default)]
+    items: Vec<SnapshotItem>,
+}
+
+/// The worklist-history snapshots (`<state>/worklist-history/<ms>.json`),
+/// read one at a time as items ask what they declared at their start, and
+/// kept for the report's lifetime.
+pub struct Snapshots {
+    dir: PathBuf,
+    /// Snapshot times, ascending; read once.
+    names: Option<Vec<i64>>,
+    /// Snapshot time -> item id -> declared files; None for an unreadable file.
+    cache: HashMap<i64, Option<HashMap<String, Vec<String>>>>,
+}
+
+/// How many snapshots either side of the start are searched for the item.
+const SNAPSHOT_SCAN: usize = 80;
+
+impl Snapshots {
+    pub fn new(root: &Path) -> Self {
+        Snapshots {
+            dir: root.join(".bram").join("worklist-history"),
+            names: None,
+            cache: HashMap::new(),
+        }
+    }
+
+    fn names(&mut self) -> &[i64] {
+        if self.names.is_none() {
+            let mut v: Vec<i64> = std::fs::read_dir(&self.dir)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.strip_suffix(".json")?.parse::<i64>().ok()
+                })
+                .collect();
+            v.sort_unstable();
+            self.names = Some(v);
+        }
+        self.names.as_deref().unwrap_or(&[])
+    }
+
+    fn load(&mut self, ms: i64) -> &Option<HashMap<String, Vec<String>>> {
+        let dir = self.dir.clone();
+        self.cache.entry(ms).or_insert_with(|| {
+            let text = std::fs::read_to_string(dir.join(format!("{ms}.json"))).ok()?;
+            let snap: Snapshot = serde_json::from_str(&text).ok()?;
+            Some(
+                snap.items
+                    .into_iter()
+                    .map(|it| {
+                        let mut files = it.files;
+                        if let Some(f) = it.file {
+                            if !files.contains(&f) {
+                                files.push(f);
+                            }
+                        }
+                        let files = files
+                            .into_iter()
+                            .map(|f| {
+                                f.replace('\\', "/")
+                                    .trim_start_matches("./")
+                                    .trim_end_matches('/')
+                                    .to_string()
+                            })
+                            .filter(|f| !f.is_empty())
+                            .collect();
+                        (it.id, files)
+                    })
+                    .collect(),
+            )
+        })
+    }
+
+    /// The files `id` declared in the newest snapshot at or before `at_ms`
+    /// that lists it (then the oldest after it), with that snapshot's time.
+    pub fn declared(&mut self, id: &str, at_ms: i64) -> (Vec<String>, Option<i64>) {
+        let names = self.names().to_vec();
+        let split = names.partition_point(|n| *n <= at_ms);
+        let before = names[..split].iter().rev().take(SNAPSHOT_SCAN);
+        let after = names[split..].iter().take(SNAPSHOT_SCAN);
+        for ms in before.chain(after) {
+            if let Some(map) = self.load(*ms) {
+                if let Some(files) = map.get(id) {
+                    return (files.clone(), Some(*ms));
+                }
+            }
+        }
+        (Vec::new(), None)
+    }
+}
+
+/// Whether a project-relative path is one of (or under) the declared entries.
+fn declared_covers(declared: &[String], path: &str) -> bool {
+    declared
+        .iter()
+        .any(|d| path == d || path.starts_with(&format!("{d}/")))
+}
+
+/// Bram's own state folder: the draft, the worklist, the feedback. Reads of it
+/// are the carrier; writes to it are not edits of the project.
+fn is_carrier_path(path: &str) -> bool {
+    path == ".bram" || path.starts_with(".bram/")
+}
+
+/// The `handoff` block of every item credited on this main thread.
+#[allow(clippy::too_many_arguments)]
+fn item_handoffs(
+    calls: &[&RawCall],
+    attrs: &[Attribution],
+    pf: &ParsedFile,
+    since: i64,
+    writes: &[SessionWrite],
+    item_first_ms: &HashMap<String, i64>,
+    root: &str,
+    home: Option<&str>,
+    snapshots: &mut Snapshots,
+) -> HashMap<String, Handoff> {
+    let mut out: HashMap<String, Handoff> = HashMap::new();
+    let Some(session_first_ms) = calls.iter().map(|c| c.at_ms).min() else {
+        return out;
+    };
+    // Compactions, by the same rule `stretches` uses.
+    let compactions: Vec<i64> = calls
+        .windows(2)
+        .filter(|w| w[0].context > 100_000 && w[1].context < w[0].context / 2)
+        .map(|w| w[1].at_ms)
+        .collect();
+    // Each item's start: the call that first credited it, and what came before.
+    let mut seen: Vec<String> = Vec::new();
+    let mut starts: Vec<(String, usize)> = Vec::new();
+    for (i, a) in attrs.iter().enumerate() {
+        if let Attribution::Items(ids) = a {
+            for id in ids {
+                if !seen.contains(id) {
+                    starts.push((id.clone(), i));
+                    seen.push(id.clone());
+                }
+            }
+        }
+    }
+    let credited = |i: usize, id: &str| matches!(&attrs[i], Attribution::Items(ids) if ids.iter().any(|x| x == id));
+    for (id, start_idx) in starts {
+        let start_ms = calls[start_idx].at_ms;
+        let prior_items = seen.iter().position(|s| *s == id).unwrap_or(0);
+        let fresh = prior_items == 0;
+        let resumed = item_first_ms.get(&id).is_some_and(|m| *m < start_ms);
+        let start = if !fresh {
+            "continued"
+        } else if resumed {
+            "resumed"
+        } else {
+            "fresh"
+        };
+        let window_from = if fresh { session_first_ms } else { start_ms };
+        let (declared_files, declared_source) = snapshots.declared(&id, start_ms);
+        // The first edit: a write on any thread, from the window's start, that
+        // lands in the project outside `.bram/`.
+        let first_edit = writes
+            .iter()
+            .filter(|w| w.at_ms >= window_from && plausible_write_target(&w.path))
+            .find_map(|w| {
+                let (resolved, _) = resolve_read_path(&w.path, w.cwd.as_deref(), root, home);
+                match resolved {
+                    Resolved::Project(p) if !is_carrier_path(&p) => Some((w.at_ms, p)),
+                    _ => None,
+                }
+            });
+        let last_credited = (0..calls.len())
+            .rev()
+            .find(|i| credited(*i, &id))
+            .map(|i| calls[i].at_ms)
+            .unwrap_or(start_ms);
+        let end = first_edit.as_ref().map(|e| e.0).unwrap_or(last_credited);
+        // Count the window [from, end]: the turn at `from` itself opened it,
+        // so turns count only after it.
+        let count = |from: i64| -> ToFirstEdit {
+            let in_window = |t: i64| t >= from && t <= end;
+            let mut tfe = ToFirstEdit {
+                calls: calls.iter().filter(|c| in_window(c.at_ms)).count() as u64,
+                user_turns: pf
+                    .turns
+                    .iter()
+                    .filter(|t| t.at_ms > from && t.at_ms <= end)
+                    .count() as u64,
+                ..Default::default()
+            };
+            for s in pf.searches.iter().filter(|s| in_window(s.at_ms)) {
+                tfe.searches += 1;
+                *tfe.search_kinds.entry(s.kind.clone()).or_default() += 1;
+            }
+            for r in pf
+                .reads
+                .iter()
+                .filter(|r| r.at_ms >= since && in_window(r.at_ms))
+            {
+                let (resolved, _) = resolve_read_path(&r.path, r.cwd.as_deref(), root, home);
+                let (pile, other_path) = match resolved {
+                    Resolved::Project(p) if is_carrier_path(&p) => (&mut tfe.carrier_reads, None),
+                    Resolved::Project(p) if declared_covers(&declared_files, &p) => {
+                        (&mut tfe.declared_reads, None)
+                    }
+                    Resolved::Project(p) => (&mut ReadPile::default(), Some(p)),
+                    Resolved::Elsewhere => (&mut ReadPile::default(), Some(r.path.clone())),
+                };
+                match other_path {
+                    None => {
+                        pile.n += 1;
+                        pile.bytes += r.bytes;
+                    }
+                    Some(p) => {
+                        tfe.other_reads.n += 1;
+                        tfe.other_reads.bytes += r.bytes;
+                        if !tfe.other_reads.paths.contains(&p) {
+                            tfe.other_reads.paths.push(p);
+                        }
+                    }
+                }
+            }
+            tfe
+        };
+        let tfe = count(window_from);
+        let from_start = (window_from != start_ms).then(|| count(start_ms));
+        out.insert(
+            id.clone(),
+            Handoff {
+                start_ms,
+                start: start.to_string(),
+                fresh,
+                compacted_before: compactions.iter().any(|c| *c <= start_ms),
+                prior_items,
+                context_at_start: calls[start_idx].context,
+                window_from_ms: window_from,
+                pre_start_calls: calls
+                    .iter()
+                    .filter(|c| c.at_ms >= window_from && c.at_ms < start_ms)
+                    .count() as u64,
+                declared_files,
+                declared_source,
+                first_edit_ms: first_edit.as_ref().map(|e| e.0),
+                first_edit_path: first_edit.as_ref().map(|e| e.1.clone()),
+                no_edit: first_edit.is_none(),
+                to_first_edit: tfe,
+                from_start,
+            },
+        );
+    }
+    out
 }
 
 #[derive(Default)]
@@ -4576,7 +5544,10 @@ pub fn conventions_bytes(root: &Path) -> BTreeMap<String, u64> {
 /// 2: Codex call keys became `<ordinal>:<at_ms>`; `open` rewrites v1 rows.
 /// 4: Windows reads of lib.rs were stored without their lines (backslash
 /// paths); `open` re-reads every transcript so the reads gain them.
-pub const LEDGER_VERSION: i64 = 4;
+/// 5: `writes`, `searches` and `turns` tables (handoff-recovery-instrument);
+/// `open` re-reads every Claude and Codex transcript once so the back
+/// catalogue fills in.
+pub const LEDGER_VERSION: i64 = 5;
 const ATTRIBUTION_SETTLE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4662,6 +5633,9 @@ struct Fetched {
     quota: Option<Quota>,
     calls: Vec<RawCall>,
     reads: Vec<ReadEvent>,
+    writes: Vec<WriteEvent>,
+    searches: Vec<SearchEvent>,
+    turns: Vec<TurnEvent>,
 }
 
 /// What a source's row said last time.
@@ -4678,6 +5652,8 @@ struct StoredSource {
 pub struct IngestStats {
     pub calls_inserted: usize,
     pub reads_inserted: usize,
+    /// Writes, searches and turns stored (handoff-recovery-instrument).
+    pub events_inserted: usize,
     /// Rows read again and found already stored.
     pub skipped: usize,
     /// Sources actually read this pass.
@@ -4689,11 +5665,12 @@ pub struct IngestStats {
 
 impl IngestStats {
     pub fn inserted(&self) -> usize {
-        self.calls_inserted + self.reads_inserted
+        self.calls_inserted + self.reads_inserted + self.events_inserted
     }
     pub fn merge(&mut self, o: &IngestStats) {
         self.calls_inserted += o.calls_inserted;
         self.reads_inserted += o.reads_inserted;
+        self.events_inserted += o.events_inserted;
         self.skipped += o.skipped;
         self.sources += o.sources;
         self.unchanged += o.unchanged;
@@ -4835,6 +5812,27 @@ impl Ledger {
                 via_shell INTEGER NOT NULL, lines TEXT,
                 cwd TEXT, shell_lines TEXT,
                 UNIQUE (source_key, read_key)
+             );
+             CREATE TABLE IF NOT EXISTS writes (
+                id INTEGER PRIMARY KEY,
+                source_key TEXT NOT NULL, write_key TEXT NOT NULL,
+                provider TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,
+                path TEXT NOT NULL, at_ms INTEGER NOT NULL, cwd TEXT,
+                UNIQUE (source_key, write_key)
+             );
+             CREATE TABLE IF NOT EXISTS searches (
+                id INTEGER PRIMARY KEY,
+                source_key TEXT NOT NULL, search_key TEXT NOT NULL,
+                provider TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,
+                kind TEXT NOT NULL, at_ms INTEGER NOT NULL,
+                UNIQUE (source_key, search_key)
+             );
+             CREATE TABLE IF NOT EXISTS turns (
+                id INTEGER PRIMARY KEY,
+                source_key TEXT NOT NULL, turn_key TEXT NOT NULL,
+                provider TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,
+                at_ms INTEGER NOT NULL,
+                UNIQUE (source_key, turn_key)
              );",
         )
         .map_err(|_| OpenFailed)?;
@@ -4864,6 +5862,18 @@ impl Ledger {
                 // the full pass. A transcript that is gone keeps its rows as
                 // they were: relative paths with no folder read as the
                 // project's.
+                let _ = conn.execute(
+                    "UPDATE sources SET read_to = 0, mtime_ms = -1, state = NULL, \
+                       unreadable = 0, compactions = 0 \
+                     WHERE provider IN ('claude', 'codex')",
+                    [],
+                );
+            }
+            if version < 5 {
+                // v5 adds writes, searches and turns, read from records the
+                // parsers already walk. The same once-only re-read as v4 fills
+                // the new tables for every transcript still on disk; a
+                // transcript that is gone has none.
                 let _ = conn.execute(
                     "UPDATE sources SET read_to = 0, mtime_ms = -1, state = NULL, \
                        unreadable = 0, compactions = 0 \
@@ -5084,6 +6094,9 @@ impl Ledger {
                     state,
                     calls,
                     reads: Vec::new(),
+                    writes: Vec::new(),
+                    searches: Vec::new(),
+                    turns: Vec::new(),
                 },
                 now_ms,
                 &mut stats,
@@ -5227,6 +6240,75 @@ impl Ledger {
                     ])
                     .unwrap_or(0);
                 stats.reads_inserted += n;
+                stats.skipped += 1 - n;
+            }
+        }
+        {
+            let Ok(mut ins) = tx.prepare_cached(
+                "INSERT OR IGNORE INTO writes (source_key, write_key, provider, session, thread, \
+                   path, at_ms, cwd) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            ) else {
+                return;
+            };
+            for w in &f.writes {
+                let n = ins
+                    .execute(rusqlite::params![
+                        f.key,
+                        w.key,
+                        ident.provider.as_str(),
+                        ident.session,
+                        ident.thread.as_str(),
+                        w.path,
+                        w.at_ms,
+                        w.cwd,
+                    ])
+                    .unwrap_or(0);
+                stats.events_inserted += n;
+                stats.skipped += 1 - n;
+            }
+        }
+        {
+            let Ok(mut ins) = tx.prepare_cached(
+                "INSERT OR IGNORE INTO searches (source_key, search_key, provider, session, \
+                   thread, kind, at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            ) else {
+                return;
+            };
+            for s in &f.searches {
+                let n = ins
+                    .execute(rusqlite::params![
+                        f.key,
+                        s.key,
+                        ident.provider.as_str(),
+                        ident.session,
+                        ident.thread.as_str(),
+                        s.kind,
+                        s.at_ms,
+                    ])
+                    .unwrap_or(0);
+                stats.events_inserted += n;
+                stats.skipped += 1 - n;
+            }
+        }
+        {
+            let Ok(mut ins) = tx.prepare_cached(
+                "INSERT OR IGNORE INTO turns (source_key, turn_key, provider, session, thread, \
+                   at_ms) VALUES (?1,?2,?3,?4,?5,?6)",
+            ) else {
+                return;
+            };
+            for t in &f.turns {
+                let n = ins
+                    .execute(rusqlite::params![
+                        f.key,
+                        t.key,
+                        ident.provider.as_str(),
+                        ident.session,
+                        ident.thread.as_str(),
+                        t.at_ms,
+                    ])
+                    .unwrap_or(0);
+                stats.events_inserted += n;
                 stats.skipped += 1 - n;
             }
         }
@@ -5389,6 +6471,69 @@ impl Ledger {
                 }
             }
         }
+        if let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT source_key, write_key, path, at_ms, cwd FROM writes ORDER BY id")
+        {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    WriteEvent {
+                        key: r.get(1)?,
+                        path: r.get(2)?,
+                        at_ms: r.get(3)?,
+                        cwd: r.get(4)?,
+                    },
+                ))
+            }) {
+                for (key, w) in rows.flatten() {
+                    if let Some(pf) = by_key.get_mut(&key) {
+                        pf.writes.push(w);
+                    }
+                }
+            }
+        }
+        if let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT source_key, search_key, kind, at_ms FROM searches ORDER BY id")
+        {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    SearchEvent {
+                        key: r.get(1)?,
+                        kind: r.get(2)?,
+                        at_ms: r.get(3)?,
+                    },
+                ))
+            }) {
+                for (key, s) in rows.flatten() {
+                    if let Some(pf) = by_key.get_mut(&key) {
+                        pf.searches.push(s);
+                    }
+                }
+            }
+        }
+        if let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT source_key, turn_key, at_ms FROM turns ORDER BY id")
+        {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    TurnEvent {
+                        key: r.get(1)?,
+                        at_ms: r.get(2)?,
+                    },
+                ))
+            }) {
+                for (key, t) in rows.flatten() {
+                    if let Some(pf) = by_key.get_mut(&key) {
+                        pf.turns.push(t);
+                    }
+                }
+            }
+        }
         by_key.into_values().map(Arc::new).collect()
     }
 }
@@ -5478,6 +6623,9 @@ fn fetch_claude(chunk: &str, start: u64, state: &SourceState, ident: Ident) -> F
         quota: None,
         calls: p.calls,
         reads: p.reads,
+        writes: p.writes,
+        searches: p.searches,
+        turns: p.turns,
     }
 }
 
@@ -5503,6 +6651,9 @@ fn fetch_codex(chunk: &str, start: u64, state: &SourceState, fallback_id: &str) 
         quota: p.quota.clone(),
         calls: std::mem::take(&mut p.calls),
         reads: std::mem::take(&mut p.reads),
+        writes: std::mem::take(&mut p.writes),
+        searches: std::mem::take(&mut p.searches),
+        turns: std::mem::take(&mut p.turns),
     }
 }
 

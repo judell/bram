@@ -549,6 +549,42 @@ or was written by a newer Bram, the report is built from the files and the
 trace says `[token-accounting] op=ledger-fallback reason=open-failed|newer-schema`.
 `op=ledger` is traced only when a pass stored something.
 
+**Handoff recovery** (`handoff-recovery-instrument`, 2026-11-24). Schema 5
+adds three tables the same parsers fill from records they already walk:
+`writes` (a Claude Edit, Write, MultiEdit or NotebookEdit whose result was not
+an error; a shell command that writes a named file; each file line of a Codex
+`apply_patch`, its own tool or quoted in an `exec` script), `searches`
+(`history` for the `/__search?` route, `grep` for a pathless Grep, `tree` for
+`rg` or `grep -r` with no file) and `turns` (what the user sent: Codex
+`task_started`; a Claude user record with text, less compaction summaries,
+`isMeta` records, interruptions, task notifications and bare system
+reminders). The migration re-reads every Claude and Codex transcript once, as
+v4 did. From them, each `sessions[].items[]` row on a main thread carries a
+`handoff` block: how the session stood when the item's work began *in that
+session* (`fresh`, `resumed` from an earlier session, or `continued` after
+another item; `compactedBefore`), what the draft declared (from the
+worklist-history snapshot at the start), and, up to the first edit on any
+thread of the session, the calls, the turns handed back, reads sorted into
+declared, carrier (`.bram/`) and other, and the searches. Shapes are in
+`apis.md`.
+
+What it measures is **handoff fidelity, not result quality.** The result it
+follows from (2026-11-24, 216 items since 2026-11-07): rounds of feedback per
+item do not move with how concentrated the session was at Start (rank
+correlation −0.02 / +0.03 / −0.05 within item-size terciles); they move with
+item size (+0.77). So the block asks a narrower question: when a draft is the
+carrier between sessions, what did the next session have to recover anyway?
+`otherReads.paths` says what the draft failed to carry. It is **an instrument,
+not a target**: nothing in the conventions or the guards reads it, and no
+agent is told to read less before editing, because an agent that minimized
+reads would edit unread files and the measure would improve as the work got
+worse. Read it from the CLI:
+
+```sh
+bram --token-accounting ~/bram --calls \
+  | jq '[.sessions[] | select(.thread=="main") | .items[] | select(.handoff)] | length'
+```
+
 **First baseline (2026-11-12, this repo: 247 Claude sessions with 27,545
 calls, 286 Codex rollouts with 24,530):**
 

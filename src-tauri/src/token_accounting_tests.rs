@@ -2815,3 +2815,517 @@ fn suggest_resolved_view_wire_shape() {
     assert_eq!(codex["tokens"], 103_360);
     assert_eq!(codex["kind"], "window");
 }
+
+// --- handoff-recovery-instrument ------------------------------------------
+
+#[test]
+fn shell_write_targets_find_redirects_sed_tee_and_moves_and_skip_devices() {
+    let w = |c: &str| shell_write_targets(c);
+    assert_eq!(w("echo x > /tmp/out.json"), ["/tmp/out.json"]);
+    assert_eq!(w("cat a.txt >> notes.md 2>&1"), ["notes.md"]);
+    assert_eq!(w("sed -i '' 's/a/b/' /r/d.toml"), ["/r/d.toml"]);
+    assert_eq!(w("sed -i -e 's/a/b/' x.rs y.rs"), ["x.rs", "y.rs"]);
+    assert_eq!(w("jq . in.json | tee -a /tmp/log.txt"), ["/tmp/log.txt"]);
+    assert_eq!(w("cp src/a.rs /tmp/backup/a.rs"), ["/tmp/backup/a.rs"]);
+    assert_eq!(w("rm -f docs/old.md"), ["docs/old.md"]);
+    assert!(w("cargo test 2>&1 | head").is_empty());
+    assert!(w("grep -n 'x -> y' lib.rs > /dev/null").is_empty());
+    assert!(
+        w("echo \"$OUT\" > $FILE").is_empty(),
+        "shell expansion is not a file"
+    );
+    assert!(w("sed -n '1,5p' a.rs").is_empty(), "sed without -i reads");
+    assert!(
+        w("grep -n 'if n > 0' lib.rs").is_empty(),
+        "a quoted > is not a redirect"
+    );
+    assert!(w("jq '.[] | select(.n > 5000)' x.json").is_empty());
+    assert!(w("awk '$1 > 200' f.txt | head").is_empty());
+    assert!(
+        w("echo x > deadline").is_empty(),
+        "no slash or extension: not taken for a file"
+    );
+    assert_eq!(w("printf '%s' \"a > b\" > out.txt"), ["out.txt"]);
+}
+
+#[test]
+fn shell_search_kind_tells_history_from_tree_from_a_file_grep() {
+    let k = |c: &str| shell_search_kind(c);
+    assert_eq!(
+        k("curl -4 -sS \"http://127.0.0.1:1/__search?q=x&limit=5\""),
+        Some("history".into())
+    );
+    assert_eq!(k("rg -n 'foo' src"), Some("tree".into()));
+    assert_eq!(k("rg foo"), Some("tree".into()));
+    assert_eq!(k("grep -rn foo ."), Some("tree".into()));
+    assert_eq!(k("git grep -n foo"), Some("tree".into()));
+    assert_eq!(k("rg -n foo src/lib.rs"), None, "a named file is a read");
+    assert_eq!(k("grep -n foo a.rs b.rs"), None);
+    assert_eq!(k("cat x.md"), None);
+}
+
+#[test]
+fn patch_paths_read_raw_and_exec_quoted_patches() {
+    let raw = "*** Begin Patch\n*** Update File: /r/x.rs\n@@\n-a\n+b\n*** Add File: /r/new.md\n+hi\n*** End Patch";
+    assert_eq!(patch_paths(raw), ["/r/x.rs", "/r/new.md"]);
+    let quoted = r#"text(await tools.apply_patch("*** Begin Patch\n*** Delete File: docs/old.md\n*** End Patch"));"#;
+    assert_eq!(patch_paths(quoted), ["docs/old.md"]);
+    assert!(patch_paths("no patch here").is_empty());
+}
+
+#[test]
+fn claude_edits_shell_writes_searches_and_turns_are_recorded_and_errors_are_not_writes() {
+    // One record per line: the parser reads a transcript line by line, so the
+    // two long records are concatenated from pieces.
+    let assistant_line = [
+            r#"{"type":"assistant","timestamp":"2026-11-01T10:00:01.000Z","message":{"id":"m1","model":"claude-opus-5-5","content":["#,
+            r#"{"type":"tool_use","id":"tu1","name":"Edit","input":{"file_path":"/r/a.rs","old_string":"a","new_string":"b"}},"#,
+            r#"{"type":"tool_use","id":"tu2","name":"Write","input":{"file_path":"/r/b.md","content":"x"}},"#,
+            r#"{"type":"tool_use","id":"tu3","name":"Edit","input":{"file_path":"/r/c.rs","old_string":"q","new_string":"r"}},"#,
+            r#"{"type":"tool_use","id":"tu4","name":"Bash","input":{"command":"echo x > /tmp/out.json && sed -i '' 's/a/b/' /r/d.toml"}},"#,
+            r#"{"type":"tool_use","id":"tu5","name":"Grep","input":{"pattern":"foo","output_mode":"content"}},"#,
+            r#"{"type":"tool_use","id":"tu6","name":"Bash","input":{"command":"curl -4 -sS \"http://127.0.0.1:1/__search?q=x\""}},"#,
+            r#"{"type":"tool_use","id":"tu7","name":"Bash","input":{"command":"rg -n foo src | head"}},"#,
+            r#"{"type":"tool_use","id":"tu8","name":"NotebookEdit","input":{"notebook_path":"/r/nb.ipynb","new_source":"x"}},"#,
+            r#"{"type":"tool_use","id":"tu9","name":"Grep","input":{"pattern":"bar","path":"/r/src/lib.rs","output_mode":"content"}}"#,
+            r#"],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        ]
+        .concat();
+    let results_line = [
+            r#"{"type":"user","timestamp":"2026-11-01T10:00:02.000Z","message":{"role":"user","content":["#,
+            r#"{"type":"tool_result","tool_use_id":"tu1","content":"The file /r/a.rs has been updated successfully."},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu2","content":"File created successfully at: /r/b.md"},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu3","is_error":true,"content":"String to replace not found in file."},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu4","content":""},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu5","content":"/r/a.rs:1:foo"},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu6","content":"[]"},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu7","content":"src/x.rs:1:foo"},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu8","content":"ok"},"#,
+            r#"{"type":"tool_result","tool_use_id":"tu9","content":"12:bar"}"#,
+            r#"]}}"#,
+        ]
+        .concat();
+    let lines = [
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:00.000Z","cwd":"/r","message":{"role":"user","content":"hello"}}"#,
+        assistant_line.as_str(),
+        results_line.as_str(),
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:03.000Z","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation."}}"#,
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:04.000Z","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:05.000Z","message":{"role":"user","content":[{"type":"text","text":"<task-notification>done</task-notification>"}]}}"#,
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:06.000Z","isMeta":true,"message":{"role":"user","content":"injected"}}"#,
+        r#"{"type":"user","timestamp":"2026-11-01T10:00:07.000Z","message":{"role":"user","content":[{"type":"text","text":"two"}]}}"#,
+    ]
+    .join("\n");
+    let pf = parse_claude_text(&lines, "s", Thread::Main, None);
+    let writes: Vec<(&str, &str)> = pf
+        .writes
+        .iter()
+        .map(|w| (w.key.as_str(), w.path.as_str()))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            ("tu1#w0", "/r/a.rs"),
+            ("tu2#w0", "/r/b.md"),
+            ("tu4#w0", "/r/d.toml"),
+            ("tu4#w1", "/tmp/out.json"),
+            ("tu8#w0", "/r/nb.ipynb"),
+        ],
+        "the failed Edit (tu3) wrote nothing"
+    );
+    assert_eq!(pf.writes[0].cwd.as_deref(), Some("/r"));
+    let searches: Vec<(&str, &str)> = pf
+        .searches
+        .iter()
+        .map(|s| (s.key.as_str(), s.kind.as_str()))
+        .collect();
+    assert_eq!(
+        searches,
+        [("tu5#s", "grep"), ("tu6#s", "history"), ("tu7#s", "tree")],
+        "a Grep of one file (tu9) is a read, not a search"
+    );
+    // The pathless Grep and the shell commands still credit their reads.
+    assert!(pf
+        .reads
+        .iter()
+        .any(|r| r.path == "/r/a.rs" && r.key == "tu5#0"));
+    assert!(pf.reads.iter().any(|r| r.path == "/r/src/lib.rs"));
+    let turns: Vec<i64> = pf.turns.iter().map(|t| t.at_ms).collect();
+    assert_eq!(
+        turns,
+        [t("2026-11-01T10:00:00.000Z"), t("2026-11-01T10:00:07.000Z")],
+        "the compaction summary, the interruption, the task notification and the meta record are not turns"
+    );
+}
+
+#[test]
+fn codex_patches_quoted_in_exec_and_as_their_own_tool_are_writes_and_task_starts_are_turns() {
+    let lines = [
+        CX_META.to_string(),
+        CX_CTX.to_string(),
+        r#"{"type":"event_msg","timestamp":"2026-11-09T15:00:00.000Z","payload":{"type":"task_started"}}"#.to_string(),
+        r#"{"type":"response_item","timestamp":"2026-11-09T15:00:01.000Z","payload":{"type":"custom_tool_call","name":"exec","call_id":"c1","input":"text(await tools.exec_command({cmd:\"sed -n '1,3p' src/x.rs\"}));\ntext(await tools.apply_patch(\"*** Begin Patch\\n*** Update File: /r/src/x.rs\\n@@\\n-a\\n+b\\n*** End Patch\"));"}}"#.to_string(),
+        r#"{"type":"response_item","timestamp":"2026-11-09T15:00:02.000Z","payload":{"type":"custom_tool_call_output","call_id":"c1","output":"line\nSuccess."}}"#.to_string(),
+        r#"{"type":"response_item","timestamp":"2026-11-09T15:00:03.000Z","payload":{"type":"function_call","name":"apply_patch","call_id":"c2","arguments":"{\"input\":\"*** Begin Patch\\n*** Add File: /r/new.md\\n+hi\\n*** End Patch\"}"}}"#.to_string(),
+        r#"{"type":"response_item","timestamp":"2026-11-09T15:00:04.000Z","payload":{"type":"function_call_output","call_id":"c2","output":"Success."}}"#.to_string(),
+        r#"{"type":"response_item","timestamp":"2026-11-09T15:00:05.000Z","payload":{"type":"custom_tool_call","name":"exec","call_id":"c3","input":"text(await tools.exec_command({cmd:\"curl -4 -sS 'http://127.0.0.1:1/__search?q=x'\"}));"}}"#.to_string(),
+        r#"{"type":"response_item","timestamp":"2026-11-09T15:00:06.000Z","payload":{"type":"custom_tool_call_output","call_id":"c3","output":"[]"}}"#.to_string(),
+        r#"{"type":"event_msg","timestamp":"2026-11-09T15:00:10.000Z","payload":{"type":"task_started"}}"#.to_string(),
+    ]
+    .join("\n");
+    let pf = parse_codex_text(&lines, "fallback");
+    let writes: Vec<(&str, &str)> = pf
+        .writes
+        .iter()
+        .map(|w| (w.key.as_str(), w.path.as_str()))
+        .collect();
+    assert_eq!(writes, [("c1#w0", "/r/src/x.rs"), ("c2#w0", "/r/new.md")]);
+    assert!(
+        pf.reads.iter().any(|r| r.path == "src/x.rs" && r.via_shell),
+        "the exec's read still counts"
+    );
+    let searches: Vec<&str> = pf.searches.iter().map(|s| s.kind.as_str()).collect();
+    assert_eq!(searches, ["history"]);
+    assert_eq!(pf.turns.len(), 2);
+    assert_eq!(pf.turns[0].key, "t2");
+}
+
+fn write_snapshot(root: &Path, ms: i64, json: &str) {
+    let dir = root.join(".bram").join("worklist-history");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{ms}.json")), json).unwrap();
+}
+
+#[test]
+fn handoff_blocks_sort_reads_find_the_first_edit_on_any_thread_and_tell_fresh_from_continued_and_resumed(
+) {
+    let dir = ledger_dir("handoff");
+    let root = dir.to_string_lossy().into_owned();
+    write_snapshot(&dir, 50, r#"{"items":[{"id":"a","files":["src/a.rs"]}]}"#);
+    // b is declared only in a snapshot after its start: the scan goes forward.
+    write_snapshot(
+        &dir,
+        5000,
+        r#"{"items":[{"id":"a","files":["src/a.rs"]},{"id":"b","files":["docs/"]}]}"#,
+    );
+    let abs = |p: &str| format!("{root}/{p}");
+    let read = |at: i64, path: &str, bytes: u64| ReadEvent {
+        key: format!("r{at}"),
+        path: path.to_string(),
+        bytes,
+        at_ms: at,
+        ..Default::default()
+    };
+    let write = |at: i64, path: &str| WriteEvent {
+        key: format!("w{at}"),
+        path: path.to_string(),
+        at_ms: at,
+        cwd: None,
+    };
+    let s1_main = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s1".into(),
+        thread: Some(Thread::Main),
+        calls: vec![
+            raw(100, "m", 1000, 800, 1),
+            raw(110, "m", 1100, 800, 1),
+            raw(150, "m", 1200, 800, 1),
+            raw(200, "m", 1300, 800, 1),
+            raw(300, "m", 1400, 800, 1),
+            raw(350, "m", 1500, 800, 1),
+        ],
+        reads: vec![
+            read(102, &abs("src/a.rs"), 10),
+            read(120, ".bram/worklist-drafts/a.md", 20),
+            read(130, "/Users/x/.claude/projects/foo.jsonl", 30),
+            read(140, &abs("src/other.rs"), 40),
+            read(170, &abs("src/late.rs"), 50),
+            read(310, &abs("docs/readme.md"), 60),
+        ],
+        writes: vec![
+            write(125, ".bram/worklist.json"),
+            write(160, &abs("src/a.rs")),
+        ],
+        searches: vec![SearchEvent {
+            key: "s135".into(),
+            kind: "history".into(),
+            at_ms: 135,
+        }],
+        turns: vec![
+            TurnEvent {
+                key: "t100".into(),
+                at_ms: 100,
+            },
+            TurnEvent {
+                key: "t145".into(),
+                at_ms: 145,
+            },
+            TurnEvent {
+                key: "t180".into(),
+                at_ms: 180,
+            },
+        ],
+        ..Default::default()
+    });
+    let s1_sub = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s1".into(),
+        thread: Some(Thread::Subagent),
+        agent_id: Some("ag1".into()),
+        calls: vec![raw(315, "m", 500, 0, 1)],
+        writes: vec![write(320, &abs("docs/x.md"))],
+        ..Default::default()
+    });
+    let s2_main = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s2".into(),
+        thread: Some(Thread::Main),
+        calls: vec![raw(500, "m", 900, 0, 1), raw(520, "m", 950, 0, 1)],
+        ..Default::default()
+    });
+    let win = |from: i64, to: i64, id: &str| ClaimWindow {
+        from_ms: from,
+        to_ms: to,
+        kind: "approved".into(),
+        ids: vec![id.into()],
+    };
+    let report = build_report(
+        ReportInput {
+            root: &root,
+            files: vec![s1_main, s1_sub, s2_main],
+            windows: Some(vec![
+                win(105, 250, "a"),
+                win(290, 400, "b"),
+                win(490, 600, "a"),
+            ]),
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    let s1 = report
+        .sessions
+        .iter()
+        .find(|s| s.id == "s1" && s.thread == Thread::Main)
+        .unwrap();
+    let a = s1.items.iter().find(|i| i.id == "a").unwrap();
+    let h = a.handoff.as_ref().expect("main-thread item has a handoff");
+    assert_eq!(h.start, "fresh");
+    assert!(h.fresh);
+    assert_eq!(h.prior_items, 0);
+    assert_eq!(h.start_ms, 110);
+    assert_eq!(h.context_at_start, 1100);
+    assert_eq!(
+        h.window_from_ms, 100,
+        "a fresh start counts from the session's first call"
+    );
+    assert_eq!(h.pre_start_calls, 1);
+    assert_eq!(h.declared_files, ["src/a.rs"]);
+    assert_eq!(h.declared_source, Some(50));
+    assert_eq!(
+        h.first_edit_ms,
+        Some(160),
+        "the worklist write at 125 is not an edit"
+    );
+    assert_eq!(h.first_edit_path.as_deref(), Some("src/a.rs"));
+    assert!(!h.no_edit);
+    assert!(!h.compacted_before);
+    let e = &h.to_first_edit;
+    assert_eq!(e.calls, 3);
+    assert_eq!(
+        e.user_turns, 1,
+        "the turn at the window's start is not handed back; the one at 180 is after the edit"
+    );
+    assert_eq!(e.declared_reads, ReadPile { n: 1, bytes: 10 });
+    assert_eq!(e.carrier_reads, ReadPile { n: 1, bytes: 20 });
+    assert_eq!(e.other_reads.n, 2);
+    assert_eq!(e.other_reads.bytes, 70);
+    assert_eq!(
+        e.other_reads.paths,
+        ["/Users/x/.claude/projects/foo.jsonl", "src/other.rs"],
+        "a read outside the root keeps its raw path"
+    );
+    assert_eq!(e.searches, 1);
+    assert_eq!(e.search_kinds.get("history"), Some(&1));
+    let f = h
+        .from_start
+        .as_ref()
+        .expect("a fresh start also counts from its Start");
+    assert_eq!(f.calls, 2, "110 and 150");
+    assert_eq!(f.user_turns, 1);
+    assert_eq!(
+        f.declared_reads,
+        ReadPile::default(),
+        "the read at 102 came before Start"
+    );
+    assert_eq!(f.carrier_reads, ReadPile { n: 1, bytes: 20 });
+    assert_eq!(f.other_reads.n, 2);
+
+    let b = s1.items.iter().find(|i| i.id == "b").unwrap();
+    let h = b.handoff.as_ref().unwrap();
+    assert_eq!(h.start, "continued");
+    assert!(!h.fresh);
+    assert_eq!(h.prior_items, 1);
+    assert_eq!(h.window_from_ms, 300);
+    assert_eq!(h.pre_start_calls, 0);
+    assert_eq!(h.declared_files, ["docs"]);
+    assert_eq!(h.declared_source, Some(5000));
+    assert!(
+        h.from_start.is_none(),
+        "a continued start's window is its Start"
+    );
+    assert_eq!(
+        h.first_edit_ms,
+        Some(320),
+        "the subagent's write is the first edit"
+    );
+    assert_eq!(h.first_edit_path.as_deref(), Some("docs/x.md"));
+    assert_eq!(h.to_first_edit.calls, 1);
+    assert_eq!(
+        h.to_first_edit.declared_reads,
+        ReadPile { n: 1, bytes: 60 },
+        "a directory entry covers the files under it"
+    );
+
+    let s2 = report
+        .sessions
+        .iter()
+        .find(|s| s.id == "s2" && s.thread == Thread::Main)
+        .unwrap();
+    let h = s2.items[0].handoff.as_ref().unwrap();
+    assert_eq!(h.start, "resumed", "an earlier session credited the item");
+    assert!(h.fresh);
+    assert!(h.no_edit);
+    assert_eq!(h.first_edit_ms, None);
+    assert_eq!(
+        h.to_first_edit.calls, 2,
+        "no edit: the window runs to the item's last credited call"
+    );
+    assert_eq!(
+        h.declared_source,
+        Some(50),
+        "the newest snapshot at or before the start"
+    );
+    assert_eq!(h.context_at_start, 900);
+
+    let sub = report
+        .sessions
+        .iter()
+        .find(|s| s.thread == Thread::Subagent)
+        .unwrap();
+    assert!(sub.items.iter().all(|i| i.handoff.is_none()));
+    let v = serde_json::to_value(a).unwrap();
+    let mut keys: Vec<&str> = v["handoff"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "compactedBefore",
+            "contextAtStart",
+            "declaredFiles",
+            "declaredSource",
+            "firstEditMs",
+            "firstEditPath",
+            "fresh",
+            "fromStart",
+            "noEdit",
+            "preStartCalls",
+            "priorItems",
+            "start",
+            "startMs",
+            "toFirstEdit",
+            "windowFromMs"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_compaction_before_the_start_is_flagged() {
+    let main = session(
+        "s1",
+        Thread::Main,
+        vec![
+            raw(100, "m", 400_000, 0, 1),
+            raw(110, "m", 120_000, 0, 1),
+            raw(150, "m", 130_000, 0, 1),
+        ],
+    );
+    let report = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![main],
+            windows: Some(vec![ClaimWindow {
+                from_ms: 140,
+                to_ms: 200,
+                kind: "approved".into(),
+                ids: vec!["a".into()],
+            }]),
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    let h = report.sessions[0].items[0].handoff.as_ref().unwrap();
+    assert!(h.compacted_before);
+    assert_eq!(h.start, "fresh");
+}
+
+#[test]
+fn a_v4_ledger_is_reread_once_for_writes_and_turns_and_a_second_pass_stores_nothing_twice() {
+    let dir = ledger_dir("v5");
+    let src = claude_source(&dir);
+    append(
+        src.path(),
+        &[
+            r#"{"type":"user","timestamp":"2026-11-01T10:00:00.000Z","message":{"role":"user","content":"go"}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-11-01T10:00:01.000Z","message":{"id":"m1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tu1","name":"Edit","input":{"file_path":"/r/a.rs"}},{"type":"tool_use","id":"tu2","name":"Bash","input":{"command":"rg foo"}}],"usage":{"input_tokens":1,"cache_read_input_tokens":10,"output_tokens":5}}}"#.to_string(),
+            tool_result("2026-11-01T10:00:02.000Z", "tu1", "The file /r/a.rs has been updated successfully."),
+            tool_result("2026-11-01T10:00:03.000Z", "tu2", "x.rs:1:foo"),
+        ],
+    );
+    let db = dir.join("l.db");
+    {
+        let mut ledger = Ledger::open(&db).unwrap();
+        let st = ledger.ingest_sources(&[src.clone()], None);
+        assert_eq!(st.events_inserted, 3, "one write, one search, one turn");
+        // Back to what v4 left: the rows, but no events.
+        ledger
+            .conn
+            .execute_batch("DELETE FROM writes; DELETE FROM searches; DELETE FROM turns;")
+            .unwrap();
+        ledger.conn.pragma_update(None, "user_version", 4).unwrap();
+    }
+    let mut ledger = Ledger::open(&db).unwrap();
+    let read_to: i64 = ledger
+        .conn
+        .query_row("SELECT read_to FROM sources", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        read_to, 0,
+        "the migration asks for a re-read from the start"
+    );
+    let st = ledger.ingest_sources(&[src.clone()], None);
+    assert_eq!(st.calls_inserted, 0, "the calls were already stored");
+    assert_eq!(st.events_inserted, 3);
+    assert_eq!(count(&ledger, "writes"), 1);
+    assert_eq!(count(&ledger, "searches"), 1);
+    assert_eq!(count(&ledger, "turns"), 1);
+    let st = ledger.ingest_sources(&[src.clone()], None);
+    assert_eq!(st.unchanged, 1);
+    assert_eq!(st.events_inserted, 0);
+    // What comes back from the ledger is what the parser saw.
+    let text = std::fs::read_to_string(src.path()).unwrap();
+    let direct = parse_claude_text(&text, "sess1", Thread::Main, None);
+    let loaded = ledger.load(None);
+    assert_eq!(loaded[0].writes, direct.writes);
+    assert_eq!(loaded[0].searches, direct.searches);
+    assert_eq!(loaded[0].turns, direct.turns);
+    assert_eq!(loaded[0].writes[0].key, "tu1#w0");
+    let _ = std::fs::remove_dir_all(&dir);
+}

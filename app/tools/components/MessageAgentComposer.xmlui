@@ -76,6 +76,29 @@
     listenTo="{doorwayStage.value &amp;&amp; doorwayStage.value.tick}"
     onDidChange="() => window.__bramApplyDoorwayStage(doorwayStage.value, composerBox)" />
 
+  <PushSource id="asyncQuestion" initial="{null}" subscribe="{window.bramSubscribeQuestionCard}" />
+  <VStack when="{asyncQuestion.value &amp;&amp; $props.activeProvider === 'codex'}"
+    var.card="{asyncQuestion.value}" gap="$space-1" width="100%">
+    <Items data="{card.questions}">
+      <VStack var.question="{$item}" gap="$space-1" width="100%">
+        <Text value="{question.title}" />
+        <HStack gap="$space-1" wrapContent="true">
+          <Items data="{question.options}">
+            <Button label="{$item}" variant="outlined" size="xs" enabled="{!card.pending}"
+              onClick="() => { window.__bramSetQuestionAnswer(card.key, question.index, $item); answerBox.setValue($item); if (card.questions.length === 1) window.__bramSendQuestionReply(card.key); }" />
+          </Items>
+        </HStack>
+        <TextBox id="answerBox" width="100%" placeholder="Your answer"
+          initialValue="{card.answers[question.index]}" enabled="{!card.pending}"
+          onDidChange="(v) => window.__bramSetQuestionAnswer(card.key, question.index, v)" />
+      </VStack>
+    </Items>
+    <Text when="{card.error}" value="{card.error}" />
+    <Button label="{card.pending ? 'Sending…' : 'Send answer'}" size="xs"
+      enabled="{!card.pending &amp;&amp; card.answers.every(a => a.trim().length > 0)}"
+      onClick="window.__bramSendQuestionReply(card.key)" />
+  </VStack>
+
   <!-- Form is retained only for TextArea.enterSubmits. Draft persistence is
        debounced in helpers.js; blur and submit flush/clear explicitly. -->
   <Form

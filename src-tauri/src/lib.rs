@@ -24241,6 +24241,9 @@ fn queue_pty_intent_inner<R: tauri::Runtime>(
         })
     };
     if let Some(obj) = line.as_object_mut() {
+        if let Some(sid) = payload.get("questionSession").and_then(|s| s.as_str()) {
+            obj.insert("questionSession".to_string(), serde_json::json!(sid));
+        }
         if !source.is_empty() {
             obj.insert("source".to_string(), serde_json::json!(source));
         }
@@ -24287,7 +24290,14 @@ fn queue_pty_intent_inner<R: tauri::Runtime>(
             ),
         );
     }
-    drain_pty_intents(app, state)
+    let result = drain_pty_intents(app, state);
+    // A question reply is already in the durable queue. A drain error
+    // (including one from a different queued send) must not invite a
+    // second submission while the original is queued for retry.
+    if payload.get("questionSession").is_some() {
+        return Ok(());
+    }
+    result
 }
 
 // Drains every queued intent in `resources/.pty-intent.jsonl` through
@@ -24410,6 +24420,22 @@ fn drain_pty_intents<R: tauri::Runtime>(
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if matches!(kind, "toShell" | "toTurn") {
+            if let Some(sid) = intent.get("questionSession").and_then(|s| s.as_str()) {
+                let path = active_session_path(app).ok().flatten();
+                if current_provider_label != "codex"
+                    || path
+                        .as_deref()
+                        .and_then(Path::file_stem)
+                        .and_then(|s| s.to_str())
+                        != Some(sid)
+                {
+                    boot_restores.push((
+                        intent["id"].as_str().unwrap_or("intent").to_string(),
+                        data.to_string(),
+                    ));
+                    continue;
+                }
+            }
             if blocking_tool.is_some() {
                 held += 1;
                 remaining.push(line.to_string());
@@ -52452,6 +52478,37 @@ fn st_parse_lines_to_turns_in(jsonl_text: &str, root: Option<&Path>) -> Vec<serd
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
                 );
+            }
+            continue;
+        }
+        if typ == "event_msg" && r["payload"]["type"] == "item_completed" {
+            let item = &r["payload"]["item"];
+            if item["type"] == "AgentMessage" && item["delivery"] == "async" {
+                if let (Some(id), Some(questions)) =
+                    (item["id"].as_str(), item["questions"].as_array())
+                {
+                    if !id.is_empty()
+                        && !questions.is_empty()
+                        && questions.iter().all(|q| {
+                            q["title"].as_str().is_some_and(|s| !s.trim().is_empty())
+                                && (q["options"].is_null()
+                                    || q["options"]
+                                        .as_array()
+                                        .is_some_and(|xs| xs.iter().all(|x| x.is_string())))
+                        })
+                    {
+                        let text = questions
+                            .iter()
+                            .filter_map(|q| q["title"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        turns.push(serde_json::json!({
+                            "role": "assistant", "text": text, "ts": r["timestamp"],
+                            "entries": [{"kind":"text", "text": text}], "images": [],
+                            "asyncQuestion": {"id": id, "questions": questions}
+                        }));
+                    }
+                }
             }
             continue;
         }
@@ -86616,6 +86673,21 @@ mod session_turn_tests {
         let turns = st_parse_lines_to_turns(content);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0]["images"][0], "/tmp/object-image.webp");
+    }
+
+    #[test]
+    fn codex_async_question_survives_turn_completion() {
+        let jsonl = r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"call_1","delivery":"async","questions":[{"title":"Which check?","options":["Files","Approval"]},{"title":"Any details?"}]}}}
+{"type":"event_msg","payload":{"type":"task_complete"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"? Which check?\n  • Files\n  • Approval"}}"#;
+        let turns = st_parse_lines_to_turns(jsonl);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0]["asyncQuestion"]["id"], "call_1");
+        assert_eq!(
+            turns[0]["asyncQuestion"]["questions"][0]["options"][1],
+            "Approval"
+        );
+        assert!(turns[1].get("asyncQuestion").is_none());
     }
 
     #[test]

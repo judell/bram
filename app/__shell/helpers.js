@@ -783,7 +783,7 @@ window.toShell = function (text) {
     } catch (le) {}
   });
 };
-window.toTurn = function (text) {
+window.toTurn = function (text, questionSession) {
   var s = String(text);
   try {
     window.logToHost({
@@ -818,7 +818,9 @@ window.toTurn = function (text) {
       at: new Date().toISOString(),
     },
   }).catch(function () {});
-  invoke("queue_pty_intent", { payload: { kind: "toTurn", data: normalized } }).catch(function (e) {
+  var payload = { kind: "toTurn", data: normalized };
+  if (questionSession) payload.questionSession = questionSession;
+  return invoke("queue_pty_intent", { payload: payload }).then(function () { return true; }).catch(function (e) {
     console.error("toTurn queue_pty_intent", e);
     try {
       window.logToHost({
@@ -13054,12 +13056,88 @@ window.onProjectedTurnsChange = function (fn) {
   };
 };
 
+// The async request is a conversation item. The next user message or a new
+// request supersedes it. A task_complete record leaves it open.
+function bramLatestAsyncQuestion(projection) {
+  if (!projection || projection.provider !== "codex" || !projection.sid) return null;
+  var seen = new Set();
+  var latest = null;
+  for (var turn of projection.turns || []) {
+    if (turn.role === "user") latest = null;
+    var question = turn.asyncQuestion;
+    if (question && !seen.has(question.id)) {
+      seen.add(question.id);
+      latest = question;
+    }
+  }
+  return latest;
+}
+
+var bramQuestionCard = null;
+var bramQuestionSubscribers = new Set();
+function publishQuestionCard() {
+  bramQuestionSubscribers.forEach(function (emit) { emit(bramQuestionCard); });
+}
+function syncQuestionCard(projection) {
+  var request = bramLatestAsyncQuestion(projection);
+  var key = request && JSON.stringify([projection.sid, request.id]);
+  if ((bramQuestionCard && bramQuestionCard.key) === key) return;
+  bramQuestionCard = null;
+  if (request) {
+    var saved = {};
+    try { saved = JSON.parse(__bramReadSS("bram.asyncQuestionReply." + projection.sid, "{}")); } catch (e) {}
+    bramQuestionCard = {
+      key: key, sid: projection.sid, questions: request.questions.map(function (q, index) {
+        return { id: key + ":" + index, index: index, title: q.title, options: q.options || [] };
+      }),
+      answers: saved.key === key ? saved.answers : request.questions.map(function () { return ""; }),
+      pending: saved.key === key ? saved.pending : "", error: ""
+    };
+  }
+  publishQuestionCard();
+}
+window.onProjectedTurnsChange(syncQuestionCard);
+window.bramSubscribeQuestionCard = function (emit) {
+  bramQuestionSubscribers.add(emit);
+  emit(bramQuestionCard);
+  return function () { bramQuestionSubscribers.delete(emit); };
+};
+function updateQuestionCard(changes) {
+  bramQuestionCard = Object.assign({}, bramQuestionCard, changes);
+  __bramWriteSS("bram.asyncQuestionReply." + bramQuestionCard.sid, JSON.stringify({
+    key: bramQuestionCard.key, answers: bramQuestionCard.answers, pending: bramQuestionCard.pending
+  }));
+  publishQuestionCard();
+}
+window.__bramSetQuestionAnswer = function (key, index, text) {
+  var card = bramQuestionCard;
+  if (!card || key !== card.key || card.pending || card.answers[index] === text) return;
+  var answers = card.answers.slice();
+  answers[index] = text;
+  updateQuestionCard({ answers: answers, error: "" });
+};
+window.__bramSendQuestionReply = async function (key) {
+  var card = bramQuestionCard;
+  if (!card || key !== card.key || card.pending || !card.answers.every(function (a) { return a.trim(); })) return;
+  var text = card.answers.length === 1 ? card.answers[0].trim() :
+    card.questions.map(function (q, i) { return q.title + "\n" + card.answers[i].trim(); }).join("\n\n");
+  updateQuestionCard({ pending: text, error: "" });
+  var accepted = await window.toTurn(text, card.sid);
+  if (!accepted && bramQuestionCard && bramQuestionCard.key === key) window.__bramRestoreQuestionReply(text);
+};
+window.__bramRestoreQuestionReply = function (text) {
+  if (!bramQuestionCard || bramQuestionCard.pending !== text) return false;
+  updateQuestionCard({ pending: "", error: "Your answer could not be sent. Try again." });
+  return true;
+};
+
 // Loose per-turn equality for reference preservation. Includes result
 // value + error/layout flags because tool results stream onto entries that
 // otherwise look unchanged.
 window.__bramProjectedTurnEqual = function (a, b) {
   if (!a || !b) return false;
   if (a.role !== b.role || a.text !== b.text) return false;
+  if ((a.asyncQuestion || b.asyncQuestion) && a.asyncQuestion?.id !== b.asyncQuestion?.id) return false;
   var ae = a.entries || [], be = b.entries || [];
   if (ae.length !== be.length) return false;
   var ai = a.images || [], bi = b.images || [];
@@ -18864,6 +18942,7 @@ window.__bramApplySendRestore = function (snapshot, box, toastApi) {
   var p = snapshot && snapshot.payload;
   var text = p && p.text;
   if (!text) return;
+  if (window.__bramRestoreQuestionReply(text)) return;
   // next-move-offers-delegation: the gate bar's What's my next move? sends
   // its own question straight to the agent. Refused (no agent yet), it is
   // not the user's words, so it doesn't go back into the message box (Jon,

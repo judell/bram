@@ -18060,9 +18060,10 @@ window.__bramRestoreAgent = function (dismissed, agentId) {
   return __bramPersistDismissedAgents(list);
 };
 
-// Restore every dismissed agent; clears the set and returns [].
-window.__bramRestoreAllAgents = function () {
-  return __bramPersistDismissedAgents([]);
+// Restore this menu's entries; other sessions keep their dismissed agents.
+window.__bramRestoreAllAgents = function (dismissed, roster) {
+  var restored = new Set(window.__bramDismissedInRoster(roster, dismissed).map(function (a) { return a.agentId; }));
+  return __bramPersistDismissedAgents((dismissed || []).filter(function (id) { return !restored.has(id); }));
 };
 
 // The footer roster minus dismissed ids. Drives the strip's when, the
@@ -18073,11 +18074,12 @@ window.__bramRestoreAllAgents = function () {
 // turn confirms it, /__agents falls back to the PREVIOUS session's transcript,
 // so its subagents (and "N hidden") leaked into the new session's footer. While
 // the current /__sessions/list row is `pending`, the chip strip gets no roster.
-// Keyed on the pending flag, not a sid comparison: a Codex roster's sid is the
-// rollout file stem, not the session id.
-window.__bramRosterForSession = function (roster, sessions) {
+// sessionId names the parent session, including for Codex rollout filenames.
+window.__bramRosterForSession = function (roster, sessions, activeProvider) {
   var current = window.__bramCurrentSessionOf(sessions);
-  return current && current.pending ? null : roster;
+  if (!current || !current.current || current.pending || !current.id || !current.provider || !roster) return null;
+  if (activeProvider && activeProvider !== current.provider) return null;
+  return roster.mainProvider === current.provider && roster.sessionId === current.id ? roster : null;
 };
 
 window.__bramVisibleFooterAgents = function (roster, dismissed) {
@@ -18109,10 +18111,9 @@ window.__bramFooterOverflowAgents = function (roster, dismissed, selectedId) {
 
 // The transcript selection that still has a chip: the agent id, or "" (Main)
 // once the agent is dismissed or leaves the roster. One chip is always
-// selected, and the Transcript doesn't stay on a stream with none. A roster
-// that hasn't loaded keeps the selection.
+// selected, and the Transcript returns to Main until its roster matches.
 window.__bramLiveTranscriptAgent = function (agentId, roster, dismissed) {
-  if (!agentId || !roster) return agentId;
+  if (!agentId || !roster) return "";
   var live = window.__bramVisibleFooterAgents(roster, dismissed).some(function (a) {
     return a.agentId === agentId;
   });

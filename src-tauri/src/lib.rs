@@ -54520,7 +54520,7 @@ impl ParentScan {
 
 #[derive(Default)]
 struct SubagentSpine {
-    sid: String,
+    session_path: Option<PathBuf>,
     agents: Vec<SubagentState>,
     scan: ParentScan,
 }
@@ -54725,12 +54725,7 @@ fn refresh_subagent_spine<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) -
     let session_path = active_session_path(app).ok().flatten();
     let now_ms = unix_now_ms();
     let mut spine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    let sid = session_path
-        .as_ref()
-        .and_then(|p| p.file_stem())
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let session_changed = sid != spine.sid;
+    let session_changed = session_path != spine.session_path;
     let next = match session_path.as_ref() {
         Some(p) => {
             let mut scan = std::mem::take(&mut spine.scan);
@@ -54741,13 +54736,13 @@ fn refresh_subagent_spine<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) -
         None => Vec::new(),
     };
     let (rows, transitions) = st_spine_apply(&spine.agents, next, session_changed, source, now_ms);
-    spine.sid = sid;
+    spine.session_path = session_path;
     spine.agents = rows;
     drop(spine);
     for t in &transitions {
         app.trace("subagents", t);
     }
-    if transitions.is_empty() {
+    if transitions.is_empty() && !session_changed {
         return false;
     }
     emit_replayable_signal(app, "subagent-state-changed");
@@ -54767,23 +54762,27 @@ fn start_subagent_spine_tick<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 // session's model and provider for the footer line. Refreshes first (source
 // "fetch"), which is cheap: the parent is re-read only when it changed.
 fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
-    let Some(session_path) = active_session_path(app)? else {
-        return serde_json::to_vec(&serde_json::json!({ "sid": "", "agents": [] }))
-            .map_err(|e| e.to_string());
-    };
     refresh_subagent_spine(app, "fetch");
     let Some(state) = app.try_state::<SubagentSpineState>() else {
         return Err("subagent spine not managed".to_string());
     };
-    let (sid, agents) = {
+    let (session_path, agents) = {
         let spine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-        (spine.sid.clone(), spine.agents.clone())
+        (spine.session_path.clone(), spine.agents.clone())
     };
+    let Some(session_path) = session_path else {
+        return serde_json::to_vec(&serde_json::json!({ "sid": "", "agents": [] }))
+            .map_err(|e| e.to_string());
+    };
+    let provider = projected_turns_provider_label(&session_path);
+    let session_id =
+        SessionProvider::from_str(provider).and_then(|p| session_id_for_path(p, &session_path));
     let body = serde_json::json!({
-        "sid": sid,
+        "sid": session_path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+        "sessionId": session_id,
         "agents": agents,
         "mainModel": main_session_model(app, &session_path),
-        "mainProvider": projected_turns_provider_label(&session_path),
+        "mainProvider": provider,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }

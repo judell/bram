@@ -16542,10 +16542,15 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu, turnEnd) {
       if (t.images && t.images.length) {
         slice.push({ id: baseId + "-images", kind: "images", role: t.role || "", images: t.images });
       }
-      // transcript-shows-produced-images: project files the turn named, one
-      // expander row each (Transcript.xmlui kind === "files").
+      // transcript-shows-produced-images: the images a turn produced or named
+      // in the repo, shown inline (Transcript.xmlui kind === "files").
+      // transcript-file-rows-images-only (Jon, 2026-11-23): only the images;
+      // the host's `files` still names every file, for the Log's counts.
       if (Array.isArray(t.files) && t.files.length) {
-        slice.push({ id: baseId + "-files", kind: "files", role: t.role || "", files: t.files });
+        var imageFiles = t.files.filter(function (f) { return f && f.image; });
+        if (imageFiles.length) {
+          slice.push({ id: baseId + "-files", kind: "files", role: t.role || "", files: imageFiles });
+        }
       }
       // log-rows-baseline-and-spacing: the turn's time (the host's `ts`) on
       // its first event, so a Log entry's link can find the turn at its
@@ -19391,64 +19396,9 @@ window.__bramToggleInArray = function (arr, id) {
   return arr.concat([id]);
 };
 
-// transcript-shows-produced-images: whether a file row's path is open in the
-// Transcript's openFiles array. Reads only its arguments.
-window.__bramFileOpen = function (arr, path) {
-  return !!arr && arr.indexOf(path) >= 0;
-};
-// transcript-file-row-scrolls-into-view (Jon, 2026-11-23: "expanding the file
-// viewer at the bottom requires a scrolldown, that should be auto if
-// possible"): wait for the opened content to have height, then scroll the
-// minimum. Quoted attribute values need only \ and " escaped; CSS.escape
-// would over-escape the "/" in paths.
-window.__bramRevealFileContent = function (id) {
-  try {
-    var sel = '[data-automation-id="' + String(id).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"]';
-    var tries = 0;
-    var step = function () {
-      var el = document.querySelector(sel);
-      if (el && el.getBoundingClientRect().height > 0) {
-        el.scrollIntoView({ block: "nearest", inline: "nearest" });
-        return;
-      }
-      if (++tries < 120) requestAnimationFrame(step); // ~2 s: a text preview's fetch may take longer than a few frames
-    };
-    requestAnimationFrame(function () { requestAnimationFrame(step); });
-  } catch (e) {}
-};
-// transcript-file-row-scrolls-into-view: toggle a file row, reveal on open.
-window.__bramToggleFileRow = function (arr, path) {
-  var next = window.__bramToggleInArray(arr, path);
-  if (next.indexOf(path) >= 0) window.__bramRevealFileContent("file-open-" + path);
-  return next;
-};
-// transcript-file-row-scrolls-into-view: same for the "Files (n)" group.
-window.__bramToggleFilesGroup = function (arr, id) {
-  var next = window.__bramToggleInArray(arr, id);
-  if (next.indexOf(id) >= 0) window.__bramRevealFileContent("files-group-" + id);
-  return next;
-};
-// The row's label: a disclosure mark and the root-relative path. Reads only
-// its arguments.
-// A turn naming more than one file folds them under "Files (n)", closed at
-// first; a single file shows its row directly. All three read only their
-// arguments.
-window.__bramFilesGroupCollapsible = function (files) {
-  return Array.isArray(files) && files.length > 1;
-};
-window.__bramFilesGroupShown = function (arr, id, files) {
-  if (!Array.isArray(files) || files.length <= 1) return true;
-  return !!arr && arr.indexOf(id) >= 0;
-};
-window.__bramFilesGroupLabel = function (arr, id, files) {
-  var n = Array.isArray(files) ? files.length : 0;
-  var open = !!arr && arr.indexOf(id) >= 0;
-  return (open ? "\u25be " : "\u25b8 ") + "Files (" + n + ")";
-};
-window.__bramFileRowLabel = function (arr, f) {
-  var open = !!arr && !!f && arr.indexOf(f.path) >= 0;
-  return (open ? "\u25be " : "\u25b8 ") + ((f && (f.repoPath || f.path)) || "");
-};
+// transcript-file-rows-images-only (Jon, 2026-11-23): the Transcript's file
+// expander rows and their eight helpers (__bramFileOpen, the fold, the
+// scroll-into-view) are gone; the files row now shows only images, open.
 
 // Tasks page (issue-483-task-candidates-report; tasks-page-prioritizes,
 // Jon 2026-11-09: "the output is pretty overwhelming. how can we help people

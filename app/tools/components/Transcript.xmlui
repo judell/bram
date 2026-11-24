@@ -160,7 +160,6 @@
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
     var.expanded="{[]}"
     var.compactToggled="{[]}"
-    var.openFiles="{[]}"
     var.atBottom="{!window.__bramVisibleRange || window.__bramVisibleRange.atBottom !== false}"
     var.repinArmed="{false}"
     var.settleArmed="{false}"
@@ -473,61 +472,28 @@
             </Link>
           </Items>
         </VStack>
-        <!-- transcript-shows-produced-images: files the turn named, one
-             expander row each, closed by default. Open state is keyed by
-             path in openFiles (the id-keyed when-gated fold the tool rows
-             and compactToggled use), never positional state. The per-row
-             DataSource fetches only while its row is open.
-             https://www.xmlui.org/docs/reference/components/DataSource
-             https://www.xmlui.org/docs/howto/share-one-datasource-fetch-across-components -->
-        <VStack when="{$item.kind === 'files'}" gap="$space-1">
-          <!-- More than one file: a "Files (n)" row, collapsed at first, keyed
-               by the event id in the same openFiles array (Jon, 2026-11-23). -->
-          <Link
-            when="{window.__bramFilesGroupCollapsible($item.files)}"
-            noIndicator="true"
-            onClick="openFiles = window.__bramToggleFilesGroup(openFiles, $item.id); atBottom = window.__bramFollowTransition(false, 'file-expand', $props.agentId)">
-            <Text
-              fontSize="$fontSize-sm"
-              color="$textColor-secondary"
-              value="{window.__bramFilesGroupLabel(openFiles, $item.id, $item.files)}" />
-          </Link>
-          <VStack when="{window.__bramFilesGroupShown(openFiles, $item.id, $item.files)}" gap="$space-1" automationId="{'files-group-' + $item.id}">
-            <Items data="{$item.files || []}">
-              <VStack gap="$space-1">
-                <Link noIndicator="true" onClick="openFiles = window.__bramToggleFileRow(openFiles, $item.path); atBottom = window.__bramFollowTransition(false, 'file-expand', $props.agentId)">
-                  <Text
-                    fontSize="$fontSize-sm"
-                    color="$textColor-secondary"
-                    value="{window.__bramFileRowLabel(openFiles, $item)}" />
-                </Link>
-                <VStack
-                  when="{window.__bramFileOpen(openFiles, $item.path)}"
-                  gap="$space-1"
-                  automationId="{'file-open-' + $item.path}">
-                <Link
-                  when="{$item.image}"
-                  onClick="fullscreenImage = $item.path"
-                  noIndicator="true">
-                  <Image
-                    src="{window.imageSrcForPath($item.path)}"
-                    maxHeight="360px"
-                    fit="contain" />
-                </Link>
-                <DataSource
-                  id="filePreview"
-                  url="/__local-file-preview"
-                  queryParams="{{ path: $item.path }}"
-                  when="{!$item.image}" />
-                <Markdown
-                  when="{!$item.image &amp;&amp; filePreview.value}"
-                  content="{window.__bramFormatLocalLinkPreview(filePreview.value)}"
-                  overflowMode="{window.__bramLocalLinkPreviewOverflow(filePreview.value)}"
-                  interpolateBindings="false" allowHtml="false" />
-                </VStack>
-              </VStack>
-            </Items>
-          </VStack>
+        <!-- transcript-shows-produced-images: the images a turn produced or
+             named in the repo, inline and open with the path under each,
+             click for fullscreen, the way the pasted-image strip above
+             renders. transcript-file-rows-images-only (Jon, 2026-11-23: "the
+             extra file viewers are overkill"): the adapter hands this row
+             only image files, so a turn that merely edited files shows
+             nothing here. https://www.xmlui.org/docs/reference/components/Image -->
+        <VStack when="{$item.kind === 'files'}" gap="$space-2" paddingVertical="$space-1">
+          <Items data="{$item.files || []}">
+            <VStack gap="$space-0_5">
+              <Link onClick="fullscreenImage = $item.path" noIndicator="true">
+                <Image
+                  src="{window.imageSrcForPath($item.path)}"
+                  maxHeight="360px"
+                  fit="contain" />
+              </Link>
+              <Text
+                fontSize="$fontSize-sm"
+                color="$textColor-secondary"
+                value="{$item.repoPath || $item.path}" />
+            </VStack>
+          </Items>
         </VStack>
         <!-- tool call (foldable) -->
         <VStack when="{$item.kind === 'tool'}" gap="$space-0_5">

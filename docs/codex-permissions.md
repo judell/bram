@@ -66,6 +66,23 @@ Cancel this request                 (Esc is always Cancel)
 ```
 (server-supplied <message> shown above the options)
 
+## MCP tool approval (codex-cli 0.172.0; an elicitation form, not the exec prompt)
+```
+Field 1/1
+Allow the <server> MCP server to run tool "<tool>"?      (or the generic: Allow this request?)
+1. Allow                   Run the tool and continue
+2. Allow for this session  Run the tool and remember this choice for this session   (only when the server allows persisting)
+3. Always allow            Run the tool and remember this choice for future tool calls   (same)
+4. Cancel                  Cancel this tool call                                   (last row, whatever the count)
+enter to submit | esc to cancel
+```
+Keys: a **digit selects its row and submits in one stroke**; Enter submits
+the highlighted row; **Esc cancels**; `y` is not a key. Bram answers Allow
+with `1` and Cancel with Esc and offers no session/always rows, since they
+move Cancel's number (`codex_permission_request_to_menu`, the `mcp__` arm).
+Source: `codex-rs/tui/src/bottom_pane/mcp_server_elicitation.rs` at
+`rust-v0.172.0`; specimen `docs/agent-specimens/codex/turn-with-mcp-tool-approval.txt`.
+
 ---
 
 ## The decisions behind the labels (typed enums — the real spine)

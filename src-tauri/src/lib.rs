@@ -7173,6 +7173,15 @@ fn grid_menu_is_codex_permission_box(grid_above: &[String], grid_header: &str) -
             || lc.contains("requires approval")
             || lc.contains("do you want to proceed")
             || lc.contains("press enter to confirm")
+            // codex-permission-menu-sync (Codex 0.172.0): an MCP tool
+            // approval is an elicitation form whose question line reads
+            // `Allow the <server> MCP server to run tool "<tool>"?`, or the
+            // generic `Allow this request?` of the upstream snapshot
+            // (mcp_server_elicitation_approval_form_with_session_persist).
+            // Captured 2026-11-24 08:10:34Z; see
+            // docs/agent-specimens/codex/turn-with-mcp-tool-approval.txt.
+            || lc.contains("mcp server to run tool")
+            || lc == "allow this request?"
             || lc.contains("environment:")
             || lc.starts_with("reason:")
             || lc.starts_with('$')
@@ -7180,6 +7189,43 @@ fn grid_menu_is_codex_permission_box(grid_above: &[String], grid_header: &str) -
             || lc.starts_with("shell:")
     };
     is_signal(grid_header) || grid_above.iter().any(|l| is_signal(l))
+}
+
+// codex-permission-menu-sync: the MCP approval form's question line, when the
+// grid is that form (Codex 0.172.0). The fallback build labels such a menu
+// MCP and shows the question instead of a `$`-command preview.
+fn grid_menu_codex_mcp_question(grid_above: &[String], grid_header: &str) -> Option<String> {
+    let is_question = |s: &str| {
+        let lc = s.trim().to_lowercase();
+        lc.contains("mcp server to run tool") || lc == "allow this request?"
+    };
+    if is_question(grid_header) {
+        return Some(grid_header.trim().to_string());
+    }
+    grid_above
+        .iter()
+        .find(|l| is_question(l))
+        .map(|l| l.trim().to_string())
+}
+
+// The form submits on a digit and cancels on Esc (codex-rs
+// tui/src/bottom_pane/mcp_server_elicitation.rs at rust-v0.172.0, the
+// select-field key handler), so the grid's numbered rows carry explicit
+// keys: the digit, or Esc for the Cancel row. Without these the pane would
+// send `<n>\r`, and the Enter after the submitting digit would land in the
+// composer.
+fn codex_mcp_form_answer_keys(options: Vec<MenuOption>) -> Vec<MenuOption> {
+    options
+        .into_iter()
+        .map(|mut o| {
+            o.answer_keys = Some(if o.label.trim().to_lowercase().starts_with("cancel") {
+                "\u{1b}".to_string()
+            } else {
+                o.key.clone()
+            });
+            o
+        })
+        .collect()
 }
 
 // #182 incident 8 instrumentation. Adjacent trace line to every
@@ -11615,6 +11661,70 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
     if tool_name.is_empty() {
         return None;
     }
+    // codex-permission-menu-sync (Codex 0.172.0): an MCP tool approval is an
+    // elicitation form, not the shell prompt: `Allow the <server> MCP server
+    // to run tool "<tool>"?` over `1. Allow`, optionally `Allow for this
+    // session` and `Always allow`, then `Cancel`; a digit selects and submits
+    // in one stroke, Esc cancels. Allow is always the first row and Esc
+    // cancels whatever the row count, so the pane offers those two; the
+    // session/always rows shift Cancel's number and are not offered. Before
+    // this arm the default below sent `y`, which the form ignores, and the
+    // pane's menu was dismissed while Codex kept waiting (trace 2026-11-24
+    // 08:06:38Z). Specimen: docs/agent-specimens/codex/
+    // turn-with-mcp-tool-approval.txt.
+    if let Some(rest) = tool_name.strip_prefix("mcp__") {
+        let (server, tool) = rest.split_once("__").unwrap_or((rest, ""));
+        let ti = value.get("tool_input");
+        let detail = ["path", "file_path", "command"]
+            .iter()
+            .find_map(|k| {
+                ti.and_then(|t| t.get(*k))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or("");
+        let question = if tool.is_empty() {
+            format!("Allow the {} MCP server to run a tool?", server)
+        } else {
+            format!("Allow the {} MCP server to run tool \"{}\"?", server, tool)
+        };
+        let text = if detail.is_empty() {
+            question
+        } else {
+            format!("{}\n{}", question, detail)
+        };
+        let options = vec![
+            MenuOption {
+                key: "1".to_string(),
+                label: "Allow".to_string(),
+                answer_keys: Some("1".to_string()),
+                description: Some("Run the tool and continue".to_string()),
+            },
+            MenuOption {
+                key: "2".to_string(),
+                label: "Cancel".to_string(),
+                answer_keys: Some("\u{1b}".to_string()),
+                description: Some("Cancel this tool call".to_string()),
+            },
+        ];
+        return Some(PtyMenu {
+            tool: tool_name.to_string(),
+            text,
+            options,
+            prompt_id: None,
+            tool_call_signature: if detail.is_empty() {
+                None
+            } else {
+                Some(format!("{}({})", tool_name, detail))
+            },
+            tool_call_diff: None,
+            tool_call_content: None,
+            cache_source: None,
+            at_host_ms: None,
+            signature_source: Some("hook"),
+            question_count: None,
+        });
+    }
     let ti = value.get("tool_input");
     let command = ti
         .and_then(|t| t.get("command").and_then(|c| c.as_str()))
@@ -15737,8 +15847,21 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                             // fingerprint (option labels) + the 1.5s freshness
                             // window guard post-dismiss ghosts. Codex renders
                             // the command in `above`.
-                            let command = grid_menu_command_preview(&grid_above, &grid_header);
-                            let tool = "Shell".to_string();
+                            // codex-permission-menu-sync: the MCP approval
+                            // form (0.172.0) is labelled MCP, shows its
+                            // question, and answers with a digit or Esc.
+                            let mcp_question =
+                                grid_menu_codex_mcp_question(&grid_above, &grid_header);
+                            let command = match &mcp_question {
+                                Some(q) => q.clone(),
+                                None => grid_menu_command_preview(&grid_above, &grid_header),
+                            };
+                            let tool = if mcp_question.is_some() {
+                                "MCP"
+                            } else {
+                                "Shell"
+                            }
+                            .to_string();
                             if bram_trace_enabled() {
                                 append_bram_trace_line(
                                     app,
@@ -15754,11 +15877,16 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                     ),
                                 );
                             }
+                            let options = if mcp_question.is_some() {
+                                codex_mcp_form_answer_keys(grid_opts)
+                            } else {
+                                grid_opts
+                            };
                             let signature = format!("{}({})", tool, command);
                             detected = Some(PtyMenu {
                                 tool,
                                 text: command,
-                                options: grid_opts,
+                                options,
                                 prompt_id: None,
                                 tool_call_signature: Some(signature),
                                 tool_call_diff: None,
@@ -84468,6 +84596,83 @@ mod pty_menu_tests {
                 .to_string(),
         ];
         assert!(!super::grid_menu_is_codex_permission_box(&above, ""));
+    }
+
+    // codex-permission-menu-sync: Codex 0.172.0's MCP tool approval form, as
+    // Bram's grid reader saw it on 2026-11-24 08:10:34Z (the trace line
+    // op=hold-codex-nosig reason=no-codex-box) and as the upstream snapshot
+    // draws its generic header.
+    #[test]
+    fn grid_menu_codex_gate_accepts_mcp_tool_approval_form() {
+        let above = vec![
+            "• Calling filesystem.write_file".to_string(),
+            "+ Show details".to_string(),
+            "Field 1/1".to_string(),
+            "Allow the filesystem MCP server to run tool \"write_file\"?".to_string(),
+            "content: # Before Jon reports".to_string(),
+        ];
+        assert!(super::grid_menu_is_codex_permission_box(&above, ""));
+        assert_eq!(
+            super::grid_menu_codex_mcp_question(&above, "").as_deref(),
+            Some("Allow the filesystem MCP server to run tool \"write_file\"?")
+        );
+        assert!(super::grid_menu_is_codex_permission_box(
+            &[],
+            "Allow this request?"
+        ));
+        assert!(super::grid_menu_codex_mcp_question(&["Field 1/1".to_string()], "").is_none());
+    }
+
+    #[test]
+    fn codex_mcp_form_rows_answer_with_a_digit_or_esc() {
+        let opt = |key: &str, label: &str| super::MenuOption {
+            key: key.to_string(),
+            label: label.to_string(),
+            answer_keys: None,
+            description: None,
+        };
+        let rows = super::codex_mcp_form_answer_keys(vec![
+            opt("1", "Allow   Run the tool and continue"),
+            opt(
+                "2",
+                "Allow for this session  Run the tool and remember this choice for this session",
+            ),
+            opt("3", "Cancel  Cancel this tool call"),
+        ]);
+        let keys: Vec<&str> = rows
+            .iter()
+            .map(|o| o.answer_keys.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(keys, vec!["1", "2", "\u{1b}"]);
+    }
+
+    #[test]
+    fn codex_permission_request_builds_mcp_allow_cancel_menu() {
+        let payload = serde_json::json!({
+            "provider": "codex",
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "mcp__filesystem__write_file",
+            "tool_input": {"content": "x", "path": "/tmp/a.json"},
+            "permission_mode": "default"
+        });
+        let menu = super::permission_request_to_menu(&payload).unwrap();
+        assert_eq!(menu.tool, "mcp__filesystem__write_file");
+        assert_eq!(
+            menu.text,
+            "Allow the filesystem MCP server to run tool \"write_file\"?\n/tmp/a.json"
+        );
+        let rows: Vec<(&str, &str)> = menu
+            .options
+            .iter()
+            .map(|o| (o.label.as_str(), o.answer_keys.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(rows, vec![("Allow", "1"), ("Cancel", "\u{1b}")]);
+        assert!(super::menu_option_matches_input(&menu.options[0], "1"));
+        assert!(!super::menu_option_matches_input(&menu.options[0], "y"));
+        assert_eq!(
+            menu.tool_call_signature.as_deref(),
+            Some("mcp__filesystem__write_file(/tmp/a.json)")
+        );
     }
 
     #[test]

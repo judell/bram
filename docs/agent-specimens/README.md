@@ -10,7 +10,7 @@ come from captures like these, never from guesses
 | Provider | Folder | Version | Captured |
 |---|---|---|---|
 | Claude Code | [`claude/`](claude/README.md) | 2.1.312 | 2026-10-28 |
-| Codex | [`codex/`](codex/README.md) | codex-cli 0.165.0 | 2026-10-28 |
+| Codex | [`codex/`](codex/README.md) | codex-cli 0.165.0, plus the 0.172.0 MCP tool approval form (2026-11-24) | 2026-10-28 |
 | OpenCode | [`opencode/`](opencode/README.md) | 2.1.4 | 2026-10-28 |
 | Cursor | [`cursor/`](cursor/README.md) | agent 2026.10.22-27dcf5f | 2026-10-28 |
 | Antigravity CLI | [`antigravity/`](antigravity/README.md) | agy 1.4.12 | 2026-10-30 |

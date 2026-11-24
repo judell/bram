@@ -1,0 +1,46 @@
+Codex CLI 0.172.0: MCP tool approval (an elicitation form)
+==========================================================
+
+Provenance: NOT a VT render like the rest of this pack. Section 1 is what
+Bram's grid reader reported from the live terminal on 2026-11-24 08:10:34Z
+(`.bram/bram-traces/bram-trace.log`, `[grid-menu] op=hold-codex-nosig
+reason=no-codex-box`, the `above` lines and the two option rows), with the
+tool input's content lines cut. Section 2 is the upstream snapshot
+`codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__mcp_server_elicitation__tests__mcp_server_elicitation_approval_form_with_session_persist.snap`
+at tag `rust-v0.172.0`, which draws the four-row form when the MCP server's
+approval meta allows persisting. Source of the form:
+`codex-rs/tui/src/bottom_pane/mcp_server_elicitation.rs` at the same tag.
+
+Keys (from that source's select-field handler): Up/Down or k/j move the
+selection, Space selects, Enter submits the selection, and a DIGIT selects
+its row and submits in one stroke; Esc cancels. `y` is not a key here. Bram
+sends `1` for Allow and Esc for Cancel; the session/always rows move
+Cancel's number and are not offered from the pane.
+
+1. Live screen, 2026-11-24 08:10:34Z (codex-cli 0.172.0, macOS)
+----------------------------------------------------------------
+
+• Calling filesystem.write_file
++ Show details
+Field 1/1
+Allow the filesystem MCP server to run tool "write_file"?
+content: <the tool input, elided>
+path: /Users/jonudell/bram/.bram/worklist-drafts/codex-permissi...
+› 1. Allow   Run the tool and continue
+  2. Cancel  Cancel this tool call
+
+The terminal-attention classifier matched this as shape=codex-permission at
+08:06:34.784Z; the grid fallback refused it as no-codex-box until this
+specimen's phrases joined grid_menu_is_codex_permission_box (lib.rs).
+
+2. Upstream snapshot, four rows (rust-v0.172.0)
+-----------------------------------------------
+
+  Field 1/1
+  Allow this request?
+  › 1. Allow                   Run the tool and continue
+    2. Allow for this session  Run the tool and remember this choice for this session
+    3. Always allow            Run the tool and remember this choice for future tool calls
+    4. Cancel                  Cancel this tool call
+
+  enter to submit | esc to cancel

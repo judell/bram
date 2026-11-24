@@ -54,6 +54,20 @@
 
   <VStack gap="$space-3" padding="$space-2">
     <HStack gap="$space-2" verticalAlignment="center">
+      <!-- git-tab-select-all (Jon, 2026-11-23): one click ticks every file in
+           every group, the Worklist board's header pattern. Driven by click,
+           not didChange, so a programmatic flip never clears a hand-made
+           selection; the tooltip sits on the label (xmlui-org/xmlui#3958).
+           https://www.xmlui.org/docs/reference/components/Checkbox -->
+      <Checkbox
+        when="{window.__bramGitAllPaths(worktree.value).length > 0}"
+        initialValue="{window.__bramGitAllSelected(worktree.value, selected)}"
+        indeterminate="{window.__bramGitSomeSelected(worktree.value, selected)}"
+        onClick="selected = window.__bramGitSelectAll(worktree.value, selected)" />
+      <Text
+        when="{window.__bramGitAllPaths(worktree.value).length > 0}"
+        tooltip="Select every file"
+        value="All" />
       <Heading level="h2">Git</Heading>
       <Text color="$textColor-secondary" value="{window.__bramGitBranchLabel(worktree.value)}" />
     </HStack>

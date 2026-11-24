@@ -19162,6 +19162,38 @@ window.__bramGitGroup = function (wt, group) {
 window.__bramGitSelected = function (selected, path) {
   return (selected || []).indexOf(path) >= 0;
 };
+// git-tab-select-all (Jon, 2026-11-23, nine ticks for a folder's first
+// commit): the All box over the groups, the Worklist board's pattern
+// (__bramW2AllSelected / SomeSelected / SelectAll). Every entry in every
+// group counts; each helper reads only its arguments.
+window.__bramGitAllPaths = function (wt) {
+  return ((wt && wt.entries) || []).map(function (e) { return e.path; });
+};
+window.__bramGitAllSelected = function (wt, selected) {
+  var paths = window.__bramGitAllPaths(wt);
+  var chosen = selected || [];
+  if (!paths.length) return false;
+  for (var i = 0; i < paths.length; i++) {
+    if (chosen.indexOf(paths[i]) === -1) return false;
+  }
+  return true;
+};
+window.__bramGitSomeSelected = function (wt, selected) {
+  var paths = window.__bramGitAllPaths(wt);
+  var chosen = selected || [];
+  var n = 0;
+  for (var i = 0; i < paths.length; i++) {
+    if (chosen.indexOf(paths[i]) !== -1) n++;
+  }
+  return n > 0 && n < paths.length;
+};
+// Click: all ticked when any was missing; none when all were ticked.
+window.__bramGitSelectAll = function (wt, selected) {
+  var paths = window.__bramGitAllPaths(wt);
+  var next = window.__bramGitAllSelected(wt, selected) ? [] : paths.slice();
+  window.__bramIframeTrace("git-tab-selection", { op: "select-all", count: next.length, of: paths.length });
+  return next;
+};
 // Whether path is an untracked entry (it has no git diff).
 window.__bramGitIsUntracked = function (wt, path) {
   return ((wt && wt.entries) || []).some(function (e) { return e.path === path && e.state === "untracked"; });

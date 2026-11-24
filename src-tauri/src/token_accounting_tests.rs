@@ -2674,3 +2674,144 @@ fn compaction_points_wire_shape_and_median() {
     assert_eq!(codex["window"], 258_400);
     assert!(aggregate_compaction_points(&[]).providers.is_empty());
 }
+
+// --- resolve_suggest ---------------------------------------------------------
+
+fn suggest_points() -> CompactionPoints {
+    aggregate_compaction_points(&[
+        ("claude", "claude-fable-5-1", 968_226, None),
+        ("codex", "gpt-5.5", 253_000, Some(258_400)),
+    ])
+}
+
+fn shipped() -> BTreeMap<String, u64> {
+    effective_compaction_fallback(None)
+}
+
+#[test]
+fn suggest_window_beats_ceiling_beats_default_beats_none() {
+    let pts = suggest_points();
+    let fb = shipped();
+    // No recorded window (Claude): the model's measured ceiling.
+    let r = resolve_suggest(
+        None,
+        None,
+        "claude",
+        "claude-fable-5-1",
+        Some(&pts),
+        None,
+        &fb,
+    );
+    assert_eq!(r.tokens, 387_290);
+    assert_eq!(r.basis.kind, SuggestBasisKind::Ceiling);
+    assert_eq!(r.basis.point, 968_226);
+    assert_eq!(r.basis.share, 40);
+    assert_eq!(r.basis.source, "claude-fable-5-1");
+
+    // A recorded window wins over a measured ceiling: the ceiling is a lower
+    // bound (few compactions seen), the window an upper one.
+    let r = resolve_suggest(
+        None,
+        None,
+        "claude",
+        "claude-fable-5-1",
+        Some(&pts),
+        Some(1_000_000),
+        &fb,
+    );
+    assert_eq!(r.tokens, 400_000);
+    assert_eq!(r.basis.kind, SuggestBasisKind::Window);
+    assert_eq!(r.basis.source, "claude");
+
+    // A model with no compaction of its own also takes the window.
+    let r = resolve_suggest(None, None, "codex", "gpt-6", Some(&pts), Some(258_400), &fb);
+    assert_eq!(r.tokens, 103_360);
+    assert_eq!(r.basis.kind, SuggestBasisKind::Window);
+    assert_eq!(r.basis.source, "codex");
+
+    // No window: the provider default.
+    let r = resolve_suggest(None, None, "claude", "other", Some(&pts), None, &fb);
+    assert_eq!(r.tokens, 386_800);
+    assert_eq!(r.basis.kind, SuggestBasisKind::Default);
+
+    // No cache at all still resolves a default.
+    let r = resolve_suggest(None, None, "codex", "m", None, None, &fb);
+    assert_eq!(
+        (r.tokens, r.basis.kind),
+        (101_200, SuggestBasisKind::Default)
+    );
+
+    // Nothing: no suggestion.
+    let r = resolve_suggest(None, None, "opencode", "m", Some(&pts), None, &fb);
+    assert_eq!((r.tokens, r.basis.kind), (0, SuggestBasisKind::None));
+    assert_eq!(r.basis.share, 40);
+}
+
+#[test]
+fn suggest_legacy_absolute_only_without_a_share() {
+    let fb = shipped();
+    let r = resolve_suggest(None, Some(400_000), "claude", "m", None, None, &fb);
+    assert_eq!(
+        (r.tokens, r.basis.kind),
+        (400_000, SuggestBasisKind::Absolute)
+    );
+    assert_eq!((r.basis.point, r.basis.share), (400_000, 0));
+
+    let r = resolve_suggest(Some(25), Some(400_000), "claude", "m", None, None, &fb);
+    assert_eq!(
+        (r.tokens, r.basis.kind),
+        (241_750, SuggestBasisKind::Default)
+    );
+
+    let r = resolve_suggest(None, Some(0), "claude", "m", None, None, &fb);
+    assert_eq!((r.tokens, r.basis.kind), (0, SuggestBasisKind::None));
+}
+
+#[test]
+fn suggest_share_zero_is_off_and_rounds() {
+    let fb = shipped();
+    let r = resolve_suggest(Some(0), None, "claude", "m", None, None, &fb);
+    assert_eq!((r.tokens, r.basis.kind), (0, SuggestBasisKind::None));
+    // 33% of 967,000 = 319,110 exactly; 33% of 1,001 = 330.33 -> 330.
+    let mut custom = BTreeMap::new();
+    custom.insert("claude".to_string(), 1_001u64);
+    let r = resolve_suggest(Some(33), None, "claude", "m", None, None, &custom);
+    assert_eq!(r.tokens, 330);
+    custom.insert("claude".to_string(), 1_005);
+    let r = resolve_suggest(Some(50), None, "claude", "m", None, None, &custom);
+    assert_eq!(r.tokens, 503, "502.5 rounds up");
+}
+
+#[test]
+fn suggest_config_overrides_win_over_shipped() {
+    let mut o = BTreeMap::new();
+    o.insert("codex".to_string(), 200_000u64);
+    o.insert("opencode".to_string(), 100_000u64);
+    let m = effective_compaction_fallback(Some(&o));
+    assert_eq!(m["claude"], 967_000);
+    assert_eq!(m["codex"], 200_000);
+    assert_eq!(m["opencode"], 100_000);
+}
+
+#[test]
+fn suggest_resolved_view_wire_shape() {
+    let pts = suggest_points();
+    let v = suggest_resolved_view(None, None, Some(&pts), &shipped());
+    assert_eq!(v["share"], 40);
+    let claude = &v["providers"]["claude"];
+    let mut keys: Vec<_> = claude.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["byModel", "kind", "point", "tokens"]);
+    assert_eq!(claude["tokens"], 386_800);
+    assert_eq!(
+        claude["byModel"]["claude-fable-5-1"],
+        serde_json::json!({ "tokens": 387_290, "kind": "ceiling", "point": 968_226 })
+    );
+    let codex = &v["providers"]["codex"];
+    let mut keys: Vec<_> = codex.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["byModel", "kind", "point", "tokens", "window"]);
+    assert_eq!(codex["window"], 258_400);
+    assert_eq!(codex["tokens"], 103_360);
+    assert_eq!(codex["kind"], "window");
+}

@@ -374,15 +374,56 @@
              (Jon, 2026-11-23). The fixed width reserves the box's space and
              width="*" on the Text takes the rest and wraps:
              https://www.xmlui.org/docs/howto/set-width-for-input-fields-in-a-horizontal-layout -->
+        <!-- session-suggestion-share-of-compaction-point (Jon, 2026-11-24):
+             the box is a share (percent) of the model's compaction point;
+             the host resolves it per provider and model and echoes the
+             figures back in settings.sessions.suggestResolved, shown under
+             the box. A fixed figure written before the share existed is a
+             legacy override; Use the share removes it (a null save drops
+             the key). Fallbacks per provider fold under Details.
+             https://www.xmlui.org/docs/reference/components/NumberBox
+             https://www.xmlui.org/docs/reference/components/ExpandableItem -->
         <HStack gap="$space-3" verticalAlignment="center">
           <NumberBox
             width="110px"
             integersOnly="{true}"
             minValue="{0}"
+            maxValue="{100}"
             initialValue="{window.__bramSuggestContextSetting(settingsValue)}"
-            onDidChange="(v) => saveSettings.execute({ sessions: { suggestAtContextTokens: window.__bramSuggestContextTokens(v) } })" />
-          <Text width="*" value="Ask at the next natural pause once the context passes this many thousand tokens (0 = never)" />
+            onDidChange="(v) => saveSettings.execute({ sessions: { suggestAtContextShare: window.__bramSuggestContextShare(v) } })" />
+          <Text width="*" value="Ask at the next natural pause once the context passes this percent of the model's compaction point (0 = never)" />
         </HStack>
+        <Markdown
+          when="{!!window.__bramSuggestResolvedMarkdown(settingsValue)}"
+          content="{window.__bramSuggestResolvedMarkdown(settingsValue)}" />
+        <Button
+          when="{window.__bramSuggestLegacyInEffect(settingsValue)}"
+          label="Use the share"
+          size="xs"
+          variant="outlined"
+          onClick="saveSettings.execute({ sessions: { suggestAtContextTokens: null } })" />
+        <ExpandableItem summary="Compaction point fallbacks, for a provider this project has not seen compact" initiallyExpanded="{false}" iconPosition="start">
+          <VStack gap="$space-2" paddingTop="$space-2">
+            <HStack gap="$space-3" verticalAlignment="center">
+              <NumberBox
+                width="110px"
+                integersOnly="{true}"
+                minValue="{0}"
+                initialValue="{window.__bramCompactionFallbackSetting(settingsValue, 'claude')}"
+                onDidChange="(v) => saveSettings.execute(window.__bramCompactionFallbackPatch(settingsValue, 'claude', v))" />
+              <Text width="*" value="Claude, thousands of tokens (shipped: 967, the 1M models' measured ceiling)" />
+            </HStack>
+            <HStack gap="$space-3" verticalAlignment="center">
+              <NumberBox
+                width="110px"
+                integersOnly="{true}"
+                minValue="{0}"
+                initialValue="{window.__bramCompactionFallbackSetting(settingsValue, 'codex')}"
+                onDidChange="(v) => saveSettings.execute(window.__bramCompactionFallbackPatch(settingsValue, 'codex', v))" />
+              <Text width="*" value="Codex, thousands of tokens (shipped: 253; Codex usually records its own window, which wins)" />
+            </HStack>
+          </VStack>
+        </ExpandableItem>
         <!-- provider-session-pair-offer: a Switch, not a fourth checkbox,
              because it isn't a "when to suggest" trigger: it turns the pair
              offer after a provider switch on or off. Default on, read through

@@ -326,7 +326,7 @@
               color="$textColor-secondary"
               value="{window.__bramPendingSessionLabel($item)}" />
             <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
-            <Text width="70px" fontSize="$fontSize-sm" color="{window.__bramSessionTokensCellColor($item.context, contextThresholdSettings.value)}" value="{window.__bramSessionTokensCell($item.context)}" />
+            <Text width="70px" fontSize="$fontSize-sm" color="{window.__bramSessionTokensCellColor($item.context, contextThresholdSettings.value, $item.provider)}" value="{window.__bramSessionTokensCell($item.context)}" />
             <Text width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionTokensCell($item.floor)}" />
             <Text width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionSizeLabel($item)}" />
           </HStack>

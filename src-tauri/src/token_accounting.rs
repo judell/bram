@@ -5926,16 +5926,16 @@ pub fn aggregate_compaction_points(points: &[(&str, &str, u64, Option<u64>)]) ->
     CompactionPoints { providers }
 }
 
-/// `GET /__compaction-points`: where agents compacted on their own, from the
-/// cached per-file parses. Antigravity and OpenCode detect no compactions.
-pub fn compaction_points_route<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    _query: &str,
-) -> Vec<u8> {
-    let Some(root) = crate::project_root(Some(app)) else {
-        return br#"{"error":"could not resolve project root"}"#.to_vec();
-    };
-    let files: Vec<Arc<ParsedFile>> = discover(&root).iter().filter_map(parse_source).collect();
+static COMPACTION_POINTS_CACHE: OnceLock<Mutex<Option<Arc<CompactionPoints>>>> = OnceLock::new();
+
+fn compaction_points_cell() -> &'static Mutex<Option<Arc<CompactionPoints>>> {
+    COMPACTION_POINTS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Rebuild the project's compaction ceilings from the cached per-file parses
+/// and store them. Main-thread files only.
+pub fn refresh_compaction_points(root: &Path) -> Arc<CompactionPoints> {
+    let files: Vec<Arc<ParsedFile>> = discover(root).iter().filter_map(parse_source).collect();
     let mut points: Vec<(&str, &str, u64, Option<u64>)> = Vec::new();
     for pf in &files {
         if pf.thread != Some(Thread::Main) {
@@ -5945,7 +5945,213 @@ pub fn compaction_points_route<R: tauri::Runtime>(
             points.push((pf.provider, c.model.as_str(), c.before, pf.context_window));
         }
     }
-    serde_json::to_vec(&aggregate_compaction_points(&points)).unwrap_or_default()
+    let built = Arc::new(aggregate_compaction_points(&points));
+    if let Ok(mut g) = compaction_points_cell().lock() {
+        *g = Some(built.clone());
+    }
+    built
+}
+
+/// The last built ceilings; `None` until the first build lands.
+pub fn compaction_points_cached() -> Option<Arc<CompactionPoints>> {
+    compaction_points_cell().lock().ok().and_then(|g| g.clone())
+}
+
+/// `GET /__compaction-points`: where agents compacted on their own, from the
+/// cache (built synchronously only when empty). Antigravity and OpenCode
+/// detect no compactions.
+pub fn compaction_points_route<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    _query: &str,
+) -> Vec<u8> {
+    let points = match compaction_points_cached() {
+        Some(p) => p,
+        None => {
+            let Some(root) = crate::project_root(Some(app)) else {
+                return br#"{"error":"could not resolve project root"}"#.to_vec();
+            };
+            refresh_compaction_points(&root)
+        }
+    };
+    serde_json::to_vec(&*points).unwrap_or_default()
+}
+
+/// Shipped per-provider compaction points, used when this project has none
+/// measured and the provider records no window. None for OpenCode and
+/// Antigravity.
+pub const SHIPPED_COMPACTION_POINT: &[(&str, u64)] = &[("claude", 967_000), ("codex", 253_000)];
+
+pub const SUGGEST_SHARE_DEFAULT: u8 = 40;
+
+/// Shipped fallbacks merged with the project's overrides (config wins).
+pub fn effective_compaction_fallback(
+    overrides: Option<&BTreeMap<String, u64>>,
+) -> BTreeMap<String, u64> {
+    let mut m: BTreeMap<String, u64> = SHIPPED_COMPACTION_POINT
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+    if let Some(o) = overrides {
+        for (k, v) in o {
+            m.insert(k.clone(), *v);
+        }
+    }
+    m
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SuggestBasisKind {
+    Ceiling,
+    Window,
+    Default,
+    Absolute,
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestBasis {
+    pub kind: SuggestBasisKind,
+    pub point: u64,
+    pub share: u8,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestResolution {
+    pub tokens: u64,
+    pub basis: SuggestBasis,
+}
+
+/// Where the footer offers a new session: a share of the model's compaction
+/// point. Ceiling (this project's measured max for the model) beats the
+/// provider's recorded window, which beats the per-provider fallback. A
+/// legacy absolute applies only when no share is set.
+pub fn resolve_suggest(
+    share: Option<u8>,
+    legacy_tokens: Option<u64>,
+    provider: &str,
+    model: &str,
+    points: Option<&CompactionPoints>,
+    session_window: Option<u64>,
+    fallback: &BTreeMap<String, u64>,
+) -> SuggestResolution {
+    let none = |point: u64, share: u8| SuggestResolution {
+        tokens: 0,
+        basis: SuggestBasis {
+            kind: SuggestBasisKind::None,
+            point,
+            share,
+            source: String::new(),
+        },
+    };
+    if share.is_none() {
+        if let Some(legacy) = legacy_tokens {
+            if legacy == 0 {
+                return none(0, 0);
+            }
+            return SuggestResolution {
+                tokens: legacy,
+                basis: SuggestBasis {
+                    kind: SuggestBasisKind::Absolute,
+                    point: legacy,
+                    share: 0,
+                    source: String::new(),
+                },
+            };
+        }
+    }
+    let share = share.unwrap_or(SUGGEST_SHARE_DEFAULT);
+    if share == 0 {
+        return none(0, 0);
+    }
+    // A recorded window is an upper bound on the compaction point and a
+    // measured ceiling a lower bound (a model with few compactions sits well
+    // under it: gpt-5.4 measured 217k against a 258k window), so the window
+    // wins where the provider records one (Codex) and the ceiling fills in
+    // where none does (Claude).
+    let ceiling = points
+        .and_then(|p| p.providers.get(provider))
+        .and_then(|p| p.by_model.get(model))
+        .map(|r| r.max);
+    let (kind, point, source) = if let Some(w) = session_window {
+        (SuggestBasisKind::Window, w, provider.to_string())
+    } else if let Some(m) = ceiling {
+        (SuggestBasisKind::Ceiling, m, model.to_string())
+    } else if let Some(d) = fallback.get(provider) {
+        (SuggestBasisKind::Default, *d, provider.to_string())
+    } else {
+        return none(0, share);
+    };
+    SuggestResolution {
+        tokens: (point as f64 * share as f64 / 100.0).round() as u64,
+        basis: SuggestBasis {
+            kind,
+            point,
+            share,
+            source,
+        },
+    }
+}
+
+/// The settings view's `suggestResolved`: per provider (and per model this
+/// project has seen compact) what the share resolves to, from one rule.
+pub fn suggest_resolved_view(
+    share: Option<u8>,
+    legacy_tokens: Option<u64>,
+    points: Option<&CompactionPoints>,
+    fallback: &BTreeMap<String, u64>,
+) -> serde_json::Value {
+    let mut providers = serde_json::Map::new();
+    for lp in LIVE_PROVIDERS {
+        let label = lp.label;
+        let pc = points.and_then(|p| p.providers.get(label));
+        let window = pc.and_then(|p| p.window);
+        let base = resolve_suggest(share, legacy_tokens, label, "", points, window, fallback);
+        let mut by_model = serde_json::Map::new();
+        if let Some(pc) = pc {
+            for model in pc.by_model.keys() {
+                let r =
+                    resolve_suggest(share, legacy_tokens, label, model, points, window, fallback);
+                by_model.insert(
+                    model.clone(),
+                    serde_json::json!({
+                        "tokens": r.tokens,
+                        "kind": r.basis.kind,
+                        "point": r.basis.point,
+                    }),
+                );
+            }
+        }
+        let mut entry = serde_json::json!({
+            "tokens": base.tokens,
+            "kind": base.basis.kind,
+            "point": base.basis.point,
+            "byModel": by_model,
+        });
+        if let Some(w) = window {
+            entry["window"] = serde_json::json!(w);
+        }
+        providers.insert(label.to_string(), entry);
+    }
+    serde_json::json!({
+        "share": share.unwrap_or(SUGGEST_SHARE_DEFAULT),
+        "providers": providers,
+    })
+}
+
+static COMPACTIONS_SEEN: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// True when the session's compaction count rose since the last sample.
+fn compactions_rose(key: &str, count: usize) -> bool {
+    let m = COMPACTIONS_SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut g) = m.lock() else {
+        return false;
+    };
+    let prev = g.insert(key.to_string(), count);
+    matches!(prev, Some(p) if count > p)
 }
 
 // --- turn-end sampler -------------------------------------------------------
@@ -6062,6 +6268,7 @@ impl LiveParser {
                 compactions: p.compactions,
                 turn_start: p.turn_start,
                 quota: None,
+                context_window: None,
             },
             LiveParser::Codex(p) => LiveCalls {
                 session: p.session_id.clone().unwrap_or_else(|| stem.to_string()),
@@ -6069,6 +6276,7 @@ impl LiveParser {
                 compactions: p.compactions,
                 turn_start: p.turn_start,
                 quota: p.quota.clone(),
+                context_window: p.context_window,
             },
         }
     }
@@ -6139,6 +6347,8 @@ pub struct LiveCalls {
     /// (index of the first call of the current turn, its user message time).
     pub turn_start: (usize, i64),
     pub quota: Option<Quota>,
+    /// The provider's recorded context window (Codex's `model_context_window`).
+    pub context_window: Option<u64>,
 }
 
 pub struct LiveProvider {
@@ -6256,6 +6466,7 @@ fn read_opencode_live(at: &LiveAt) -> Option<LiveCalls> {
         compactions: 0,
         turn_start,
         quota: None,
+        context_window: None,
     })
 }
 
@@ -6286,6 +6497,7 @@ fn read_antigravity_live(at: &LiveAt) -> Option<LiveCalls> {
         compactions: pf.compactions,
         turn_start: (start, turn_at),
         quota: pf.quota.clone(),
+        context_window: pf.context_window,
     })
 }
 
@@ -6302,6 +6514,9 @@ pub struct LiveContext {
     pub calls: usize,
     pub compactions: usize,
     pub model: String,
+    /// The provider's recorded window, when its transcripts say (Codex).
+    #[serde(skip)]
+    pub context_window: Option<u64>,
     pub cache_read: u64,
     pub first_at_ms: i64,
     pub last_at_ms: i64,
@@ -6324,6 +6539,7 @@ pub fn live_context(label: &str, at: &LiveAt) -> Option<LiveContext> {
         calls: lc.calls.len(),
         compactions: lc.compactions,
         model: last.model.clone(),
+        context_window: lc.context_window,
         cache_read: lc.calls.iter().map(|c| c.cache_read).sum(),
         first_at_ms: first.at_ms,
         last_at_ms: last.at_ms,
@@ -6685,12 +6901,47 @@ pub fn sample_turn_end<R: tauri::Runtime>(app: &tauri::AppHandle<R>, provider: &
         return;
     }
     ledger_session_turn_end(app, provider, path);
+    refresh_ceilings_on_compaction(app, provider, path);
     if !crate::bram_trace_enabled() {
         return;
     }
     for s in sample_live(path, provider) {
         crate::append_bram_trace_line(app, "session-context", &format_sample(&s));
     }
+}
+
+/// When the live session's compaction count rose, rebuild the ceilings off
+/// the sampler's thread.
+fn refresh_ceilings_on_compaction<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    provider: &str,
+    path: &Path,
+) {
+    let Some(lc) = live_calls(provider, &LiveAt::File(path.to_path_buf())) else {
+        return;
+    };
+    let key = format!(
+        "{provider}:{}",
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+    );
+    if !compactions_rose(&key, lc.compactions) {
+        return;
+    }
+    if let Some(root) = crate::project_root(Some(app)) {
+        std::thread::spawn(move || {
+            refresh_compaction_points(&root);
+        });
+    }
+}
+
+/// Build the ceilings once at launch, off the main thread.
+pub fn spawn_compaction_points_build<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        if let Some(root) = crate::project_root(Some(&app)) {
+            refresh_compaction_points(&root);
+        }
+    });
 }
 
 /// Write the session's new calls (and its subagents') into the ledger.

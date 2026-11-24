@@ -4112,7 +4112,7 @@ window.settingsInfoBodies = {
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
-    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: on.*\n\n## Ask at the next natural pause once the context passes\n\nEach call re-sends the whole live context, so a long session pays for its history on every turn. Past this many tokens the footer shows **Start a new session** and the agent offers one at a natural pause. The figure beside the session line in the footer is what the model re-read on its last call, with the floor (the size of a fresh session) beside it.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestAtContextTokens` and shared with everyone who works in this repo. Default: 400,000 tokens; 0 turns it off.*\n\n## Pair new sessions across providers\n\nWhen you switch between Claude and Codex and the session you're leaving has no partner on the other side, the other agent resumes its most recent session and Bram asks what you want: **Keep these together** pairs the two, so switching back and forth moves between them; **Start a new … session** starts one for the session you left. Bram never pairs sessions on its own. Turning this off stops the question; pairs you already made keep working, and **Unpair** on the Sessions tab ends one.\n\n*Project setting, saved in `.bram.json` as `sessions.pairAcrossProviders` and shared with everyone who works in this repo. Default: on.*",
+    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: on.*\n\n## Ask at the next natural pause once the context passes a share of the compaction point\n\nEach call re-sends the whole live context, so a long session pays for its history on every turn, and when the context reaches the agent's own limit the agent compacts it into a summary at a moment you don't choose. The setting is a share of that limit: past it the footer shows **Start a new session** and the agent offers one at a natural pause. Bram works the limit out per provider and model: where that model has compacted in this project, else the window the provider records (Codex), else a per-provider fallback you can set here. The lines under the box show the figure each provider gets today and where it comes from.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestAtContextShare` (percent) and `sessions.compactionPointByProvider` (the fallbacks), shared with everyone who works in this repo. Default: 40%; 0 turns it off. A `sessions.suggestAtContextTokens` written before the share existed is a fixed override until you drop it with **Use the share**.*\n\n## Pair new sessions across providers\n\nWhen you switch between Claude and Codex and the session you're leaving has no partner on the other side, the other agent resumes its most recent session and Bram asks what you want: **Keep these together** pairs the two, so switching back and forth moves between them; **Start a new … session** starts one for the session you left. Bram never pairs sessions on its own. Turning this off stops the question; pairs you already made keep working, and **Unpair** on the Sessions tab ends one.\n\n*Project setting, saved in `.bram.json` as `sessions.pairAcrossProviders` and shared with everyone who works in this repo. Default: on.*",
   batchCommitActions:
     "## Mirror Worklist lifecycle to GitHub issues\n\nPost Worklist lifecycle comments to linked GitHub issues.\n\n*Project setting, saved in `.bram.json` as `mirrorWorklistLifecycleToIssue` and shared with everyone who works in this repo. Default: off.*" +
     "\n\n## Pause Worklist enforcement for Claude\n\nAn advanced, experimental setting. While it is on, Bram's guard stops denying Claude's edits that no Worklist item covers, and Claude is told the Worklist is paused, so it edits directly and proposes no items. You define the work and manage commits yourself. The guard's other checks (session URLs, forge signatures) still apply. Codex, OpenCode and Antigravity stay enforced. Edits made while paused belong to no item: before turning enforcement back on, commit or stash them, or the next whole-file commit of a begun item may take them.\n\n*Saved for this computer in `.bram/settings.json` as `worklist.enforcement` (`paused` or `on`). A repo can also set it for everyone in a committed `.bram.json`; your own setting wins. Default: on.*",
@@ -16899,9 +16899,10 @@ window.__bramSessionTokensCell = function (n) {
 // same rule as the footer's figure (Jon, 2026-11-23: "here we do have hard
 // numbers"). The action it names is the header tooltip's: start a new
 // session for that session's next work. Reads only its arguments.
-window.__bramSessionTokensCellColor = function (n, settings) {
-  var s = settings && settings.sessions;
-  var t = s && typeof s.suggestAtContextTokens === "number" ? s.suggestAtContextTokens : 400000;
+window.__bramSessionTokensCellColor = function (n, settings, provider) {
+  // session-suggestion-share-of-compaction-point: the row's provider
+  // resolves the threshold (the list row carries no model).
+  var t = window.__bramSuggestResolvedTokens(settings, provider, null);
   if (t > 0 && typeof n === "number" && n >= t) return "$color-warn-700";
   return "$textColor-primary";
 };
@@ -22338,18 +22339,112 @@ window.__bramSuggestSetting = function (settings, key) {
   if (s && typeof s[key] === "boolean") return s[key];
   return true;
 };
-// session-context-pane: the context-limit setting, thousands in the box and
-// tokens on disk (sessions.suggestAtContextTokens; default 400,000; 0 = off).
+// session-suggestion-share-of-compaction-point (Jon, 2026-11-24): the
+// setting is a share (percent) of the model's compaction point, default 40,
+// 0 = off. The host resolves it per provider and model (this project's
+// measured ceiling, else the provider's recorded window, else a per-provider
+// fallback) into settings.sessions.suggestResolved and into the footer
+// block's suggestTokens / suggestBasis. A fixed suggestAtContextTokens set
+// before the share existed is a legacy override while it is in the file.
+// Pure helpers; each reads only its arguments.
 window.__bramSuggestContextSetting = function (settings) {
   var s = settings && settings.sessions;
-  var n = s && s.suggestAtContextTokens;
-  if (typeof n === "number" && isFinite(n) && n >= 0) return Math.round(n / 1000);
-  return 400;
+  var n = s && s.suggestAtContextShare;
+  if (typeof n === "number" && isFinite(n) && n >= 0) return Math.round(n);
+  return 40;
 };
+window.__bramSuggestContextShare = function (v) {
+  var n = Number(v);
+  if (v === null || v === undefined || v === "" || !isFinite(n) || n < 0) return 0;
+  return Math.min(100, Math.round(n));
+};
+// Thousands in a box, tokens on disk (the per-provider fallback fields).
 window.__bramSuggestContextTokens = function (v) {
   var n = Number(v);
   if (v === null || v === undefined || v === "" || !isFinite(n) || n < 0) return 0;
   return Math.round(n) * 1000;
+};
+// The resolved threshold for a session row: the first of its models with an
+// entry, else the provider's; the legacy absolute when one is in effect; 0
+// when none. `models` is a name or a list.
+window.__bramSuggestResolvedTokens = function (settings, provider, models) {
+  var s = settings && settings.sessions;
+  if (!s) return 0;
+  if (s.suggestAtContextLegacy && typeof s.suggestAtContextTokens === "number") return s.suggestAtContextTokens;
+  var r = s.suggestResolved && s.suggestResolved.providers && provider ? s.suggestResolved.providers[provider] : null;
+  if (!r) return 0;
+  var list = Array.isArray(models) ? models : models ? [models] : [];
+  for (var i = 0; i < list.length; i++) {
+    var m = r.byModel && r.byModel[list[i]];
+    if (m && typeof m.tokens === "number") return m.tokens;
+  }
+  return typeof r.tokens === "number" ? r.tokens : 0;
+};
+// What a threshold is made of: "40% of where Claude has compacted in this
+// project (968k on `claude-fable-5-1`)". Empty when there is none.
+window.__bramSuggestBasisText = function (basis, providerName, forProvider) {
+  if (!basis || !basis.kind || basis.kind === "none") return "";
+  var K = window.__bramTokenK;
+  var who = providerName || "the agent";
+  if (basis.kind === "absolute") return "a fixed figure set in Settings before the share existed";
+  var of = basis.kind === "ceiling"
+    ? "where " + who + " has compacted in this project (" + K(basis.point) + (basis.source ? " on `" + basis.source + "`" : "") + ")"
+    : basis.kind === "window"
+      ? who + "'s " + K(basis.point) + " window"
+      : "the shipped default for " + who + " (" + K(basis.point) + (forProvider ? "" : "; this project has not seen this model compact") + ")";
+  return basis.share + "% of " + of;
+};
+// Settings: one line per provider with its resolved figure and basis.
+window.__bramSuggestResolvedMarkdown = function (settings) {
+  var s = settings && settings.sessions;
+  var r = s && s.suggestResolved && s.suggestResolved.providers;
+  if (!r) return "";
+  var K = window.__bramTokenK;
+  var lines = [];
+  Object.keys(r).forEach(function (p) {
+    var e = r[p];
+    var name = window.__bramCompactionProviderName(p + ":");
+    if (!e || !name) return;
+    // The provider entry is the rung for a model not yet seen compacting
+    // here; the share is the table's, not the entry's.
+    var basis = { kind: e.kind, point: e.point, share: s.suggestResolved.share, source: "" };
+    var line = !e.tokens || e.kind === "none"
+      ? "**" + name + ":** no compaction point known, so no suggestion; a fallback below sets one."
+      : "**" + name + ":** " + K(e.tokens) + ", " + window.__bramSuggestBasisText(basis, name, true) + ".";
+    // Only models resolved from their own ceiling are worth listing; under a
+    // recorded window (Codex) every model gets the provider's figure.
+    var models = Object.keys(e.byModel || {}).filter(function (m) { return e.byModel[m].kind === "ceiling"; });
+    if (models.length) {
+      line += " Models that have compacted here use their own ceilings: " +
+        models.map(function (m) { return "`" + m + "` " + K(e.byModel[m].tokens); }).join(", ") + ".";
+    }
+    lines.push("- " + line);
+  });
+  if (s.suggestAtContextLegacy && typeof s.suggestAtContextTokens === "number") {
+    lines.unshift("- A fixed **" + K(s.suggestAtContextTokens) + "** set before the share existed overrides it for every provider. **Use the share** drops it.");
+  }
+  return lines.join("\n");
+};
+window.__bramSuggestLegacyInEffect = function (settings) {
+  var s = settings && settings.sessions;
+  return !!(s && s.suggestAtContextLegacy);
+};
+// The per-provider fallback fields: the effective map (shipped defaults
+// merged with overrides), thousands in the box. A save writes the whole
+// map back, so a shipped value a person has seen stays what they saw.
+window.__bramCompactionFallbackSetting = function (settings, provider) {
+  var s = settings && settings.sessions;
+  var m = s && s.compactionPointByProvider;
+  var n = m && m[provider];
+  return typeof n === "number" && isFinite(n) ? Math.round(n / 1000) : 0;
+};
+window.__bramCompactionFallbackPatch = function (settings, provider, v) {
+  var s = settings && settings.sessions;
+  var cur = (s && s.compactionPointByProvider) || {};
+  var out = {};
+  Object.keys(cur).forEach(function (k) { out[k] = cur[k]; });
+  out[provider] = window.__bramSuggestContextTokens(v);
+  return { sessions: { compactionPointByProvider: out } };
 };
 
 // session-context-pane: the footer's context figure (FooterSessionContext).
@@ -22598,12 +22693,19 @@ window.__bramSessionContextInfoBody = function (key, ctx, rates, points) {
       (ctx.sinceBoundaryCalls || 0) + " calls.";
   }
   out += "\n\n";
+  // session-suggestion-share-of-compaction-point: the threshold names its
+  // basis; "off" and "no compaction point known" are told apart by the
+  // share the host echoes back.
+  var basisText = window.__bramSuggestBasisText(ctx.suggestBasis, window.__bramCompactionProviderName(ctx.session));
+  var basisNote = basisText ? " (" + basisText + ")" : "";
   if (lim) {
     out += ctx.state === "suggest"
-      ? "It is past the limit in Settings (" + lim + "), so **Start a new session** is offered here, and the agent offers one at the next natural pause. Saying no keeps the work here; ✕ hides the button until the next pause."
-      : "Past the limit in Settings (" + lim + ") the footer offers **Start a new session**, and the agent offers one at the next natural pause.";
+      ? "It is past the threshold of " + lim + basisNote + ", so **Start a new session** is offered here, and the agent offers one at the next natural pause. Saying no keeps the work here; ✕ hides the button until the next pause."
+      : "Past " + lim + basisNote + " the footer offers **Start a new session**, and the agent offers one at the next natural pause. The share is set in Settings.";
+  } else if (ctx.suggestBasis && ctx.suggestBasis.kind === "none" && ctx.suggestBasis.share > 0) {
+    out += "No compaction point is known for this agent yet, so there is no suggestion threshold; Settings has a per-provider fallback.";
   } else {
-    out += "The fresh-session offer is off in Settings (the limit is 0).";
+    out += "The fresh-session offer is off in Settings (the share is 0).";
   }
   var table = window.__bramCompactionModelTable(ctx, points);
   if (table) out += "\n\n" + table;
@@ -22663,7 +22765,17 @@ window.__bramCompactionGroup = function (ctx, points) {
 window.__bramCompactionRangeClause = function (ctx, points, limN) {
   var K = window.__bramTokenK;
   var parts = [];
-  if (limN > 0 && !(ctx && ctx.state === "suggest")) parts.push("Bram suggests a new session at **" + K(limN) + "**.");
+  // session-suggestion-share-of-compaction-point: the threshold states its
+  // basis; with no compaction point known (share set, nothing to apply it
+  // to) it says so instead of showing nothing.
+  var pname = window.__bramCompactionProviderName(ctx && ctx.session);
+  var basis = ctx && ctx.suggestBasis;
+  if (limN > 0 && !(ctx && ctx.state === "suggest")) {
+    var bt = window.__bramSuggestBasisText(basis, pname);
+    parts.push("Bram suggests a new session at **" + K(limN) + "**" + (bt ? ", " + bt : "") + ".");
+  } else if (limN === 0 && basis && basis.kind === "none" && basis.share > 0 && pname) {
+    parts.push("Bram has no compaction point for " + pname + " yet, so no suggestion threshold; a fallback can be set in Settings.");
+  }
   var g = window.__bramCompactionGroup(ctx, points);
   if (g && g.name) {
     var times = g.count === 1 ? "once" : "**" + g.count + " times**";
@@ -24506,7 +24618,9 @@ var COST_ROWS_CAP = 10;
 window.__bramCostSessionRows = function (report, sessionsList, rates, settings, showAll) {
   var folds = window.__bramCostSessionFolds(report, rates);
   folds.sort(function (a, b) { return __bramCostSortKey(b) - __bramCostSortKey(a); });
-  var threshold = settings && settings.sessions && typeof settings.sessions.suggestAtContextTokens === "number" ? settings.sessions.suggestAtContextTokens : 0;
+  // session-suggestion-share-of-compaction-point: per fold, by its provider
+  // and models.
+  var thresholdOf = function (f) { return window.__bramSuggestResolvedTokens(settings, f.provider, f.models); };
   var K = window.__bramTokenK, I = window.__bramTokenInt;
   return (showAll ? folds : folds.slice(0, COST_ROWS_CAP)).map(function (f) {
     return {
@@ -24519,7 +24633,7 @@ window.__bramCostSessionRows = function (report, sessionsList, rates, settings, 
       compactions: f.compactions ? String(f.compactions) : "—",
       context: window.__bramTokenM(f.context),
       usd: f.usd === null ? "—" : window.__bramTokenUsd(f.usd),
-      note: threshold > 0 && f.peak > threshold ? "peaked past " + K(threshold) : "",
+      note: thresholdOf(f) > 0 && f.peak > thresholdOf(f) ? "peaked past " + K(thresholdOf(f)) : "",
     };
   });
 };

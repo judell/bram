@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -460,6 +460,14 @@ struct SessionsConfig {
     // 70 items that started above 400k ran at an average 597k.
     #[serde(default, rename = "suggestAtContextTokens")]
     suggest_at_context_tokens: Option<u64>,
+    // session-suggestion-share-of-compaction-point: percent of the model's
+    // compaction point at which to suggest a new session. Default 40; 0 is
+    // off. When present, `suggestAtContextTokens` above is ignored.
+    #[serde(default, rename = "suggestAtContextShare")]
+    suggest_at_context_share: Option<u8>,
+    // Per-provider overrides of the shipped fallback compaction points.
+    #[serde(default, rename = "compactionPointByProvider")]
+    compaction_point_by_provider: Option<BTreeMap<String, u64>>,
     // provider-session-pair-offer: whether a switch that finds no partner
     // offers to pair the two sessions or start a new one. Default on.
     #[serde(default, rename = "pairAcrossProviders")]
@@ -31762,7 +31770,26 @@ mod agent_startup_policy_tests {
         assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
         assert_eq!(view["sessions"]["suggestOnTopicShift"], true);
         assert_eq!(view["sessions"]["pairAcrossProviders"], true);
-        assert_eq!(view["sessions"]["suggestAtContextTokens"], 400000);
+        assert_eq!(view["sessions"]["suggestAtContextShare"], 40);
+        assert!(view["sessions"]["suggestAtContextTokens"].is_null());
+        assert_eq!(view["sessions"]["suggestAtContextLegacy"], false);
+        assert_eq!(
+            view["sessions"]["compactionPointByProvider"]["claude"],
+            967000
+        );
+        assert_eq!(
+            view["sessions"]["compactionPointByProvider"]["codex"],
+            253000
+        );
+        assert_eq!(view["sessions"]["suggestResolved"]["share"], 40);
+        assert_eq!(
+            view["sessions"]["suggestResolved"]["providers"]["claude"]["tokens"],
+            386800
+        );
+        assert_eq!(
+            view["sessions"]["suggestResolved"]["providers"]["opencode"]["kind"],
+            "none"
+        );
 
         let existing = serde_json::json!({
             "ui": { "showTargetApp": true },
@@ -31781,6 +31808,49 @@ mod agent_startup_policy_tests {
         assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
         assert_eq!(view["sessions"]["suggestOnTopicShift"], false);
         assert_eq!(view["ui"]["showTargetApp"], true);
+
+        // The legacy absolute is in effect until the share is set; a null
+        // save removes it and leaves the other keys alone.
+        let legacy = serde_json::json!({
+            "sessions": { "suggestAtContextTokens": 400000, "suggestOnNewItem": false }
+        });
+        let cfg = serde_json::from_value::<ProjectConfig>(legacy.clone()).unwrap();
+        let view = settings_view_from_config(Some(cfg));
+        assert_eq!(view["sessions"]["suggestAtContextTokens"], 400000);
+        assert_eq!(view["sessions"]["suggestAtContextLegacy"], true);
+        let cleared = merge_settings_into_config(
+            legacy,
+            &serde_json::json!({ "sessions": { "suggestAtContextTokens": null } }),
+        );
+        assert!(cleared["sessions"].get("suggestAtContextTokens").is_none());
+        assert_eq!(cleared["sessions"]["suggestOnNewItem"], false);
+
+        // The share and fallback round-trip, and the share wins over legacy.
+        let both = serde_json::json!({
+            "sessions": {
+                "suggestAtContextTokens": 400000,
+                "suggestAtContextShare": 25,
+                "compactionPointByProvider": { "codex": 200000, "opencode": 100000 }
+            }
+        });
+        let cfg = serde_json::from_value::<ProjectConfig>(both).unwrap();
+        let view = settings_view_from_config(Some(cfg));
+        assert_eq!(view["sessions"]["suggestAtContextShare"], 25);
+        assert_eq!(view["sessions"]["suggestAtContextLegacy"], false);
+        assert_eq!(
+            view["sessions"]["compactionPointByProvider"]["claude"],
+            967000
+        );
+        assert_eq!(
+            view["sessions"]["compactionPointByProvider"]["codex"],
+            200000
+        );
+        let r = &view["sessions"]["suggestResolved"]["providers"];
+        assert_eq!(r["codex"]["tokens"], 50000);
+        assert_eq!(r["opencode"]["tokens"], 25000);
+        let mut keys: Vec<_> = r["codex"].as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["byModel", "kind", "point", "tokens"]);
     }
 
     // settings-info-says-storage-and-default: every project default a repo
@@ -31805,7 +31875,19 @@ mod agent_startup_policy_tests {
                 "suggestOnNewIssue": true,
                 "suggestOnTopicShift": true,
                 "pairAcrossProviders": true,
-                "suggestAtContextTokens": 400000
+                "suggestAtContextShare": 40,
+                "suggestAtContextTokens": null,
+                "suggestAtContextLegacy": false,
+                "compactionPointByProvider": { "claude": 967000, "codex": 253000 },
+                "suggestResolved": {
+                    "share": 40,
+                    "providers": {
+                        "claude": { "tokens": 386800, "kind": "default", "point": 967000, "byModel": {} },
+                        "codex": { "tokens": 101200, "kind": "default", "point": 253000, "byModel": {} },
+                        "opencode": { "tokens": 0, "kind": "none", "point": 0, "byModel": {} },
+                        "antigravity": { "tokens": 0, "kind": "none", "point": 0, "byModel": {} }
+                    }
+                }
             },
             "traces": { "enabled": true, "inspectorTap": false, "archiveAfterDays": 14 },
             "menus": { "parseAndDisplay": false },
@@ -32000,10 +32082,14 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         .as_ref()
         .and_then(|s| s.pair_across_providers)
         .unwrap_or(true);
-    let suggest_at_context_tokens = sessions_cfg
-        .as_ref()
-        .and_then(|s| s.suggest_at_context_tokens)
-        .unwrap_or(SUGGEST_AT_CONTEXT_TOKENS_DEFAULT);
+    let (suggest_share, suggest_legacy, suggest_fallback) =
+        suggest_settings_from(sessions_cfg.as_ref());
+    let suggest_resolved = token_accounting::suggest_resolved_view(
+        suggest_share,
+        suggest_legacy,
+        token_accounting::compaction_points_cached().as_deref(),
+        &suggest_fallback,
+    );
     let (
         agent,
         args,
@@ -32109,7 +32195,11 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             "suggestOnNewIssue": suggest_on_new_issue,
             "suggestOnTopicShift": suggest_on_topic_shift,
             "pairAcrossProviders": pair_across_providers,
-            "suggestAtContextTokens": suggest_at_context_tokens
+            "suggestAtContextShare": suggest_share.unwrap_or(token_accounting::SUGGEST_SHARE_DEFAULT),
+            "suggestAtContextTokens": suggest_legacy,
+            "suggestAtContextLegacy": suggest_share.is_none() && suggest_legacy.is_some(),
+            "compactionPointByProvider": suggest_fallback,
+            "suggestResolved": suggest_resolved
         },
         "traces": {
             "enabled": tracing_enabled,
@@ -32166,6 +32256,19 @@ fn merge_settings_into_config(
             return;
         };
         for (k, v) in from_obj {
+            // A null for one of the suggestion keys removes it from the file
+            // ("Use the share" drops the legacy absolute override).
+            if v.is_null()
+                && matches!(
+                    k.as_str(),
+                    "suggestAtContextTokens"
+                        | "suggestAtContextShare"
+                        | "compactionPointByProvider"
+                )
+            {
+                into.remove(k);
+                continue;
+            }
             match (into.get_mut(k), v) {
                 (Some(existing_val), serde_json::Value::Object(_)) if existing_val.is_object() => {
                     if let Some(existing_map) = existing_val.as_object_mut() {
@@ -45861,6 +45964,7 @@ mod companion_app_tests {
 }
 
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
+    token_accounting::spawn_compaction_points_build(app.clone());
     let (tx, rx) = std::sync::mpsc::channel::<IndexBucket>();
     if let Ok(mut guard) = search_index_tx_cell().lock() {
         *guard = Some(tx.clone());
@@ -54825,19 +54929,33 @@ struct SessionContextBlock {
     boundary_at_ms: i64,
     model: String,
     suggest_tokens: u64,
+    suggest_basis: token_accounting::SuggestBasis,
     state: &'static str,
     /// Calls per turn and per active hour; null below two calls.
     pace: Option<token_accounting::Pace>,
 }
 
-const SUGGEST_AT_CONTEXT_TOKENS_DEFAULT: u64 = 400_000;
-
-fn suggest_at_context_tokens<R: tauri::Runtime>(app: &AppHandle<R>) -> u64 {
-    project_root(Some(app))
+/// The project's `sessions` settings that decide the suggestion threshold:
+/// the share, the legacy absolute, and the effective per-provider fallback.
+fn suggest_settings<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> (Option<u8>, Option<u64>, BTreeMap<String, u64>) {
+    let sessions = project_root(Some(app))
         .and_then(|root| load_project_config(&root))
-        .and_then(|c| c.sessions)
-        .and_then(|s| s.suggest_at_context_tokens)
-        .unwrap_or(SUGGEST_AT_CONTEXT_TOKENS_DEFAULT)
+        .and_then(|c| c.sessions);
+    suggest_settings_from(sessions.as_ref())
+}
+
+fn suggest_settings_from(
+    sessions: Option<&SessionsConfig>,
+) -> (Option<u8>, Option<u64>, BTreeMap<String, u64>) {
+    (
+        sessions.and_then(|s| s.suggest_at_context_share),
+        sessions.and_then(|s| s.suggest_at_context_tokens),
+        token_accounting::effective_compaction_fallback(
+            sessions.and_then(|s| s.compaction_point_by_provider.as_ref()),
+        ),
+    )
 }
 
 fn session_context_key<R: tauri::Runtime>(
@@ -54866,7 +54984,18 @@ fn session_context_block<R: tauri::Runtime>(
         .unwrap_or_default();
     let (since_tokens, since_calls, boundary_at_ms) =
         token_accounting::since_boundary(&lc.timeline, &windows);
-    let suggest_tokens = suggest_at_context_tokens(app);
+    let (share, legacy, fallback) = suggest_settings(app);
+    let cached = token_accounting::compaction_points_cached();
+    let resolution = token_accounting::resolve_suggest(
+        share,
+        legacy,
+        provider_label,
+        &lc.model,
+        cached.as_deref(),
+        lc.context_window,
+        &fallback,
+    );
+    let suggest_tokens = resolution.tokens;
     let block = SessionContextBlock {
         session: session_context_key(app, provider_label).unwrap_or_default(),
         tokens: lc.tokens,
@@ -54879,6 +55008,7 @@ fn session_context_block<R: tauri::Runtime>(
         boundary_at_ms,
         model: lc.model,
         suggest_tokens,
+        suggest_basis: resolution.basis,
         state: if suggest_tokens > 0 && lc.tokens >= suggest_tokens {
             "suggest"
         } else {
@@ -54960,6 +55090,12 @@ mod session_context_wire_tests {
             boundary_at_ms: 8,
             model: "m".to_string(),
             suggest_tokens: 9,
+            suggest_basis: token_accounting::SuggestBasis {
+                kind: token_accounting::SuggestBasisKind::Default,
+                point: 967_000,
+                share: 40,
+                source: "claude".to_string(),
+            },
             state: "note",
             pace: token_accounting::pace_of(&[0, 10_000, 20_000, 30_000, 630_000]),
         };
@@ -54983,6 +55119,7 @@ mod session_context_wire_tests {
                 "sinceBoundaryCalls",
                 "sinceBoundaryTokens",
                 "state",
+                "suggestBasis",
                 "suggestTokens",
                 "tokens"
             ]

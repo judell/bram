@@ -24599,7 +24599,7 @@ window.__bramCostHeadline = function (report, rates, period) {
   var out = "**" + label + ":** " + folds.length + (folds.length === 1 ? " session, " : " sessions, ") + K(calls) + " calls, " +
     window.__bramCostTokens(context) + " tokens sent (each call sends the whole conversation again), about **" + window.__bramTokenUsd(usd) + "** at list prices";
   if (unpriced) out += " (" + unpriced + (unpriced === 1 ? " session has" : " sessions have") + " no listed price and is left out)";
-  out += ". On a subscription these dollars are usage against your plan, not a bill; what holds either way is the proportion between the lines below.";
+  out += ". On a subscription these dollars are usage against your plan, not a bill.";
   return out;
 };
 var __bramCostTitleOf = function (list, f) {

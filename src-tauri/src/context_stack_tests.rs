@@ -393,7 +393,7 @@ fn labels_are_first_lines_cut_to_eighty_characters() {
 #[test]
 fn a_provider_without_a_reader_gets_the_unsupported_stack_whatever_the_file_holds() {
     let text = plain().join("\n");
-    for provider in ["codex", "opencode", "antigravity", "someday"] {
+    for provider in ["opencode", "antigravity", "someday"] {
         assert_eq!(reader_for(provider), None, "{provider}");
         let s = build(provider, &text, "s1", None);
         assert!(!s.supported, "{provider}");
@@ -402,6 +402,43 @@ fn a_provider_without_a_reader_gets_the_unsupported_stack_whatever_the_file_hold
         assert_eq!(s.measured.calls, 0);
     }
     assert_eq!(reader_for("claude"), Some(Reader::ClaudeJsonl));
+}
+
+#[test]
+fn codex_rollout_preserves_text_and_record_identity() {
+    let text = r#"{"type":"session_meta","payload":{"id":"abc","base_instructions":{"text":"base"}}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"  rules\n"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"echo","arguments":"{}"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"duplicate"}}
+{"type":"response_item","payload":{"type":"function_call_output","output":"done"}}
+{"unfinished":"#;
+    let s = build("codex", text, "fallback", None);
+    assert_eq!(s.session, "codex:abc");
+    assert_eq!(
+        s.blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+        ["base", "  rules\n", "{}", "done"]
+    );
+    let key = s.blocks[1].record_key.clone();
+    let after = format!(
+        r#"{text}
+{{"type":"compacted","payload":{{"replacement_history":[{{"type":"message","role":"user","content":[{{"text":"summary"}}]}}]}}}}"#
+    );
+    let compact = build("codex", &after, "fallback", None);
+    assert_eq!(compact.compacted.blocks, 3);
+    assert_eq!(compact.blocks.len(), 2);
+    assert_eq!(compact.blocks[0].record_key, s.blocks[0].record_key);
+    assert_ne!(compact.blocks[1].record_key, key);
+    assert_eq!(compact.blocks[1].text, "summary");
+}
+
+#[test]
+fn partial_codex_rollout_keeps_session_scope() {
+    for (id, text) in [("a", ""), ("b", "{broken\n{}")] {
+        let s = build("codex", text, id, None);
+        assert!(s.supported);
+        assert_eq!(s.session, format!("codex:{id}"));
+        assert!(s.blocks.is_empty());
+    }
 }
 
 #[test]
@@ -448,7 +485,8 @@ fn probe_a_real_session_file() {
     };
     let root = std::env::var("BRAM_STACK_ROOT").ok();
     let text = std::fs::read_to_string(&path).expect("readable session file");
-    let s = build("claude", &text, "probe", root.as_deref().map(Path::new));
+    let provider = crate::projected_turns_provider_label(Path::new(&path));
+    let s = build(provider, &text, "probe", root.as_deref().map(Path::new));
     println!(
         "blocks {} · measured {} · floor {} · base {} · calls {} · compactions {} · bytes/token {:.2} text, {:.2} opaque ({}, fit rows {}) · accounted {} · unaccounted {}",
         s.blocks.len(),

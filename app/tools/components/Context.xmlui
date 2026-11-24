@@ -8,12 +8,13 @@
 <Component name="Context"
   var.selectedPath="{null}"
   var.selectedDisplay="{null}"
+  var.selectedSession=""
   var.selectedBlock="{null}">
 
   <!-- The stack for the active session; refetched when the host samples a
        new context reading at turn end (push over polling).
        https://www.xmlui.org/docs/reference/components/DataSource -->
-  <DataSource id="stack" url="/__context-stack" />
+  <DataSource id="stack" url="/__context-stack" queryParams="{{ provider: $props.activeProvider || '' }}" />
   <PushSource
     id="stackTick"
     initial="{null}"
@@ -22,10 +23,11 @@
   <DataSource
     id="blockText"
     url="/__context-stack/block"
-    queryParams="{{ i: selectedBlock &amp;&amp; selectedBlock.i }}"
+    queryParams="{{ i: selectedBlock &amp;&amp; selectedBlock.i, key: (selectedBlock &amp;&amp; selectedBlock.recordKey) || '', provider: selectedSession.split(':')[0], id: selectedSession.split(':')[1] || '' }}"
     when="{!!selectedBlock}" />
+  <ChangeListener listenTo="{stack.value &amp;&amp; stack.value.session}" onDidChange="selectedBlock = null" />
 
-  <DataSource id="ctxList" url="/__context/list" queryParams="{{ provider: activeProvider || '' }}" />
+  <DataSource id="ctxList" url="/__context/list" queryParams="{{ provider: $props.activeProvider || '' }}" />
   <DataSource
     id="ctxFile"
     url="/__context/file"
@@ -33,7 +35,7 @@
     when="{!!selectedPath}" />
 
   <ChangeListener
-    listenTo="{activeProvider}"
+    listenTo="{$props.activeProvider}"
     onDidChange="selectedPath = null; selectedDisplay = null; selectedBlock = null; stack.refetch()" />
 
   <HSplitter height="*"
@@ -49,7 +51,7 @@
            ContextStack's pinned header (pinned-header-standard-everywhere). -->
       <ContextStack
         stack="{stack.value}"
-        onSelect="(b) => { selectedBlock = b; selectedPath = null; selectedDisplay = null; }" />
+        onSelect="(b) => { selectedSession = stack.value.session; selectedBlock = b; selectedPath = null; selectedDisplay = null; }" />
     </VStack>
 
     <VStack when="{selectedPath || selectedBlock}" padding="$space-4" gap="$space-2" overflowY="auto">
@@ -62,7 +64,7 @@
            Markdown file renders as Markdown, as the Runs under files do. -->
       <VStack when="{!!selectedBlock &amp;&amp; !selectedPath}" gap="$space-2">
         <Text value="{window.__bramStackRowLabel(selectedBlock)}" fontWeight="$fontWeight-bold" />
-        <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{window.__bramStackBlockHeader(selectedBlock)}" />
+        <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{window.__bramStackBlockHeader(selectedBlock, selectedSession.split(':')[0])}" />
         <Text when="{selectedBlock.onDisk}" value="{selectedBlock.onDisk}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" />
         <Markdown
           when="{selectedBlock.onDisk &amp;&amp; selectedBlock.onDisk.endsWith('.md')}"

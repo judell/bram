@@ -1660,6 +1660,18 @@ no compaction: the harness clears, too. The single largest tool result was
 
 **Adding a provider.** `reader_for` maps the session's provider label to a
 `Reader`; a provider without one answers `supported: false` and the pane
-says so in the provider's name. A Codex reader is a walk over the rollout's
-records into `Block`s plus `parse_codex_text` for the measured side; the
-scaling and the by-kind totals are shared.
+says so in the provider's name.
+
+**Codex rollouts.** The Context tab identifies the rollout by session ID.
+It shows the text of `session_meta.payload.base_instructions`, message
+content parts from `response_item`, tool arguments or custom tool input,
+and text from tool outputs. Event messages can duplicate this content and
+are skipped. Compaction replaces earlier conversation blocks with the
+recorded replacement history, or the summary text when available.
+Detail requests carry the session ID and the block’s rollout line and part.
+
+Codex usage records supply the last reported context size. Individual
+block weights use four text bytes per estimated token. Rollouts can omit
+request instructions and tool definitions, and can include messages written
+after the last measured call. Image data, encrypted reasoning and incomplete
+JSON lines do not contribute to the displayed text.

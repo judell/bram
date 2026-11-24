@@ -19,15 +19,17 @@
      https://www.xmlui.org/docs/howto/pass-a-template-slot-to-a-component -->
 <Component name="ContextStack" var.sort="order" var.kind="all" var.selectedI="{null}" var.picked="{null}">
   <ChangeListener listenTo="{picked}" onDidChange="emitEvent('select', picked)" />
+  <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.session}" onDidChange="selectedI = null; kind = 'all'" />
   <ModalDialog id="contextInfoDialog" title="About Context">
     <VStack gap="$space-3">
-      <Text value="{window.__bramStackIntro()}" />
-      <Text value="Sizes are the bytes each block takes in the session file, scaled by a bytes-per-token figure measured on this session so they total the context the last call reported. The remainder no block accounts for is shown as such." />
+      <Text value="{($props.stack &amp;&amp; $props.stack.provider) === 'codex' ? 'The rollout records message text, base instructions, tool inputs and tool results. It can omit parts of the model request.' : window.__bramStackIntro()}" />
+      <Text when="{($props.stack &amp;&amp; $props.stack.provider) === 'codex'}" value="Block weights estimate one token per four text bytes. The last call’s token count comes from Codex usage records." />
+      <Text when="{($props.stack &amp;&amp; $props.stack.provider) !== 'codex'}" value="Sizes are the bytes each block takes in the session file, scaled by a bytes-per-token figure measured on this session so they total the context the last call reported. The remainder no block accounts for is shown as such." />
       <!-- One line per kind, the way the tables say what their columns
            mean (table-headers-explained). -->
       <VStack gap="$space-1">
         <Text fontWeight="$fontWeight-bold" value="What the kinds are" />
-        <Items data="{window.__bramStackKindGlossary()}">
+        <Items data="{window.__bramStackKindGlossary($props.stack &amp;&amp; $props.stack.provider)}">
           <HStack gap="$space-2" verticalAlignment="start">
             <Stack width="10px" height="10px" backgroundColor="{$item.color}" marginTop="$space-1" />
             <Text fontSize="$fontSize-sm" width="*" value="{$item.line}" />
@@ -49,7 +51,7 @@
         color="$textColor-secondary"
         value="{window.__bramStackUnsupportedLine($props.stack)}" />
       <VStack when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}" gap="$space-2">
-      <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackIntro()}" />
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{$props.stack.provider === 'codex' ? 'Captured rollout text · ' + $props.stack.session : window.__bramStackIntro()}" />
       <!-- One thin stacked bar, a series per kind in the stack's colours; the
            legend is the chip row below, which wraps to the pane's width and
            doubles as the kind filter (ECharts' own legend wrapped over the

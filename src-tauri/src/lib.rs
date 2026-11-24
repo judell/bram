@@ -46949,24 +46949,35 @@ fn latest_claude_session_path<R: tauri::Runtime>(
     Ok(Some(chosen))
 }
 
-fn latest_codex_session_path<R: tauri::Runtime>(
+fn cached_codex_session_path_for_id<R: tauri::Runtime>(
     app: &AppHandle<R>,
-) -> Result<Option<std::path::PathBuf>, String> {
+    id: &str,
+) -> Option<PathBuf> {
     // This runs on every poll, and finding a rollout by id walks the sessions
     // tree, so the id's path is kept until the id changes.
     static NAMED_PATH: OnceLock<Mutex<Option<(String, PathBuf)>>> = OnceLock::new();
+    let cell = NAMED_PATH.get_or_init(|| Mutex::new(None));
+    let known = cell
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|(known, path)| known == id && path.exists())
+        .map(|(_, path)| path);
+    if let Some(path) = known {
+        return Some(path);
+    }
+    let path = codex_session_path_for_id(app, id)?;
+    if let Ok(mut g) = cell.lock() {
+        *g = Some((id.to_string(), path.clone()));
+    }
+    Some(path)
+}
+
+fn latest_codex_session_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<std::path::PathBuf>, String> {
     if let Some(id) = named_session(SessionProvider::Codex) {
-        let cell = NAMED_PATH.get_or_init(|| Mutex::new(None));
-        let known = cell
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .filter(|(known, path)| *known == id && path.exists())
-            .map(|(_, path)| path);
-        if let Some(path) = known.or_else(|| codex_session_path_for_id(app, &id)) {
-            if let Ok(mut g) = cell.lock() {
-                *g = Some((id, path.clone()));
-            }
+        if let Some(path) = cached_codex_session_path_for_id(app, &id) {
             return Ok(Some(path));
         }
     }
@@ -64789,6 +64800,7 @@ fn context_stack_response<R: tauri::Runtime>(
     id: &str,
     provider: Option<SessionProvider>,
     block: Option<usize>,
+    record_key: Option<&str>,
 ) -> Result<(u16, &'static str, Vec<u8>), String> {
     const JSON: &str = "application/json; charset=utf-8";
     const TEXT: &str = "text/plain; charset=utf-8";
@@ -64798,7 +64810,11 @@ fn context_stack_response<R: tauri::Runtime>(
             .map_err(|e| e.to_string())
     };
     let path_opt = if id.is_empty() {
-        match provider {
+        match provider.or_else(|| current_provider(app)) {
+            Some(SessionProvider::Codex) => match named_session(SessionProvider::Codex) {
+                Some(id) => cached_codex_session_path_for_id(app, &id),
+                None => latest_codex_session_path(app)?,
+            },
             Some(p) => latest_session_path_for_provider(app, p)?,
             None => active_session_path(app)?,
         }
@@ -64806,8 +64822,12 @@ fn context_stack_response<R: tauri::Runtime>(
         if !session_id_is_safe(id) {
             return Err("invalid session id".to_string());
         }
-        let (_, sessions) = sessions_for_provider(app, provider, None)?;
-        sessions.into_iter().find(|s| s.id == id).map(|s| s.path)
+        if provider == Some(SessionProvider::Codex) {
+            cached_codex_session_path_for_id(app, id)
+        } else {
+            let (_, sessions) = sessions_for_provider(app, provider, None)?;
+            sessions.into_iter().find(|s| s.id == id).map(|s| s.path)
+        }
     };
     let Some(path) = path_opt else {
         let label = provider
@@ -64831,7 +64851,16 @@ fn context_stack_response<R: tauri::Runtime>(
             None => json(&context_stack::empty(label, false)),
         };
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) if label == "codex" => {
+            return match block {
+                Some(_) => Ok((404, TEXT, b"rollout unavailable".to_vec())),
+                None => json(&context_stack::empty(label, true)),
+            }
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     let sid = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -64839,7 +64868,11 @@ fn context_stack_response<R: tauri::Runtime>(
     let root = project_root(Some(app));
     let stack = context_stack::build(label, &text, &sid, root.as_deref());
     match block {
-        Some(i) => match stack.blocks.get(i) {
+        Some(i) => match stack
+            .blocks
+            .get(i)
+            .filter(|b| record_key.is_none() || record_key == b.record_key.as_deref())
+        {
             // JSON like /__context/file, so the pane's DataSource reads
             // `.text` the way it reads `.content` there.
             Some(b) => serde_json::to_vec(&serde_json::json!({
@@ -93881,6 +93914,7 @@ fn route_request<R: tauri::Runtime>(
         let mut provider: Option<SessionProvider> = None;
         let mut session_id = String::new();
         let mut block: Option<usize> = None;
+        let mut record_key = None;
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("provider=") {
                 provider = SessionProvider::from_str(&percent_decode(v));
@@ -93888,12 +93922,14 @@ fn route_request<R: tauri::Runtime>(
                 session_id = percent_decode(v);
             } else if let Some(v) = pair.strip_prefix("i=") {
                 block = percent_decode(v).parse::<usize>().ok();
+            } else if let Some(v) = pair.strip_prefix("key=") {
+                record_key = (!v.is_empty()).then_some(v);
             }
         }
         if path == "__context-stack/block" && block.is_none() {
             return (400, "text/plain; charset=utf-8", b"i required".to_vec());
         }
-        return match context_stack_response(app, &session_id, provider, block) {
+        return match context_stack_response(app, &session_id, provider, block, record_key) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[http /__context-stack] {}", e);

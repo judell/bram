@@ -95,6 +95,9 @@ const KIND_ORDER: [BlockKind; 10] = [
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Block {
+    /// Coordinate in the append-only rollout, retained across stack rebuilds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_key: Option<String>,
     /// Position in the live stack (the blocks the model is sent now).
     pub i: usize,
     pub kind: BlockKind,
@@ -246,13 +249,14 @@ pub fn empty(provider: &'static str, supported: bool) -> Stack {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reader {
     ClaudeJsonl,
+    CodexRollout,
 }
 
 /// The provider labels are the ones `/__turns` and the sessions routes use.
 pub fn reader_for(provider: &str) -> Option<Reader> {
     match provider {
         "claude" => Some(Reader::ClaudeJsonl),
-        // "codex", "opencode", "antigravity": no reader yet.
+        "codex" => Some(Reader::CodexRollout),
         _ => None,
     }
 }
@@ -276,8 +280,132 @@ pub fn build(provider: &'static str, text: &str, session_id: &str, root: Option<
                 ),
             }
         }
+        Some(Reader::CodexRollout) => codex_stack(text, session_id),
         None => empty(provider, false),
     }
+}
+
+fn codex_item(item: &Value, mut emit: impl FnMut(BlockKind, &str, &str)) {
+    match item["type"].as_str() {
+        Some("message") => {
+            let (kind, role) = match item["role"].as_str() {
+                Some("developer") => (BlockKind::Instructions, "Developer"),
+                Some("system") => (BlockKind::Harness, "System"),
+                Some("user") => (BlockKind::User, "User"),
+                Some("assistant") => (BlockKind::Agent, "Assistant"),
+                _ => return,
+            };
+            for part in item["content"].as_array().into_iter().flatten() {
+                if let Some(text) = part["text"].as_str() {
+                    emit(kind, &format!("{role} · {}", first_line(text)), text);
+                }
+            }
+        }
+        Some("function_call" | "custom_tool_call") => {
+            if let Some(input) = item["arguments"]
+                .as_str()
+                .or_else(|| item["input"].as_str())
+            {
+                emit(
+                    BlockKind::ToolCall,
+                    item["name"].as_str().unwrap_or("Tool call"),
+                    input,
+                );
+            }
+        }
+        Some("function_call_output" | "custom_tool_call_output") => {
+            let output = &item["output"];
+            let label = item["call_id"].as_str().unwrap_or("Tool result");
+            if let Some(text) = output.as_str() {
+                emit(BlockKind::ToolResult, label, text);
+            } else if let Some(parts) = output.as_array() {
+                for part in parts {
+                    if let Some(text) = part["text"].as_str() {
+                        emit(BlockKind::ToolResult, label, text);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn codex_stack(text: &str, fallback_id: &str) -> Stack {
+    let usage = crate::token_accounting::parse_codex_text(text, fallback_id);
+    let mut stack = empty("codex", true);
+    stack.session = format!(
+        "codex:{}",
+        usage.agent_id.as_ref().unwrap_or(&usage.session_id)
+    );
+    stack.reader = Strategy::Records;
+    stack.model = usage
+        .calls
+        .last()
+        .map(|c| c.model.clone())
+        .unwrap_or_default();
+    stack.measured.tokens = usage.calls.last().map_or(0, |c| c.context);
+    stack.measured.floor = usage.calls.first().map_or(0, |c| c.context);
+    stack.measured.calls = usage.calls.len();
+    let mut base_len = 0;
+    let mut turn = 0;
+    for (line, raw) in text.lines().enumerate() {
+        let Ok(rec) = serde_json::from_str::<Value>(raw) else {
+            continue;
+        };
+        let p = &rec["payload"];
+        let kind = rec["type"].as_str();
+        if kind == Some("compacted") {
+            stack.measured.compactions += 1;
+            for old in stack.blocks.drain(base_len..) {
+                stack.compacted.blocks += 1;
+                stack.compacted.bytes += old.bytes;
+            }
+        }
+        let is_first_block = stack.blocks.is_empty();
+        let mut part = 0;
+        let mut push = |kind, label: &str, body: &str| {
+            let mut b = new_block(
+                kind,
+                label.to_string(),
+                body.to_string(),
+                rec["timestamp"].as_str().map(str::to_owned),
+                turn,
+                0,
+            );
+            b.record_key = Some(format!("{line}.{part}"));
+            part += 1;
+            stack.blocks.push(b);
+        };
+        match kind {
+            Some("session_meta") if is_first_block => {
+                if let Some(body) = p.pointer("/base_instructions/text").and_then(Value::as_str) {
+                    push(BlockKind::Harness, "Base instructions", body);
+                    base_len = stack.blocks.len();
+                }
+            }
+            Some("turn_context") => turn += 1,
+            Some("response_item") => codex_item(p, push),
+            Some("compacted") => {
+                if let Some(items) = p["replacement_history"].as_array() {
+                    for item in items {
+                        codex_item(item, &mut push);
+                    }
+                } else if let Some(summary) = p["message"].as_str() {
+                    push(BlockKind::CompactionSummary, "Compaction summary", summary);
+                }
+            }
+            _ => {}
+        }
+    }
+    let latest = stack.measured.tokens;
+    (stack.accounted_tokens, stack.by_kind) = scale(
+        &mut stack.blocks,
+        FALLBACK_BYTES_PER_TOKEN,
+        FALLBACK_BYTES_PER_TOKEN,
+        latest,
+    );
+    stack.unaccounted_tokens = latest as i64 - stack.accounted_tokens as i64;
+    stack
 }
 
 /// The measured side for Claude, from the accounting's parser so the figures
@@ -390,6 +518,7 @@ fn new_block(
     call: usize,
 ) -> Block {
     Block {
+        record_key: None,
         i: 0,
         kind,
         label,

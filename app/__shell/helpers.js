@@ -24891,7 +24891,16 @@ window.__bramStackKindLabel = function (kind) {
 // One sentence per kind, for the chips' tooltips, the block header and the
 // About dialog (Jon, 2026-11-24: "don't understand. what are thinking
 // tokens?").
-window.__bramStackKindExplain = function (kind) {
+window.__bramStackKindExplain = function (kind, provider) {
+  if (provider !== "claude") {
+    if (kind === "harness") return provider === "codex"
+      ? "Base instructions and system messages captured in the Codex rollout."
+      : "System instructions recorded for this session.";
+    if (kind === "instructions") return provider === "codex"
+      ? "Developer messages captured in the Codex rollout."
+      : "Instructions recorded for this session.";
+    if (kind === "thinking") return "Reasoning recorded for this session.";
+  }
   var text = {
     harness: "The system prompt Claude Code sends first on every call, and the definitions of the tools the agent may call.",
     instructions: "CLAUDE.md and the files it imports, sent on every call.",
@@ -24907,17 +24916,21 @@ window.__bramStackKindExplain = function (kind) {
   };
   return text[kind] || "";
 };
-window.__bramStackKindGlossary = function () {
+window.__bramStackKindGlossary = function (provider) {
   return ["harness", "instructions", "memory", "user", "agent", "tool-call", "tool-result", "attachment", "thinking", "compaction-summary"]
     .map(function (k) {
-      var title = window.__bramStackKindTitle(k);
-      var explain = window.__bramStackKindExplain(k);
+      var title = window.__bramStackKindTitle(k, provider);
+      var explain = window.__bramStackKindExplain(k, provider);
       return { kind: k, title: title, explain: explain, line: title + ": " + explain, color: window.__bramStackKindColor(k) };
     });
 };
-window.__bramStackKindTitle = function (kind) {
+window.__bramStackKindTitle = function (kind, provider) {
+  if (kind === "harness") {
+    var owner = provider ? window.__bramTokenProviderName(provider) : "The agent";
+    return owner + (provider === "claude" ? "'s own prompt and tools" : "'s own prompt");
+  }
   var names = {
-    harness: "Claude's own prompt and tools", instructions: "Instruction files",
+    instructions: provider === "claude" ? "Instruction files" : "Instructions",
     memory: "Memory", user: "Your messages", agent: "The agent's words",
     "tool-call": "Tool calls", "tool-result": "Tool results",
     attachment: "Notes from the harness", thinking: "Thinking",
@@ -25022,7 +25035,7 @@ window.__bramStackSegments = function (stack) {
   var parts = byKind.filter(function (k) { return k.tokens > 0; }).slice()
     .sort(function (a, b) { return b.tokens - a.tokens; })
     .map(function (k) {
-      return { kind: k.kind, color: window.__bramStackKindColor(k.kind), tokens: k.tokens, drawn: Math.max(k.tokens, floor), title: window.__bramStackKindTitle(k.kind) };
+      return { kind: k.kind, color: window.__bramStackKindColor(k.kind), tokens: k.tokens, drawn: Math.max(k.tokens, floor), title: window.__bramStackKindTitle(k.kind, stack.provider) };
     });
   var u = stack && stack.unaccountedTokens;
   if (typeof u === "number" && u >= 1000) {
@@ -25035,7 +25048,7 @@ window.__bramStackSegments = function (stack) {
       kind: p.kind,
       color: p.color,
       width: (Math.round((p.drawn / drawn) * 10000) / 100) + "%",
-      tip: p.title + ": " + window.__bramStackTokens(p.tokens) + " tokens (" + share + "%). " + window.__bramStackKindExplain(p.kind === "all" ? "unaccounted" : p.kind)
+      tip: p.title + ": " + window.__bramStackTokens(p.tokens) + " tokens (" + share + "%). " + window.__bramStackKindExplain(p.kind === "all" ? "unaccounted" : p.kind, stack.provider)
     };
   });
 };
@@ -25055,10 +25068,10 @@ window.__bramStackLegend = function (stack, kind) {
     var pct = total ? Math.round((k.tokens / total) * 100) : 0;
     out.push({
       kind: k.kind,
-      label: window.__bramStackKindTitle(k.kind) + " " + (pct >= 1 ? pct + "%" : "<1%"),
+      label: window.__bramStackKindTitle(k.kind, stack.provider) + " " + (pct >= 1 ? pct + "%" : "<1%"),
       color: window.__bramStackKindColor(k.kind),
       active: kind === k.kind,
-      tip: window.__bramStackKindExplain(k.kind) + " " + k.blocks + (k.blocks === 1 ? " block, " : " blocks, ") + window.__bramStackTokens(k.tokens) + " tokens. Click to show only these."
+      tip: window.__bramStackKindExplain(k.kind, stack.provider) + " " + k.blocks + (k.blocks === 1 ? " block, " : " blocks, ") + window.__bramStackTokens(k.tokens) + " tokens. Click to show only these."
     });
   });
   return out;
@@ -25077,9 +25090,9 @@ window.__bramStackRows = function (stack, sort, kind) {
   }
   return rows;
 };
-window.__bramStackBlockHeader = function (block) {
+window.__bramStackBlockHeader = function (block, provider) {
   if (!block) return "";
-  var parts = [window.__bramStackKindTitle(block.kind), window.__bramStackBytes(block.bytes)];
+  var parts = [window.__bramStackKindTitle(block.kind, provider), window.__bramStackBytes(block.bytes)];
   if (block.resent === false) parts.push("not re-sent on later calls");
   else {
     parts.push(window.__bramStackTokens(block.tokens) + " tokens");
@@ -25087,7 +25100,7 @@ window.__bramStackBlockHeader = function (block) {
   }
   if (block.turn) parts.push("turn " + block.turn);
   var line = parts.join(" · ");
-  var why = window.__bramStackKindExplain(block.kind);
+  var why = window.__bramStackKindExplain(block.kind, provider);
   return why ? line + "\n" + why : line;
 };
 window.__bramStackBlockBody = function (block, payload) {

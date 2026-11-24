@@ -3,7 +3,8 @@
   var.view="{window.__bramFilesView()}"
   var.query="{view.query}"
   var.submitted="{view.query}"
-  var.openIds="{view.expanded}">
+  var.openIds="{view.expanded}"
+  var.readsOn="{view.readsOn}">
 
   <!-- more-files-tree-view: a navigable, searchable view of this repo.
        Patterns from ~/tau-extractor-sandbox/Main.xmlui (catalog browser):
@@ -28,6 +29,39 @@
   <ChangeListener
     listenTo="{gitStatusEvt.value &amp;&amp; gitStatusEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, repoTree)" />
+
+  <!-- files-tab-read-in-this-session: the current session's reads, from
+       /__session-reads (the read ledger scoped to one session, uncapped).
+       The session is the footer's notion of "current" (the same list and
+       pick the footer's context figure uses). Reads land at turn end, which
+       is when the host emits session-context-changed, so that event drives
+       the refetch; sessions-list-changed re-reads the list when the current
+       session changes. Push, not polling.
+       https://www.xmlui.org/docs/reference/components/PushSource
+       https://www.xmlui.org/docs/reference/components/DataSource -->
+  <DataSource id="readsSessions" url="/__sessions/list" queryParams="{{ limit: 20 }}" />
+  <PushSource
+    id="readsSessionsEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
+  <ChangeListener
+    listenTo="{readsSessionsEvt.value &amp;&amp; readsSessionsEvt.value.tick}"
+    onDidChange="() => { readsSessions.refetch(); }" />
+  <variable
+    name="readsSessionKey"
+    value="{window.__bramSessionContextKey(window.__bramCurrentSessionOf(readsSessions.value))}" />
+  <DataSource
+    id="sessionReads"
+    url="/__session-reads"
+    queryParams="{{ session: readsSessionKey }}"
+    when="{!!readsSessionKey}" />
+  <PushSource
+    id="readsTurnEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('session-context-changed')}" />
+  <ChangeListener
+    listenTo="{readsTurnEvt.value &amp;&amp; readsTurnEvt.value.tick}"
+    onDidChange="() => { sessionReads.refetch(); }" />
   <ChangeListener
     listenTo="{query}"
     onDidChange="submitted = window.__bramFilesAfterQueryEdit(query, submitted)" />
@@ -68,16 +102,43 @@
       value="{window.__bramFilesCaption(window.__bramFilesSearchTree(submitted, repoTree.value, repoGrep.value))}" />
     <Text when="{!!submitted &amp;&amp; repoGrep.inProgress}" variant="caption" value="Searching…" />
 
+    <!-- files-tab-read-in-this-session: the switch expands every folder that
+         holds a file this session read; the dots show either way. Its value
+         is focus state in the same store as the query and open folders.
+         https://www.xmlui.org/docs/reference/components/Switch -->
+    <HStack when="{!submitted}" gap="$space-3" verticalAlignment="center">
+      <Switch
+        automationId="files-reads-switch"
+        label="Read in this session"
+        labelPosition="end"
+        initialValue="{readsOn}"
+        onDidChange="(v) => readsOn = window.__bramFilesReadsOn(v)" />
+      <Text variant="caption" value="{window.__bramFilesReadsCaption(sessionReads.value)}" />
+    </HStack>
+
     <!-- Browse. Mounted only once there are rows: a mounted Tree keeps the
          data it was born with (the sandbox's finding), and mounting on
          repoTree.loaded handed it [] first, then ignored the 30 rows
          (trace tree-dom found:true, text:"", 2026-10-09). -->
-    <VStack when="{!submitted &amp;&amp; window.__bramFilesTreeData(repoTree.value).length &gt; 0}" height="70vh">
+    <!-- files-tab-read-in-this-session: two browse instances under exclusive
+         `when`, the pattern this file already uses for search results,
+         because defaultExpanded is read once at mount
+         (https://www.xmlui.org/docs/reference/components/Tree#defaultexpanded)
+         and the switch changes what starts expanded: the user's open folders
+         alone, or those plus every folder holding a read file.
+
+         Whole-line click: the Tree's itemClickExpands handles a folder row
+         only if the row's own template doesn't take the click, so folder
+         rows carry no onClick (the old single HStack opened files and
+         returned early for folders, consuming the click); file rows keep
+         theirs. Both stretch to the row's width so the run past a name is
+         part of the line. -->
+    <VStack when="{!submitted &amp;&amp; !readsOn &amp;&amp; window.__bramFilesTreeData(repoTree.value, sessionReads.value).length &gt; 0}" height="70vh">
       <Tree
         id="filesTree"
         automationId="files-tree"
         height="100%"
-        data="{window.__bramFilesTreeData(repoTree.value)}"
+        data="{window.__bramFilesTreeData(repoTree.value, sessionReads.value)}"
         dataFormat="flat"
         dataRefreshMode="preserve-state"
         defaultExpanded="{openIds}"
@@ -85,13 +146,63 @@
         fixedItemSize="true"
         scrollStyle="whenMouseOver"
         spinnerDelay="{300}"
-        onLoadChildren="(node) => window.__bramFilesLoadDir(node)"
+        onLoadChildren="(node) => window.__bramFilesLoadDir(node, sessionReads.value)"
         onNodeDidExpand="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, true)"
         onNodeDidCollapse="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, false)">
         <property name="itemTemplate">
-          <HStack gap="$space-2" verticalAlignment="center" onClick="window.__bramFilesOpen($item)">
-            <Text variant="mono" fontSize="0.82rem" value="{$item.name}" />
-          </HStack>
+          <Fragment>
+            <HStack when="{$item.isDir}" width="100%" gap="$space-1" verticalAlignment="center"
+              tooltip="{window.__bramFilesReadTooltip($item, sessionReads.value)}">
+              <Text variant="mono" fontSize="0.82rem" width="0.9em" color="$textColor-secondary" value="{window.__bramFilesReadDot($item)}" />
+              <Text variant="mono" fontSize="0.82rem" value="{$item.name}" />
+            </HStack>
+            <HStack when="{!$item.isDir}" width="100%" gap="$space-1" verticalAlignment="center"
+              onClick="window.__bramFilesOpen($item)"
+              tooltip="{window.__bramFilesReadTooltip($item, sessionReads.value)}">
+              <Text variant="mono" fontSize="0.82rem" width="0.9em" color="$textColor-secondary" value="{window.__bramFilesReadDot($item)}" />
+              <Text variant="mono" fontSize="0.82rem" value="{$item.name}" />
+            </HStack>
+          </Fragment>
+        </property>
+      </Tree>
+    </VStack>
+    <!-- The switch's tree holds only the read files and their folders (Jon,
+         2026-11-23: "collapse the tree to just those files"), every folder
+         open; its lazy folders list only read children too. -->
+    <Text
+      when="{!submitted &amp;&amp; readsOn &amp;&amp; window.__bramFilesReadTreeData(repoTree.value, sessionReads.value).length === 0}"
+      variant="caption"
+      value="Nothing to show yet: the tree fills in as this session reads files." />
+    <VStack when="{!submitted &amp;&amp; readsOn &amp;&amp; window.__bramFilesReadTreeData(repoTree.value, sessionReads.value).length &gt; 0}" height="70vh">
+      <Tree
+        id="filesReadTree"
+        automationId="files-read-tree"
+        height="100%"
+        data="{window.__bramFilesReadTreeData(repoTree.value, sessionReads.value)}"
+        dataFormat="flat"
+        dataRefreshMode="preserve-state"
+        defaultExpanded="{window.__bramFilesReadExpanded(sessionReads.value, openIds)}"
+        itemClickExpands="true"
+        fixedItemSize="true"
+        scrollStyle="whenMouseOver"
+        spinnerDelay="{300}"
+        onLoadChildren="(node) => window.__bramFilesLoadDir(node, sessionReads.value, true)"
+        onNodeDidExpand="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, true)"
+        onNodeDidCollapse="(node) => openIds = window.__bramFilesExpanded(openIds, node.id, false)">
+        <property name="itemTemplate">
+          <Fragment>
+            <HStack when="{$item.isDir}" width="100%" gap="$space-1" verticalAlignment="center"
+              tooltip="{window.__bramFilesReadTooltip($item, sessionReads.value)}">
+              <Text variant="mono" fontSize="0.82rem" width="0.9em" color="$textColor-secondary" value="{window.__bramFilesReadDot($item)}" />
+              <Text variant="mono" fontSize="0.82rem" value="{$item.name}" />
+            </HStack>
+            <HStack when="{!$item.isDir}" width="100%" gap="$space-1" verticalAlignment="center"
+              onClick="window.__bramFilesOpen($item)"
+              tooltip="{window.__bramFilesReadTooltip($item, sessionReads.value)}">
+              <Text variant="mono" fontSize="0.82rem" width="0.9em" color="$textColor-secondary" value="{window.__bramFilesReadDot($item)}" />
+              <Text variant="mono" fontSize="0.82rem" value="{$item.name}" />
+            </HStack>
+          </Fragment>
         </property>
       </Tree>
     </VStack>
@@ -110,13 +221,18 @@
         fixedItemSize="true"
         scrollStyle="whenMouseOver">
         <property name="itemTemplate">
-          <HStack gap="$space-2" verticalAlignment="center" onClick="window.__bramFilesOpen($item)">
-            <Text
-              variant="mono"
-              fontSize="0.82rem"
-              highlightText="{$item.hit ? submitted : ''}"
-              value="{$item.name}" />
-          </HStack>
+          <Fragment>
+            <HStack when="{$item.isDir}" width="100%" gap="$space-2" verticalAlignment="center">
+              <Text variant="mono" fontSize="0.82rem" value="{$item.name}" />
+            </HStack>
+            <HStack when="{!$item.isDir}" width="100%" gap="$space-2" verticalAlignment="center" onClick="window.__bramFilesOpen($item)">
+              <Text
+                variant="mono"
+                fontSize="0.82rem"
+                highlightText="{$item.hit ? submitted : ''}"
+                value="{$item.name}" />
+            </HStack>
+          </Fragment>
         </property>
       </Tree>
     </VStack>

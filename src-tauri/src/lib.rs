@@ -96119,6 +96119,23 @@ fn route_request<R: tauri::Runtime>(
         );
     }
 
+    // /__session-reads?session=<provider>:<id> — the project files one agent
+    // session read, uncapped, for the Files tab's "read in this session" mark.
+    if path == "__session-reads" {
+        if token_accounting::session_reads_param(query).is_none() {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                br#"{"error":"session=<provider>:<id> required"}"#.to_vec(),
+            );
+        }
+        return (
+            200,
+            "application/json; charset=utf-8",
+            token_accounting::session_reads_route(app, query),
+        );
+    }
+
     // /__story/lines?since=<ISO> — issue-473-readable-launch-log: the lines
     // the Status tab's Log narrator (helpers.js) tells episodes from. The host
     // only selects; the pane does the telling, so wording changes are a pane

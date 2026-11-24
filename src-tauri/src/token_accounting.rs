@@ -5671,6 +5671,139 @@ pub fn route<R: tauri::Runtime>(app: &tauri::AppHandle<R>, query: &str) -> Vec<u
     serde_json::to_vec(&report).unwrap_or_default()
 }
 
+/// One project file one session read, aggregated over every read of it.
+#[derive(Clone, Debug, PartialEq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReadRow {
+    pub path: String,
+    pub reads: u64,
+    pub bytes: u64,
+    pub main_reads: u64,
+    pub subagent_reads: u64,
+    pub via_shell_reads: u64,
+    pub last_at_ms: i64,
+}
+
+/// The files one session read, uncapped.
+#[derive(Clone, Debug, PartialEq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReads {
+    pub session: String,
+    pub paths: Vec<SessionReadRow>,
+    pub elsewhere: u64,
+    pub compactions: u64,
+}
+
+/// `session=<provider>:<id>` from a query string, if well formed.
+pub fn session_reads_param(query: &str) -> Option<(String, String)> {
+    let s = query_param(query, "session")?;
+    let (p, i) = s.split_once(':')?;
+    if p.is_empty() || i.is_empty() {
+        return None;
+    }
+    Some((p.to_string(), i.to_string()))
+}
+
+/// The pure part of `/__session-reads`: aggregate the reads of the session's
+/// parsed files (main thread and subagents alike) by project path, most
+/// recently read first. Reads resolving outside the project count as `elsewhere`.
+fn session_reads_report(
+    files: &[Arc<ParsedFile>],
+    root: &str,
+    home: Option<&str>,
+    session: &str,
+) -> SessionReads {
+    let filter = session.split_once(':');
+    let mut rows: HashMap<String, SessionReadRow> = HashMap::new();
+    let mut elsewhere = 0u64;
+    let mut compactions = 0u64;
+    for pf in files {
+        if let Some((prov, id)) = filter {
+            if prov != pf.provider || id != pf.session_id {
+                continue;
+            }
+        }
+        compactions += pf.compactions as u64;
+        let sub = pf.thread == Some(Thread::Subagent);
+        for r in &pf.reads {
+            let (resolved, _) = resolve_read_path(&r.path, r.cwd.as_deref(), root, home);
+            let Resolved::Project(path) = resolved else {
+                elsewhere += 1;
+                continue;
+            };
+            let e = rows.entry(path.clone()).or_insert_with(|| SessionReadRow {
+                path,
+                ..Default::default()
+            });
+            e.reads += 1;
+            e.bytes += r.bytes;
+            if sub {
+                e.subagent_reads += 1;
+            } else {
+                e.main_reads += 1;
+            }
+            if r.via_shell {
+                e.via_shell_reads += 1;
+            }
+            e.last_at_ms = e.last_at_ms.max(r.at_ms);
+        }
+    }
+    let mut paths: Vec<SessionReadRow> = rows.into_values().collect();
+    paths.sort_by(|a, b| {
+        b.last_at_ms
+            .cmp(&a.last_at_ms)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    SessionReads {
+        session: session.to_string(),
+        paths,
+        elsewhere,
+        compactions,
+    }
+}
+
+/// `GET /__session-reads?session=<provider>:<id>`: the files that session read
+/// from the project, for the Files tab's "read in this session" decoration.
+/// Uncapped, unlike the Cost tab's `FILES_CAP`.
+pub fn session_reads_route<R: tauri::Runtime>(app: &tauri::AppHandle<R>, query: &str) -> Vec<u8> {
+    let Some(filter) = session_reads_param(query) else {
+        return br#"{"error":"session=<provider>:<id> required"}"#.to_vec();
+    };
+    let Some(root) = crate::project_root(Some(app)) else {
+        return br#"{"error":"could not resolve project root"}"#.to_vec();
+    };
+    let conn = crate::worklist_state_open(app);
+    let ledger_path = ledger_path_for_app(app, &root);
+    let sources = discover(&root);
+    let opencode = crate::opencode_open_db();
+    let ledger = match ledger_path.as_deref().map(Ledger::open_checked) {
+        Some(Ok(l)) => Some(l),
+        _ => None,
+    };
+    let files: Vec<Arc<ParsedFile>> = match ledger {
+        Some(mut l) => {
+            l.ingest_sources(&sources, conn.as_ref());
+            if let Some(c) = &opencode {
+                l.ingest_opencode(c, &root, None, conn.as_ref());
+            }
+            l.stamp_pending(conn.as_ref());
+            l.load(Some(&filter))
+        }
+        None => {
+            let mut files: Vec<Arc<ParsedFile>> = sources.iter().filter_map(parse_source).collect();
+            if let Some(c) = &opencode {
+                files.extend(opencode_parse(c, &root).into_iter().map(Arc::new));
+            }
+            files
+        }
+    };
+    let root_s = root.to_string_lossy().into_owned();
+    let home = crate::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let session = format!("{}:{}", filter.0, filter.1);
+    let report = session_reads_report(&files, &root_s, home.as_deref(), &session);
+    serde_json::to_vec(&report).unwrap_or_default()
+}
+
 // --- turn-end sampler -------------------------------------------------------
 
 /// What one turn-end line says.

@@ -2484,3 +2484,99 @@ fn item_calls_count_main_thread_calls_credited_to_each_item_per_model() {
     keys.sort();
     assert_eq!(keys, ["items", "max", "p25", "p50", "p75", "p90"]);
 }
+
+fn reads_file(thread: Thread, session: &str, reads: Vec<ReadEvent>) -> Arc<ParsedFile> {
+    Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: session.into(),
+        thread: Some(thread),
+        reads,
+        compactions: 0,
+        ..Default::default()
+    })
+}
+
+fn read_at(path: &str, bytes: u64, at_ms: i64, shell: bool, cwd: Option<&str>) -> ReadEvent {
+    ReadEvent {
+        path: path.into(),
+        bytes,
+        at_ms,
+        via_shell: shell,
+        cwd: cwd.map(String::from),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn session_reads_aggregates_orders_and_counts_elsewhere() {
+    let mut main = reads_file(
+        Thread::Main,
+        "s1",
+        vec![
+            read_at("/proj/a.txt", 10, 100, false, None),
+            read_at("/proj/a.txt", 5, 300, true, None),
+            read_at("/proj/b.txt", 7, 200, false, None),
+            read_at("/other/x.txt", 1, 50, false, None),
+            read_at("../outside.txt", 1, 60, false, Some("/proj")),
+        ],
+    );
+    Arc::get_mut(&mut main).unwrap().compactions = 2;
+    let sub = reads_file(
+        Thread::Subagent,
+        "s1",
+        vec![read_at("/proj/b.txt", 3, 400, false, None)],
+    );
+    let stranger = reads_file(
+        Thread::Main,
+        "s2",
+        vec![read_at("/proj/z.txt", 9, 999, false, None)],
+    );
+    let r = session_reads_report(&[main, sub, stranger], "/proj", None, "claude:s1");
+    assert_eq!(r.elsewhere, 2);
+    assert_eq!(r.compactions, 2);
+    let order: Vec<&str> = r.paths.iter().map(|p| p.path.as_str()).collect();
+    assert_eq!(order, ["b.txt", "a.txt"]);
+    let b = &r.paths[0];
+    assert_eq!((b.reads, b.main_reads, b.subagent_reads), (2, 1, 1));
+    assert_eq!(b.bytes, 10);
+    let a = &r.paths[1];
+    assert_eq!((a.reads, a.via_shell_reads, a.last_at_ms), (2, 1, 300));
+}
+
+#[test]
+fn session_reads_wire_shape() {
+    let f = reads_file(
+        Thread::Main,
+        "s1",
+        vec![read_at("/proj/a.txt", 10, 100, false, None)],
+    );
+    let r = session_reads_report(&[f], "/proj", None, "claude:s1");
+    let v = serde_json::to_value(&r).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "session": "claude:s1",
+            "paths": [{
+                "path": "a.txt", "reads": 1, "bytes": 10, "mainReads": 1,
+                "subagentReads": 0, "viaShellReads": 0, "lastAtMs": 100
+            }],
+            "elsewhere": 0,
+            "compactions": 0
+        })
+    );
+}
+
+#[test]
+fn session_reads_param_requires_provider_and_id() {
+    assert_eq!(
+        session_reads_param("session=claude%3Aabc"),
+        Some(("claude".into(), "abc".into()))
+    );
+    assert_eq!(
+        session_reads_param("session=claude:abc"),
+        Some(("claude".into(), "abc".into()))
+    );
+    assert_eq!(session_reads_param("session=abc"), None);
+    assert_eq!(session_reads_param("session=claude:"), None);
+    assert_eq!(session_reads_param(""), None);
+}

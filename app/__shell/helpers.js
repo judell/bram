@@ -22907,22 +22907,74 @@ window.__bramInstallCodeBlockTools();
     } catch (e) {}
     if (lastView && raw === lastViewRaw) return lastView;
     lastViewRaw = raw;
-    var v = { query: "", expanded: [] };
+    var v = { query: "", expanded: [], readsOn: false };
     try {
       if (raw) {
         var p = JSON.parse(raw);
         v.query = String((p && p.query) || "");
         v.expanded = Array.isArray(p && p.expanded) ? p.expanded : [];
+        v.readsOn = !!(p && p.readsOn);
       }
     } catch (e) {}
     lastView = v;
     return v;
   };
-  var save = function (query, expanded) {
+  // readsOn is the "Read in this session" switch (files-tab-read-in-this-
+  // session); callers that don't know it keep the stored value.
+  var save = function (query, expanded, readsOn) {
     try {
       var k = viewKey();
-      if (k) window.sessionStorage.setItem(k, JSON.stringify({ query: query || "", expanded: expanded || [] }));
+      if (readsOn === undefined) readsOn = window.__bramFilesView().readsOn;
+      if (k) window.sessionStorage.setItem(k, JSON.stringify({ query: query || "", expanded: expanded || [], readsOn: !!readsOn }));
     } catch (e) {}
+  };
+  window.__bramFilesReadsOn = function (on) {
+    var v = window.__bramFilesView();
+    save(v.query, v.expanded, !!on);
+    try { window.__bramIframeTrace("files", { op: "reads-switch", on: !!on }); } catch (e) {}
+    return !!on;
+  };
+
+  // files-tab-read-in-this-session: the current session's reads from
+  // /__session-reads, as a lookup. `byPath` keys a file's row; `dirs` holds
+  // every ancestor folder of a read file (ids are repo-relative paths, the
+  // same spelling the tree rows use). Memoized on content, like the rows.
+  var readsKeyOf = function (payload) {
+    var rows = payload && Array.isArray(payload.paths) ? payload.paths : [];
+    return rows.length + "\u0000" + rows.map(function (r) { return r.path + ":" + r.reads; }).join("\u0001");
+  };
+  var lastReadsKey = null, lastReads = { byPath: {}, dirs: {}, key: "0", count: 0, compactions: 0 };
+  var readsOf = function (payload) {
+    payload = asPayload(payload);
+    var key = readsKeyOf(payload);
+    if (key === lastReadsKey) return lastReads;
+    lastReadsKey = key;
+    var rows = payload && Array.isArray(payload.paths) ? payload.paths : [];
+    var byPath = {}, dirs = {};
+    rows.forEach(function (r) {
+      if (!r || typeof r.path !== "string") return;
+      byPath[r.path] = r;
+      var parts = r.path.split("/");
+      for (var i = 1; i < parts.length; i++) dirs[parts.slice(0, i).join("/")] = true;
+    });
+    lastReads = {
+      byPath: byPath, dirs: dirs, key: key, count: rows.length,
+      compactions: (payload && typeof payload.compactions === "number") ? payload.compactions : 0,
+      elsewhere: (payload && typeof payload.elsewhere === "number") ? payload.elsewhere : 0,
+    };
+    return lastReads;
+  };
+  var decorate = function (r, reads) {
+    var out = Object.assign({}, r, { icon: r.isDir ? "folder" : "doc-outline", file: r.file || r.id });
+    var id = String(r.id || "");
+    if (r.isDir) {
+      out.hasRead = !!reads.dirs[id];
+      out.read = null;
+    } else {
+      out.read = reads.byPath[id] || null;
+      out.hasRead = !!out.read;
+    }
+    return out;
   };
 
   // `file` carries the repo path: inside the Tree's itemTemplate `$item.path`
@@ -22948,8 +23000,12 @@ window.__bramInstallCodeBlockTools();
     if (typeof payload !== "string") return payload;
     try { return JSON.parse(payload); } catch (e) { return null; }
   };
-  window.__bramFilesTreeData = function (payload) {
+  // `readsPayload` is /__session-reads for the current session (or null):
+  // rows carry `read` (the file's read row) and `hasRead` (a file read, or a
+  // folder holding one), so the Tree's template can mark them.
+  window.__bramFilesTreeData = function (payload, readsPayload) {
     payload = asPayload(payload);
+    var reads = readsOf(readsPayload);
     var rows = payload && Array.isArray(payload.rows) ? payload.rows : null;
     if (!rows) {
       if (payload && !lastOddLogged) {
@@ -22965,13 +23021,13 @@ window.__bramInstallCodeBlockTools();
       }
       return lastRowsOut;
     }
-    var key = rowsKey(rows);
+    var key = rowsKey(rows) + "\u0002" + reads.key;
     if (key === lastRowsKey) return lastRowsOut;
     lastRowsKey = key;
-    lastRowsOut = rows.map(withIcon);
+    lastRowsOut = rows.map(function (r) { return decorate(r, reads); });
     try {
       var handed = lastRowsOut.length;
-      window.__bramIframeTrace("files", { op: "tree-data", rows: handed });
+      window.__bramIframeTrace("files", { op: "tree-data", rows: handed, read: reads.count });
     } catch (e) {}
     return lastRowsOut;
   };
@@ -22981,16 +23037,20 @@ window.__bramInstallCodeBlockTools();
   // takes a Promise of child rows:
   // https://www.xmlui.org/docs/howto/lazy-load-tree-children-on-expand).
   // A failed fetch resolves to [] so the node stops spinning.
-  window.__bramFilesLoadDir = function (node) {
+  // `onlyRead` is the "Read in this session" Tree: its lazy folders list
+  // only the read files and the folders holding one.
+  window.__bramFilesLoadDir = function (node, readsPayload, onlyRead) {
     var dir = String((node && node.id) || "");
     var started = Date.now();
+    var reads = readsOf(readsPayload);
     return window.fetch("/__repo/tree/dir?path=" + encodeURIComponent(dir), { cache: "no-store" })
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
       })
       .then(function (body) {
-        var rows = ((body && body.rows) || []).map(withIcon);
+        var rows = ((body && body.rows) || []).map(function (r) { return decorate(r, reads); });
+        if (onlyRead) rows = rows.filter(function (r) { return !!r.hasRead; });
         try {
           window.__bramIframeTrace("files", { op: "load-dir", path: dir, rows: rows.length, ms: Date.now() - started });
         } catch (e) {}
@@ -23011,6 +23071,89 @@ window.__bramInstallCodeBlockTools();
       : ids.filter(function (x) { return x !== id && x.indexOf(id + "/") !== 0; });
     save(window.__bramFilesView().query, next);
     return next;
+  };
+
+  // files-tab-read-in-this-session: the "Read in this session" Tree's rows,
+  // only the files this session read and the folders that hold them (Jon,
+  // 2026-11-23: "collapse the tree to just those files"). Same memo
+  // discipline as __bramFilesTreeData: one array per content.
+  var lastReadRowsKey = null, lastReadRowsOut = [];
+  window.__bramFilesReadTreeData = function (payload, readsPayload) {
+    var all = window.__bramFilesTreeData(payload, readsPayload);
+    var reads = readsOf(readsPayload);
+    var key = lastRowsKey + "\u0002" + reads.key;
+    if (key === lastReadRowsKey) return lastReadRowsOut;
+    lastReadRowsKey = key;
+    lastReadRowsOut = all.filter(function (r) { return !!r.hasRead; });
+    try {
+      window.__bramIframeTrace("files", { op: "read-tree-data", rows: lastReadRowsOut.length, read: reads.count });
+    } catch (e) {}
+    return lastReadRowsOut;
+  };
+  // What that Tree starts expanded to: the user's open folders plus every
+  // folder holding a read file. Memoized on content so the Tree sees one
+  // array per state.
+  var lastReadExpKey = null, lastReadExp = [];
+  window.__bramFilesReadExpanded = function (readsPayload, openIds) {
+    var reads = readsOf(readsPayload);
+    var ids = Array.isArray(openIds) ? openIds : [];
+    var key = reads.key + "\u0002" + ids.join("\u0001");
+    if (key === lastReadExpKey) return lastReadExp;
+    lastReadExpKey = key;
+    var seen = {};
+    var out = [];
+    ids.concat(Object.keys(reads.dirs)).forEach(function (id) {
+      if (!seen[id]) { seen[id] = true; out.push(id); }
+    });
+    lastReadExp = out;
+    return out;
+  };
+  // The row's mark: a filled dot for a file read this session, a hollow one
+  // for a folder holding such a file, a space otherwise (so names align).
+  window.__bramFilesReadDot = function (item) {
+    if (!item || !item.hasRead) return " ";
+    return item.isDir ? "○" : "●";
+  };
+  var clockOf = function (ms) {
+    if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "";
+    var d = new Date(ms);
+    var hh = String(d.getHours()), mm = String(d.getMinutes());
+    return (hh.length < 2 ? "0" + hh : hh) + ":" + (mm.length < 2 ? "0" + mm : mm);
+  };
+  var kbOf = function (bytes) {
+    if (typeof bytes !== "number" || !isFinite(bytes)) return "";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  };
+  // Hover text for a row. Reads only its arguments: the reads payload is
+  // passed in for its compaction count, so the clause about summaries can
+  // appear.
+  window.__bramFilesReadTooltip = function (item, readsPayload) {
+    if (!item || !item.hasRead) return null;
+    var compactions = readsOf(readsPayload).compactions;
+    if (item.isDir) return "holds a file read in this session";
+    var r = item.read || {};
+    var n = typeof r.reads === "number" ? r.reads : 0;
+    var parts = ["read " + n + (n === 1 ? " time" : " times") + " in this session"];
+    var kb = kbOf(r.bytes);
+    if (kb) parts.push(kb);
+    var at = clockOf(r.lastAtMs);
+    if (at) parts.push("last at " + at);
+    if (r.viaShellReads > 0) parts.push(r.viaShellReads === n ? "via shell" : r.viaShellReads + " via shell");
+    if (r.subagentReads > 0) parts.push(r.subagentReads + " by subagents");
+    var s = parts.join(" · ");
+    if (compactions > 0) s += ". The session has compacted, so earlier reads survive only as a summary.";
+    return s;
+  };
+  // The line beside the switch: how many files this session has read.
+  window.__bramFilesReadsCaption = function (readsPayload) {
+    var reads = readsOf(readsPayload);
+    if (!reads.count && !reads.elsewhere) return "No files read in this session yet.";
+    var s = reads.count + (reads.count === 1 ? " file" : " files") + " read in this session";
+    if (reads.elsewhere > 0) s += ", " + reads.elsewhere + " more outside this repo";
+    if (reads.compactions > 0) s += " · " + reads.compactions + (reads.compactions === 1 ? " compaction" : " compactions");
+    return s + ".";
   };
 
   // files-tab-lists-bram-state-in-resources: the search is literal, so

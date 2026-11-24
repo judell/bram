@@ -1,0 +1,36 @@
+Codex async question in Bram, 2026-11-24
+
+Source: .bram/bram-traces/bram-trace.log, iframe send-capture events.
+The excerpts below reproduce contiguous terminal rows from two calls to
+request_user_input_async. Timestamps are the events' UTC "at" values.
+Both events reported menuPresent=false, blockTop=-1 and meta.optionCount=0.
+
+23:00:25.717Z — wrapped question
+
+? Which part of the v0.9.0 release would you like to check
+  first?
+
+  • Test a Codex MCP approval from the Bram pane
+  • Test Files browsing and search in the Freestyle folder
+  • Review the rewritten release notes
+
+23:01:00.587Z — single-line question and end of turn
+
+? What would you like to do first?
+
+  • Test a Codex MCP approval in Bram
+  • Test the Files tab in Freestyle
+  • Review the v0.9.0 release notes
+
+• Menu sent.
+
+  Worked for 5s • 3:00 PM
+
+Both screens also showed the ordinary “› Ask Codex to do anything”
+composer below the question. The question and its choices can therefore
+remain visible in terminal history after the turn has ended.
+
+Compare ../opencode/form-question.txt. OpenCode numbers its choices,
+includes a free-text row and displays “↑↓ select  enter submit  esc dismiss”.
+The Codex excerpts show bullet choices without a highlighted row or a
+selection footer. Neither attempt captured a choice being submitted.

@@ -22451,29 +22451,22 @@ window.__bramCompactionFallbackPatch = function (settings, provider, v) {
 // session-context-pane: the footer's context figure (FooterSessionContext).
 // Pure helpers; each reads only its arguments.
 window.__bramSessionContextPick = function (pushValue, routeValue, currentSession) {
-  var route = routeValue && typeof routeValue === "object" ? routeValue : null;
-  if (pushValue && typeof pushValue === "object") {
-    var p = pushValue.payload !== undefined ? pushValue.payload : pushValue;
-    if (p && typeof p === "object") {
-      // A reading for another session is stale (replayed after a switch).
-      var other = typeof p.session === "string" && p.session && typeof currentSession === "string" && currentSession && p.session !== currentSession;
-      if (!other) {
-        if (typeof p.tokens === "number") return p;
-        // tokens: null for this session means no reading yet; a route value
-        // naming a different session is the old one's.
-        if (p.tokens === null && typeof p.session === "string" && p.session) {
-          return route && route.session === p.session ? route : null;
-        }
-      }
-    }
+  if (!currentSession) return null;
+  var push = pushValue && (pushValue.payload !== undefined ? pushValue.payload : pushValue);
+  function matches(reading) {
+    return reading && reading.session === currentSession && Number.isFinite(reading.tokens);
   }
-  // context-dialog-measured-compaction-range: the route value is a reading
-  // for a session too, and after a provider switch it is the previous
-  // provider's until re-read (trace 2026-11-24 04:35: Claude's reading stood
-  // through a Codex and an OpenCode visit, so the dialog named Claude on
-  // all three). Another session's reading is blank, not stale.
-  if (route && typeof currentSession === "string" && currentSession && typeof route.session === "string" && route.session && route.session !== currentSession) return null;
-  return route;
+  if (!matches(push)) return matches(routeValue) ? routeValue : null;
+  if (!matches(routeValue)) return push;
+
+  // Compare the underlying call, independent of when the route or replay arrived.
+  // Calls also order older payloads and calls that share a timestamp.
+  if (push.lastCallAtMs > 0 && routeValue.lastCallAtMs > 0 &&
+      push.lastCallAtMs !== routeValue.lastCallAtMs) {
+    return routeValue.lastCallAtMs > push.lastCallAtMs ? routeValue : push;
+  }
+  if (routeValue.calls !== push.calls) return routeValue.calls > push.calls ? routeValue : push;
+  return routeValue.compactions > push.compactions ? routeValue : push;
 };
 // The footer's current session as `<provider>:<id>`, the spelling pushed
 // readings carry; "" when there is none.

@@ -55060,6 +55060,7 @@ struct SessionContextBlock {
     /// empty when the host can't name the session. The pane ignores a
     /// pushed reading whose session isn't the one on its footer.
     session: String,
+    last_call_at_ms: i64,
     tokens: u64,
     floor: u64,
     peak: u64,
@@ -55139,6 +55140,7 @@ fn session_context_block<R: tauri::Runtime>(
     let suggest_tokens = resolution.tokens;
     let block = SessionContextBlock {
         session: session_context_key(app, provider_label).unwrap_or_default(),
+        last_call_at_ms: lc.last_at_ms,
         tokens: lc.tokens,
         floor: lc.floor,
         peak: lc.peak,
@@ -55221,6 +55223,7 @@ mod session_context_wire_tests {
     fn session_context_block_names_its_session_in_the_wire_shape() {
         let block = SessionContextBlock {
             session: "claude:abc-123".to_string(),
+            last_call_at_ms: 123456,
             tokens: 1,
             floor: 2,
             peak: 3,
@@ -55242,6 +55245,7 @@ mod session_context_wire_tests {
         };
         let v = serde_json::to_value(block).unwrap();
         assert_eq!(v["session"], "claude:abc-123");
+        assert_eq!(v["lastCallAtMs"], 123456);
         assert_eq!(v["pace"]["callsPerTurn"], 2.5);
         assert_eq!(v["pace"]["activeMs"], 30_000);
         let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
@@ -55253,6 +55257,7 @@ mod session_context_wire_tests {
                 "calls",
                 "compactions",
                 "floor",
+                "lastCallAtMs",
                 "model",
                 "pace",
                 "peak",

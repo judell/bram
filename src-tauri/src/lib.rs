@@ -436,12 +436,6 @@ struct UiConfig {
     show_target_app: Option<bool>,
     #[serde(default, rename = "toolsPaneHotReload")]
     tools_pane_hot_reload: Option<bool>,
-    // pane-idle-flush-when-degraded: opt-in WORKAROUND for an unexplained
-    // agent-pane slowdown (judell/bram#482 for the underlying leak). When
-    // on, the pane reloads itself once it has measurably degraded and nobody
-    // is using it. Default off.
-    #[serde(default, rename = "paneIdleFlush")]
-    pane_idle_flush: Option<bool>,
 }
 
 // suggest-fresh-session: when the agent may suggest starting a fresh session.
@@ -31999,7 +31993,7 @@ mod agent_startup_policy_tests {
                 "continueLast": true
             },
             "worklist": { "batchCommitActions": false, "enforcement": "on" },
-            "ui": { "showTargetApp": false, "toolsPaneHotReload": false, "paneIdleFlush": true },
+            "ui": { "showTargetApp": false, "toolsPaneHotReload": false },
             "sessions": {
                 "suggestOnNewItem": true,
                 "suggestOnNewIssue": true,
@@ -32228,7 +32222,6 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         batch,
         show_target_app,
         tools_pane_hot_reload,
-        pane_idle_flush,
         tracing_enabled,
         inspector_tap,
         archive_after_days,
@@ -32266,9 +32259,6 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                 ui.as_ref()
                     .and_then(|u| u.tools_pane_hot_reload)
                     .unwrap_or(false),
-                // pane-idle-flush-when-degraded: default ON — only an
-                // explicit `false` turns the workaround off.
-                ui.and_then(|u| u.pane_idle_flush).unwrap_or(true),
                 // Default ON — tracing is the observability backbone; an
                 // explicit `false` (or BRAM_TRACE=0) turns it off.
                 traces.as_ref().and_then(|t| t.enabled).unwrap_or(true),
@@ -32294,7 +32284,6 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             false,
             false,
             false,
-            true, // pane_idle_flush: default ON
             true,
             false,
             DEFAULT_TRACE_ARCHIVE_AFTER_DAYS,
@@ -32317,8 +32306,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         "worklist": { "batchCommitActions": batch, "enforcement": enforcement },
         "ui": {
             "showTargetApp": show_target_app,
-            "toolsPaneHotReload": tools_pane_hot_reload,
-            "paneIdleFlush": pane_idle_flush
+            "toolsPaneHotReload": tools_pane_hot_reload
         },
         "sessions": {
             "suggestOnNewItem": suggest_on_new_item,
@@ -99531,33 +99519,6 @@ fn handle_queue_save<R: tauri::Runtime>(
 // with a transport=fetch-fallback field, so a line arriving here is itself
 // evidence of which channel died. Same sink and redaction as the invoke
 // command (log_from_right_pane_impl).
-// pane-idle-flush-when-degraded: POST /__pane/flush. The degraded, idle pane
-// asks for a forced reload; it goes through the same deferral as every other
-// forced reload (emit_or_defer_tools_pane_reload), so a turn in flight holds
-// it until the claim clears. Refused when ui.paneIdleFlush is explicitly
-// false (a missing key reads as on). Workaround
-// route; judell/bram#482 for the underlying leak.
-fn handle_pane_flush<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
-    const JSON: &str = "application/json; charset=utf-8";
-    let enabled = project_root(Some(app))
-        .and_then(|root| load_project_config(&root))
-        .and_then(|c| c.ui)
-        .and_then(|u| u.pane_idle_flush)
-        .unwrap_or(true);
-    if !enabled {
-        return (
-            409,
-            JSON,
-            br#"{"ok":false,"error":"ui.paneIdleFlush is off"}"#.to_vec(),
-        );
-    }
-    if bram_trace_enabled() {
-        append_bram_trace_line(app, "tools-pane-reload", "op=requested source=pane-flush");
-    }
-    emit_or_defer_tools_pane_reload(app, true);
-    (200, JSON, br#"{"ok":true}"#.to_vec())
-}
-
 fn handle_trace_pane<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -113140,12 +113101,6 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_audit_direct_edit(app, &buf)
         }
-    } else if path == "__pane/flush" {
-        if method != "POST" {
-            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
-        } else {
-            handle_pane_flush(app)
-        }
     } else if path == "__doorway/stage" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
@@ -113538,14 +113493,13 @@ fn page_origin_allowed(request_origin: Option<&str>, port: Option<u16>) -> bool 
 // hold's own Move / Retry (migrate-relaunch, and Status's decision, which
 // writes the mover's answer into the old folder by its literal name), a
 // self-update (a newer Bram is a way out), the pane's trace (off under a
-// hold), its reload, and the startup-ready signal.
+// hold), and the startup-ready signal.
 const HELD_ALLOWED_PATHS: &[&str] = &[
     "__state-dir/migrate-relaunch",
     "__state-dir/decision",
     "__self-update",
     "__self-update/relaunch",
     "__trace/pane",
-    "__pane/flush",
     "__startup-ready",
 ];
 

@@ -585,6 +585,48 @@ bram --token-accounting ~/bram --calls \
   | jq '[.sessions[] | select(.thread=="main") | .items[] | select(.handoff)] | length'
 ```
 
+**The start is the approved window** (`handoff-start-is-begun`, 2026-11-24).
+An item's start in a session is its first main-thread call *inside* an
+`approved` claim window naming it. The first build took the start to be the
+first call credited to the item, and credits come from every window kind, so
+an `iterate:` turn on a proposed item read as the item starting there: one
+feedback turn in `b83a76bd` gave `handoff-recovery-instrument` a phantom row
+there whose window ran 2.5 hours to the next edit anyone made, and the
+session that then built it from the draft read `resumed`. `a42ff20c`'s
+reading ("an item resumed from an earlier session recovers four times as
+much") used that rule and is superseded by the table below. A session whose
+only windows for the item are feedback, a drop, or an approved window no
+call fell in (a Start that ran nothing, as in `b83a76bd` at 18:31Z) has no
+row; `resumed` means an earlier session has an approved-window call for the
+item. The ledger records a window's kind, not its gate, so a **Commit** on an
+item the agent pre-marked `applied` is that item's start; and with no
+readable claim ledger there are no handoff rows at all, since the kind lives
+only there. The worklist-history snapshots were considered as the anchor
+(`begunAtMs`) and rejected: the host snapshots only on a new item, a status
+change or a removal, so a bare Start stamp is never snapshotted and 72 of 225
+credited items had none.
+
+Re-read after the change (2026-11-24, 231 blocks on 219 items, 223 Claude and
+8 Codex; the credit rule gave 251 on 225, with 17 `resumed` rows against 8
+now). Edited blocks, counted from Start:
+
+| start | blocks | other reads, median (mean) | turns handed back, median (mean) | handed back none |
+|---|---|---|---|---|
+| fresh (a draft, a new session) | 28 | 2.0 (4.3) | 0 (0.5) | 23 of 28 |
+| continued (another item first) | 187 | 1.0 (6.7) | 0 (1.7) | 132 of 187 |
+| resumed (approved work in an earlier session) | 7 | 10.0 (17.9) | 2 (4.4) | 2 of 7 |
+
+The first reading's shape holds with the phantoms gone: a fresh session
+started from a draft reaches its first edit like a continued one, and the
+items begun in one session and worked in another are the lossy handoff, now
+five times the undeclared reads on seven blocks (`worklist-plain-words-pane`,
+`last-active-only-from-bram-evidence` and Codex's
+`pinned-header-standard-everywhere` read 23 to 64 files first; two of the
+seven read nothing undeclared). Compaction before the start still makes no
+difference (39 blocks, 2.0 other reads median, the same as live windows).
+Script: `read_handoff.py` from the `handoff-recovery-instrument` session, run
+on `bram --token-accounting ~/bram --calls`.
+
 **Per session, not per item** (`session-orientation-instrument`, 2026-11-24).
 The per-item block answers the resumed-item question and cannot answer the
 one Jon asked (to what extent a fresh session has less recovery to do in

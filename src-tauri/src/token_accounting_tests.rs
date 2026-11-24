@@ -3246,6 +3246,87 @@ fn handoff_blocks_sort_reads_find_the_first_edit_on_any_thread_and_tell_fresh_fr
 }
 
 #[test]
+fn handoff_start_is_the_first_call_inside_an_approved_window() {
+    let dir = ledger_dir("handoff-start");
+    let root = dir.to_string_lossy().into_owned();
+    let main = |id: &str, calls: Vec<RawCall>| {
+        Arc::new(ParsedFile {
+            provider: "claude",
+            session_id: id.into(),
+            thread: Some(Thread::Main),
+            calls,
+            ..Default::default()
+        })
+    };
+    let win_kind = |from: i64, to: i64, kind: &str, id: &str| ClaimWindow {
+        from_ms: from,
+        to_ms: to,
+        kind: kind.into(),
+        ids: vec![id.into()],
+    };
+    let report = build_report(
+        ReportInput {
+            root: &root,
+            files: vec![
+                // a: feedback only for x; an empty approved window for y.
+                main(
+                    "a",
+                    vec![raw(100, "m", 1000, 0, 1), raw(110, "m", 1000, 0, 1)],
+                ),
+                // b: approved start of x and y; z starts.
+                main(
+                    "b",
+                    vec![raw(500, "m", 1000, 0, 1), raw(520, "m", 1000, 0, 1)],
+                ),
+                // c: z resumed.
+                main("c", vec![raw(900, "m", 1000, 0, 1)]),
+                main("e", vec![raw(700, "m", 1000, 0, 1)]),
+                main("d", vec![raw(300, "m", 1000, 0, 1)]),
+            ],
+            windows: Some(vec![
+                win_kind(90, 120, "iterate", "x"),
+                win_kind(200, 250, "approved", "y"),
+                win_kind(290, 310, "approved", "z"),
+                win_kind(490, 530, "approved", "x"),
+                win_kind(690, 730, "approved", "y"),
+                win_kind(890, 950, "approved", "z"),
+            ]),
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    let sess = |id: &str| {
+        report
+            .sessions
+            .iter()
+            .find(|s| s.id == id && s.thread == Thread::Main)
+            .unwrap()
+    };
+    let handoff = |sid: &str, item: &str| {
+        sess(sid)
+            .items
+            .iter()
+            .find(|i| i.id == item)
+            .and_then(|i| i.handoff.as_ref())
+    };
+    assert!(
+        handoff("a", "x").is_none(),
+        "feedback does not start an item"
+    );
+    assert!(
+        handoff("a", "y").is_none(),
+        "an approved window with no call"
+    );
+    assert_eq!(handoff("b", "x").unwrap().start, "fresh");
+    assert_eq!(handoff("e", "y").unwrap().start, "fresh");
+    assert_eq!(handoff("b", "x").unwrap().start_ms, 500);
+    assert_eq!(handoff("d", "z").unwrap().start, "fresh");
+    assert_eq!(handoff("c", "z").unwrap().start, "resumed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_compaction_before_the_start_is_flagged() {
     let main = session(
         "s1",

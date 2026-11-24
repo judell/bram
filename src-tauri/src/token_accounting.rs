@@ -4165,6 +4165,26 @@ pub fn attribute(windows: &[ClaimWindow], at_ms: i64) -> Attribution {
     Attribution::Chat
 }
 
+/// The items whose `approved` claim windows contain `at_ms`, deduplicated.
+/// `windows` must be sorted by `from_ms`. Windows can overlap, so this does
+/// not stop at the first hit; the backward scan is bounded at 64 windows
+/// (a call is rarely inside more than a few) to stay cheap on ~1000 windows
+/// times ~50k calls.
+fn approved_items_at(windows: &[ClaimWindow], at_ms: i64) -> Vec<String> {
+    let upto = windows.partition_point(|w| w.from_ms <= at_ms);
+    let mut out: Vec<String> = Vec::new();
+    for w in windows[..upto].iter().rev().take(64) {
+        if w.kind == "approved" && at_ms <= w.to_ms {
+            for id in &w.ids {
+                if !out.contains(id) {
+                    out.push(id.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn normalize_path(path: &str, root: &str) -> String {
     let prefix = format!("{}/", root.trim_end_matches('/'));
     let p = path.strip_prefix(&prefix).unwrap_or(path);
@@ -4612,16 +4632,11 @@ pub fn build_report(
     let mut lib_events: Vec<LibEvent> = Vec::new();
 
     // handoff-recovery-instrument: what the whole record says before the
-    // per-session loop. An item's earliest credited call anywhere tells a
-    // resumed start from a fresh one; a session's writes on every thread
+    // per-session loop. An item's earliest main-thread call inside an
+    // approved claim window anywhere tells a resumed start from a fresh one
+    // (feedback `iterate` and `drop` windows do not start an item;
+    // handoff-start-is-begun); a session's writes on every thread
     // (subagents edit too) find the first edit.
-    let attribution_of = |c: &RawCall| -> Attribution {
-        match &c.attribution {
-            Some(a) => a.clone(),
-            None if input.windows.is_some() => attribute(&windows, c.at_ms),
-            None => Attribution::Chat,
-        }
-    };
     let mut item_first_ms: HashMap<String, i64> = HashMap::new();
     let mut session_writes: HashMap<(String, String), Vec<SessionWrite>> = HashMap::new();
     for pf in &input.files {
@@ -4641,11 +4656,9 @@ pub fn build_report(
             continue;
         }
         for c in pf.calls.iter().filter(|c| c.at_ms >= since) {
-            if let Attribution::Items(ids) = attribution_of(c) {
-                for id in ids {
-                    let e = item_first_ms.entry(id).or_insert(c.at_ms);
-                    *e = (*e).min(c.at_ms);
-                }
+            for id in approved_items_at(&windows, c.at_ms) {
+                let e = item_first_ms.entry(id).or_insert(c.at_ms);
+                *e = (*e).min(c.at_ms);
             }
         }
     }
@@ -4910,6 +4923,7 @@ pub fn build_report(
                     since,
                     writes,
                     &item_first_ms,
+                    &windows,
                     input.root,
                     input.home.as_deref(),
                     &mut snapshots,
@@ -5270,7 +5284,10 @@ fn is_carrier_path(path: &str) -> bool {
     path == ".bram" || path.starts_with(".bram/")
 }
 
-/// The `handoff` block of every item credited on this main thread.
+/// The `handoff` block of every item that started on this main thread: its
+/// first call inside an approved claim window naming it. A session whose only
+/// windows for an item are feedback (`iterate`), `drop`, or empty approved
+/// ones gets no row (handoff-start-is-begun).
 #[allow(clippy::too_many_arguments)]
 fn item_handoffs(
     calls: &[&RawCall],
@@ -5279,6 +5296,7 @@ fn item_handoffs(
     since: i64,
     writes: &[SessionWrite],
     item_first_ms: &HashMap<String, i64>,
+    windows: &[ClaimWindow],
     root: &str,
     home: Option<&str>,
     snapshots: &mut Snapshots,
@@ -5293,16 +5311,15 @@ fn item_handoffs(
         .filter(|w| w[0].context > 100_000 && w[1].context < w[0].context / 2)
         .map(|w| w[1].at_ms)
         .collect();
-    // Each item's start: the call that first credited it, and what came before.
+    // Each item's start: its first call inside an approved window, and what
+    // came before.
     let mut seen: Vec<String> = Vec::new();
     let mut starts: Vec<(String, usize)> = Vec::new();
-    for (i, a) in attrs.iter().enumerate() {
-        if let Attribution::Items(ids) = a {
-            for id in ids {
-                if !seen.contains(id) {
-                    starts.push((id.clone(), i));
-                    seen.push(id.clone());
-                }
+    for (i, c) in calls.iter().enumerate() {
+        for id in approved_items_at(windows, c.at_ms) {
+            if !seen.contains(&id) {
+                starts.push((id.clone(), i));
+                seen.push(id);
             }
         }
     }

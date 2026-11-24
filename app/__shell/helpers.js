@@ -19293,7 +19293,12 @@ window.__bramStorySessionLine = function (contextBlock, rates, turnsPayload, top
     // call at the midpoint rather than at today's size; it is an estimate.
     var mid = typeof ctx.floor === "number" ? (ctx.floor + ctx.tokens) / 2 : ctx.tokens;
     var cost = ctx.calls * mid * row.cacheRead / 1e6;
-    s += ", about $" + cost.toFixed(2) + " at list prices for " + ctx.model;
+    // cost-headline-cents-and-boundary-column: this is the cached reading
+    // only (the context block carries no write or output totals), so say so
+    // rather than let it stand beside the Cost tab's full bill as if it were
+    // the same figure.
+    s += ", about " + window.__bramTokenUsd(cost) + " of cached reading at list prices for " + ctx.model +
+      " (the Cost tab has the full bill)";
   }
   return { id: "session-so-far", kind: "prompt", t: topT, at: "", surprising: false, text: s + "." };
 };
@@ -24424,11 +24429,22 @@ window.__bramTokenSessionLead = function (row, rates) {
     var wr = typeof r.cacheWrite5m === "number" && row.cacheCreation ? (row.cacheCreation / 1e6) * r.cacheWrite5m : null;
     var op = (row.output / 1e6) * (r.output || 0);
     var total = rd + (wr || 0) + op;
-    out += " · about $" + total.toFixed(0) + " at list prices (cache reads $" + rd.toFixed(0) +
-      (wr === null ? "" : ", cache writes $" + wr.toFixed(0) + " at the 5-minute rate") +
-      ", output $" + op.toFixed(0) + ")";
+    // cost-headline-cents-and-boundary-column (Jon, 2026-11-23): the parts
+    // rounded to whole dollars beside a total that did not, "about $1 (cache
+    // reads $0, cache writes $0, output $0)". One formatter for all four.
+    var usd = window.__bramTokenUsd;
+    out += " · about " + usd(total) + " at list prices (cache reads " + usd(rd) +
+      (wr === null ? "" : ", cache writes " + usd(wr) + " at the 5-minute rate") +
+      ", output " + usd(op) + ")";
   }
   return out;
+};
+// Dollars the way the savings table prints them: under a cent, cents below
+// $10, whole dollars from $10. Reads only its argument.
+window.__bramTokenUsd = function (d) {
+  if (typeof d !== "number" || !isFinite(d)) return "—";
+  if (d < 0.005) return "under a cent";
+  return "$" + (d < 10 ? d.toFixed(2) : String(Math.round(d)));
 };
 window.__bramTokenHM = function (ms) {
   if (typeof ms !== "number" || !isFinite(ms)) return "—";

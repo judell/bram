@@ -76,12 +76,16 @@
           value="{window.__bramTokenStretchLead(window.__bramTokenMainRow(thisSession.value))}" />
         <Table data="{window.__bramTokenStretchRows(window.__bramTokenMainRow(thisSession.value), tokenRates.value)}">
           <Column bindTo="when" header="When" width="70px" />
-          <Column bindTo="boundary" header="Boundary"><Text breakMode="anywhere" value="{$item.boundary}" /></Column>
+          <!-- cost-headline-cents-and-boundary-column (Jon, 2026-11-23): this
+               was the one column without a width and the fixed widths of the
+               other six left it "BO" / "st"; it takes 110px and the last
+               column flexes instead. -->
+          <Column bindTo="boundary" header="Boundary" width="110px"><Text breakMode="anywhere" value="{$item.boundary}" /></Column>
           <Column bindTo="contextAt" header="Context at boundary" width="140px" />
           <Column bindTo="calls" header="Calls" width="70px" />
           <Column bindTo="avgContext" header="Avg context" width="100px" />
           <Column bindTo="cacheRead" header="Cache reads" width="100px" />
-          <Column bindTo="saved" header="A fresh session here would have saved" width="240px" />
+          <Column bindTo="saved" header="A fresh session here would have saved" />
         </Table>
       </VStack>
       <VStack when="{tokens.loaded &amp;&amp; !!tokens.value}" gap="$space-2">

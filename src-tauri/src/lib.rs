@@ -43617,6 +43617,10 @@ const FOLDER_STARTUP_GREETING_NESTED: &str = "Hello, this is Bram. This folder i
 // Freestyle chosen: no gate, no setup, the agent is simply here.
 const FOLDER_STARTUP_GREETING_FREESTYLE: &str = "Hello, this is Bram. We're freestyling in this folder: ask me about what's here, or tell me what to do, and I'll get going. Nothing changes until you ask.";
 const FOLDER_STARTUP_GREETING_NEW_REPO: &str = "Hello, this is Bram. This repository is brand new, so its first job is its first commit. Click First commit below and I'll propose it as a Worklist item for you to approve. You can also just ask me to look around.";
+// The same new repository, holding only the files Setup wrote: nothing of
+// the user's to commit yet, so the First commit offer waits for something
+// (first-commit-offer-waits-for-user-content, Jon 2026-11-24).
+const FOLDER_STARTUP_GREETING_NEW_REPO_ONLY_BRAM: &str = "Hello, this is Bram. This repository is brand new and holds only the files Setup wrote. Add something of your own, or tell me what to build, and once there's something of yours here I'll offer its first commit through the Worklist.";
 // Schemas 1 and 2 meant "written to the PTY" and "landed as a provider user
 // turn" respectively. Neither represents the intended feature. Schema 3 is
 // written only after Bram has serialized the greeting into its own UI
@@ -44239,7 +44243,11 @@ fn repo_startup_greeting_turn() -> serde_json::Value {
     let created_repo = folder_mode_record(&root).map_or(false, |r| r.created_repo);
     let default_copy = match folder_mode(&root) {
         // A repo the workflow choice just created has nothing to orient in;
-        // its first job is the first commit, offered below the greeting.
+        // its first job is the first commit, offered below the greeting once
+        // the folder holds something of the user's.
+        FolderModeState::Workflow if created_repo && folder_only_bram(&root) => {
+            FOLDER_STARTUP_GREETING_NEW_REPO_ONLY_BRAM
+        }
         FolderModeState::Workflow if created_repo => FOLDER_STARTUP_GREETING_NEW_REPO,
         FolderModeState::Workflow => REPO_STARTUP_GREETING,
         FolderModeState::Freestyle => FOLDER_STARTUP_GREETING_FREESTYLE,
@@ -66633,10 +66641,21 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // A repository with no commits yet (the one the workflow choice just
     // created): the pane offers the first commit through the Worklist, the
     // way Orient me introduces it (Jon, 2026-11-22).
-    body["repoUnborn"] = json!(root
+    let repo_unborn = root
         .as_ref()
         .map(|p| git_toplevel_of(p).is_some() && !git_has_head(p))
-        .unwrap_or(false));
+        .unwrap_or(false);
+    body["repoUnborn"] = json!(repo_unborn);
+    // The folder holds nothing of the user's (only Setup's files), so the
+    // first-commit offer waits (first-commit-offer-waits-for-user-content,
+    // Jon 2026-11-24). Asked only where the offer could show, an unborn repo
+    // the workflow choice created; elsewhere it is false without a walk.
+    let mode_created_repo = body["modeCreatedRepo"].as_bool().unwrap_or(false);
+    body["folderOnlyBram"] = json!(
+        repo_unborn
+            && mode_created_repo
+            && root.as_ref().map(|p| folder_only_bram(p)).unwrap_or(false)
+    );
     // setup-banner-survives-reload: this process's last Setup (null if none)
     // and the time it last launched an agent (0 if none), so the pane can
     // tell whether the running session predates the instructions.
@@ -67070,12 +67089,97 @@ fn resolve_folder_mode(recorded: Option<FolderMode>, has_marker: bool) -> Folder
 // then reads "for a new project" alone.
 fn folder_is_empty(root: &Path) -> bool {
     match std::fs::read_dir(root) {
-        Ok(entries) => entries.flatten().all(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.starts_with(".bram") || name == ".DS_Store"
-        }),
+        Ok(entries) => entries
+            .flatten()
+            .all(|e| bram_entry_name(&e.file_name().to_string_lossy())),
         Err(_) => false,
     }
+}
+
+// The names `folder_is_empty` and `folder_only_bram` both skip: Bram's own
+// entries and the Finder's. One list, so the two checks can't drift.
+fn bram_entry_name(name: &str) -> bool {
+    name.starts_with(".bram") || name == ".DS_Store"
+}
+
+// A `CLAUDE.md` or `AGENTS.md` that is only Setup's marker block, with
+// nothing of the user's outside it.
+fn file_is_only_bram_block(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with(ENHANCE_MARKER_START)
+        && t.ends_with(ENHANCE_MARKER_END)
+        && t.matches(ENHANCE_MARKER_START).count() == 1
+}
+
+// A folder with nothing of the user's in it, after Setup: `folder_is_empty`'s
+// post-Setup sibling. Every path is Bram's: `.git`, `.bram*`, `.DS_Store`, the
+// seeded entries of BRAM_OWNED_ENTRIES (the `.claude/`, `.opencode/`,
+// `.agents/` files Setup writes, a skill only when its SKILL.md carries the
+// bram-managed marker), and a `CLAUDE.md` / `AGENTS.md` holding only the
+// marker block. The first-commit offer waits on this
+// (first-commit-offer-waits-for-user-content, Jon 2026-11-24: the offer fired
+// in a folder where "I created no files there yet", and the agent proposed
+// Setup's 19 files as the first commit). Stops at the first user path, so a
+// real project answers in one directory read.
+fn folder_only_bram(root: &Path) -> bool {
+    fn walk(root: &Path, dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            let at_root = dir == root;
+            if bram_entry_name(&name) || (at_root && name == ".git") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if rel == ".claude/skills" {
+                // Seeded as a whole, but a user's own skill lives here too:
+                // walk it and judge each skill by its marker.
+                if !walk(root, &path) {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(skill) = rel.strip_prefix(".claude/skills/") {
+                let skill_name = skill.split('/').next().unwrap_or("");
+                let marker = root
+                    .join(".claude/skills")
+                    .join(skill_name)
+                    .join("SKILL.md");
+                if std::fs::read_to_string(marker).is_ok_and(|s| s.contains(BRAM_SKILL_MARKER)) {
+                    continue;
+                }
+                return false;
+            }
+            if BRAM_OWNED_ENTRIES
+                .iter()
+                .filter(|e| e.root_relative)
+                .any(|e| owned_entry_covers(e, &rel))
+            {
+                continue;
+            }
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                if !walk(root, &path) {
+                    return false;
+                }
+                continue;
+            }
+            if at_root && (name == "CLAUDE.md" || name == "AGENTS.md") {
+                if std::fs::read_to_string(&path).is_ok_and(|s| file_is_only_bram_block(&s)) {
+                    continue;
+                }
+                return false;
+            }
+            return false;
+        }
+        true
+    }
+    walk(root, root)
 }
 
 fn folder_mode_record(root: &Path) -> Option<FolderModeRecord> {
@@ -67328,6 +67432,94 @@ mod folder_mode_tests {
         std::fs::write(&path, b"{not json").unwrap();
         assert!(read_folder_modes(&path).folders.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // first-commit-offer-waits-for-user-content: a folder Setup just seeded
+    // holds nothing of the user's; one file, or one line of theirs in
+    // CLAUDE.md, makes it theirs.
+    fn seeded_folder(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-folder-only-bram-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let block = format!(
+            "{}\n@.claude/bram-conventions.md\n{}\n",
+            super::ENHANCE_MARKER_START,
+            super::ENHANCE_MARKER_END
+        );
+        for (rel, body) in [
+            (".git/HEAD", "ref: refs/heads/main\n"),
+            (".bram/worklist.json", "{}"),
+            (".DS_Store", ""),
+            ("CLAUDE.md", block.as_str()),
+            ("AGENTS.md", block.as_str()),
+            (".claude/bram-conventions.md", "# Working with Bram\n"),
+            (".claude/bram-reference/diagnostics.md", "x"),
+            (".claude/settings.json", "{}"),
+            (
+                ".claude/skills/loose-ends/SKILL.md",
+                "<!-- bram-managed: skill -->\n",
+            ),
+            (".opencode/.gitignore", "/.gitignore\n"),
+            (".agents/rules/bram-conventions-1.md", "x"),
+        ] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn only_setups_files_is_only_bram() {
+        let dir = seeded_folder("seeded");
+        assert!(super::folder_only_bram(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_user_file_makes_the_folder_theirs() {
+        let dir = seeded_folder("user-file");
+        std::fs::write(dir.join("index.html"), "<p>hi</p>").unwrap();
+        assert!(!super::folder_only_bram(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_user_line_in_claude_md_makes_the_folder_theirs() {
+        let dir = seeded_folder("claude-md");
+        let path = dir.join("CLAUDE.md");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("\n# My project\n");
+        std::fs::write(&path, text).unwrap();
+        assert!(!super::folder_only_bram(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_users_own_skill_makes_the_folder_theirs() {
+        let dir = seeded_folder("skill");
+        let path = dir.join(".claude/skills/mine/SKILL.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "---\nname: mine\n---\n").unwrap();
+        assert!(!super::folder_only_bram(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_bram_block_means_nothing_outside_the_markers() {
+        use super::file_is_only_bram_block;
+        let block = format!(
+            "{}\nbody\n{}\n",
+            super::ENHANCE_MARKER_START,
+            super::ENHANCE_MARKER_END
+        );
+        assert!(file_is_only_bram_block(&block));
+        assert!(!file_is_only_bram_block(&format!("# Mine\n{}", block)));
+        assert!(!file_is_only_bram_block(&format!("{}\n# Mine\n", block)));
+        assert!(!file_is_only_bram_block(""));
     }
 }
 

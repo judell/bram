@@ -285,7 +285,11 @@
          no commits. Offer the first one through the Worklist, as Orient me
          does for orientation (Jon, 2026-11-22). The turn asks the agent to
          propose it as an item, so nothing is committed until Start & commit.
-         Same shape as the Orient me row above. -->
+         Same shape as the Orient me row above. The offer waits until the
+         folder holds something of the user's, and the turn leaves Setup's
+         seeded files for the draft to call out rather than folding them in
+         (first-commit-offer-waits-for-user-content, Jon 2026-11-24: in a
+         folder with no files of their own the agent proposed Setup's 19). -->
     <HStack
       when="{!$props.agentId &amp;&amp; !firstCommitSent &amp;&amp; window.__bramFirstCommitOfferAllowed(orientStatus.value)}"
       width="100%" verticalAlignment="center" gap="$space-2" paddingVertical="$space-2"
@@ -293,7 +297,7 @@
       <Text fontSize="$fontSize-sm" width="*"
         value="This repo has no commits yet. Make the first one through the Worklist: the agent proposes it as an item, you read what it will commit, and you click Start &amp; commit." />
       <Button label="First commit" size="sm"
-        onClick="toTurn('Propose the first commit of this new repo as one Worklist item: everything now in the folder, including the files Setup wrote. In the draft, say what each file is and why it belongs in the repo. Do not commit until I click Start and commit.'); firstCommitSent = true; emitEvent('openWorklist')" />
+        onClick="toTurn('Propose the first commit of this new repo as one Worklist item covering the files I have added to the folder. In the draft, say what each file is and why it belongs in the repo. List the files Setup wrote (CLAUDE.md, AGENTS.md, .claude/) separately and say whether they belong in the repo, so I can decide. Do not commit until I click Start and commit.'); firstCommitSent = true; emitEvent('openWorklist')" />
       <Button label="✕" variant="ghost" size="sm"
         tooltip="Hide this; nothing is sent"
         onClick="firstCommitSent = true" />

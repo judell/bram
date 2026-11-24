@@ -8291,6 +8291,11 @@ window.__bramOrientOfferAllowed = function (status) {
 window.__bramFirstCommitOfferAllowed = function (status) {
   var s = status || {};
   if (!(s.mode === "workflow" && !!s.modeCreatedRepo && !!s.repoUnborn)) return false;
+  // Nothing of the user's in the folder yet, only Setup's files: the offer
+  // waits for something of theirs to commit (Jon, 2026-11-24, after the
+  // offer proposed Setup's 19 files in a folder where "I created no files").
+  // An older host has no `folderOnlyBram`; `undefined` keeps the offer.
+  if (s.folderOnlyBram === true) return false;
   // One ask at a time (Jon, 2026-11-22): the offer sends a turn, so it waits
   // for an agent to be running, and for that session to postdate Setup (the
   // Setup-complete banner's own condition has cleared).

@@ -32,6 +32,13 @@ happens, and use Bram's history to ask what an earlier session decided.
   python3 scripts/demo_instance.py --repo ~/bram-freestyle-survey new survey --from freestyle-survey --bare
   ```
 
+  Reusing a fixture folder name inherits its recorded mode (the folder's
+  entry in `~/.bram/folders.json`), its `.bram/` state and Claude's sessions
+  for that path. `new` on an existing folder refuses and says what it found;
+  `new --replace` deletes the folder and Claude's sessions for it. The mode
+  record is yours to clear: remove the folder's entry from `folders.json`
+  (the script does not edit it).
+
 - `python3` in that folder with pandas and matplotlib. `launch` checks this
   and refuses with `python3 -m pip install pandas matplotlib` if they are
   missing. Otherwise the agent may spend the demo trying to install packages.

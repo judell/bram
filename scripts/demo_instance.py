@@ -13,6 +13,14 @@ is a plain folder with no ``.git`` (default ``../bram-freestyle-survey``),
 seeded from ``scripts/fixtures/freestyle-survey/folder/``.  ``status``,
 ``launch``, ``stop`` and ``reset`` work on it; ``use``, ``add``, ``capture``
 and ``prune`` refuse, since there is nothing to park.
+
+A bare fixture writes ``.bram/.gitignore`` holding the single line ``*`` before
+anything else in ``.bram/``: that file is Bram's ownership marker for a state
+folder (``is_bram_state_dir`` in ``src-tauri/src/guard_policy.rs``: the
+``.gitignore`` is exactly ``*``, or ``.migrated-from`` exists).  Without it Bram
+holds the launch as "another tool's folder".  If that test changes, change
+``BARE_STATE_MARKER`` below with it.  ``new --bare`` on an existing folder
+refuses unless ``--replace``, which also clears Claude's per-path sessions.
 """
 
 from __future__ import annotations
@@ -68,6 +76,8 @@ BARE_STARTERS = ("freestyle-survey",)
 FIXTURES_DIR = SOURCE_ROOT / "scripts" / "fixtures"
 DEFAULT_BARE_REPO = SOURCE_ROOT.parent / "bram-freestyle-survey"
 BARE_STATE_DIR = ".bram"
+# Bram's state-folder ownership marker; see the module docstring.
+BARE_STATE_MARKER = ".gitignore"
 SCENARIO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 AGENT_ENV_KEYS = (
@@ -1464,9 +1474,78 @@ def _git_init_bare(repo: Path) -> None:
     run_git(repo, "commit", "-q", "-m", "Survey folder", env=_fixed_git_env(50))
 
 
-def new_bare(repo: Path, name: str, starter: str, git: bool = False) -> Path:
+def _has_bram_marker(repo: Path) -> bool:
+    """Mirror of `is_bram_state_dir` (guard_policy.rs) for `<repo>/.bram/`."""
+    state = repo / BARE_STATE_DIR
+    try:
+        if (state / BARE_STATE_MARKER).read_text().strip() == "*":
+            return True
+    except OSError:
+        pass
+    return (state / ".migrated-from").exists()
+
+
+def _claude_project_dir(repo: Path) -> Path:
+    """Claude Code's per-path session folder: the absolute path, `/` as `-`."""
+    return Path.home() / ".claude" / "projects" / str(repo.resolve()).replace("/", "-")
+
+
+def _claude_session_count(repo: Path) -> int | None:
+    folder = _claude_project_dir(repo)
+    return len(list(folder.glob("*.jsonl"))) if folder.is_dir() else None
+
+
+def _recorded_mode(repo: Path) -> str | None:
+    """The mode Bram's per-folder record (under ~/.bram) holds for this folder."""
+    try:
+        record = json.loads((Path.home() / ".bram" / "folders.json").read_text())
+        entry = record["folders"].get(str(repo.resolve()))
+        return str(entry.get("mode")) if entry else None
+    except (OSError, ValueError, KeyError, AttributeError):
+        return None
+
+
+def _describe_existing(repo: Path) -> str:
+    state = repo / BARE_STATE_DIR
+    if state.is_dir():
+        owned = "carries" if _has_bram_marker(repo) else "lacks"
+        bram = f".bram/ exists and {owned} Bram's marker"
+    else:
+        bram = ".bram/ does not exist"
+    sessions = _claude_session_count(repo)
+    claude = (
+        f"Claude project folder {_claude_project_dir(repo)} holds {sessions} session file(s)"
+        if sessions is not None
+        else f"no Claude project folder at {_claude_project_dir(repo)}"
+    )
+    return f"{bram}; {claude}"
+
+
+def _replace_bare_folder(repo: Path) -> None:
+    """Delete the folder and Claude's project folder for it, nothing else."""
+    _refuse_running(repo)
+    claude = _claude_project_dir(repo)
+    shutil.rmtree(repo)
+    print(f"deleted folder {repo}")
+    if claude.is_dir():
+        shutil.rmtree(claude)
+        print(f"deleted Claude project folder {claude}")
+
+
+def new_bare(
+    repo: Path, name: str, starter: str, git: bool = False, replace: bool = False
+) -> Path:
     seed = _bare_seed_dir(starter)
     repo = _assert_safe_location(repo)
+    if repo.exists():
+        if not replace:
+            raise DemoError(
+                f"{repo} already exists ({_describe_existing(repo)}). "
+                "Reusing it inherits its .bram/ state, the mode Bram recorded for the "
+                "folder and Claude's sessions for the path; "
+                "pass --replace to delete the folder and the Claude project folder first"
+            )
+        _replace_bare_folder(repo)
     marker = _marker_of(repo)
     if repo.exists():
         if not marker:
@@ -1492,6 +1571,10 @@ def new_bare(repo: Path, name: str, starter: str, git: bool = False) -> Path:
     )
     if git:
         _git_init_bare(repo)
+    marker_path = repo / BARE_STATE_DIR / BARE_STATE_MARKER
+    if not marker_path.exists():
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text("*\n")
     write_json(
         repo / BARE_STATE_DIR / RUNTIME_DIR / "active.json", {"name": name, "starter": starter}
     )
@@ -1836,6 +1919,9 @@ def _bare_status(repo: Path) -> dict[str, Any]:
         "repo": str(repo),
         "scenarios": [],
         "starter": marker.get("starter"),
+        "bramMarker": _has_bram_marker(repo),
+        "recordedMode": _recorded_mode(repo),
+        "claudeSessions": _claude_session_count(repo) or 0,
     }
 
 
@@ -1942,6 +2028,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --bare: the same folder as a fresh git repository with one commit "
         "(no Bram marker), so the chooser's Workflow card shows its other variant",
     )
+    new.add_argument(
+        "--replace",
+        action="store_true",
+        help="with --bare: if the folder exists, delete it and Claude's project folder "
+        "for its path first (Bram's per-folder mode record is not touched)",
+    )
     _layout_flag(new, "hydrate into resources/, the 0.8.3 layout (default: .bram/)")
 
     use = sub.add_parser("use", help="hydrate a parked scenario exactly")
@@ -2003,11 +2095,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise DemoError(f"--bare takes exactly one of --from {', '.join(BARE_STARTERS)}")
             explicit = any(a == "--repo" or a.startswith("--repo=") for a in raw)
             target = args.repo if explicit else DEFAULT_BARE_REPO
-            made = new_bare(target, args.name, wanted[0], git=bool(args.git))
+            made = new_bare(
+                target, args.name, wanted[0], git=bool(args.git), replace=bool(args.replace)
+            )
             kind = "git fixture" if args.git else "bare fixture"
             print(f"created {kind} {args.name} ({wanted[0]}) at {made}")
         elif args.command == "new" and args.git:
             raise DemoError("--git applies to --bare fixtures only")
+        elif args.command == "new" and args.replace:
+            raise DemoError("--replace applies to --bare fixtures only")
         elif args.command == "reset" and is_bare(args.repo):
             print(f"reset bare fixture {reset_bare(args.repo)}")
         elif args.command == "new":
@@ -2045,6 +2141,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"log: {value['log']}")
                 if value.get("bare"):
                     print(f"bare fixture: {value['starter']} (no .git)")
+                    print(f".bram/ carries Bram's marker: {'yes' if value['bramMarker'] else 'no'}")
+                    mode = value["recordedMode"]
+                    print(f"mode recorded for this folder (~/.bram): {mode or 'none'}")
+                    print(f"Claude sessions for this path: {value['claudeSessions']}")
         elif args.command == "prune":
             removed, skipped = prune_scenarios(
                 args.repo, args.match or ["check-*"], args.keep, args.dry_run, args.gc

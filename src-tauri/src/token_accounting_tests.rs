@@ -3329,3 +3329,232 @@ fn a_v4_ledger_is_reread_once_for_writes_and_turns_and_a_second_pass_stores_noth
     assert_eq!(loaded[0].writes[0].key, "tu1#w0");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// session-orientation-instrument: the per-session block, from claim windows.
+fn orientation_report(
+    windows: Option<Vec<ClaimWindow>>,
+    edit_in_sub: bool,
+) -> (Report, Orientation) {
+    let write = |at: i64| WriteEvent {
+        key: format!("w{at}"),
+        path: "/r/src/a.rs".into(),
+        at_ms: at,
+        cwd: None,
+    };
+    let read = |at: i64, path: &str| ReadEvent {
+        key: format!("r{at}"),
+        path: path.into(),
+        bytes: 10,
+        at_ms: at,
+        ..Default::default()
+    };
+    let turn = |at: i64| TurnEvent {
+        key: format!("t{at}"),
+        at_ms: at,
+    };
+    let main = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s".into(),
+        thread: Some(Thread::Main),
+        calls: vec![
+            raw(100, "m", 1000, 0, 1),
+            raw(150, "m", 1100, 0, 1),
+            raw(300, "m", 1200, 0, 1),
+        ],
+        reads: vec![
+            read(110, "/r/src/b.rs"),
+            read(120, "/r/.bram/worklist.json"),
+            read(130, "/Users/x/.claude/foo.jsonl"),
+        ],
+        writes: if edit_in_sub {
+            vec![]
+        } else {
+            vec![write(250)]
+        },
+        searches: vec![SearchEvent {
+            key: "s1".into(),
+            kind: "grep".into(),
+            at_ms: 140,
+        }],
+        turns: vec![turn(100), turn(120), turn(180), turn(220), turn(280)],
+        ..Default::default()
+    });
+    let sub = Arc::new(ParsedFile {
+        provider: "claude",
+        session_id: "s".into(),
+        thread: Some(Thread::Subagent),
+        agent_id: Some("ag".into()),
+        calls: vec![raw(200, "m", 500, 0, 1)],
+        writes: if edit_in_sub {
+            vec![write(250)]
+        } else {
+            vec![]
+        },
+        ..Default::default()
+    });
+    let report = build_report(
+        ReportInput {
+            root: "/r",
+            files: vec![main, sub],
+            windows,
+            ..Default::default()
+        },
+        &mut NoSpans,
+        None,
+    );
+    let main_row = report
+        .sessions
+        .iter()
+        .find(|s| s.thread == Thread::Main)
+        .unwrap();
+    let sub_row = report
+        .sessions
+        .iter()
+        .find(|s| s.thread == Thread::Subagent)
+        .unwrap();
+    assert!(sub_row.orientation.is_none(), "subagent rows carry none");
+    assert!(main_row.items.is_empty(), "the block needs no items");
+    let o = main_row
+        .orientation
+        .clone()
+        .expect("every main row has one");
+    (report, o)
+}
+
+fn owin(from: i64, to: i64, kind: &str) -> ClaimWindow {
+    ClaimWindow {
+        from_ms: from,
+        to_ms: to,
+        kind: kind.into(),
+        ids: vec![],
+    }
+}
+
+#[test]
+fn orientation_freestyle_has_no_windows_and_every_turn_before_start() {
+    let (_, o) = orientation_report(Some(vec![]), false);
+    assert_eq!(o.mode, "freestyle");
+    assert_eq!(o.start_ms, None);
+    assert_eq!(o.first_call_ms, 100);
+    assert_eq!(o.context_at_first_call, 1000);
+    assert_eq!(o.first_edit_ms, Some(250));
+    assert_eq!(o.first_edit_path.as_deref(), Some("src/a.rs"));
+    assert_eq!(o.first_edit_thread.as_deref(), Some("main"));
+    assert!(!o.no_edit);
+    assert!(!o.claim_open_at_report);
+    let t = &o.to_first_edit;
+    assert_eq!(t.calls, 2, "main-thread calls at 100 and 150");
+    // turns after 100 and up to 250: 120, 180, 220
+    assert_eq!((t.turns_before_start, t.turns_after_start), (3, 0));
+    assert_eq!(t.project_reads.n, 1);
+    assert_eq!(t.project_reads.paths, vec!["src/b.rs".to_string()]);
+    assert_eq!(t.carrier_reads.n, 1);
+    assert_eq!(t.outside_reads.paths, vec!["/Users/x/.claude/foo.jsonl"]);
+    assert_eq!(t.searches, 1);
+    assert_eq!(t.search_kinds.get("grep"), Some(&1));
+}
+
+#[test]
+fn orientation_workflow_counts_a_window_opened_before_the_first_call() {
+    // Approved before the first call, closed after the edit.
+    let (_, o) = orientation_report(Some(vec![owin(50, 400, "approved")]), true);
+    assert_eq!(o.mode, "workflow");
+    assert_eq!(o.start_ms, Some(50));
+    assert_eq!(o.first_edit_thread.as_deref(), Some("subagent"));
+    assert!(!o.claim_open_at_report);
+    assert_eq!(
+        (
+            o.to_first_edit.turns_before_start,
+            o.to_first_edit.turns_after_start
+        ),
+        (0, 3)
+    );
+    // Start inside the span splits the turns there.
+    let (_, o) = orientation_report(Some(vec![owin(150, 400, "approved")]), false);
+    assert_eq!(o.mode, "workflow");
+    assert_eq!(o.start_ms, Some(150));
+    assert_eq!(
+        (
+            o.to_first_edit.turns_before_start,
+            o.to_first_edit.turns_after_start
+        ),
+        (1, 2)
+    );
+}
+
+#[test]
+fn orientation_item_then_chat_when_the_window_closed_before_the_edit() {
+    let (_, o) = orientation_report(Some(vec![owin(130, 200, "approved")]), false);
+    assert_eq!(o.mode, "item-then-chat");
+    assert_eq!(o.start_ms, Some(130));
+}
+
+#[test]
+fn orientation_flags_an_open_claim_and_does_not_guess_without_windows() {
+    let (_, o) = orientation_report(Some(vec![owin(130, 131, "approved")]), false);
+    assert!(o.claim_open_at_report);
+    let (_, o) = orientation_report(None, false);
+    assert_eq!(o.mode, "unknown");
+}
+
+#[test]
+fn plausible_write_target_rejects_size_words() {
+    for bad in ["1.2KB", "3.4MB", "12kb", "0", "src/1.2KB.txt"] {
+        assert!(!plausible_write_target(bad), "{bad}");
+    }
+    for good in [
+        "lib.rs",
+        "Main.xmlui",
+        ".gitignore",
+        "a/b",
+        "~/x/y.md",
+        "src/.env",
+    ] {
+        assert!(plausible_write_target(good), "{good}");
+    }
+}
+
+#[test]
+fn folder_mode_info_reads_the_marker_then_the_record() {
+    let state = ledger_dir("fm-state");
+    let root = ledger_dir("fm-root");
+    std::fs::create_dir_all(root.join(".bram")).unwrap();
+    std::fs::write(root.join(".bram/.worklist-authorization.json"), "{}").unwrap();
+    std::env::set_var("BRAM_USER_STATE_DIR", &state);
+    let marker = folder_mode_info(&root).unwrap();
+    let key = root
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let body = serde_json::json!({
+        "folders": { key: { "mode": "freestyle", "chosenAtMs": 123 } }
+    });
+    std::fs::write(state.join("folders.json"), body.to_string()).unwrap();
+    let record = folder_mode_info(&root).unwrap();
+    std::fs::remove_file(root.join(".bram/.worklist-authorization.json")).unwrap();
+    let neither_state = ledger_dir("fm-empty");
+    std::fs::remove_file(state.join("folders.json")).unwrap();
+    let undecided = folder_mode_info(&root).unwrap();
+    std::env::remove_var("BRAM_USER_STATE_DIR");
+    drop(neither_state);
+    assert_eq!(
+        (
+            marker.mode.as_str(),
+            marker.basis.as_str(),
+            marker.chosen_at_ms
+        ),
+        ("workflow", "marker", None)
+    );
+    assert_eq!(
+        (
+            record.mode.as_str(),
+            record.basis.as_str(),
+            record.chosen_at_ms
+        ),
+        ("freestyle", "record", Some(123))
+    );
+    assert_eq!(undecided.basis, "undecided");
+    let _ = std::fs::remove_dir_all(&state);
+    let _ = std::fs::remove_dir_all(&root);
+}

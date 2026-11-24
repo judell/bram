@@ -638,10 +638,21 @@ pub fn patch_paths(text: &str) -> Vec<String> {
 
 /// True for a word that can name a file to write: it has a letter and a `/`
 /// or an extension (so `0`, `deadline` and `s` from code quoted in a command
-/// are not files), no shell expansion, not a flag, not a device.
+/// are not files), no shell expansion, not a flag, not a device. The last
+/// path segment must be a dotfile (`.env`) or have a letter before its first
+/// dot (`lib.rs`), and the word must not be a size (`1.2KB`, `3.4MB`, `12kb`):
+/// a size word quoted in a command is not a file (session-orientation-instrument).
 fn plausible_write_target(w: &str) -> bool {
     let w = w.trim_matches(|c| c == '"' || c == '\'');
+    let last = w.rsplit('/').next().unwrap_or(w);
+    let named = last.starts_with('.')
+        || last
+            .split('.')
+            .next()
+            .is_some_and(|stem| stem.chars().any(|c| c.is_ascii_alphabetic()));
     !w.is_empty()
+        && named
+        && !is_size_word(w)
         && !w.starts_with('-')
         && !w.starts_with("/dev/")
         && !w.starts_with('&')
@@ -654,6 +665,22 @@ fn plausible_write_target(w: &str) -> bool {
             c.is_ascii_alphanumeric()
                 || matches!(c, '/' | '.' | '_' | '-' | '~' | '#' | '+' | '@' | ':')
         })
+}
+
+/// `^\d+(\.\d+)?[KMGkmg]?[Bb]$`: `1.2KB`, `3.4MB`, `12kb`.
+fn is_size_word(w: &str) -> bool {
+    let Some(body) = w.strip_suffix(['B', 'b']) else {
+        return false;
+    };
+    let body = body
+        .strip_suffix(['K', 'M', 'G', 'k', 'm', 'g'])
+        .unwrap_or(body);
+    let (int, frac) = match body.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (body, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    digits(int) && frac.is_none_or(digits)
 }
 
 /// The files a shell command line writes: redirect targets (`>`, `>>`, `&>`),
@@ -3694,6 +3721,87 @@ pub struct SessionRow {
     /// Main thread only: calls per turn and per active hour; null below
     /// two calls (and for subagent rows).
     pub pace: Option<Pace>,
+    /// Main-thread rows only: how the session got ready to edit, and whether
+    /// it ran under a claim window (session-orientation-instrument).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<Orientation>,
+}
+
+/// Reads of one kind with their paths.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct PathedReads {
+    pub n: u64,
+    pub bytes: u64,
+    pub paths: Vec<String>,
+}
+
+/// The folder's recorded mode, read once per report: a present-tense fact
+/// about the folder, not what held when a session ran. `basis` is `record`
+/// (`folders.json` has an entry, whose `chosenAtMs` is carried), `marker` (no
+/// record, but `.bram/.worklist-authorization.json` exists, so workflow) or
+/// `undecided`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderModeInfo {
+    pub mode: String,
+    pub basis: String,
+    pub chosen_at_ms: Option<i64>,
+}
+
+/// What a session did between its first call and its first project edit,
+/// and under which mode (session-orientation-instrument).
+///
+/// `mode` comes from claim windows, never from per-call attribution (an open
+/// claim reads 1 ms wide at report time, so the live session's calls would
+/// read as chat). The span is `[firstCallMs, end]`, `end` being the first edit
+/// or, with none, the session's last call. A window overlaps the span when
+/// `from <= end && to >= firstCallMs`, so windows opened before the first call
+/// (a handoff start) count. `workflow`: a window of any kind contains the
+/// first edit (or, with no edit, the last call) and an approved window
+/// overlaps the span; when only `drop`/`iterate` windows overlap, it is still
+/// `workflow` and `startMs` stays null. `freestyle`: no window touches the
+/// span. `item-then-chat`: windows overlap the span but none contains the
+/// edit. `unknown`: the claim ledger could not be read, never guessed.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Orientation {
+    pub first_call_ms: i64,
+    pub context_at_first_call: u64,
+    pub mode: String,
+    pub folder_mode: Option<FolderModeInfo>,
+    /// The first approved claim window overlapping the span.
+    pub start_ms: Option<i64>,
+    pub first_edit_ms: Option<i64>,
+    pub first_edit_path: Option<String>,
+    /// `main` or `subagent`.
+    pub first_edit_thread: Option<String>,
+    pub no_edit: bool,
+    /// A compaction at or before the end of the span.
+    pub compacted_before: bool,
+    /// A window overlapping the span is still open (it reads 1 ms wide), so
+    /// the mode of this row is not settled: readings skip it.
+    pub claim_open_at_report: bool,
+    pub to_first_edit: OrientationToFirstEdit,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientationToFirstEdit {
+    /// Main-thread calls in the span.
+    pub calls: u64,
+    /// Turns handed back after the first call and at or before `startMs`
+    /// (all of them when `startMs` is null): the gate's own exchange is in
+    /// this count.
+    pub turns_before_start: u64,
+    pub turns_after_start: u64,
+    /// Under the root, outside `.bram/`.
+    pub project_reads: PathedReads,
+    /// Under `.bram/`.
+    pub carrier_reads: ReadPile,
+    /// Elsewhere; raw paths kept.
+    pub outside_reads: PathedReads,
+    pub searches: u64,
+    pub search_kinds: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -4004,6 +4112,27 @@ pub struct ReportInput<'a> {
     /// `lib.rs` at HEAD, the file the coverage is measured against; without
     /// it the `lib_rs_now` argument is used.
     pub coverage_now: Option<LibRsNow>,
+    /// The folder's recorded mode, for each session's `orientation`.
+    pub folder_mode: Option<FolderModeInfo>,
+}
+
+/// The folder's mode as the host would resolve it, with its basis.
+fn folder_mode_info(root: &Path) -> Option<FolderModeInfo> {
+    let record = crate::folder_mode_record(root);
+    let has_marker = crate::resource_relative_path(root, crate::WORKLIST_AUTH_REL).exists();
+    let state = crate::resolve_folder_mode(record.as_ref().map(|r| r.mode), has_marker);
+    let basis = if record.is_some() {
+        "record"
+    } else if has_marker {
+        "marker"
+    } else {
+        "undecided"
+    };
+    Some(FolderModeInfo {
+        mode: state.as_str().to_string(),
+        basis: basis.to_string(),
+        chosen_at_ms: record.map(|r| r.chosen_at_ms),
+    })
 }
 
 /// Nearest-rank percentile of an ascending slice: the value at rank
@@ -4505,6 +4634,7 @@ pub fn build_report(
                     at_ms: w.at_ms,
                     path: w.path.clone(),
                     cwd: w.cwd.clone(),
+                    thread,
                 });
         }
         if thread != Thread::Main {
@@ -4659,6 +4789,7 @@ pub fn build_report(
             compactions: pf.compactions,
             stretches: Vec::new(),
             pace: None,
+            orientation: None,
         };
         let mut items: BTreeMap<String, ItemRow> = BTreeMap::new();
         let mut chat_calls = 0f64;
@@ -4757,11 +4888,21 @@ pub fn build_report(
             accumulate_models(&mut model_acc, pf.provider, &pf.session_id, &calls);
             row.stretches = stretches(&calls, &windows);
             row.pace = pace_of(&calls.iter().map(|c| c.at_ms).collect::<Vec<_>>());
+            let writes = session_writes
+                .get(&(pf.provider.to_string(), pf.session_id.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            row.orientation = Some(session_orientation(
+                &calls,
+                pf,
+                since,
+                writes,
+                input.windows.as_deref(),
+                input.root,
+                input.home.as_deref(),
+                input.folder_mode.clone(),
+            ));
             if !row.items.is_empty() {
-                let writes = session_writes
-                    .get(&(pf.provider.to_string(), pf.session_id.clone()))
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
                 let mut blocks = item_handoffs(
                     &calls,
                     &attrs,
@@ -4877,6 +5018,135 @@ struct SessionWrite {
     at_ms: i64,
     path: String,
     cwd: Option<String>,
+    /// The thread of the file the write came from.
+    thread: Thread,
+}
+
+/// The first write at or after `from_ms` that lands in the project outside
+/// `.bram/` and names a plausible file: its time, project-relative path and
+/// thread. `writes` is sorted by time.
+fn first_project_edit(
+    writes: &[SessionWrite],
+    from_ms: i64,
+    root: &str,
+    home: Option<&str>,
+) -> Option<(i64, String, Thread)> {
+    writes
+        .iter()
+        .filter(|w| w.at_ms >= from_ms && plausible_write_target(&w.path))
+        .find_map(|w| {
+            let (resolved, _) = resolve_read_path(&w.path, w.cwd.as_deref(), root, home);
+            match resolved {
+                Resolved::Project(p) if !is_carrier_path(&p) => Some((w.at_ms, p, w.thread)),
+                _ => None,
+            }
+        })
+}
+
+/// The `orientation` block of one main-thread session (see [`Orientation`]).
+/// `windows` is the claim ledger's windows (None when it could not be read).
+#[allow(clippy::too_many_arguments)]
+fn session_orientation(
+    calls: &[&RawCall],
+    pf: &ParsedFile,
+    since: i64,
+    writes: &[SessionWrite],
+    windows: Option<&[ClaimWindow]>,
+    root: &str,
+    home: Option<&str>,
+    folder_mode: Option<FolderModeInfo>,
+) -> Orientation {
+    let first_call_ms = calls.iter().map(|c| c.at_ms).min().unwrap_or(0);
+    let last_call_ms = calls.iter().map(|c| c.at_ms).max().unwrap_or(0);
+    let first_edit = first_project_edit(writes, first_call_ms, root, home);
+    let end = first_edit.as_ref().map(|e| e.0).unwrap_or(last_call_ms);
+    let ws = windows.unwrap_or(&[]);
+    let overlapping: Vec<&ClaimWindow> = ws
+        .iter()
+        .filter(|w| w.from_ms <= end && w.to_ms >= first_call_ms)
+        .collect();
+    let start_ms = overlapping
+        .iter()
+        .filter(|w| w.kind == "approved")
+        .map(|w| w.from_ms)
+        .min();
+    let claim_open_at_report = overlapping.iter().any(|w| w.to_ms == w.from_ms + 1);
+    let mode = if windows.is_none() {
+        "unknown"
+    } else if overlapping.is_empty() {
+        "freestyle"
+    } else if overlapping
+        .iter()
+        .any(|w| w.from_ms <= end && end <= w.to_ms)
+    {
+        "workflow"
+    } else {
+        "item-then-chat"
+    };
+    let compacted_before = calls
+        .windows(2)
+        .any(|w| w[0].context > 100_000 && w[1].context < w[0].context / 2 && w[1].at_ms <= end);
+    let in_span = |t: i64| first_call_ms <= t && t <= end;
+    let mut tfe = OrientationToFirstEdit {
+        calls: calls.iter().filter(|c| in_span(c.at_ms)).count() as u64,
+        ..Default::default()
+    };
+    for t in pf
+        .turns
+        .iter()
+        .filter(|t| t.at_ms > first_call_ms && t.at_ms <= end)
+    {
+        if start_ms.is_none_or(|s| t.at_ms <= s) {
+            tfe.turns_before_start += 1;
+        } else {
+            tfe.turns_after_start += 1;
+        }
+    }
+    for s in pf.searches.iter().filter(|s| in_span(s.at_ms)) {
+        tfe.searches += 1;
+        *tfe.search_kinds.entry(s.kind.clone()).or_default() += 1;
+    }
+    for r in pf
+        .reads
+        .iter()
+        .filter(|r| r.at_ms >= since && in_span(r.at_ms))
+    {
+        let (resolved, _) = resolve_read_path(&r.path, r.cwd.as_deref(), root, home);
+        let (pile, path) = match resolved {
+            Resolved::Project(p) if is_carrier_path(&p) => {
+                tfe.carrier_reads.n += 1;
+                tfe.carrier_reads.bytes += r.bytes;
+                continue;
+            }
+            Resolved::Project(p) => (&mut tfe.project_reads, p),
+            Resolved::Elsewhere => (&mut tfe.outside_reads, r.path.clone()),
+        };
+        pile.n += 1;
+        pile.bytes += r.bytes;
+        if !pile.paths.contains(&path) {
+            pile.paths.push(path);
+        }
+    }
+    Orientation {
+        first_call_ms,
+        context_at_first_call: calls.first().map(|c| c.context).unwrap_or(0),
+        mode: mode.to_string(),
+        folder_mode,
+        start_ms,
+        first_edit_ms: first_edit.as_ref().map(|e| e.0),
+        first_edit_path: first_edit.as_ref().map(|e| e.1.clone()),
+        first_edit_thread: first_edit.as_ref().map(|e| {
+            match e.2 {
+                Thread::Main => "main",
+                Thread::Subagent => "subagent",
+            }
+            .to_string()
+        }),
+        no_edit: first_edit.is_none(),
+        compacted_before,
+        claim_open_at_report,
+        to_first_edit: tfe,
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5053,16 +5323,8 @@ fn item_handoffs(
         let (declared_files, declared_source) = snapshots.declared(&id, start_ms);
         // The first edit: a write on any thread, from the window's start, that
         // lands in the project outside `.bram/`.
-        let first_edit = writes
-            .iter()
-            .filter(|w| w.at_ms >= window_from && plausible_write_target(&w.path))
-            .find_map(|w| {
-                let (resolved, _) = resolve_read_path(&w.path, w.cwd.as_deref(), root, home);
-                match resolved {
-                    Resolved::Project(p) if !is_carrier_path(&p) => Some((w.at_ms, p)),
-                    _ => None,
-                }
-            });
+        let first_edit =
+            first_project_edit(writes, window_from, root, home).map(|(t, p, _)| (t, p));
         let last_credited = (0..calls.len())
             .rev()
             .find(|i| credited(*i, &id))
@@ -6780,6 +7042,7 @@ pub fn run(
             conventions_bytes: conventions_bytes(root),
             home: crate::home_dir().map(|h| h.to_string_lossy().into_owned()),
             coverage_now: lib_rs_at_head(root),
+            folder_mode: folder_mode_info(root),
         },
         &mut spans,
         lib_rs_now(root),

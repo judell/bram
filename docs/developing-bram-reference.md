@@ -585,6 +585,33 @@ bram --token-accounting ~/bram --calls \
   | jq '[.sessions[] | select(.thread=="main") | .items[] | select(.handoff)] | length'
 ```
 
+**Per session, not per item** (`session-orientation-instrument`, 2026-11-24).
+The per-item block answers the resumed-item question and cannot answer the
+one Jon asked (to what extent a fresh session has less recovery to do in
+workflow mode than in freestyle), because freestyle work credits no item. The
+`orientation` block on every main-thread session row answers that one from
+the same three tables: first call to first project edit on any thread, with
+`mode` inferred as `workflow`, `freestyle` or `item-then-chat`. Three things
+about it are deliberate. **Mode comes from the claim windows, not from the
+attribution of the calls.** An open claim reads 1 ms wide at report time
+(`claims_overlapping`), so a report taken while a session's claim is open
+shows that session's calls as chat; the first hand pass did exactly that and
+classed the session that built the instrument as item-then-chat. The block
+tests windows against the span (including windows opened before the
+session's first call, the handoff start) and flags `claimOpenAtReport` so a
+reading can skip the live row. **Turns are split at Start**
+(`turnsBeforeStart` / `turnsAfterStart`), because in workflow mode the
+propose and triage exchange is inside the count and would otherwise read as
+the agent asking more; the Start turn itself is delivered after the host
+writes the claim, so it is the first turn after Start and a workflow
+session's `turnsAfterStart` floors at 1. **`folderMode` carries its basis.** On this
+machine no folder has a `~/.bram/folders.json` record; this repo is workflow
+by its marker, so the inferred mode is the one that varies and the recorded
+one is a present-tense fact about the folder. The reading is in the item's
+draft; the freestyle sample in this ledger is small (4 to 8 sessions by the
+rule used), and the other project ledgers under `token-ledger/` are where it
+grows.
+
 **First baseline (2026-11-12, this repo: 247 Claude sessions with 27,545
 calls, 286 Codex rollouts with 24,530):**
 

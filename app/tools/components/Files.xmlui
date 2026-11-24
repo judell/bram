@@ -81,7 +81,10 @@
     <VStack gap="$space-3">
     <Heading level="h2">Files</Heading>
     <Text when="{repoTree.value &amp;&amp; repoTree.value.error}" variant="caption">
-      This folder isn't a git checkout, so there's no file list to show.
+      The file list could not be read from git.
+    </Text>
+    <Text when="{repoTree.value &amp;&amp; repoTree.value.capped}" variant="caption">
+      Showing the first 5,000 files; this folder has no repository, so there is no ignore list to trim it.
     </Text>
     <Form hideButtonRow="true" onSubmit="submitted = window.__bramFilesSubmit(query, openIds)">
       <HStack gap="$space-2" verticalAlignment="center">

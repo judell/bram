@@ -62812,6 +62812,113 @@ fn repo_tree_rows_with_lazy(paths: &[String], lazy: &[String]) -> Vec<serde_json
     rows
 }
 
+// files-tab-without-git: the most files the Files tab lists from a folder
+// with no repository, which has no ignore list to trim the walk.
+const REPO_TREE_PLAIN_CAP: usize = 5000;
+
+// files-tab-without-git: a folder with no repository has no `git ls-files`,
+// so walk it. Relative paths with `/` separators, sorted; skips `.git` and
+// Bram's and the Finder's entries (`bram_entry_name`). Symlinks are listed,
+// never followed. Stops at `cap` files and says whether it did.
+fn plain_folder_paths(root: &Path, cap: usize) -> (Vec<String>, bool) {
+    let mut paths: Vec<String> = Vec::new();
+    let mut capped = false;
+    let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
+    'walk: while let Some((dir, rel)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        let mut subdirs: Vec<(PathBuf, String)> = Vec::new();
+        for e in entries {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name == ".git" || bram_entry_name(&name) {
+                continue;
+            }
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", rel, name)
+            };
+            match e.file_type() {
+                Ok(t) if t.is_dir() => subdirs.push((e.path(), child_rel)),
+                Ok(_) => {
+                    if paths.len() >= cap {
+                        capped = true;
+                        break 'walk;
+                    }
+                    paths.push(child_rel);
+                }
+                Err(_) => {}
+            }
+        }
+        // Reversed so the stack visits subfolders in name order.
+        stack.extend(subdirs.into_iter().rev());
+    }
+    paths.sort();
+    (paths, capped)
+}
+
+#[cfg(test)]
+mod plain_folder_paths_tests {
+    use super::plain_folder_paths;
+
+    fn plain_folder(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bram-plain-folder-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for rel in [
+            "README.md",
+            "data/survey.csv",
+            "scripts/summarize.py",
+            ".bram/x",
+            ".DS_Store",
+        ] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn plain_folder_paths_lists_the_users_files_sorted() {
+        let dir = plain_folder("list");
+        let (paths, capped) = plain_folder_paths(&dir, 5000);
+        assert_eq!(
+            paths,
+            vec!["README.md", "data/survey.csv", "scripts/summarize.py"]
+        );
+        assert!(!capped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_folder_paths_stops_at_the_cap() {
+        let dir = plain_folder("cap");
+        let (paths, capped) = plain_folder_paths(&dir, 2);
+        assert_eq!(paths.len(), 2);
+        assert!(capped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_folder_paths_skips_dot_git() {
+        let dir = plain_folder("git");
+        for rel in [".git/HEAD", ".git/objects/ab/cdef"] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+        }
+        let (paths, capped) = plain_folder_paths(&dir, 5000);
+        assert!(paths.iter().all(|p| !p.starts_with(".git")));
+        assert_eq!(paths.len(), 3);
+        assert!(!capped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 const REPO_GREP_CAP: usize = 200;
 const REPO_GREP_PER_FILE: usize = 20;
 const REPO_GREP_WINDOW: usize = 60;
@@ -94575,6 +94682,28 @@ fn route_request<R: tauri::Runtime>(
     // more-files-tree-view: the Files page's listing. Tracked plus untracked
     // files that aren't ignored, as flat Tree rows (repo_tree_rows_with_lazy, plus Bram's ignored state).
     if path == "__repo/tree" {
+        // files-tab-without-git: a folder with no repository is listed by a
+        // capped walk instead, with Bram's state added the same way.
+        if let Some(root) = project_root(Some(app)).filter(|r| git_toplevel_of(r).is_none()) {
+            let (mut paths, capped) = plain_folder_paths(&root, REPO_TREE_PLAIN_CAP);
+            let (state_files, state_dirs) = bram_state_present(&root);
+            for f in state_files {
+                if !paths.contains(&f) {
+                    paths.push(f);
+                }
+            }
+            let body = serde_json::json!({
+                "rows": repo_tree_rows_with_lazy(&paths, &state_dirs),
+                "files": paths.len(),
+                "source": "walk",
+                "capped": capped,
+            });
+            return (
+                200,
+                "application/json; charset=utf-8",
+                serde_json::to_vec(&body).unwrap_or_default(),
+            );
+        }
         let out = git_run(
             app,
             &[
@@ -94605,6 +94734,7 @@ fn route_request<R: tauri::Runtime>(
                 serde_json::json!({
                     "rows": repo_tree_rows_with_lazy(&paths, &state_dirs),
                     "files": paths.len(),
+                    "source": "git",
                 })
             }
             Err(e) => serde_json::json!({ "rows": [], "error": "not-a-git-repo", "detail": e }),
@@ -94683,22 +94813,25 @@ fn route_request<R: tauri::Runtime>(
             serde_json::json!({ "hits": [], "total": 0, "capped": false })
         } else {
             let per_file = format!("--max-count={}", REPO_GREP_PER_FILE);
-            let out = git_run_allow_exit(
-                app,
-                &[
-                    "grep",
-                    "-n",
-                    "-I",
-                    "-i",
-                    "-F",
-                    "-z",
-                    "--untracked",
-                    &per_file,
-                    "-e",
-                    &q,
-                ],
-            )
-            .unwrap_or_default();
+            // files-tab-without-git: outside a repository, `--no-index`
+            // searches the plain folder with the same output format. No
+            // ignore list keeps Bram's entries out there, so exclude them
+            // (the state pass below searches them), as the Files walk does.
+            let no_repo = project_root(Some(app))
+                .map(|r| git_toplevel_of(&r).is_none())
+                .unwrap_or(false);
+            let untracked = if no_repo { "--no-index" } else { "--untracked" };
+            let mut args: Vec<&str> = vec![
+                "grep", "-n", "-I", "-i", "-F", "-z", untracked, &per_file, "-e", &q,
+            ];
+            if no_repo {
+                args.extend([
+                    "--",
+                    ":(exclude,glob)**/.bram*",
+                    ":(exclude,glob)**/.bram*/**",
+                ]);
+            }
+            let out = git_run_allow_exit(app, &args).unwrap_or_default();
             // files-tab-lists-bram-state-in-resources: the same search over
             // the small, current state paths, which are ignored and so
             // skipped above. Same output format, so the two concatenate.
@@ -94709,7 +94842,7 @@ fn route_request<R: tauri::Runtime>(
                 "-i",
                 "-F",
                 "-z",
-                "--untracked",
+                untracked,
                 "--no-exclude-standard",
                 &per_file,
                 "-e",

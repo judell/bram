@@ -560,3 +560,44 @@ mechanism that covers the older generic names. `app/provider-hooks/` is
 gone with the Python guards it held; the history (including the
 shadow-soak and authority-flip receipts) is in git and on
 judell/bram#269 and #313.
+
+## The worklist section: enforced mechanics moved out (2026-11-23)
+
+`conventions-worklist-section-enforced-mechanics-move-out`. The
+worklist section of the core was 25,186 of the file's 45,429 bytes,
+more than the other five sections together, and the token report put
+the conventions at 15% of the Claude floor (11k of 75k tokens, re-sent
+on every call). The test applied to each paragraph extends the split's
+placement rule with enforcement: **if a guard, the gate or a route
+enforces the rule, the core keeps one sentence and a pointer and the
+detail lives in `worklist-mechanics.md`, because a slip is caught and
+the denial names the file.** Rules nothing enforces (investigations
+don't belong on the board; write the finding into the draft before
+chat; Drop removes the item, not the bytes; point to the button; refer
+to items by id) stayed in the core, tightened.
+
+Evidence that the pointer mechanism carries the weight: in November
+2026, 42 of this repo's 54 Claude sessions read a
+`.claude/bram-reference/` file (486 reads averaging 2.5 KB, almost all
+by `grep`/`sed` on a section), and 16 of 23 sessions in bram-studio
+did the same. The same ledger showed agents re-reading the imported
+core by grep (65 re-reads across 9 xmlui sessions), which is how a
+long core gets used: as a manual to search, not instructions held in
+mind. A shorter core with greppable headings serves that use better.
+
+What moved, by destination section of `worklist-mechanics.md`: the
+schema field notes (`files`, `closesIssues`, `begunAtMs`, the three
+commit states, `_draftMissing`, `worklist-history/`) to §Schema field
+notes; the triage payload shape, selection detail, resolve's responses,
+the per-status iterate rules, claim-from-feedback and feedback-ref
+detail to §What each button sends; the authoring reasoning and examples
+to §Authoring detail. The opt-out section's retired-phrase history and
+the claim section's three endings were already in §Opt-out plumbing and
+§The claim and the authorization and are now stated once. Jon's
+framing: "reducing the floor is the biggest source of token
+optimization, right?" The honest answer recorded with the item: the
+floor was 21% of tokens sent that week and the history above it 79%,
+so the fresh-session habit is the larger lever; the floor is the one
+Bram pays on every call of every project, and the one that sets the
+smallest window a session can start in. Freestyle mode was unaffected:
+it seeds no conventions at all.

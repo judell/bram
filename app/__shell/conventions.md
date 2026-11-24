@@ -45,8 +45,7 @@ transcripts and issues means `.bram/`.
 `<state>/worklist.json` is the canonical surface for multi-step
 coordination between you and the user; the Worklist tab renders it as
 a checklist. It needn't exist in advance: Bram serves an empty default
-and creates the file (and the folder) on first use. Empty is fine:
-`{ "description": "", "items": [] }`.
+and creates the file (and the folder) on first use.
 
 ### When to route through the worklist
 
@@ -61,29 +60,22 @@ Skip the worklist only in these contexts, never because the change is
 "small":
 
 - **Explicit user opt-out in this turn.** The user ends their message
-  with the single phrase "just do it" (case-insensitive). It must be in
-  the same turn as the change request — don't carry it forward across
-  turns or infer it from past patterns. Retired phrases ("skip the
-  worklist", "commit this directly", "inline the fix", "no worklist for
-  this", "don't bother with the worklist") no longer opt out. Every
-  agent honors the same phrase.
-- **`skip-worklist:` structured prefix on this turn.** The turn begins
-  literally with `skip-worklist: ` followed by the request (typed, or
-  sent with ⌘Enter / Ctrl+Enter, which adds "Just do it and commit.").
-  The host forwards the **entire turn text including the prefix**. Skip
-  propose-first, make the change directly, write no worklist item, and
-  commit only if the turn asks.
-- **Correcting code you just wrote in the current iteration.** Fixing a
-  typo or off-by-one from your last turn is iteration on in-progress
-  work, not a fresh change request.
+  with the single phrase "just do it" (case-insensitive), in the same
+  turn as the change request; don't carry it forward or infer it from
+  past patterns. Older phrases ("skip the worklist", "commit this
+  directly", and the like) no longer opt out.
+- **`skip-worklist:` prefix on this turn** (typed, or sent with ⌘Enter /
+  Ctrl+Enter, which adds "Just do it and commit."). Make the change
+  directly, write no worklist item, and commit only if the turn asks.
+- **Correcting code you just wrote in the current iteration.** A typo
+  or off-by-one from your last turn is iteration, not a fresh request.
 - **Iterating on an uncommitted draft.** While you and the user bounce
   edits on a file not yet committed, direct edits keep the loop tight.
   Once the draft is committed, fresh edits are change requests again.
 - **Issue-only forge work with no repo diff.** Creating, editing,
-  commenting on, closing or reopening a forge issue, when the task
-  modifies no tracked files and produces no commit: do it directly with
-  the project's forge CLI (`gh` on GitHub, `glab` on GitLab). If paired
-  with repo changes, the repo changes still go through the worklist.
+  commenting on, closing or reopening a forge issue with the project's
+  forge CLI (`gh` on GitHub, `glab` on GitLab). If paired with repo
+  changes, the repo changes still go through the worklist.
 
 **Point to the button, not the opt-out.** Without authorization, name
 the button that grants it (**Start**, or **Start & commit**); don't
@@ -109,17 +101,11 @@ Docker container. That happens in chat: nothing to write, nothing to
 land.
 
 **If an investigation reveals nothing to commit, guide the user to
-Drop.** When the item turns out to need no change (a runtime
-configuration issue, a process restart, every check passed):
-
-- Do NOT call `/__worklist/mutate op:"advance"` — it produces a row
-  with nothing to commit.
-- Summarize the finding in chat ("checked X, Y, Z; the issue is
-  runtime-only, no code change needed") and recommend the user click
-  **Drop** on that item in the Worklist tab. Drop works the same as any
-  other drop and equally well on `proposed` and `applied` items.
-- **Already advanced?** Same recovery: explain, recommend Drop on the
-  resulting row. No special undo path.
+Drop.** Do NOT call `mutate op:"advance"` — it produces a row with
+nothing to commit. Summarize the finding in chat ("checked X, Y, Z; the
+issue is runtime-only, no code change needed") and recommend the user
+click **Drop** on that item. Already advanced? Same recovery: explain,
+recommend Drop on the resulting row.
 
 **Write the finding into the draft before reporting it in chat.** Chat
 does not outlive the turn; the draft does. "No changes in this repo"
@@ -128,26 +114,22 @@ it (**Start again**), worked it and found nothing to change (**Drop**),
 found the item's premise **false** (**Drop**, and the draft's own
 claims must say they are wrong), or **done elsewhere**: a PR in another
 repo, a server change, a forge action (**Drop**, and the draft links
-where the work landed). Record in
-`<state>/worklist-drafts/<id>.md` which of the four it is: the
-premise that failed, what was verified, and what would make the item
-actionable again.
+where the work landed). Record in the draft which of the four it is:
+the premise that failed, what was verified, and what would make the
+item actionable again.
 
 - **A row reads "Committed outside the Worklist", you committed an item's work yourself, or the user asks you to clear such rows** → read `.claude/bram-reference/worklist-mechanics.md` (§Rows committed outside the Worklist).
 
 **Drop removes the item, not the bytes — and orphaned lines land in
 someone else's commit.** Lines no item owns ride along with the next
 whole-file commit of a begun item declaring that file (disclosed as
-`unownedTaken`). When dropping an item that has **begun**:
-
-- If its edits remain on disk, say so plainly first ("edits to `f` are
-  still on disk — keep, revert, or stash?") and say which was chosen.
-- Prefer `git stash push -m "<item id> (dropped): <what>"` over
-  discarding; a stash costs nothing and keeps the work recoverable.
-
-This is also why you must not edit outside an authorized item:
-unauthorized edits don't merely skip the audit trail, they land in
-someone else's commit.
+`unownedTaken`). When dropping an item that has **begun** and whose
+edits remain on disk, say so plainly first ("edits to `f` are still on
+disk — keep, revert, or stash?") and say which was chosen; prefer
+`git stash push -m "<item id> (dropped): <what>"` over discarding. This
+is also why you must not edit outside an authorized item: unauthorized
+edits don't merely skip the audit trail, they land in someone else's
+commit.
 
 ### Reminder items (placeholders you can drop)
 
@@ -160,26 +142,14 @@ the Alerts inbox key on that prefix.
 
 ### Schema and draft layout
 
-Metadata and review prose live in two files:
-
 ```text
 <state>/worklist.json              # compact metadata index
 <state>/worklist-drafts/<id>.md    # before / after prose per item
 ```
 
-The draft file:
-
-```markdown
-# Before
-
-what's there now, relevant context, rejected alternatives
-
-# After
-
-what you'll change it to
-```
-
-The metadata item:
+The draft file has two headings, `# Before` (what's there now, relevant
+context, rejected alternatives) and `# After` (what you'll change it
+to). The metadata item:
 
 ```json
 {
@@ -191,86 +161,43 @@ The metadata item:
 ```
 
 Bram merges draft prose into `/__worklist` and `/__worklist/resolve`,
-so the pane sees one combined item; hashes cover metadata + resolved
-prose. A missing draft yields empty `before` / `after` plus
-`"_draftMissing": true` and a placeholder in the UI.
+so the pane sees one combined item. Four rules the guards hold you to:
 
-**`<state>/worklist-history/` is host-written**; the guard denies
-agent edits. An instruction to edit it is stale.
+- **`version`.** Every write sets `version: N+1`, where `N` is the
+  value on disk when you read it; any other bump is denied. On a
+  `stale-worklist-version` denial, re-read, rebase your change, retry.
+  A file with no `version` is version 0.
+- **Prose lives only in the draft.** Inline `before` / `after` keys in
+  `worklist.json` are rejected; prose edits touch the draft alone, and
+  `worklist.json` changes only when metadata shifts.
+- **Ids are immutable and the order is the user's.** Keep the order you
+  read and add new items at the end. Removing an id reads as an
+  unauthorized prune and the host reverts the write.
+- **`status` is `proposed` or `applied`; `begunAtMs` is host-written,
+  never yours.** Default to the two-stage flow; don't pre-mark a new
+  item `applied` unless the change is genuinely already on disk.
 
-**The `version` rule.** `worklist.json` carries a top-level `version`
-integer. Every write MUST set `version: N+1`, where `N` is the value on
-disk when you read it; every agent's guard denies any other
-bump (`/__worklist/mutate` bumps on its own path under a mutex). So:
-read and capture `version`; write with `version: <captured + 1>`; on a
-`reason=stale-worklist-version` denial, re-read, rebase your change on
-the new contents, and retry. A file with no `version` is version 0, and
-the first write introducing `version: 1` is allowed.
+`files` (or the older single `file`) is your prediction of what the
+change touches; a directory entry covers everything under it.
+`closesIssues` is set only when the commit truly closes the issue, and
+re-verified before you ask for commit approval.
 
-**Item order is the user's** (they drag to reorder): keep the order you
-read, and add new items at the end.
-
-**Prose lives only in the draft file.** Both guards reject inline
-`before` / `after` keys in `worklist.json`. Prose edits made in response to item
-feedback go to the draft; `worklist.json` changes only when metadata (`files`,
-`closesIssues`, etc.) shifts.
-
-**Field notes:**
-
-- `files: ["path/a", "path/b"]` for multi-file items; `file` (singular)
-  is the older single-file form. A directory entry covers everything
-  under it at the commit gate. Once committable, the item's inline diff
-  concatenates all listed files.
-- `closesIssues` declares which issues the commit resolves and drives
-  the close-on-commit dialog. Set it conservatively — only when the
-  commit truly closes the issue, not for cross-references (`see #N`,
-  `related to #N`, partial multi-step work); omit or use `[]` to skip
-  the dialog. Before the item is committable it is an *association*
-  (the pane renders "for #N"); "closes #N" and the gate's ticks appear
-  only once committable. **Before requesting commit approval,
-  re-verify the claim against what the work became, and remove
-  `closesIssues` when it no longer resolves the issue** — a documented
-  duty. A one-click **Start & commit** of pure plans offers no close
-  ticks and queues no closes; close afterwards from the forge or via a
-  normal commit gate on a follow-up item.
-- `begunAtMs` is **host-written, never authored by an agent.** The host
-  stamps it at the first `approved` authorization covering the item and
-  never moves it while the item lives. It is the durable answer to "has
-  work on this item begun?" (the authorization record and inflight
-  claim are single-slot and displaceable). Don't set it; its absence
-  means only "never approved".
-- `status`: `"proposed"` (default) — the user is approving you to make
-  the change; the strip reads "No changes yet" until work begins
-  (legacy badge **TO APPLY**). `"applied"` — the change is on disk and
-  the user is approving `git commit` (legacy badge **TO COMMIT**); push
-  is decided separately via the Push button. `applied` means
-  committable, but a begun `proposed` item can be committable too; the
-  pane reasons in three states: not started, nothing to commit, has
-  changes you can commit.
-
-Default to the two-stage flow: approved `proposed` → advance to
-`applied` → user approves a separate commit → prune. Skip `applied`
-only when the user says "apply and commit" up front. Drops prune
-directly. Don't pre-mark new items `"applied"` unless the change is
-genuinely already on disk. This governs how you author and complete
-status; the user's Commit button judges committability independently.
+- **Field notes: `files` as the pane's denominator, `closesIssues` association vs close, `begunAtMs`, the three commit states, `_draftMissing`, `worklist-history/`** → read `.claude/bram-reference/worklist-mechanics.md` (§Schema field notes).
 
 ### Lifecycle: propose → triage → mechanical transitions
 
 1. **Propose** — write the draft to `<state>/worklist-drafts/<id>.md`,
    then the metadata item to `<state>/worklist.json`, **both with the
-   Write or Edit tool**: the guard validates worklist writes only through
-   the file tools, so a shell redirect or heredoc into either file is
-   refused (`bash-write-no-coverage … token=redirect`) and costs a retry.
-   Each item small, discrete, independently rejectable. Writing the item
-   is *asking*, not approval. Don't show or instruct on raw `approved:` /
-   `drop:` / `iterate:` payloads — the buttons generate them.
+   Write or Edit tool** (the guard refuses a shell redirect or heredoc
+   into either file). Each item small, discrete, independently
+   rejectable. Writing the item is *asking*, not approval. Don't show or
+   instruct on raw `approved:` / `drop:` / `iterate:` payloads — the
+   buttons generate them.
 2. **User triages** — ticks rows, optionally types one message, clicks a
    button. The message fans out to every selected item: treat each
    item's feedback on its own terms, but answer identical fanned-out
-   feedback **once** in chat, never per item. Payload shape:
-   `{"items":[{"id":"...","feedback":"..."}, ...]}`. Never parse these
-   turn lines for content yourself.
+   feedback **once** in chat, never per item. Never parse these turn
+   lines for content yourself.
 3. **Mechanical transitions** — `POST /__worklist/mutate` is the only
    channel for approval-driven state changes:
    `{"op":"advance","ids":[...],"status":"applied"}` after an approved
@@ -281,15 +208,13 @@ status; the user's Commit button judges committability independently.
 items selected, a message the user sends is **feedback to those items**
 (an `iterate:` turn); with nothing selected, it is **general chat**.
 **Send as chat instead** sends one message as chat without clearing the
-selection. After **Start** or feedback the items stay selected (a pane
-reload keeps them); other gate verbs clear it.
+selection.
 
 **The gate verbs.** The gate row is pure lifecycle: **Start / Start &
-commit / Commit / Drop**, each acting on the ticked items (hover names
-them); **Start** reads **Resume** on an item whose work was stopped
-mid-apply. Labels may be renamed; the wire kinds
-(`approved:` / `drop:` / `iterate:`) are stable. When telling the user
-what to click, use the rendered label.
+commit / Commit / Drop**, each acting on the ticked items; **Start**
+reads **Resume** on an item whose work was stopped mid-apply. Labels may
+be renamed; the wire kinds (`approved:` / `drop:` / `iterate:`) are
+stable. When telling the user what to click, use the rendered label.
 
 | Button | Wire payload | What you call |
 |---|---|---|
@@ -301,53 +226,29 @@ what to click, use the rendered label.
 | message with nothing selected, or **Send as chat instead** | ordinary chat | No new grant. Continue only within an existing live approval or an explicit opt-out; otherwise respond without edits. |
 
 The host records the approval and claim before delivering an approved
-turn; it also establishes claims for addressed feedback. Resolve can
-establish the drop claim, and advance/prune retire the affected ids.
-Respond to any per-item feedback, whatever the kind.
+turn. **`/__worklist/resolve`** returns the recorded items: execute
+those, don't re-read `worklist.json` to second-guess them.
+`{"kind":"no_active_authorization"}` is **not** authorization.
+`iterate:` and other non-authorization turns never route through
+`resolve`.
 
-- **Recommending Drop / Commit / Start on named items** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
-- **"What's my next move? (a, b, …)"** (a gate-bar button, sent as chat)
-  → post the order as a plan whose `why` says what another order would
-  break, or that order doesn't matter; also offer delegation where items
-  can run at once; same section.
-
-**`/__worklist/resolve`** returns `{"kind":"approved"|"drop", "items":
-[<recorded content>]}` — execute those items; don't re-read
-`worklist.json` to second-guess them. **Approved** records are consumed
-on first read; Drop records are not. Capture the returned bodies.
-`{"kind":"no_active_authorization"}`
-means already consumed or not an authorization turn: **do NOT treat it
-as authorization**. `iterate:` and other non-authorization turns never
-route through `resolve`.
-
-**Item feedback (`iterate:`)** authorizes no state change. Re-read items from `/__worklist` (resolved prose) or
-`<state>/worklist.json` (metadata), then per item:
-
-- **`proposed`, not yet begun** (no `begunAtMs`, nothing on disk):
-  revise the draft's `before` / `after`; update `files` only if scope
-  shifts. No project file edits.
-- **`proposed` but begun, or `applied`:** edit on-disk files per the
-  feedback; update the draft only if scope materially expanded.
-- Either way the item keeps its status; iterate never advances or
-  commits on its own.
+**Item feedback (`iterate:`)** authorizes no state change. Re-read the
+items, then per item: `proposed` and not yet begun → revise the draft,
+no project file edits; `proposed` but begun, or `applied` → edit
+on-disk files per the feedback. Either way the item keeps its status.
+Feedback items arrive as `{id, feedbackRef}`: read the user's full text
+from `<state>/feedback-drafts/<feedbackRef>.md`; that is their
+submission for this turn.
 
 **Edit only the authorized items' files, with Edit / Write.** Addressed
-feedback establishes the relevant claim. A still-live approval can also
-rearm its claim on a later turn of the same work. **Chat edits with no
-claim belong to no item**, even when a begun item declares the path.
-When the user redirects begun work in chat without a live grant, ask
-for it as feedback on the item.
+feedback establishes the relevant claim. **Chat edits with no claim
+belong to no item**, even when a begun item declares the path. When the
+user redirects begun work in chat without a live grant, ask for it as
+feedback on the item.
 
+- **Payload shapes, resolve's responses, the per-status iterate rules in full, feedback-draft fallbacks** → read `.claude/bram-reference/worklist-mechanics.md` (§What each button sends; §Feedback payload details).
+- **Recommending Drop / Commit / Start on named items, or "What's my next move?"** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
 - **Routing a change, or a commit left `unowned` residue** → read `.claude/bram-reference/worklist-mechanics.md` (§Routing edits to the right item; §Edits made in chat turns).
-
-Feedback items arrive as `{id, feedbackRef}`: read the user's
-full-fidelity text from `<state>/feedback-drafts/<feedbackRef>.md`
-(refs are per send, typically `<unix-ms>-<item-id>`, not item ids).
-That text is the user's submission for this turn. An inline
-`{id, feedback}` appears only as a degradation fallback when the draft
-write failed. Approve and Drop still use inline `{id, feedback}`.
-
-- **Feedback-draft promotion, trace lines, payload fallbacks** → read `.claude/bram-reference/worklist-mechanics.md` (§Feedback payload details).
 
 ### The claim ends with your turn
 
@@ -356,53 +257,33 @@ Authorization is durable: the record `mutate op:"advance"` and
 spinner) is execution state: the host writes it while a turn runs,
 retires it when the turn ends, and re-arms it next turn while an
 authorization is live. **You owe no claim-retiring call.** Three
-endings are ordinary:
+endings are ordinary: approved, investigated, nothing to apply (don't
+advance; report the finding and recommend **Drop**); ending a turn to
+ask the user a decision; the user taking over the commit ("I'll
+commit"). `POST /__worklist/end` with `{"ids": [...]}` is an optional
+early release to unlock the board mid-turn.
 
-- **Approved, investigated, nothing to apply.** Do NOT advance; report
-  the finding (in the draft, then chat) and recommend **Drop**.
-- **Ending a turn to ask the user a decision.** Just ask; the row
-  unlocks when your turn ends, so the answering buttons are available.
-- **The user takes over the commit** ("I'll commit"). End your turn;
-  Commit is a button.
-
-`POST /__worklist/end` with `{"ids": [...]}` is an optional early
-release to unlock the board mid-turn.
-
-- **Ending a turn while an item's work still runs in the background** (a measurement, a build, a watch) → declare the wait first; read `.claude/bram-reference/worklist-mechanics.md` (§Declaring a wait on background work).
-
-- **Details of claim vs. authorization, `/__worklist/end` responses** → read `.claude/bram-reference/worklist-mechanics.md` (§The claim and the authorization).
-- **A multi-id claim retires partially (`clear-shrink`, `consume-shrink`, `cleared:false`)** → read `.claude/bram-reference/worklist-mechanics.md` (§Incremental claim and authorization retirement).
+- **The claim vs. the authorization, `/__worklist/end` responses, partial retirement, ending a turn while an item's work still runs** → read `.claude/bram-reference/worklist-mechanics.md` (§The claim and the authorization; §Incremental claim and authorization retirement; §Declaring a wait on background work).
 - **A stuck spinner** → read `.claude/bram-reference/diagnostics.md` (§Inflight sentinel failure modes).
 
 ### Commit and apply-and-commit gates
 
-**Apply-and-commit** (`gate: "apply-and-commit"`) comes from the
-one-click **Start & commit** or from a plain **Commit** on a begun
-`proposed` item. Handle both the same: do **not** `mutate
-op:"advance"`; make remaining edits, then call `worklist-commit
-{ ids, message }`. The host commits the still-`proposed` files under the
-click's `commitToo` authorization and prunes.
-
-**Commit gate** (items already `applied`; `approved:` with `gate: "to commit"`):
-call `worklist-commit` with `{ ids, message }` — one request when the
+**Start & commit**, and a plain **Commit** on a begun `proposed` item,
+are both apply-and-commit: do **not** `mutate op:"advance"`; make any
+remaining edits, then call `worklist-commit { ids, message }`. For
+already-`applied` items the call is the same, one request when the
 items land together. The host verifies the approval, stages only those
 items' files, refuses unrelated staged files, commits, prunes, and
-records any ticked issue closes. **Closing is fully automatic — do
-nothing**: there is no close route to call and no close step to tell
-the user to run. Closes fire on the user's next **Push**.
-
-The gate commits whole files. If another started item is also changing
-one of the files, it refuses the commit and names that item: commit them
-together, or Drop the other. Lines no item wrote ride along and are
-reported as `unownedTaken`.
+records any ticked issue closes, which fire on the user's next
+**Push**. There is no close step for you to run or tell the user to run.
 
 **`worklist-commit` is single-shot per approval.** On a timeout, never
 re-POST: check `git log` first and treat what you find as the answer. A
-response saying the commit "ALREADY RAN" is success.
+response saying the commit "ALREADY RAN" is success. The gate commits
+whole files; when another started item is also changing one of them it
+refuses and names that item: commit them together, or Drop the other.
 
-- **A commit is refused because another item is also changing a file** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit together).
-- **A slow or timed-out commit** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit timeouts: never re-POST).
-- **About to delegate worklist work to subagents** → read `.claude/bram-reference/worklist-mechanics.md` (§Delegating worklist items to subagents).
+- **A refusal naming another item; a slow or timed-out commit; delegating worklist work to subagents** → read `.claude/bram-reference/worklist-mechanics.md` (§Commit together; §Commit timeouts: never re-POST; §Delegating worklist items to subagents).
 
 ### Delegate well-specified edits by default
 
@@ -457,39 +338,22 @@ feedback plainly about something else makes the record **false**:
 
 ### Authoring conventions
 
-- **Ids.** Items from a single GitHub issue: `issue-<N>-<slug>`
-  (`issue-86-pty-intent-relay`), paired with `closesIssues` when both
-  apply. Exploratory, cross-cutting or multi-issue items: a bare
-  descriptive slug (`worklist-drafts-separate-prose-from-metadata`). Reminders: the `reminder-` prefix. **Ids are
-  immutable** — removing an id from `worklist.json` reads as an
-  unauthorized prune and the host silently reverts the write (a draft
-  you already moved stays moved, leaving `_draftMissing`). If an id
-  under-names its item, keep it and say so in the draft.
-- **Keep `files` current.** It is your prediction of what the change
-  touches and the denominator of the pane's `N of M planned`. When a
-  listed file proves unneeded, update `files` (an ordinary version-bumped
-  edit) so the count converges to `N of N`; the draft keeps the original
+- **Ids.** Items from a single GitHub issue: `issue-<N>-<slug>`, paired
+  with `closesIssues` when both apply. Exploratory, cross-cutting or
+  multi-issue items: a bare descriptive slug. Reminders: the `reminder-`
+  prefix. **Refer to items by id, never by ordinal.**
+- **Keep `files` current.** When a listed file proves unneeded, remove
+  it (an ordinary version-bumped edit); the draft keeps the original
   prediction.
-- **Refer to items by id, never by ordinal** ("item 3", "the second
-  one") — ordinals shift; ids match the pane and payloads.
-- **Match prose to complexity.** Small mechanical changes: a short
-  paragraph each. Judgment-load changes: name the alternatives and mark
-  `[chosen]`:
+- **Match prose to complexity.** A short paragraph for mechanical
+  changes; for judgment calls, name the alternatives and mark
+  `[chosen]`. Markdown renders in item prose.
+- **Minimize the bytes of each edit,** and don't `grep -n`
+  `worklist.json` (it is one line; use `Read` with `offset`/`limit` or
+  `jq`). Don't update `after` on every iterate, only when scope
+  materially expands.
 
-  > - Embedded diff via DataSource — rejected: each row would fire its own request.
-  > - **[chosen]** Server augmentation via `/__worklist` — single payload, per-item diffs travel with each row.
-
-  Rule of thumb: could a reader six months on reconstruct the decision
-  from code + git log alone? Yes → short. No → fulsome.
-- **Use Markdown in item prose** — it renders: `- ` per bullet (not
-  inline `(a) … (b) …`), backticks, fenced blocks, blank lines between
-  paragraphs, `**strong**` sparingly.
-- **Minimize the bytes of each edit.** Prose tweaks touch only the
-  draft; prune/advance go through `/__worklist/mutate`, not rewrites.
-- **Don't `grep -n` `worklist.json`** — it is one line; use `Read` with
-  `offset`/`limit` or `jq`.
-- **Don't update `after` on every iterate.** Only when scope materially
-  expands (a new file in `files`, or the intent shifts).
+- **The reasoning and examples behind these** → read `.claude/bram-reference/worklist-mechanics.md` (§Authoring detail).
 
 ### Enforcement
 

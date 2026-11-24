@@ -22,9 +22,12 @@
     id="ctxSessionsChangedEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
+  <!-- context-dialog-measured-compaction-range: a switch changes which
+       session the route reads, so re-read it with the list; the picker
+       blanks a reading that names another session until then. -->
   <ChangeListener
     listenTo="{ctxSessionsChangedEvt.value &amp;&amp; ctxSessionsChangedEvt.value.tick}"
-    onDidChange="() => { ctxSessions.refetch(); }" />
+    onDidChange="() => { ctxSessions.refetch(); sessionSize.refetch(); }" />
   <!-- footer-context-blank-until-first-turn-ends (Jon, 2026-11-23): a new
        session's switch payload has no tokens, and the next pushed reading
        comes only at turn end, so the line was blank for the whole first
@@ -58,6 +61,18 @@
       var.ctx="{window.__bramSessionContextPick(sessionContextEvt.value, sessionSize.value &amp;&amp; sessionSize.value.context, window.__bramSessionContextKey(window.__bramCurrentSessionOf(ctxSessions.value)))}"
       var.dismissedBoundaryMs="{0}"
       var.infoKey="{''}">
+      <!-- context-dialog-measured-compaction-range: where the agent has
+           compacted on its own in this project, for the context dialog's
+           sentence and its Details table. Fetched the first time a dialog
+           opens (infoKey is set by the little-i buttons and never cleared),
+           refetched only when this session's compaction count moves; never
+           polled (developing-bram.md, "Push over polling").
+           https://www.xmlui.org/docs/reference/components/DataSource
+           https://www.xmlui.org/docs/reference/components/ChangeListener -->
+      <DataSource id="compactionPoints" url="/__compaction-points" when="{!!infoKey}" />
+      <ChangeListener
+        listenTo="{ctx &amp;&amp; ctx.compactions}"
+        onDidChange="() => { if (infoKey) { compactionPoints.refetch(); } }" />
       <!-- Each figure carries a little-i that opens a modal explaining it,
            the Settings tab's pattern (settingInfoDialog); no tooltips, the
            modal is the explanation (Jon, 2026-11-23). Warning color only
@@ -111,9 +126,9 @@
       <Theme maxWidth-ModalDialog="min(760px, 95vw)">
       <ModalDialog id="contextInfoDialog" title="{window.__bramSessionContextInfoTitle(infoKey)}">
         <VStack gap="$space-3" padding="$space-2" paddingTop="0">
-          <Markdown content="{window.__bramSessionContextLead(infoKey, ctx, modelRates.value)}" />
+          <Markdown content="{window.__bramSessionContextLead(infoKey, ctx, modelRates.value, compactionPoints.value)}" />
           <ExpandableItem summary="Details" initiallyExpanded="{false}" iconPosition="start">
-            <Markdown content="{window.__bramSessionContextInfoBody(infoKey, ctx, modelRates.value)}" />
+            <Markdown content="{window.__bramSessionContextInfoBody(infoKey, ctx, modelRates.value, compactionPoints.value)}" />
           </ExpandableItem>
           <HStack>
             <Button label="Got it" onClick="contextInfoDialog.close()" />

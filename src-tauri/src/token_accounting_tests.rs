@@ -2580,3 +2580,97 @@ fn session_reads_param_requires_provider_and_id() {
     assert_eq!(session_reads_param("session=claude:"), None);
     assert_eq!(session_reads_param(""), None);
 }
+
+const CL_BOUNDARY: &str = r#"{"type":"system","subtype":"compact_boundary","timestamp":"2026-11-09T15:00:06.000Z","compactMetadata":{"trigger":"auto","preTokens":999}}"#;
+
+#[test]
+fn claude_boundary_records_the_last_calls_context_and_model() {
+    let text = [
+        assistant("m1", "2026-11-09T15:00:01.000Z", 10, 200, 30, 5),
+        assistant("m2", "2026-11-09T15:00:03.000Z", 20, 700, 80, 5),
+        CL_BOUNDARY.to_string(),
+    ]
+    .join("\n");
+    let pf = parse_claude_text(&text, "s", Thread::Main, None);
+    assert_eq!(pf.compactions, 1);
+    assert_eq!(
+        pf.compaction_points,
+        vec![CompactionPoint {
+            at_ms: t("2026-11-09T15:00:06.000Z"),
+            before: 800,
+            model: "claude-opus-5-5".into(),
+        }]
+    );
+}
+
+#[test]
+fn claude_boundary_with_no_prior_call_records_no_point() {
+    let pf = parse_claude_text(CL_BOUNDARY, "s", Thread::Main, None);
+    assert_eq!(pf.compactions, 1);
+    assert!(pf.compaction_points.is_empty());
+}
+
+#[test]
+fn codex_compacted_records_the_token_count_context_and_the_window() {
+    let count = codex_count("2026-11-09T15:00:05.000Z", 2, 1000, 900, 800, 100).replace(
+        r#""last_token_usage""#,
+        r#""model_context_window":258400,"last_token_usage""#,
+    );
+    let text = [
+        CX_META.to_string(),
+        CX_CTX.to_string(),
+        count,
+        CX_COMPACT.to_string(),
+    ]
+    .join("\n");
+    let pf = parse_codex_text(&text, "fb");
+    assert_eq!(pf.compactions, 1);
+    assert_eq!(pf.context_window, Some(258_400));
+    assert_eq!(
+        pf.compaction_points,
+        vec![CompactionPoint {
+            at_ms: t("2026-11-09T15:00:06.000Z"),
+            before: pf.calls[0].context,
+            model: "gpt-5.5".into(),
+        }]
+    );
+    assert_eq!(pf.calls[0].context, 900);
+}
+
+#[test]
+fn compaction_points_wire_shape_and_median() {
+    let pts = [
+        ("claude", "m-a", 300, None),
+        ("claude", "m-a", 100, None),
+        ("claude", "m-b", 200, None),
+        ("claude", "m-a", 400, None),
+        ("codex", "g", 230, Some(258_400)),
+    ];
+    let got = aggregate_compaction_points(&pts);
+    let v = serde_json::to_value(&got).unwrap();
+    let keys = |x: &serde_json::Value| -> Vec<String> {
+        let mut k: Vec<String> = x.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(&v), vec!["providers"]);
+    let claude = &v["providers"]["claude"];
+    assert_eq!(
+        keys(claude),
+        vec!["byModel", "count", "max", "median", "min"]
+    );
+    assert_eq!(claude["count"], 4);
+    assert_eq!(claude["min"], 100);
+    assert_eq!(claude["max"], 400);
+    // Even count: the lower-middle value.
+    assert_eq!(claude["median"], 200);
+    assert_eq!(keys(&claude["byModel"]), vec!["m-a", "m-b"]);
+    assert_eq!(claude["byModel"]["m-a"]["median"], 300);
+    let codex = &v["providers"]["codex"];
+    assert_eq!(
+        keys(codex),
+        vec!["byModel", "count", "max", "median", "min", "window"]
+    );
+    assert_eq!(codex["window"], 258_400);
+    assert!(aggregate_compaction_points(&[]).providers.is_empty());
+}

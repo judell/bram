@@ -96107,6 +96107,14 @@ fn route_request<R: tauri::Runtime>(
         );
     }
 
+    if path == "__compaction-points" {
+        return (
+            200,
+            "application/json; charset=utf-8",
+            token_accounting::compaction_points_route(app, query),
+        );
+    }
+
     // /__token-accounting[?since=<ISO>&session=<provider>:<id>&calls=1] —
     // issue-486-token-accounting-instrument: per-call token readings from the
     // agents' transcripts, joined to the claim ledger. `bram

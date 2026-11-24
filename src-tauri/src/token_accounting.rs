@@ -138,6 +138,16 @@ pub struct RawCall {
     pub attribution: Option<Attribution>,
 }
 
+/// Where the agent compacted on its own: the context of the last call before
+/// the boundary, and that call's model.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionPoint {
+    pub at_ms: i64,
+    pub before: u64,
+    pub model: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
@@ -196,6 +206,9 @@ pub struct ParsedFile {
     pub reads: Vec<ReadEvent>,
     pub unreadable: usize,
     pub compactions: usize,
+    pub compaction_points: Vec<CompactionPoint>,
+    /// Codex's `model_context_window`, last one seen.
+    pub context_window: Option<u64>,
     pub quota: Option<Quota>,
 }
 
@@ -389,6 +402,8 @@ struct CodexInfo {
     total_token_usage: Option<CodexUsage>,
     #[serde(default)]
     last_token_usage: Option<CodexUsage>,
+    #[serde(default)]
+    model_context_window: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1250,6 +1265,7 @@ pub struct ClaudeParser {
     pub reads: Vec<ReadEvent>,
     pub unreadable: usize,
     pub compactions: usize,
+    pub compaction_points: Vec<CompactionPoint>,
     pending: HashMap<String, PendingTool>,
     collect_reads: bool,
     /// (index of the first call, timestamp) of the turn the last real user
@@ -1296,6 +1312,19 @@ impl ClaudeParser {
             "user" => self.user(rec),
             "system" if rec.subtype.as_deref() == Some("compact_boundary") => {
                 self.compactions += 1;
+                // A subagent has its own file, so this parser's last call is
+                // the main thread's whenever the file is a main one.
+                if let Some(c) = self.calls.last() {
+                    self.compaction_points.push(CompactionPoint {
+                        at_ms: rec
+                            .timestamp
+                            .as_deref()
+                            .and_then(crate::parse_iso_to_epoch_ms)
+                            .unwrap_or(0),
+                        before: c.context,
+                        model: c.model.clone(),
+                    });
+                }
             }
             _ => {}
         }
@@ -1461,6 +1490,7 @@ impl ClaudeParser {
             reads: self.reads,
             unreadable: self.unreadable,
             compactions: self.compactions,
+            compaction_points: self.compaction_points,
             ..Default::default()
         }
     }
@@ -1485,6 +1515,8 @@ pub struct CodexParser {
     pub reads: Vec<ReadEvent>,
     pub unreadable: usize,
     pub compactions: usize,
+    pub compaction_points: Vec<CompactionPoint>,
+    pub context_window: Option<u64>,
     pub quota: Option<Quota>,
     pub session_id: Option<String>,
     /// For a subagent rollout: the thread that spawned it.
@@ -1572,7 +1604,16 @@ impl CodexParser {
                 Some("task_started") => self.turn_start = (self.calls.len(), at_ms),
                 _ => {}
             },
-            "compacted" => self.compactions += 1,
+            "compacted" => {
+                self.compactions += 1;
+                if let Some(c) = self.calls.last() {
+                    self.compaction_points.push(CompactionPoint {
+                        at_ms,
+                        before: c.context,
+                        model: c.model.clone(),
+                    });
+                }
+            }
             "response_item" => {
                 if self.collect_reads {
                     self.response_item(p, at_ms);
@@ -1604,6 +1645,9 @@ impl CodexParser {
         let Some(info) = p.info else {
             return;
         };
+        if info.model_context_window.is_some() {
+            self.context_window = info.model_context_window;
+        }
         let total = info.total_token_usage.as_ref().and_then(|t| t.total_tokens);
         if total.is_some() && total == self.last_total {
             return;
@@ -1746,6 +1790,8 @@ impl CodexParser {
             reads: self.reads,
             unreadable: self.unreadable,
             compactions: self.compactions,
+            compaction_points: self.compaction_points,
+            context_window: self.context_window,
             quota: self.quota,
         }
     }
@@ -5802,6 +5848,104 @@ pub fn session_reads_route<R: tauri::Runtime>(app: &tauri::AppHandle<R>, query: 
     let session = format!("{}:{}", filter.0, filter.1);
     let report = session_reads_report(&files, &root_s, home.as_deref(), &session);
     serde_json::to_vec(&report).unwrap_or_default()
+}
+
+// --- compaction points ------------------------------------------------------
+
+/// Count, min, max and median of the context measured just before the agent
+/// compacted.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionRange {
+    pub count: usize,
+    pub min: u64,
+    pub max: u64,
+    pub median: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCompactions {
+    #[serde(flatten)]
+    pub range: CompactionRange,
+    /// The provider's context window, when its transcripts say (Codex).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<u64>,
+    pub by_model: BTreeMap<String, CompactionRange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionPoints {
+    pub providers: BTreeMap<String, ProviderCompactions>,
+}
+
+fn compaction_range(v: &mut Vec<u64>) -> Option<CompactionRange> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_unstable();
+    Some(CompactionRange {
+        count: v.len(),
+        min: v[0],
+        max: v[v.len() - 1],
+        // Lower-middle for an even count: always a measured value.
+        median: v[(v.len() - 1) / 2],
+    })
+}
+
+/// Group `(provider, model, before, window)` points by provider and model.
+/// A provider with no points is absent; its `window` is the largest seen.
+pub fn aggregate_compaction_points(points: &[(&str, &str, u64, Option<u64>)]) -> CompactionPoints {
+    let mut by_provider: BTreeMap<&str, (Vec<u64>, Option<u64>, BTreeMap<&str, Vec<u64>>)> =
+        BTreeMap::new();
+    for (prov, model, before, window) in points {
+        let e = by_provider.entry(prov).or_default();
+        e.0.push(*before);
+        e.1 = e.1.max(*window);
+        e.2.entry(model).or_default().push(*before);
+    }
+    let mut providers = BTreeMap::new();
+    for (prov, (mut all, window, models)) in by_provider {
+        let Some(range) = compaction_range(&mut all) else {
+            continue;
+        };
+        let by_model = models
+            .into_iter()
+            .filter_map(|(m, mut v)| compaction_range(&mut v).map(|r| (m.to_string(), r)))
+            .collect();
+        providers.insert(
+            prov.to_string(),
+            ProviderCompactions {
+                range,
+                window,
+                by_model,
+            },
+        );
+    }
+    CompactionPoints { providers }
+}
+
+/// `GET /__compaction-points`: where agents compacted on their own, from the
+/// cached per-file parses. Antigravity and OpenCode detect no compactions.
+pub fn compaction_points_route<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    _query: &str,
+) -> Vec<u8> {
+    let Some(root) = crate::project_root(Some(app)) else {
+        return br#"{"error":"could not resolve project root"}"#.to_vec();
+    };
+    let files: Vec<Arc<ParsedFile>> = discover(&root).iter().filter_map(parse_source).collect();
+    let mut points: Vec<(&str, &str, u64, Option<u64>)> = Vec::new();
+    for pf in &files {
+        if pf.thread != Some(Thread::Main) {
+            continue;
+        }
+        for c in &pf.compaction_points {
+            points.push((pf.provider, c.model.as_str(), c.before, pf.context_window));
+        }
+    }
+    serde_json::to_vec(&aggregate_compaction_points(&points)).unwrap_or_default()
 }
 
 // --- turn-end sampler -------------------------------------------------------

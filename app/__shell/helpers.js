@@ -22371,6 +22371,12 @@ window.__bramSessionContextPick = function (pushValue, routeValue, currentSessio
       }
     }
   }
+  // context-dialog-measured-compaction-range: the route value is a reading
+  // for a session too, and after a provider switch it is the previous
+  // provider's until re-read (trace 2026-11-24 04:35: Claude's reading stood
+  // through a Codex and an OpenCode visit, so the dialog named Claude on
+  // all three). Another session's reading is blank, not stale.
+  if (route && typeof currentSession === "string" && currentSession && typeof route.session === "string" && route.session && route.session !== currentSession) return null;
   return route;
 };
 // The footer's current session as `<provider>:<id>`, the spelling pushed
@@ -22459,7 +22465,7 @@ window.__bramSessionContextCost = function (ctx, rates) {
 // Then savings per call, since that is what a fresh session changes: the gap
 // between the context now and the floor, in tokens and, when the model has a
 // rate, in dollars. Pure: reads only its arguments.
-window.__bramSessionContextLead = function (key, ctx, rates) {
+window.__bramSessionContextLead = function (key, ctx, rates, points) {
   if (!ctx || typeof ctx.tokens !== "number") return "";
   var K = window.__bramTokenK;
   var floor = typeof ctx.floor === "number" ? ctx.floor : 0;
@@ -22493,8 +22499,13 @@ window.__bramSessionContextLead = function (key, ctx, rates) {
   } else {
     where = hasCalls ? "At this point in the session you have made " + N + ", and " + cost("each one") : "At this point in the session " + cost("each call");
   }
-  if (gap === 0) return where;
-  return where + " Switching to a new session will save you about **" + K(gap) + " tokens" + dollars + "** on every call.";
+  // context-dialog-measured-compaction-range: the threshold, and where the
+  // agent has compacted on its own in this project, between the position
+  // sentence and the saving sentence.
+  var range = window.__bramCompactionRangeClause(ctx, points, limN);
+  var tail = range ? " " + range : "";
+  if (gap === 0) return where + tail;
+  return where + tail + " Switching to a new session will save you about **" + K(gap) + " tokens" + dollars + "** on every call.";
 };
 // accounting-actionable-units: the saving in the units a person works in.
 // Pure: reads only its arguments. ctx is { tokens, floor, model, pace };
@@ -22562,7 +22573,7 @@ window.__bramContextSavingMarkdown = function (ctx, rates, byModel) {
   );
   return lines.join("\n");
 };
-window.__bramSessionContextInfoBody = function (key, ctx, rates) {
+window.__bramSessionContextInfoBody = function (key, ctx, rates, points) {
   var K = window.__bramTokenK;
   var num = function (n) { return typeof n === "number" && isFinite(n) ? K(n) : "—"; };
   if (!ctx) return "";
@@ -22594,6 +22605,8 @@ window.__bramSessionContextInfoBody = function (key, ctx, rates) {
   } else {
     out += "The fresh-session offer is off in Settings (the limit is 0).";
   }
+  var table = window.__bramCompactionModelTable(ctx, points);
+  if (table) out += "\n\n" + table;
   var saving = window.__bramContextSavingMarkdown(ctx, rates, null);
   if (saving) out += "\n\n**What a new session saves**, at list prices for `" + ctx.model + "`:\n\n" + saving;
   out += "\n\nThe KB figure beside the session name is the transcript file on disk. It only grows, so it says how much there is to find and search, not what a call costs.";
@@ -22618,6 +22631,64 @@ window.__bramSessionContextNewSession = function (ctx, title) {
       body: JSON.stringify({ name: name, whatsNext: "" }),
     })
     .catch(function () {});
+};
+
+// context-dialog-measured-compaction-range (Jon, 2026-11-23): the context
+// dialog says where Bram suggests a switch and where the agent has compacted
+// on its own, from the project's own session records (/__compaction-points:
+// per provider, per model: count, min, max, median, window when known). A
+// point figure was rejected: 28 of this project's 42 Claude compactions fired
+// well below the 967k ceiling, so the honest statement is the range. Pure
+// functions; each reads only its arguments.
+window.__bramCompactionProviderName = function (session) {
+  var p = String(session || "").split(":")[0];
+  return { claude: "Claude", codex: "Codex", antigravity: "Antigravity", opencode: "OpenCode" }[p] || "";
+};
+// The current model's group when it has at least three points, else the
+// provider's; null when the provider has none.
+window.__bramCompactionGroup = function (ctx, points) {
+  var label = String((ctx && ctx.session) || "").split(":")[0];
+  var prov = points && points.providers && points.providers[label];
+  if (!prov || !prov.count) return null;
+  var m = prov.byModel && ctx && ctx.model ? prov.byModel[ctx.model] : null;
+  var g = m && m.count >= 3 ? m : prov;
+  return {
+    count: g.count, min: g.min, max: g.max, median: g.median,
+    window: prov.window || 0,
+    name: window.__bramCompactionProviderName(ctx.session),
+  };
+};
+// A range narrower than a quarter of its top reads as a point (Codex: 203k
+// to 253k of a 258k window); otherwise the span (Claude: 210k to 980k).
+window.__bramCompactionRangeClause = function (ctx, points, limN) {
+  var K = window.__bramTokenK;
+  var parts = [];
+  if (limN > 0 && !(ctx && ctx.state === "suggest")) parts.push("Bram suggests a new session at **" + K(limN) + "**.");
+  var g = window.__bramCompactionGroup(ctx, points);
+  if (g && g.name) {
+    var times = g.count === 1 ? "once" : "**" + g.count + " times**";
+    var at = g.max - g.min < g.max / 4
+      ? "at about **" + K(g.median) + "** tokens" + (g.window ? ", just under its **" + K(g.window) + "** window" : "")
+      : "at anywhere from **" + K(g.min) + "** to **" + K(g.max) + "** tokens";
+    parts.push(g.name + " has compacted on its own " + times + " in this project's sessions, " + at + "; you don't get to pick that moment. A new session is the reset you choose.");
+  }
+  return parts.join(" ");
+};
+// The Details fold: the provider's points by model.
+window.__bramCompactionModelTable = function (ctx, points) {
+  var label = String((ctx && ctx.session) || "").split(":")[0];
+  var prov = points && points.providers && points.providers[label];
+  if (!prov || !prov.byModel) return "";
+  var K = window.__bramTokenK;
+  var models = Object.keys(prov.byModel).sort(function (a, b) { return prov.byModel[b].count - prov.byModel[a].count; });
+  if (!models.length) return "";
+  var rows = models.map(function (m) {
+    var g = prov.byModel[m];
+    return "| `" + m + "` | " + g.count + " | " + K(g.min) + " | " + K(g.max) + " | " + K(g.median) + " |";
+  });
+  return "**Where " + window.__bramCompactionProviderName(ctx.session) + " has compacted on its own** in this project's sessions, by model (the context on the call before each compaction):\n\n" +
+    "| Model | Compactions | Earliest | Latest | Typical |\n|---|---|---|---|---|\n" + rows.join("\n") +
+    (prov.window ? "\n\nIts window is " + K(prov.window) + " tokens." : "");
 };
 
 // issue-466-pause-install-uninstall (v1): worklist.enforcement, Claude only.

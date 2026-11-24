@@ -50,7 +50,18 @@ UI section.
 - Footer: Shows agent status and the current session, and lets you message the agent.
 
 
+### Workflow or Freestyle
+
+The first time Bram wakes up in a folder it hasn't seen, it asks: **How do you want to work in this folder?** Two cards answer it.
+
+- **Workflow** is Bram as the next section describes it. **Work this way** runs Setup, which seeds the conventions and guard hooks into the folder, and from then on changes flow through the Worklist: the agent proposes an item, you start it, you commit it. In a folder with no git repository the button reads **Create a repo and work this way**: Bram runs `git init` first, then Setup.
+- **Freestyle** writes nothing into your folder and installs no hooks. You talk to the agent in the message box or the terminal, and the Git tab shows what changed and commits the files you tick; where there is no repository yet it offers **Start a repository**, a plain `git init`.
+
+Both modes share the Transcript, Files (including what the agent has read this session), Context, Cost, Sessions and the footer's nudge when a session has grown past the point where a fresh one would serve you better. The choice is remembered for this folder on this computer. A freestyle folder moves to workflow later with **Switch to workflow** on the Worklist tab. There is no switch back from workflow yet.
+
 ### Workflow
+
+This section describes Workflow mode.
 
 On the *Worklist* tab, create Worklist items in conversation ("Hey agent, let's do x") or with the *+ New item* button, which can also cite an open issue. Either way the agent proposes an item: a short plan with Before and After notes, naming the files it expects to alter.
 
@@ -167,7 +178,7 @@ Sources: [What is Smart App Control](https://support.microsoft.com/en-us/topic/w
 
 ### First-run setup
 
-The first time you launch `claude`, `codex`, `opencode` or `agy` in a repo, Bram checks what that provider needs and prompts once if anything is missing — no prompt on later launches. Accepting Bram's setup prompt installs the Worklist conventions the agent reads each session plus provider-specific hooks that enforce the Worklist and show permission menus. A provider-neutral authorization record and watcher-revert fallback back up those hooks.
+Setup runs when you choose **Workflow** on Bram's first wake in a folder, or later when you click **Switch to workflow** on the Worklist tab. It never runs in a freestyle folder, and once a folder is set up, later launches leave it alone. Setup installs the Worklist conventions the agent reads each session plus provider-specific hooks that enforce the Worklist and show permission menus. A provider-neutral authorization record and watcher-revert fallback back up those hooks.
 
 The agents differ in the trust step you see after Bram writes those files:
 
@@ -189,20 +200,20 @@ A healthy Codex hook screen should show Bram's installed lifecycle hooks as both
 <details>
 <summary>Setup internals: hook adapters, guard source-of-truth, and how conventions.md binds each provider</summary>
 
-Once you launch an agent through Bram's terminal, the agent pane checks what that provider still needs for the current repo and prompts only when setup is missing.
+When you choose Workflow, Setup checks what the current provider needs in this folder and installs what is missing; later launches find it in place.
 
 Current behavior:
 
-- **Claude in a fresh repo** — prompt once. Setup installs the provider-neutral core plus the Claude-specific adapter.
-- **Claude in a repo that is already set up** — no prompt.
-- **Codex in a fresh repo** — prompt once. Setup installs the provider-neutral core, the codex hook adapter, and the codex `developer_instructions`, and it also refreshes the shared Claude-side artifacts that live in the repo.
-- **Codex in a repo where setup has already run** — no prompt. The repo and user-global Codex setup artifacts are already in place.
-- **OpenCode in a fresh repo** — prompt once. Setup installs the provider-neutral core, the OpenCode plugin, and the `instructions` entry in `.opencode/opencode.json`.
-- **OpenCode in a repo where setup has already run** — no prompt.
-- **Antigravity in a fresh repo** — prompt once. Setup installs the provider-neutral core, Bram's hook group in `.agents/hooks.json`, and the always-on rules in `.agents/rules/`.
-- **Antigravity in a repo where setup has already run** — no prompt.
+- **Claude in a fresh workflow folder** — Setup installs the provider-neutral core plus the Claude-specific adapter.
+- **Claude in a folder that is already set up** — nothing to install.
+- **Codex in a fresh workflow folder** — Setup installs the provider-neutral core, the codex hook adapter, and the codex `developer_instructions`, and it also refreshes the shared Claude-side artifacts that live in the repo.
+- **Codex in a folder where setup has already run** — nothing to install. The repo and user-global Codex setup artifacts are already in place.
+- **OpenCode in a fresh workflow folder** — Setup installs the provider-neutral core, the OpenCode plugin, and the `instructions` entry in `.opencode/opencode.json`.
+- **OpenCode in a folder where setup has already run** — nothing to install.
+- **Antigravity in a fresh workflow folder** — Setup installs the provider-neutral core, Bram's hook group in `.agents/hooks.json`, and the always-on rules in `.agents/rules/`.
+- **Antigravity in a folder where setup has already run** — nothing to install.
 
-When the prompt runs, Bram installs two layers:
+When Setup runs, Bram installs these layers:
 
 - A provider-neutral core: Bram records the latest structured `approved:` / `drop:` payload in `resources/.worklist-authorization.json` and uses that local record when validating Worklist removals. The desktop watcher can revert an invalid prune as a defense-in-depth fallback if a hook ever fails to fire.
 - A Claude adapter: `~/.bram/bram-guard guard claude-worklist`, registered in `.claude/settings.json` as a `PreToolUse` hook for `Write`, `Edit`, `Bash`, and `mcp__.*`. The hook denies edits to project files not covered by a proposed/applied worklist item (with the explicit opt-out phrase "just do it" in the last user message as the escape hatch), validates worklist-prune authorization for changes to `resources/worklist.json` itself, and blocks mutation-shaped Bash commands without worklist coverage. Setup also registers `~/.bram/bram-guard guard claude-permission-menu` for Claude permission and AskUserQuestion surfacing in the agent pane.
@@ -225,7 +236,7 @@ still references it.
 
 PreToolUse hooks are the generic extension point — both Claude Code and codex expose them — so the two adapters share the same shape: each runs *before* the agent invokes a tool, receives a JSON payload describing the pending call on stdin, and can exit 0 to allow, return a deny decision to block (stderr/permissionDecisionReason goes back to the agent as a tool error), or fail to launch. OpenCode has no such hook, so its adapter is a plugin (`.opencode/plugins/bram.js`) whose `execute.before` tool hook asks the same guard (`~/.bram/bram-guard guard opencode-worklist`) and throws to refuse the call; OpenCode's model reads the message as the refusal. The plugin fails closed: no guard, no answer, or an unreadable answer is a deny. Antigravity does expose `PreToolUse`, in `.agents/hooks.json`; its group runs `~/.bram/bram-guard guard antigravity-worklist`, which maps agy's tools onto Claude's before the shared policy decides. Because agy runs a call when a hook exits 0 with empty output, the registered command turns empty output into a deny.
 
-That means first-run setup is provider-aware in when it prompts but provider-symmetric in what it installs: launching either `claude` or `codex` and accepting the prompt sets up the shared core, the Codex-side `AGENTS.md` guidance block, the Codex `developer_instructions`, the Worklist guard hooks, and the permission-menu surfacing hooks. The OpenCode plugin and its `instructions` entry are the exception: Setup writes them only where OpenCode can run, so projects whose users never run OpenCode get no `.opencode/` directory. Antigravity's hook group and rules are the same kind of exception: projects whose users never run `agy` get no `.agents/hooks.json` or `.agents/rules/`.
+That means Setup is provider-symmetric in what it installs: choosing Workflow with either `claude` or `codex` running sets up the shared core, the Codex-side `AGENTS.md` guidance block, the Codex `developer_instructions`, the Worklist guard hooks, and the permission-menu surfacing hooks. The OpenCode plugin and its `instructions` entry are the exception: Setup writes them only where OpenCode can run, so projects whose users never run OpenCode get no `.opencode/` directory. Antigravity's hook group and rules are the same kind of exception: projects whose users never run `agy` get no `.agents/hooks.json` or `.agents/rules/`.
 
 #### How `conventions.md` governs each agent
 

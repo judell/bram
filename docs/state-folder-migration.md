@@ -23,7 +23,7 @@ Every change here is behavior-preserving when `.bram/` doesn't exist, which was 
 - The OpenCode plugin reads either port file. The seeded conventions and reference docs say the folder is `.bram/` if it exists, else `resources/`, and write `<state>/` after that.
 - One inventory of Bram-owned entries, `BRAM_OWNED_ENTRIES`, used by the owned-path predicate and the Files tab, with a test that every path the host writes is on it and that every machine-state entry is in this repo's `.gitignore`.
 - A read-only dry run: `GET /__state-dir/plan`, the Status tab's "State folder" section, and `bram --state-dir-plan <root>` with no window. For a root: what would move, what's foreign, what's tracked, whether a claim is live, and nested instances.
-- Setup writes `.opencode/.gitignore` and `.agents/.gitignore` naming its seeded entries (decision 7), after the loader check.
+- Setup writes `.opencode/.gitignore` and `.agents/.gitignore` naming its seeded entries (decision 7), after the loader check. Since setup-self-ignores-claude (2026-11-24) it writes `.claude/.gitignore` the same way, naming each bundled skill rather than the skills folder.
 
 ### 0.8.4: the move.
 

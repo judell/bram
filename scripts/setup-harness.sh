@@ -624,6 +624,21 @@ scenario_nogit_workflow() {
   assert_session_postdates_setup
   snap first-commit "Agent started after Setup on the new repo: the First commit offer under the greeting."
   assert_setup_landed "$dir"
+  # setup-self-ignores-claude: Setup's files in .claude/ ignore themselves,
+  # one anchored line per seeded entry and per bundled skill, so the first
+  # commit never asks about them; a file of the user's there stays visible.
+  local expected_ignore
+  expected_ignore="$(printf '/.gitignore\n/bram-conventions.md\n/bram-reference/\n/settings.json\n/settings.local.json\n/skills/loose-ends/\n')"
+  if [ -f "$dir/.claude/.gitignore" ] && [ "$(cat "$dir/.claude/.gitignore")" = "$expected_ignore" ]; then
+    ok ".claude/.gitignore written with Setup's entries"
+  else
+    bad ".claude/.gitignore written with Setup's entries" "got: $(cat "$dir/.claude/.gitignore" 2>&1 | tr '\n' ' ')"
+  fi
+  check "nothing under .claude untracked" test -z "$(git -C "$dir" status --porcelain -- .claude)"
+  mkdir -p "$dir/.claude/commands"
+  printf '# probe\n' > "$dir/.claude/commands/probe.md"
+  # -uall: without it git folds the untracked folder to `?? .claude/commands/`.
+  check "a user file under .claude stays visible" test "$(git -C "$dir" status --porcelain -uall -- .claude)" = "?? .claude/commands/probe.md"
   assert_idempotent "$dir"
   shutdown_bram
 }

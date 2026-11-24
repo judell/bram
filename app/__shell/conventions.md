@@ -33,7 +33,10 @@ lives beside this file in `.claude/bram-reference/`:
 `worklist-mechanics.md`, `diagnostics.md`, `environment.md` and
 `orientation.md` (orienting in a new repo). Sections below say when to read which. Setup refreshes these files and Bram-bundled skills
 (`.claude/skills/<name>/SKILL.md` carrying a `<!-- bram-managed` marker);
-don't edit installed copies, since the next Setup overwrites them.
+don't edit installed copies, since the next Setup overwrites them. Setup
+also writes a `.gitignore` inside `.claude/` naming the files it seeds
+there, so they never show as untracked; your own files in `.claude/` stay
+visible to git.
 
 
 ## Coordinate via worklist.json

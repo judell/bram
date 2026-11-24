@@ -67458,6 +67458,7 @@ mod folder_mode_tests {
             (".claude/bram-conventions.md", "# Working with Bram\n"),
             (".claude/bram-reference/diagnostics.md", "x"),
             (".claude/settings.json", "{}"),
+            (".claude/.gitignore", "/.gitignore\n"),
             (
                 ".claude/skills/loose-ends/SKILL.md",
                 "<!-- bram-managed: skill -->\n",
@@ -67973,6 +67974,20 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             }
         }
     }
+    // setup-self-ignores-claude: Claude's files are seeded in every managed
+    // project, so `.claude/` ignores them unconditionally, once its settings
+    // and skills are on disk. Same rules as the other folders: an existing
+    // `.gitignore` is kept, a folder the project tracks files in is left
+    // alone, the source repo is skipped.
+    apply_self_ignore(
+        app,
+        &proj,
+        ".claude",
+        is_source_repo,
+        &bundled_skill_names(app),
+        &mut wrote,
+        &mut skipped,
+    );
 
     // AGENTS.md marker block — skipped on the source repo (its AGENTS.md is
     // the canonical hand-maintained content, not a Setup-managed target).
@@ -68101,6 +68116,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             &proj,
             ".opencode",
             is_source_repo,
+            &[],
             &mut wrote,
             &mut skipped,
         );
@@ -68124,6 +68140,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             &proj,
             ".agents",
             is_source_repo,
+            &[],
             &mut wrote,
             &mut skipped,
         );
@@ -68205,13 +68222,22 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
 // (it keeps its own config in git); and the source repo, whose root
 // .gitignore covers both. One rule for both folders, so they can't drift.
 
+// setup-self-ignores-claude (Jon, 2026-11-24, "don't think we want
+// .claude"): `.claude/` follows the same rule. It is where Setup seeds the
+// most, and every first commit of a new workflow folder was asking about
+// seven Bram files. The skills folder is shared too, so its line is one
+// `/skills/<name>/` per bundled skill rather than `/skills/`: a skill the
+// user wrote there stays visible to git.
+
 // The folder's ignore file: one anchored line per root-relative table entry
 // under `folder`, plus the file's own line, sorted, newline-terminated.
-fn self_ignore_bytes(folder: &str) -> Vec<u8> {
+// `skills` names the bundled skills, each ignored by name in place of the
+// table's `.claude/skills` folder entry; the other folders pass none.
+fn self_ignore_bytes(folder: &str, skills: &[String]) -> Vec<u8> {
     let prefix = format!("{}/", folder);
     let mut lines: Vec<String> = BRAM_OWNED_ENTRIES
         .iter()
-        .filter(|e| e.root_relative)
+        .filter(|e| e.root_relative && e.rel != ".claude/skills")
         .filter_map(|e| {
             let rest = e.rel.strip_prefix(prefix.as_str())?;
             Some(match e.kind {
@@ -68220,6 +68246,9 @@ fn self_ignore_bytes(folder: &str) -> Vec<u8> {
             })
         })
         .collect();
+    if folder == ".claude" {
+        lines.extend(skills.iter().map(|name| format!("/skills/{}/", name)));
+    }
     lines.push("/.gitignore".to_string());
     lines.sort();
     lines.dedup();
@@ -68261,7 +68290,12 @@ fn folder_has_tracked_files(root: &Path, folder: &str) -> bool {
         .is_some_and(|out| !out.stdout.iter().all(|b| b.is_ascii_whitespace()))
 }
 
-fn seed_self_ignore(root: &Path, folder: &str, is_source_repo: bool) -> SelfIgnoreOutcome {
+fn seed_self_ignore(
+    root: &Path,
+    folder: &str,
+    is_source_repo: bool,
+    skills: &[String],
+) -> SelfIgnoreOutcome {
     if is_source_repo {
         return SelfIgnoreOutcome::SourceRepoSkip;
     }
@@ -68285,7 +68319,7 @@ fn seed_self_ignore(root: &Path, folder: &str, is_source_repo: bool) -> SelfIgno
     {
         Ok(mut file) => {
             use std::io::Write;
-            match file.write_all(&self_ignore_bytes(folder)) {
+            match file.write_all(&self_ignore_bytes(folder, skills)) {
                 Ok(()) => SelfIgnoreOutcome::Written,
                 Err(_) => SelfIgnoreOutcome::Error,
             }
@@ -68304,10 +68338,11 @@ fn apply_self_ignore<R: tauri::Runtime>(
     root: &Path,
     folder: &str,
     is_source_repo: bool,
+    skills: &[String],
     wrote: &mut Vec<String>,
     skipped: &mut Vec<String>,
 ) {
-    let outcome = seed_self_ignore(root, folder, is_source_repo);
+    let outcome = seed_self_ignore(root, folder, is_source_repo, skills);
     let path = root.join(folder).join(".gitignore");
     match outcome {
         SelfIgnoreOutcome::Written => wrote.push(path.display().to_string()),
@@ -68335,6 +68370,8 @@ mod self_ignore_tests {
 
     const OPENCODE_BYTES: &[u8] = b"/.gitignore\n/opencode.json\n/plugins/bram.js\n";
     const AGENTS_BYTES: &[u8] = b"/.gitignore\n/hooks.json\n/rules/bram-conventions-*.md\n";
+    // setup-self-ignores-claude: the skills folder is named skill by skill.
+    const CLAUDE_BYTES: &[u8] = b"/.gitignore\n/bram-conventions.md\n/bram-reference/\n/settings.json\n/settings.local.json\n/skills/loose-ends/\n";
 
     fn write(dir: &Path, rel: &str, text: &str) {
         let path = dir.join(rel);
@@ -68408,14 +68445,14 @@ mod self_ignore_tests {
         let dir = repo("fresh-opencode");
         write(dir.path(), ".opencode/plugins/bram.js", "x");
         assert_eq!(
-            seed_self_ignore(dir.path(), ".opencode", false),
+            seed_self_ignore(dir.path(), ".opencode", false, &[]),
             SelfIgnoreOutcome::Written
         );
         let path = dir.path().join(".opencode/.gitignore");
         assert_eq!(std::fs::read(&path).unwrap(), OPENCODE_BYTES);
         // A second Setup changes nothing.
         assert_eq!(
-            seed_self_ignore(dir.path(), ".opencode", false),
+            seed_self_ignore(dir.path(), ".opencode", false, &[]),
             SelfIgnoreOutcome::AlreadyPresent
         );
         assert_eq!(std::fs::read(&path).unwrap(), OPENCODE_BYTES);
@@ -68426,12 +68463,45 @@ mod self_ignore_tests {
         let dir = repo("fresh-agents");
         write(dir.path(), ".agents/hooks.json", "{}");
         assert_eq!(
-            seed_self_ignore(dir.path(), ".agents", false),
+            seed_self_ignore(dir.path(), ".agents", false, &[]),
             SelfIgnoreOutcome::Written
         );
         assert_eq!(
             std::fs::read(dir.path().join(".agents/.gitignore")).unwrap(),
             AGENTS_BYTES
+        );
+    }
+
+    #[test]
+    fn writes_claude_entries_naming_each_bundled_skill() {
+        let dir = repo("fresh-claude");
+        write(dir.path(), ".claude/bram-conventions.md", "x");
+        write(
+            dir.path(),
+            ".claude/skills/loose-ends/SKILL.md",
+            "<!-- bram-managed -->",
+        );
+        write(dir.path(), ".claude/skills/mine/SKILL.md", "mine");
+        write(dir.path(), ".claude/commands/probe.md", "mine");
+        let skills = vec!["loose-ends".to_string()];
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".claude", false, &skills),
+            SelfIgnoreOutcome::Written
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(".claude/.gitignore")).unwrap(),
+            CLAUDE_BYTES
+        );
+        assert!(ignored(dir.path(), ".claude/bram-conventions.md"));
+        assert!(ignored(dir.path(), ".claude/skills/loose-ends/SKILL.md"));
+        assert!(ignored(dir.path(), ".claude/.gitignore"));
+        // The user's own skill and command stay visible.
+        assert!(!ignored(dir.path(), ".claude/skills/mine/SKILL.md"));
+        assert!(!ignored(dir.path(), ".claude/commands/probe.md"));
+        // A second Setup changes nothing.
+        assert_eq!(
+            seed_self_ignore(dir.path(), ".claude", false, &skills),
+            SelfIgnoreOutcome::AlreadyPresent
         );
     }
 
@@ -68445,7 +68515,7 @@ mod self_ignore_tests {
         write(dir.path(), ".opencode/plugins/mine.js", "mine");
         for folder in [".agents", ".opencode"] {
             assert_eq!(
-                seed_self_ignore(dir.path(), folder, false),
+                seed_self_ignore(dir.path(), folder, false, &[]),
                 SelfIgnoreOutcome::Written
             );
         }
@@ -68464,7 +68534,7 @@ mod self_ignore_tests {
         let path = dir.path().join(".agents/.gitignore");
         std::fs::write(&path, "hooks.json\n# mine\n").unwrap();
         assert_eq!(
-            seed_self_ignore(dir.path(), ".agents", false),
+            seed_self_ignore(dir.path(), ".agents", false, &[]),
             SelfIgnoreOutcome::AlreadyPresent
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"hooks.json\n# mine\n");
@@ -68478,7 +68548,7 @@ mod self_ignore_tests {
         git(dir.path(), &["add", ".agents/rules/team.md"]);
         git(dir.path(), &["commit", "-q", "-m", "track a rule"]);
         assert_eq!(
-            seed_self_ignore(dir.path(), ".agents", false),
+            seed_self_ignore(dir.path(), ".agents", false, &[]),
             SelfIgnoreOutcome::TrackedSkip
         );
         assert!(!dir.path().join(".agents/.gitignore").exists());
@@ -68489,7 +68559,7 @@ mod self_ignore_tests {
         let dir = repo("source");
         std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
         assert_eq!(
-            seed_self_ignore(dir.path(), ".opencode", true),
+            seed_self_ignore(dir.path(), ".opencode", true, &[]),
             SelfIgnoreOutcome::SourceRepoSkip
         );
         assert!(!dir.path().join(".opencode/.gitignore").exists());
@@ -68500,7 +68570,7 @@ mod self_ignore_tests {
         let dir = Scratch::new("not-a-repo");
         std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
         assert_eq!(
-            seed_self_ignore(dir.path(), ".opencode", false),
+            seed_self_ignore(dir.path(), ".opencode", false, &[]),
             SelfIgnoreOutcome::Written
         );
     }
@@ -70508,6 +70578,9 @@ const BRAM_OWNED_ENTRIES: &[OwnedEntry] = {
         seeded(".claude/settings.json", File),
         seeded(".claude/settings.local.json", File),
         seeded(".claude/skills", Dir),
+        // setup-self-ignores-claude: `.claude/`'s self-ignore file, as the
+        // other two shared folders have.
+        seeded(".claude/.gitignore", File),
         // OpenCode's guard plugin and config (seed_opencode_plugin,
         // seed_opencode_instructions), Antigravity's hooks and the
         // conventions cut into rules (antigravity_rule_path names them

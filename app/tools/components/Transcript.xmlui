@@ -197,7 +197,7 @@
          size observer races at load). Needs an explicit backgroundColor
          or scrolled content shows through (per the sticky-header
          how-to). -->
-    <StickySection stickTo="top" top="$height-AppHeader" backgroundColor="$backgroundColor"
+    <StickySection stickTo="top" backgroundColor="$backgroundColor"
       paddingHorizontal="$space-4">
       <!-- header-wraps-instead-of-overflowing: with the terminal open the
            pane is ~406px, and heading + count + the 16rem find box don't fit

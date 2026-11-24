@@ -81,10 +81,15 @@
     </ModalDialog>
   </Theme>
 
-  <VStack padding="$space-6" gap="$space-4">
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Heading level="h2">Log</Heading>
-    </HStack>
+  <VStack padding="$space-6" gap="$space-4" height="*">
+    <PinnedHeader gap="$space-4">
+    <property name="headerTemplate">
+      <VStack gap="$space-4">
+        <HStack gap="$space-3" verticalAlignment="center">
+          <Heading level="h2">Log</Heading>
+        </HStack>
+      </VStack>
+    </property>
     <!-- No firm height: the List hands its scroll to the page, which is the
          tab's own scroll container
          (https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region). -->
@@ -272,6 +277,7 @@
       </HStack>
       </Theme>
     </List>
+    </PinnedHeader>
   </VStack>
 
 </Component>

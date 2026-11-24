@@ -1,0 +1,52 @@
+<!-- PinnedHeader: a heading (and the controls that act on the list below it)
+     that stays put while the body scrolls under it. The one way a tab pins
+     a header.
+
+     The pattern is the full-height layout, not a sticky: the App has
+     scrollWholePage="false" (Main.xmlui; Jon, 2026-11-24: "rejected appwide
+     switch: that was my call, maybe a bad one, let's try it"), so the page
+     never scrolls, each tab is a bounded column, the header is a plain
+     sibling at the top, and the body is the one capping scroller
+     (height="*" with overflowY="auto"). StickySection was the first
+     attempt: it pins only against its nearest overflow ancestor, which
+     inside a splitter pane (overflow:auto in XMLUI's own CSS) or a bounded
+     box is not the element that scrolls, so Context and Files never pinned
+     while Issues, straight in the page scroller, did. StickyBox is not
+     used (410d069f, e60fd6cf).
+
+     Contract for the caller: each route uses Page height="*" minHeight="0".
+     Page defaults to min-height:100% and otherwise grows with its content,
+     even when its child has height="*". The tab root is a height="*" column
+     (or height="100%" directly inside a bounded splitter pane);
+     without it the body has nothing to fill and the whole tab grows
+     instead. Virtualized Lists and Trees in the body either take the body's
+     scroller (an unbounded List defers to it) or their own bounded box.
+
+     Props:
+       headerTemplate  the pinned markup. Slot content evaluates in the
+               caller's scope, so filter and sort controls in it drive the
+               caller's var. state as they did inline (the Issues filters
+               prove it).
+       children  the scrolling body. Caveat, found 2026-11-24 on
+               ContextStack: an emitEvent written in slot content fires in
+               this component's scope, not the caller's, so the caller's
+               handler never runs. Set a caller var from the slot instead
+               and emit from a ChangeListener in the caller's own markup.
+
+     Fragment root, so the caller's own gap applies between the header and
+     the body; the component adds no box of its own around the header.
+     https://www.xmlui.org/docs/howto/build-a-full-height-scroll-layout
+     https://www.xmlui.org/docs/howto/pin-a-toolbar-above-a-bounded-scroll-region
+     https://www.xmlui.org/docs/howto/pass-a-template-slot-to-a-component -->
+<Component name="PinnedHeader">
+  <Fragment>
+    <Slot name="headerTemplate" />
+    <VStack
+      automationId="pinned-body"
+      height="*"
+      overflowY="auto"
+      gap="{$props.gap ?? '$space-4'}">
+      <Slot />
+    </VStack>
+  </Fragment>
+</Component>

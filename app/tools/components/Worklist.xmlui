@@ -197,6 +197,7 @@
   <VStack
     when="{enhanceMode.value &amp;&amp; enhanceMode.value.mode === 'freestyle'}"
     padding="$space-4"
+    height="*"
     gap="$space-3">
     <Text>This folder is in freestyle mode: you work with the agent directly, in the message box or the terminal, with no Worklist in between. Switch to workflow when you want changes proposed and committed through one.</Text>
     <!-- worklist-freestyle-note-why-switch (Jon, 2026-11-23): the sentence
@@ -213,13 +214,17 @@
   <VStack
     when="{enhanceMode.value &amp;&amp; enhanceMode.value.mode === 'undecided'}"
     padding="$space-4"
+    height="*"
     gap="$space-3">
     <Text>The Worklist starts once you choose how to work in this folder, at the top of this pane.</Text>
   </VStack>
   <VStack
     when="{!(enhanceMode.value &amp;&amp; (enhanceMode.value.mode === 'freestyle' || enhanceMode.value.mode === 'undecided'))}"
     padding="$space-4"
+    height="*"
     gap="$space-3">
+    <PinnedHeader gap="$space-3">
+    <property name="headerTemplate">
     <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
       <!-- worklist-select-all-checkbox: one click selects every row, so
            Do recommended lights without ticking each one (Jon, 2026-11-12).
@@ -288,6 +293,9 @@
         size="xs"
         onClick="worklist2OverlapOpen = window.__bramOverlapToggleOpen(worklist2OverlapOpen)" />
     </HStack>
+    </property>
+    <!-- pinned-header-standard-everywhere: the heading row stays put; the
+         board (overlap index, composer, rows) scrolls in PinnedHeader's body. -->
     <!-- issue-278 rung 2: the overlap index. One disclosure owns the graph,
          so a row never has to render its peer set - at twenty dense items that
          is the same news twenty times. Ordered HAZARD BEFORE POPULARITY by
@@ -1137,5 +1145,6 @@
          full conversation instead of a peek. This reverses the earlier
          dock-and-dim design (2026-08 era) by the same author's live verdict;
          the dock's markup is in git history if the pendulum swings back. -->
+    </PinnedHeader>
   </VStack>
 </Component>

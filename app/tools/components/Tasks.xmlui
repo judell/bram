@@ -14,11 +14,14 @@
        https://www.xmlui.org/docs/reference/components/DataSource -->
   <DataSource id="cands" url="{'/__tasks/candidates?t=' + tick}" />
 
-  <VStack padding="$space-6" gap="$space-4">
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Heading level="h2">Tasks</Heading>
-      <Button label="Refresh" size="xs" variant="outlined" onClick="tick = tick + 1" />
-    </HStack>
+  <VStack padding="$space-6" gap="$space-4" height="*">
+    <PinnedHeader gap="$space-4">
+    <property name="headerTemplate">
+      <HStack gap="$space-3" verticalAlignment="center">
+        <Heading level="h2">Tasks</Heading>
+        <Button label="Refresh" size="xs" variant="outlined" onClick="tick = tick + 1" />
+      </HStack>
+    </property>
     <!-- Words for a reader new to repos (Jon, 2026-11-09: "joyce will not
          have any idea what a runner is"): no "runner", "target" or "recipe"
          here. The page talks about commands the agents keep running, and
@@ -255,6 +258,7 @@
         </VStack>
       </Items>
     </VStack>
+    </PinnedHeader>
   </VStack>
   <Theme maxWidth-ModalDialog="50vw">
     <ModalDialog when="{!!infoKey}" title="{window.__bramTaskInfoTitle(infoKey)}" onClose="infoKey = ''">

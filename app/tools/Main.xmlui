@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" persistTheme="true" noScrollbarGutters="true" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}" var.stageManagerBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.setupBannerDismissedAt="{0}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" scrollWholePage="false" persistTheme="true" noScrollbarGutters="true" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.codexTrustBannerDismissed="{false}" var.stageManagerBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.setupBannerDismissedAt="{0}" var.lastSeenAgentVerb="{''}" var.transcriptAgentId="{''}" var.worklistOpen="{window.__bramRestoreWorklistPaneOpen()}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -1334,27 +1334,30 @@
     backgroundColor-markActive-markdown="$color-warn-400">
     <!-- The Transcript is home in both modes (Jon, 2026-11-22): the root
          route and the fallback render it; the Worklist keeps /worklist2. -->
+    <!-- Page itself must be bounded too: its default min-height:100% grows
+         with content and star-sized descendants then have nothing to cap.
+         https://www.xmlui.org/docs/howto/build-a-full-height-scroll-layout -->
     <Pages fallbackPath="/transcript">
-      <Page url="/needs-you"><Inbox /></Page>
-      <Page url="/"><Transcript agentId="{transcriptAgentId}" worklistOpen="{worklistOpen}" onOpenWorklist="worklistOpen = window.__bramSetWorklistPaneOpen(true, 'orient')" /></Page>
-      <Page url="/worklist"><Worklist /></Page>
-      <Page url="/worklist2"><Worklist /></Page>
-      <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" worklistOpen="{worklistOpen}" onOpenWorklist="worklistOpen = window.__bramSetWorklistPaneOpen(true, 'orient')" /></Page>
-      <Page url="/search"><Search /></Page>
-      <Page url="/queue"><AgentMessageQueue /></Page>
-      <Page url="/status"><Status /></Page>
-      <Page url="/accounting"><Accounting /></Page>
-      <Page url="/log"><Log /></Page>
-      <Page url="/tasks"><Tasks /></Page>
-      <Page url="/settings"><Settings /></Page>
-      <Page url="/sessions"><Sessions /></Page>
-      <Page url="/tips"><Tips /></Page>
-      <Page url="/context"><Context activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
-      <Page url="/issues"><Issues /></Page>
-      <Page url="/commits"><Commits /></Page>
-      <Page url="/history"><History /></Page>
-      <Page url="/files"><Files /></Page>
-      <Page url="/git"><Git /></Page>
+      <Page height="*" minHeight="0" url="/needs-you"><Inbox /></Page>
+      <Page height="*" minHeight="0" url="/"><Transcript agentId="{transcriptAgentId}" worklistOpen="{worklistOpen}" onOpenWorklist="worklistOpen = window.__bramSetWorklistPaneOpen(true, 'orient')" /></Page>
+      <Page height="*" minHeight="0" url="/worklist"><Worklist /></Page>
+      <Page height="*" minHeight="0" url="/worklist2"><Worklist /></Page>
+      <Page height="*" minHeight="0" url="/transcript"><Transcript agentId="{transcriptAgentId}" worklistOpen="{worklistOpen}" onOpenWorklist="worklistOpen = window.__bramSetWorklistPaneOpen(true, 'orient')" /></Page>
+      <Page height="*" minHeight="0" url="/search"><VStack height="*" overflowY="auto"><Search /></VStack></Page>
+      <Page height="*" minHeight="0" url="/queue"><AgentMessageQueue /></Page>
+      <Page height="*" minHeight="0" url="/status"><Status /></Page>
+      <Page height="*" minHeight="0" url="/accounting"><Accounting /></Page>
+      <Page height="*" minHeight="0" url="/log"><Log /></Page>
+      <Page height="*" minHeight="0" url="/tasks"><Tasks /></Page>
+      <Page height="*" minHeight="0" url="/settings"><Settings /></Page>
+      <Page height="*" minHeight="0" url="/sessions"><Sessions /></Page>
+      <Page height="*" minHeight="0" url="/tips"><Tips /></Page>
+      <Page height="*" minHeight="0" url="/context"><Context activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
+      <Page height="*" minHeight="0" url="/issues"><Issues /></Page>
+      <Page height="*" minHeight="0" url="/commits"><Commits /></Page>
+      <Page height="*" minHeight="0" url="/history"><History /></Page>
+      <Page height="*" minHeight="0" url="/files"><Files /></Page>
+      <Page height="*" minHeight="0" url="/git"><Git /></Page>
     </Pages>
   </Theme>
   <!-- worklist-bar-on-every-page (Jon): the Worklist bar under every tab,

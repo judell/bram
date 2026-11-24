@@ -209,7 +209,13 @@
     listenTo="{sessionsListChangedEvt.value &amp;&amp; sessionsListChangedEvt.value.tick}"
     onDidChange="() => { sessionsMeta.refetch(); sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch(); }" />
 
-  <VStack padding="$space-4" gap="$space-3" overflowY="auto" height="100%">
+  <!-- pinned-header: heading, filters and the column-header row stay put;
+       the session rows scroll under them (PinnedHeader.xmlui). No emitEvent
+       in the moved markup. -->
+  <VStack padding="$space-4" gap="0" height="*">
+   <PinnedHeader gap="0">
+    <property name="headerTemplate">
+     <VStack gap="$space-3">
     <HStack gap="$space-3" verticalAlignment="center">
       <Link when="{$queryParams.from === 'tip'}" noIndicator
         tooltip="Back to where you were" onClick="navigate(-1)">
@@ -246,7 +252,6 @@
       </Items>
     </VStack>
 
-    <VStack gap="0" width="100%">
       <HStack
         gap="$space-3"
         paddingHorizontal="$space-3"
@@ -261,6 +266,8 @@
         <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="FLOOR" tooltip="Tokens in its first call: about where a fresh session starts." />
         <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SIZE" />
       </HStack>
+     </VStack>
+    </property>
       <Items data="{filteredSessions}">
         <VStack gap="0" borderBottom="1px solid $borderColor">
           <HStack
@@ -384,6 +391,6 @@
       <Text
         when="{searchReady &amp;&amp; sessionsSearch.loaded &amp;&amp; sessionsFull.loaded &amp;&amp; !sessionsSearch.inProgress &amp;&amp; !sessionsFull.inProgress &amp;&amp; filteredSessions.length === 0}"
         color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching sessions." />
-    </VStack>
+   </PinnedHeader>
   </VStack>
 </Component>

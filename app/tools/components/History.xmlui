@@ -82,21 +82,25 @@
   <ChangeListener
     listenTo="{enhanceModeEvt.value}"
     onDidChange="() => enhanceMode.refetch()" />
-  <VStack when="{window.__bramTabHold(enhanceMode.value, 'history')}" padding="$space-4" gap="$space-3">
+  <VStack when="{window.__bramTabHold(enhanceMode.value, 'history')}" padding="$space-4" gap="$space-3" height="*">
     <Heading level="h2">History</Heading>
     <Text>{window.__bramTabHold(enhanceMode.value, 'history')}</Text>
   </VStack>
-  <VStack when="{!window.__bramTabHold(enhanceMode.value, 'history')}" padding="$space-4" gap="$space-4">
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Heading level="h2">History</Heading>
-      <SearchBox
-        boxWidth="22rem"
-        placeholder="Filter history…"
-        initialValue="{searchQuery}"
-        inProgress="{historyList.inProgress}"
-        onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
-        onClear="searchQuery = ''; setLastSearchQuery('')" />
-    </HStack>
+  <VStack when="{!window.__bramTabHold(enhanceMode.value, 'history')}" padding="$space-4" gap="$space-4" height="*">
+    <PinnedHeader gap="$space-4">
+      <property name="headerTemplate">
+        <HStack gap="$space-3" verticalAlignment="center">
+          <Heading level="h2">History</Heading>
+          <SearchBox
+            boxWidth="22rem"
+            placeholder="Filter history…"
+            initialValue="{searchQuery}"
+            inProgress="{historyList.inProgress}"
+            onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
+            onClear="searchQuery = ''; setLastSearchQuery('')" />
+        </HStack>
+      </property>
+
 
     <Spinner when="{historyList.inProgress &amp;&amp; !historyList.loaded}" />
 
@@ -149,6 +153,7 @@
       color="$textColor-secondary"
       fontSize="$fontSize-sm"
       value="No worklist history yet." />
+    </PinnedHeader>
   </VStack>
 
   <!-- issue-67: opens the deep-linked entry directly, independent of

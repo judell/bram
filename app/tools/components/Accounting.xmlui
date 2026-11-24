@@ -25,7 +25,10 @@
   <DataSource id="costSettings" url="/__settings" />
   <DataSource id="tokens" url="{window.__bramCostUrl(window.__bramCostSince(period))}" />
 
-  <VStack padding="$space-6" gap="$space-4">
+  <VStack padding="$space-6" gap="$space-4" height="*">
+    <PinnedHeader gap="$space-4">
+    <property name="headerTemplate">
+      <VStack gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center" wrapContent="true">
       <Heading level="h2">Cost</Heading>
       <!-- https://www.xmlui.org/docs/reference/components/Select -->
@@ -51,7 +54,8 @@
       when="{tokens.loaded &amp;&amp; !!tokens.value}"
       interpolateBindings="false" allowHtml="false"
       content="{window.__bramCostHeadline(tokens.value, tokenRates.value, period)}" />
-
+      </VStack>
+    </property>
     <VStack when="{tokens.loaded &amp;&amp; !!tokens.value}" gap="$space-4">
       <!-- By session: costliest first. Subagent threads fold into their
            parent's row. A row whose peak passed the Settings threshold says
@@ -119,6 +123,7 @@
         interpolateBindings="false" allowHtml="false"
         content="{window.__bramCostFixedLines(tokens.value)}" />
     </VStack>
+    </PinnedHeader>
 
     <Theme maxWidth-ModalDialog="50vw">
       <ModalDialog when="{!!tokenInfoKey}" title="{window.__bramCostInfoTitle(tokenInfoKey)}" onClose="tokenInfoKey = ''">

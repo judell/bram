@@ -52,7 +52,9 @@
     queryParams="{{ path: diffPath }}"
     when="{!!diffPath &amp;&amp; window.__bramGitIsUntracked(worktree.value, diffPath)}" />
 
-  <VStack gap="$space-3" padding="$space-2">
+  <VStack gap="$space-3" padding="$space-2" height="*">
+    <PinnedHeader gap="$space-3">
+    <property name="headerTemplate">
     <HStack gap="$space-2" verticalAlignment="center">
       <!-- git-tab-select-all (Jon, 2026-11-23): one click ticks every file in
            every group, the Worklist board's header pattern. Driven by click,
@@ -71,6 +73,7 @@
       <Heading level="h2">Git</Heading>
       <Text color="$textColor-secondary" value="{window.__bramGitBranchLabel(worktree.value)}" />
     </HStack>
+    </property>
 
     <Text when="{!worktree.loaded}" color="$textColor-secondary" value="Loading…" />
 
@@ -153,6 +156,7 @@
         content="{window.__bramFenceMarkdown(window.__bramGitTrackedTranscript(worktree.value), '')}"
         interpolateBindings="false" allowHtml="false" />
     </VStack>
+    </PinnedHeader>
   </VStack>
 
   <!-- Commit dialog: the message is prefilled when the dialog mounts (TextArea

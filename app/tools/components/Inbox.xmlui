@@ -70,7 +70,9 @@
     </VStack>
   </ModalDialog>
 
-  <VStack padding="$space-4" gap="$space-4" width="*">
+  <VStack padding="$space-4" gap="$space-4" width="*" height="*">
+    <PinnedHeader gap="$space-4">
+    <property name="headerTemplate">
     <HStack verticalAlignment="center" gap="$space-2">
       <Heading level="h2" value="Alerts" />
       <Button
@@ -81,6 +83,7 @@
         tooltip="Notes"
         onClick="awaitingNotesDialog.open()" />
     </HStack>
+    </property>
 
     <!-- Progress annotation while the freshness / reconciliation check runs
          (docs/history/needs-you-inbox.md): a blank inbox must read as *verifying*,
@@ -196,5 +199,6 @@
       </Items>
     </VStack>
 
+    </PinnedHeader>
   </VStack>
 </Component>

@@ -73,7 +73,12 @@
        overflow="visible", and height="70vh" on the Tree itself, both drew 0
        rows at 2px (trace files op=tree-dom, 2026-10-09). Same shape as the
        Transcript's List: a bounded container, the list at height="100%". -->
-  <VStack padding="$space-4" gap="$space-3">
+  <VStack padding="$space-4" gap="$space-3" height="*">
+    <!-- pinned-header-standard-everywhere: the heading, the search row and
+         the switch stay put; the tree boxes fill PinnedHeader's body. -->
+    <PinnedHeader gap="$space-3">
+    <property name="headerTemplate">
+    <VStack gap="$space-3">
     <Heading level="h2">Files</Heading>
     <Text when="{repoTree.value &amp;&amp; repoTree.value.error}" variant="caption">
       This folder isn't a git checkout, so there's no file list to show.
@@ -116,6 +121,8 @@
       <Text variant="caption" value="{window.__bramFilesReadsCaption(sessionReads.value)}" />
     </HStack>
 
+    </VStack>
+    </property>
     <!-- Browse. Mounted only once there are rows: a mounted Tree keeps the
          data it was born with (the sandbox's finding), and mounting on
          repoTree.loaded handed it [] first, then ignored the 30 rows
@@ -133,7 +140,7 @@
          returned early for folders, consuming the click); file rows keep
          theirs. Both stretch to the row's width so the run past a name is
          part of the line. -->
-    <VStack when="{!submitted &amp;&amp; !readsOn &amp;&amp; window.__bramFilesTreeData(repoTree.value, sessionReads.value).length &gt; 0}" height="70vh">
+    <VStack when="{!submitted &amp;&amp; !readsOn &amp;&amp; window.__bramFilesTreeData(repoTree.value, sessionReads.value).length &gt; 0}" height="*">
       <Tree
         id="filesTree"
         automationId="files-tree"
@@ -173,7 +180,7 @@
       when="{!submitted &amp;&amp; readsOn &amp;&amp; window.__bramFilesReadTreeData(repoTree.value, sessionReads.value).length === 0}"
       variant="caption"
       value="Nothing to show yet: the tree fills in as this session reads files." />
-    <VStack when="{!submitted &amp;&amp; readsOn &amp;&amp; window.__bramFilesReadTreeData(repoTree.value, sessionReads.value).length &gt; 0}" height="70vh">
+    <VStack when="{!submitted &amp;&amp; readsOn &amp;&amp; window.__bramFilesReadTreeData(repoTree.value, sessionReads.value).length &gt; 0}" height="*">
       <Tree
         id="filesReadTree"
         automationId="files-read-tree"
@@ -210,7 +217,7 @@
     <!-- Search results: their own instance, remounted per query (the
          DataSource is in progress between queries), fully expanded, hits
          highlighted. -->
-    <VStack when="{!!submitted &amp;&amp; repoGrep.loaded &amp;&amp; !repoGrep.inProgress &amp;&amp; window.__bramFilesSearchTree(submitted, repoTree.value, repoGrep.value).nodes.length &gt; 0}" height="70vh">
+    <VStack when="{!!submitted &amp;&amp; repoGrep.loaded &amp;&amp; !repoGrep.inProgress &amp;&amp; window.__bramFilesSearchTree(submitted, repoTree.value, repoGrep.value).nodes.length &gt; 0}" height="*">
       <Tree
         id="filesHitTree"
         height="100%"
@@ -236,5 +243,6 @@
         </property>
       </Tree>
     </VStack>
+    </PinnedHeader>
   </VStack>
 </Component>

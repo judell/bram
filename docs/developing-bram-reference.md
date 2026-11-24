@@ -6,6 +6,27 @@ below is pointed to from there by the situation that calls for it. Same
 audience (editing Bram's own source), same rules; moved here verbatim
 (`developing-bram-core-and-reference-split`, 2026-11-12).
 
+## Receipts: bounded Pages and pinned tab headers
+
+`pinned-header-standard-everywhere` (2026-11-24) moved tab headers outside
+shared scrolling bodies. Switching App to `scrollWholePage="false"` and
+sizing tab columns with `height="*"` was insufficient: Page itself still
+had `flex:0 0 auto; min-height:100%` and grew with its contents. Adding
+`height="*" minHeight="0"` to each Page completed the bounded height chain.
+
+A reproduction using Bram’s vendored XMLUI bundle showed a 4373px Page
+inside a 704px content container before the fix, with body scrollTop stuck
+at zero. Chromium and WebKit verified scrolling after the fix with no
+movement of the header. The shared PinnedHeader inside a splitter also
+passed at 1000×800 and 420×620, including caller-state updates from its
+header slot. The live Cost tab then reported a 455px scrolling body over
+1123px of content inside a bounded 633px Page. The documentation gap is
+tracked in [xmlui-org/xmlui#3975](https://github.com/xmlui-org/xmlui/issues/3975).
+
+Transcript retains its measured List height and Search its sticky header
+inside a bounded route scroller. The failed sticky approaches and original
+app-wide switch rejection are recorded in `410d069f` and `e60fd6cf`.
+
 ## The orientation site's engine lives in the template
 
 Bram's own orientation site (`orientation/`) is a copy of the template in

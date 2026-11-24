@@ -279,7 +279,7 @@
        Transcript.xmlui. Do not add a competing height/overflow boundary here.
        https://docs.xmlui.org/howto/pin-sticky-content-below-the-appheader -->
   <VStack padding="$space-4" gap="$space-3">
-    <StickySection stickTo="top" top="$height-AppHeader" backgroundColor="$backgroundColor">
+    <StickySection stickTo="top" backgroundColor="$backgroundColor">
       <!-- A fit-content column lets the query row establish the width; the date
            control beneath it follows that same width instead of stretching across
            the remainder of the page. Stack sizing:

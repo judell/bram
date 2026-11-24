@@ -166,7 +166,15 @@
     <Heading level="h2">Issues</Heading>
     <Text>{window.__bramTabHold(enhanceMode.value, 'issues')}</Text>
   </VStack>
-  <VStack when="{!window.__bramTabHold(enhanceMode.value, 'issues')}" padding="$space-4" gap="$space-4">
+  <VStack when="{!window.__bramTabHold(enhanceMode.value, 'issues')}" padding="$space-4" gap="0" height="*">
+    <!-- pinned-header-standard-everywhere: the heading row, its filters and
+         the column headers stay put while the rows scroll in PinnedHeader's
+         body. The column owns its height so the body has something to
+         fill. The outer gap is 0 so the column headers sit flush on the
+         first row; the header and the body carry their own gaps. -->
+    <PinnedHeader>
+    <property name="headerTemplate">
+    <VStack gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Issues</Heading>
       <RadioGroup
@@ -195,20 +203,8 @@
         <Spinner when="{newIssueSubmitting || (issuesFull.inProgress &amp;&amp; !issuesFull.loaded)}" />
       </Theme>
     </HStack>
-
-    <Text
-      when="{!repoOrigin.value || !repoOrigin.value.htmlBase}"
-      color="$textColor-secondary">
-      No forge remote detected for this project. Add an origin remote (GitHub or GitLab) to populate this tab.
-    </Text>
-    <Text
-      when="{repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFull.loaded &amp;&amp; !issuesFull.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
-      color="$textColor-secondary">
-      No issues found. (The repo may have none, `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` may not be installed / authenticated, or the last fetch failed — it will retry shortly.)
-    </Text>
-
-    <VStack gap="0" width="100%" when="{pageIssues.length > 0}">
       <HStack
+        when="{pageIssues.length > 0}"
         gap="$space-3"
         paddingHorizontal="$space-3"
         paddingVertical="$space-2"
@@ -239,6 +235,23 @@
             value="{window.sortLabel('AGE', sortField, sortDir, 'activityAt')}" />
         </Link>
       </HStack>
+    </VStack>
+    </property>
+
+    <Text
+      when="{!repoOrigin.value || !repoOrigin.value.htmlBase}"
+      color="$textColor-secondary">
+      No forge remote detected for this project. Add an origin remote (GitHub or GitLab) to populate this tab.
+    </Text>
+    <Text
+      when="{repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFull.loaded &amp;&amp; !issuesFull.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
+      color="$textColor-secondary">
+      No issues found. (The repo may have none, `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` may not be installed / authenticated, or the last fetch failed — it will retry shortly.)
+    </Text>
+
+    <VStack gap="0" width="100%" when="{pageIssues.length > 0}">
+      <!-- The column-header row is in the pinned header above
+           (pinned-header-standard-everywhere). -->
       <!-- browse-tabs-adopt-searchresults: rows render through the shared
            ResultList shell (hover Cards, whole-row click → detail modal,
            virtualized). Row anatomy (state / title+meta / age) and the
@@ -372,5 +385,6 @@
     </VStack>
     <Text when="{searchNeedle &amp;&amp; !issuesFull.inProgress &amp;&amp; filteredIssues.length === 0}"
       color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching issues." />
+    </PinnedHeader>
   </VStack>
 </Component>

@@ -31,7 +31,9 @@
   <ChangeListener listenTo="{launchRunViewEvt.value &amp;&amp; launchRunViewEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(launchRunViewEvt.value, launchRunView)" />
 
-  <VStack padding="$space-6" gap="$space-4">
+  <VStack padding="$space-6" gap="$space-4" height="*">
+   <PinnedHeader gap="$space-4">
+    <property name="headerTemplate">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Status</Heading>
       <SpaceFiller />
@@ -45,6 +47,7 @@
         size="sm"
         onClick="refreshTick = refreshTick + 1; status.refetch(); guardSelftest.refetch(); stateDirPlan.refetch();" />
     </HStack>
+    </property>
 
     <!-- issue-415: whether the worklist guard actually runs and decides as
          expected, probed rather than presumed. Pass, or the failing cases
@@ -254,5 +257,6 @@
       </VStack>
     </ModalDialog>
     </Theme>
+   </PinnedHeader>
   </VStack>
 </Component>

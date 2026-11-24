@@ -104,57 +104,61 @@
   <ChangeListener
     listenTo="{enhanceModeEvt.value}"
     onDidChange="() => enhanceMode.refetch()" />
-  <VStack when="{window.__bramTabHold(enhanceMode.value, 'commits')}" padding="$space-4" gap="$space-3">
+  <VStack when="{window.__bramTabHold(enhanceMode.value, 'commits')}" padding="$space-4" gap="$space-3" height="*">
     <Heading level="h2">Commits</Heading>
     <Text>{window.__bramTabHold(enhanceMode.value, 'commits')}</Text>
   </VStack>
-  <VStack when="{!window.__bramTabHold(enhanceMode.value, 'commits')}" padding="$space-4" gap="$space-4">
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Heading level="h2">Commits</Heading>
-      <SearchBox
-        boxWidth="22rem"
-        placeholder="Filter commits…"
-        initialValue="{searchQuery}"
-        inProgress="{commits.inProgress}"
-        onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
-        onClear="searchQuery = ''; setLastSearchQuery('')" />
-      <Text
-        when="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
-        maxWidth="260px"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        tooltip="{gitStatus.value.branch}"
-        value="{'on ' + gitStatus.value.branch}" />
-      <Button
-        when="{(commits.value || []).filter(c => !c.pushed).length > 0}"
-        label="Push {(commits.value || []).filter(c => !c.pushed).length}{gitStatus.value &amp;&amp; gitStatus.value.branch ? ' to ' + gitStatus.value.branch : ''}"
-        size="xs"
-        enabled="{!window.__bramPushWithheld(gitStatus.value)}"
-        tooltipMarkdown="{window.__bramPushTooltip(gitStatus.value)}"
-        onClick="pushError = null; gitPush(commits, gitStatus, gitStatus.value &amp;&amp; gitStatus.value.branch, (e) => pushError = e)" />
-      <!-- local-repo-no-origin-first-class: with no remote, unpushed is
-           undefined (the host marks no commit unpushed, so Push never
-           renders); say the state plainly instead of offering nothing. -->
-      <Text
-        when="{gitStatus.value &amp;&amp; gitStatus.value.hasOrigin === false}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        tooltip="Add a remote (git remote add origin …) to enable Push"
-        value="local repository — no remote configured" />
-      <!-- issue-399-status-fetch-non-fatal: the status fetch failed or timed
-           out; counts come from the last good fetch. -->
-      <Text
-        when="{gitStatus.value &amp;&amp; gitStatus.value.fetchError}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        tooltip="{gitStatus.value.fetchError}"
-        value="couldn't reach origin — counts are from the last fetch" />
-      <Button
-        label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
-        size="xs"
-        enabled="{!(pullRebaseAct.value &amp;&amp; pullRebaseAct.value.busy) &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
-        onClick="pullError = null; window.__bramPaneAction('pullRebase', '/__git/pull-rebase', { method: 'POST' })" />
-    </HStack>
+  <VStack when="{!window.__bramTabHold(enhanceMode.value, 'commits')}" padding="$space-4" gap="$space-4" height="*">
+    <PinnedHeader gap="$space-4">
+      <property name="headerTemplate">
+        <HStack gap="$space-3" verticalAlignment="center">
+          <Heading level="h2">Commits</Heading>
+          <SearchBox
+            boxWidth="22rem"
+            placeholder="Filter commits…"
+            initialValue="{searchQuery}"
+            inProgress="{commits.inProgress}"
+            onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
+            onClear="searchQuery = ''; setLastSearchQuery('')" />
+          <Text
+            when="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
+            maxWidth="260px"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            tooltip="{gitStatus.value.branch}"
+            value="{'on ' + gitStatus.value.branch}" />
+          <Button
+            when="{(commits.value || []).filter(c => !c.pushed).length > 0}"
+            label="Push {(commits.value || []).filter(c => !c.pushed).length}{gitStatus.value &amp;&amp; gitStatus.value.branch ? ' to ' + gitStatus.value.branch : ''}"
+            size="xs"
+            enabled="{!window.__bramPushWithheld(gitStatus.value)}"
+            tooltipMarkdown="{window.__bramPushTooltip(gitStatus.value)}"
+            onClick="pushError = null; gitPush(commits, gitStatus, gitStatus.value &amp;&amp; gitStatus.value.branch, (e) => pushError = e)" />
+          <!-- local-repo-no-origin-first-class: with no remote, unpushed is
+               undefined (the host marks no commit unpushed, so Push never
+               renders); say the state plainly instead of offering nothing. -->
+          <Text
+            when="{gitStatus.value &amp;&amp; gitStatus.value.hasOrigin === false}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            tooltip="Add a remote (git remote add origin …) to enable Push"
+            value="local repository — no remote configured" />
+          <!-- issue-399-status-fetch-non-fatal: the status fetch failed or timed
+               out; counts come from the last good fetch. -->
+          <Text
+            when="{gitStatus.value &amp;&amp; gitStatus.value.fetchError}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            tooltip="{gitStatus.value.fetchError}"
+            value="couldn't reach origin — counts are from the last fetch" />
+          <Button
+            label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
+            size="xs"
+            enabled="{!(pullRebaseAct.value &amp;&amp; pullRebaseAct.value.busy) &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
+            onClick="pullError = null; window.__bramPaneAction('pullRebase', '/__git/pull-rebase', { method: 'POST' })" />
+        </HStack>
+      </property>
+
 
     <!-- push-withheld-when-commits-ride-a-pr: on the default branch, when
          the unpushed commits also ride another branch, that branch's PR is
@@ -341,5 +345,6 @@
       <Text when="{searchNeedle &amp;&amp; filteredCommits.length === 0}"
         color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching commits." />
     </VStack>
+    </PinnedHeader>
   </VStack>
 </Component>

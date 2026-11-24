@@ -82,7 +82,10 @@
     listenTo="{((queueAgentStatus.value &amp;&amp; queueAgentStatus.value.state) || '') + '|' + (queueMenuEvt.value ? '1' : '0')}"
     onDidChange="() => window.__bramIframeTrace('queue', {op: 'ready-transition', state: (queueAgentStatus.value &amp;&amp; queueAgentStatus.value.state) || '', menu: queueMenuEvt.value ? 1 : 0, ready: window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value)})" />
 
-  <VStack gap="$space-3" padding="$space-2">
+  <VStack gap="$space-3" padding="$space-2" height="*">
+    <PinnedHeader gap="$space-3">
+    <property name="headerTemplate">
+    <VStack gap="$space-3">
     <HStack verticalAlignment="center" gap="$space-2">
       <Link when="{$queryParams.from === 'tip'}" noIndicator
         tooltip="Back to where you were" onClick="navigate(-1)">
@@ -107,6 +110,8 @@
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
       value="Park thoughts here while the agent works. Edit any note in place; Send delivers it as a fresh turn. Send stays dimmed until the terminal is quiet and no menu is pending." />
+    </VStack>
+    </property>
 
     <!-- log-queue-entry-opens-message: a focused message that is no longer
          queued, read-only, with what happened to it and its recorded context. -->
@@ -157,9 +162,7 @@
          Same pattern as Workspace's worklist rows.
          https://www.xmlui.org/docs/reference/components/Items -->
     <VStack
-      when="{(entries || []).length > 0}"
-      height="*"
-      overflowY="auto">
+      when="{(entries || []).length > 0}">
       <DndItems data="{entries || []}"
         dragHandle="true"
         onReorder="(newOrder) => { entries = window.__bramQueueReorder(entries, newOrder); }">
@@ -239,5 +242,6 @@
       </DndItems>
     </VStack>
 
+    </PinnedHeader>
   </VStack>
 </Component>

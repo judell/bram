@@ -2,22 +2,53 @@
      this session, as the host projects them at GET /__context-stack
      (src/context_stack.rs). The parent passes the route's value as `stack`
      and hears `select` with the clicked block; it shows the block's text in
-     its right half, where the Runs under files show too. Presentation only:
-     the sort and the kind filter are this component's state, the data is
-     the parent's. Per-row token figures on the Transcript were dropped as
-     noise (transcript-shows-context-weight); here they are the point.
+     its right half. Presentation only: the sort and the kind filter are this
+     component's state, the data is the parent's. Per-row token figures on
+     the Transcript were dropped as noise (transcript-shows-context-weight);
+     here they are the point.
+
+     pinned-header-standard-everywhere: the title, the bar, the legend and
+     the sort buttons are the pinned header (PinnedHeader), the List scrolls
+     under them. The row click sets `picked` and the ChangeListener below,
+     outside the slot, emits `select`: an emitEvent written inside slot
+     content fires in the slot-rendering component's scope, not the
+     caller's, so the parent never heard it (2026-11-24, the xmlui #3584
+     family the draft named).
      https://www.xmlui.org/docs/reference/components/Stack
-     https://www.xmlui.org/docs/reference/components/List -->
-<Component name="ContextStack" var.sort="order" var.kind="all" var.selectedI="{null}">
-  <VStack gap="$space-2" when="{$props.stack}">
-    <Text
-      when="{!!window.__bramStackUnsupportedLine($props.stack)}"
-      fontSize="$fontSize-sm"
-      color="$textColor-secondary"
-      value="{window.__bramStackUnsupportedLine($props.stack)}" />
-    <VStack when="{!window.__bramStackUnsupportedLine($props.stack)}" gap="$space-2">
-      <StickySection stickTo="top" backgroundColor="$backgroundColor">
-      <VStack gap="$space-2">
+     https://www.xmlui.org/docs/reference/components/List
+     https://www.xmlui.org/docs/howto/pass-a-template-slot-to-a-component -->
+<Component name="ContextStack" var.sort="order" var.kind="all" var.selectedI="{null}" var.picked="{null}">
+  <ChangeListener listenTo="{picked}" onDidChange="emitEvent('select', picked)" />
+  <ModalDialog id="contextInfoDialog" title="About Context">
+    <VStack gap="$space-3">
+      <Text value="{window.__bramStackIntro()}" />
+      <Text value="Sizes are the bytes each block takes in the session file, scaled by a bytes-per-token figure measured on this session so they total the context the last call reported. The remainder no block accounts for is shown as such." />
+      <!-- One line per kind, the way the tables say what their columns
+           mean (table-headers-explained). -->
+      <VStack gap="$space-1">
+        <Text fontWeight="$fontWeight-bold" value="What the kinds are" />
+        <Items data="{window.__bramStackKindGlossary()}">
+          <HStack gap="$space-2" verticalAlignment="start">
+            <Stack width="10px" height="10px" backgroundColor="{$item.color}" marginTop="$space-1" />
+            <Text fontSize="$fontSize-sm" width="*" value="{$item.line}" />
+          </HStack>
+        </Items>
+      </VStack>
+    </VStack>
+  </ModalDialog>
+  <VStack height="*" gap="$space-2">
+    <!-- The splitter pane bounds this column; the header stays and the
+         List scrolls in PinnedHeader's body. -->
+    <PinnedHeader gap="$space-2">
+    <property name="headerTemplate">
+    <VStack gap="$space-2">
+      <Heading level="h1">Context</Heading>
+      <Text
+        when="{!!window.__bramStackUnsupportedLine($props.stack)}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{window.__bramStackUnsupportedLine($props.stack)}" />
+      <VStack when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}" gap="$space-2">
       <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackIntro()}" />
       <!-- One thin stacked bar, a series per kind in the stack's colours; the
            legend is the chip row below, which wraps to the pane's width and
@@ -41,7 +72,10 @@
             onClick="kind = window.__bramStackToggleKind(kind, $item.kind)" />
         </Items>
       </HStack>
-      <HStack wrapContent="true" gap="$space-3" verticalAlignment="center">
+      <!-- gap is both axes on a wrapping HStack; $space-2 keeps the wrapped
+           rows close (Jon, 2026-11-24: tighten the legend). The little-i
+           closes the legend row (Jon: after the legend). -->
+      <HStack wrapContent="true" gap="$space-2" verticalAlignment="center">
         <Items data="{window.__bramStackLegend($props.stack, kind)}">
           <Link onClick="kind = $item.kind" noIndicator="true" tooltip="{$item.tip}">
             <HStack gap="$space-1" verticalAlignment="center">
@@ -54,6 +88,12 @@
             </HStack>
           </Link>
         </Items>
+        <Button
+          label="ⓘ"
+          variant="ghost"
+          size="sm"
+          tooltip="About Context"
+          onClick="contextInfoDialog.open()" />
       </HStack>
       <Text
         when="{!!window.__bramStackThinkingLine($props.stack)}"
@@ -74,35 +114,35 @@
         <Button label="By size" size="xs" variant="{sort === 'size' ? 'solid' : 'ghost'}" tooltip="What is eating the context" onClick="sort = 'size'" />
       </HStack>
       </VStack>
-      </StickySection>
-      <!-- A List, not Items: a long session has many hundreds of blocks
-           (#427's lesson on the Transcript), so the rows are virtualized. The
-           List is unbounded and delegates to the column's scroller (Context's
-           left pane); StickySection pins the header above it, as on Search and
-           Transcript. No competing height/overflow boundary here.
-           https://www.xmlui.org/docs/reference/components/StickySection -->
-      <List data="{window.__bramStackRows($props.stack, sort, kind)}">
-        <Link onClick="selectedI = $item.i; emitEvent('select', $item)" noIndicator="true">
-          <HStack
-            gap="$space-2"
-            verticalAlignment="center"
-            paddingVertical="$space-0_5"
-            paddingHorizontal="$space-1"
-            backgroundColor="{selectedI === $item.i ? '$color-surface-100' : 'transparent'}">
-            <Stack width="8px" height="8px" backgroundColor="{window.__bramStackKindColor($item.kind)}" />
-            <Text width="84px" fontSize="$fontSize-xs" color="$textColor-secondary" value="{window.__bramStackKindLabel($item.kind)}" />
-            <Text
-              width="*"
-              fontSize="$fontSize-sm"
-              fontFamily="{window.__bramStackLabelFont($item)}"
-              whiteSpace="nowrap"
-              overflowMode="ellipsis"
-              maxLines="1"
-              value="{window.__bramStackRowLabel($item)}" />
-            <Text fontSize="$fontSize-xs" color="$textColor-secondary" whiteSpace="nowrap" value="{window.__bramStackSizeLabel($item)}" />
-          </HStack>
-        </Link>
-      </List>
     </VStack>
+    </property>
+    <!-- A List, not Items: a long session has many hundreds of blocks
+         (#427's lesson on the Transcript), so the rows are virtualized. The
+         List is unbounded and delegates to PinnedHeader's body scroller. -->
+    <List
+      when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
+      data="{window.__bramStackRows($props.stack, sort, kind)}">
+      <Link onClick="selectedI = $item.i; picked = $item" noIndicator="true">
+        <HStack
+          gap="$space-2"
+          verticalAlignment="center"
+          paddingVertical="$space-0_5"
+          paddingHorizontal="$space-1"
+          backgroundColor="{selectedI === $item.i ? '$color-surface-100' : 'transparent'}">
+          <Stack width="8px" height="8px" backgroundColor="{window.__bramStackKindColor($item.kind)}" />
+          <Text width="84px" fontSize="$fontSize-xs" color="$textColor-secondary" value="{window.__bramStackKindLabel($item.kind)}" />
+          <Text
+            width="*"
+            fontSize="$fontSize-sm"
+            fontFamily="{window.__bramStackLabelFont($item)}"
+            whiteSpace="nowrap"
+            overflowMode="ellipsis"
+            maxLines="1"
+            value="{window.__bramStackRowLabel($item)}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" whiteSpace="nowrap" value="{window.__bramStackSizeLabel($item)}" />
+        </HStack>
+      </Link>
+    </List>
+    </PinnedHeader>
   </VStack>
 </Component>

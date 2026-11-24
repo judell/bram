@@ -24,7 +24,8 @@
 
   <VStack
     padding="$space-6"
-    gap="$space-5"
+    gap="0"
+    height="*"
     var.settingsValue="{settingsChangedEvt.value &amp;&amp; settingsChangedEvt.value.payload}">
     <!-- Each explicit-save group is a scoped Form. A successful POST installs
          its canonical response with reset(data); pushed snapshots reset only a
@@ -53,6 +54,9 @@
       enabled="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'pending'}"
       onTick="traceArchiveStatus.refetch()" />
 
+    <PinnedHeader gap="$space-5">
+    <property name="headerTemplate">
+     <VStack gap="$space-5" paddingBottom="$space-5">
     <!-- issue-231: tip arrivals carry from=tip; the back link returns to
          wherever the tip was clicked. Hidden on normal visits. -->
     <Link when="{$queryParams.from === 'tip'}" noIndicator
@@ -66,7 +70,8 @@
         onClick="infoTitle = 'Settings'; infoBody = window.settingsInfoBodies.page; settingInfoDialog.open()" />
       <Heading level="h2">Settings</Heading>
     </HStack>
-
+     </VStack>
+    </property>
     <VStack when="{settingsValue}" gap="$space-5">
       <Theme paddingLeft-summary-ExpandableItem="0">
         <ExpandableItem id="settingsGroupAgent" initiallyExpanded="{false}" iconPosition="start" summary="Agent · which agent, and how it starts">
@@ -767,5 +772,6 @@
       </VStack>
     </ModalDialog>
 
+    </PinnedHeader>
   </VStack>
 </Component>

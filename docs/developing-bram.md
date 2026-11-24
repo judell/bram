@@ -114,6 +114,20 @@ Keeping *displayed* state on `window` defeats XMLUI's tracking (Jon, 2026-11-16)
 
 **The check:** `node scripts/check-bound-helpers.mjs` fails on any helper read not in its allowlist; `--list` prints the allowlist.
 
+### Fixed tab headers and scrolling bodies
+
+Use `PinnedHeader` for a tab heading and the controls that act on its body.
+The App uses `scrollWholePage="false"`, **every Page uses `height="*"
+minHeight="0"`**, and the tab root is a `VStack height="*"`. The shared
+component keeps the header outside its `height="*" overflowY="auto"` body.
+A splitter pane can bound a `height="100%"` column, whose inner columns
+still use `height="*"`. Do not omit the Page sizing: its default
+`min-height:100%` lets it grow with content, so the inner body never scrolls.
+See [the full-height layout how-to](https://www.xmlui.org/docs/howto/build-a-full-height-scroll-layout)
+and the browser reproduction in the pinned-header worklist draft. Transcript
+retains its measured List height; Search retains a sticky heading in its
+bounded route scroller.
+
 ### Peer-pattern check before designing
 
 Before introducing a new mechanism in the pane, grep 2–3 peer components for the same problem and run `xmlui_search_howto`. If peers share one pattern and the misbehaving component hand-rolls another, the outlier is where the bug lives: refit to the canonical pattern before adding instrumentation.

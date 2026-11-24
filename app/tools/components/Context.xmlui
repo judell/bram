@@ -36,42 +36,17 @@
     listenTo="{activeProvider}"
     onDidChange="selectedPath = null; selectedDisplay = null; selectedBlock = null; stack.refetch()" />
 
-  <HSplitter height="100%"
+  <HSplitter height="*"
     initialPrimarySize="{window.__bramRestoreSplitterSize('context', '45%')}"
     onResize="(px) => window.__bramSaveSplitterSize('context', px)">
     <VStack
       padding="$space-4"
       gap="$space-4"
-      overflowY="auto"
+      height="100%"
       onInit="registerContextMemorySelector((basename) => { let memorySection = ((ctxList.value &amp;&amp; ctxList.value.sections) || []).find((s) => s.key === 'memory'); let f = ((memorySection &amp;&amp; memorySection.items) || []).find((x) => x.display === basename); if (f) { selectedPath = f.path; selectedDisplay = f.display; selectedBlock = null; } })"
       onCleanup="clearContextMemorySelector()">
-      <ModalDialog id="contextInfoDialog" title="About Context">
-        <VStack gap="$space-3">
-          <Text value="{window.__bramStackIntro()}" />
-          <Text value="Sizes are the bytes each block takes in the session file, scaled by a bytes-per-token figure measured on this session so they total the context the last call reported. The remainder no block accounts for is shown as such." />
-          <!-- One line per kind, the way the tables say what their columns
-               mean (table-headers-explained). -->
-          <VStack gap="$space-1">
-            <Text fontWeight="$fontWeight-bold" value="What the kinds are" />
-            <Items data="{window.__bramStackKindGlossary()}">
-              <HStack gap="$space-2" verticalAlignment="start">
-                <Stack width="10px" height="10px" backgroundColor="{$item.color}" marginTop="$space-1" />
-                <Text fontSize="$fontSize-sm" width="*" value="{$item.line}" />
-              </HStack>
-            </Items>
-          </VStack>
-        </VStack>
-      </ModalDialog>
-      <HStack verticalAlignment="center" gap="$space-2">
-        <Heading level="h4">Context</Heading>
-        <Button
-          label="ⓘ"
-          variant="ghost"
-          size="sm"
-          tooltip="About Context"
-          onClick="contextInfoDialog.open()" />
-      </HStack>
-
+      <!-- The title, the About dialog and its little-i live in
+           ContextStack's pinned header (pinned-header-standard-everywhere). -->
       <ContextStack
         stack="{stack.value}"
         onSelect="(b) => { selectedBlock = b; selectedPath = null; selectedDisplay = null; }" />

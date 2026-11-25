@@ -63394,7 +63394,8 @@ route worklist-commit with body {ids, message}; the host stages only those \
 items files, commits, AND prunes them, so do not run raw git add/commit and do \
 not prune by hand. The exact routes, intent/result shapes, opt-out, and \
 transition rules are canonical in .claude/bram-conventions.md (relative to the \
-project root). Do not duplicate or guess those details from this abbreviated \
+project root; in the Bram source repo, which has no such file, read \
+app/__shell/conventions.md instead). Do not duplicate or guess those details from this abbreviated \
 instruction.";
 // This and the *_REL consts below are relative to Bram's state folder
 // (resource_relative_path / project_resource_path), not the project root.

@@ -3453,7 +3453,8 @@ window.__bramPlanLine = function (board) {
       return "Send feedback to " + ids + (quote ? ": " + quote : "");
     }
     var verb = s.verb === "drop" ? "Drop" : s.verb === "commit" ? "Commit"
-      : s.verb === "start" ? "Start" : String(s.verb || "");
+      : s.verb === "start" ? "Start" : s.verb === "resume" ? "Resume"
+      : String(s.verb || "");
     return verb + " " + ids;
   });
   return parts.length ? "Recommended: " + parts.join(" · ") : "";
@@ -3576,19 +3577,27 @@ window.__bramDoRecommended = function (board, claim) {
   var dropIds = [];
   var commitIds = [];
   var startIds = [];
+  var resumeCount = 0;
   var feedbackSteps = [];
   steps.forEach(function (s) {
     var ids = s.ids || [];
     if (s.verb === "drop") dropIds = dropIds.concat(ids);
     else if (s.verb === "commit") commitIds = commitIds.concat(ids);
-    else if (s.verb === "start") startIds = startIds.concat(ids);
+    // plan-resume-step: the row's Resume is the Start path on begun work
+    // (WorklistGateBar's Start button, labeled Resume), so resume ids ride
+    // with the starts and each gets "to apply" from its status.
+    else if (s.verb === "start" || s.verb === "resume") {
+      startIds = startIds.concat(ids);
+      if (s.verb === "resume") resumeCount += ids.length;
+    }
     else if (s.verb === "feedback" && ids.length && s.text) feedbackSteps.push(s);
   });
   window.__bramIframeTrace("click", {
     target: "gatebar-do-recommended",
     drop: dropIds.length,
     commit: commitIds.length,
-    start: startIds.length,
+    start: startIds.length - resumeCount,
+    resume: resumeCount,
     feedback: feedbackSteps.length,
   });
   var items = (board && board.items) || [];

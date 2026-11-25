@@ -706,11 +706,22 @@ items that haven't begun, so "Commit `a`, then Start `b`" is one click:
   commit retires only its own ids (§Incremental claim and authorization
   retirement), so the started items' approval survives it.
 - **The host refuses**, naming the id:
-  - a start on an item that has already begun;
+  - a start on an item that has already begun (post a `resume` step instead);
   - a start beside a commit of an item that isn't `applied`. That commit
     needs apply-and-commit consent, which is per approval, so the started
     item would share it. Post that commit alone, then the start.
   - a start beside a `feedback` step: each starts an agent turn.
+
+**Recommending Resume.** A `{"verb": "resume", "ids": [...]}` step resumes
+items that have begun but aren't `applied`, which is what the row's **Resume**
+button does. The line reads "Resume a, b". **Do recommended** sends them in the
+same `approved:` turn as any starts, each with `gate: "to apply"`, and you
+handle them as resumed work: make the remaining edits, then
+`mutate op:"advance"`. A resume follows a start's rules: it can sit beside
+commits of `applied` items and beside starts, but not beside a commit of
+unapplied work or a `feedback` step. The host refuses a resume on an item
+that hasn't begun (use `start`) or is `applied` (use `commit`), and a start
+on begun work (use `resume`).
 
 **The plan line shows only while two or more items are ticked.** A sequence
 only matters for a multi-item selection, so a plan posted while one item (or
@@ -776,7 +787,7 @@ Make this offer only when the agent answering is one whose subagents Bram
 can show and bind: Claude today. A Codex, OpenCode or Antigravity session
 answers the next move without it.
 
-A step a plan can't hold (Resume, Start & commit, Push) goes in the chat
+A step a plan can't hold (Start & commit, Push) goes in the chat
 answer as a click to make.
 
 **Recommending feedback.** When you'd tell the user to tick an item and send

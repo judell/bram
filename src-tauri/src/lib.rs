@@ -99233,11 +99233,11 @@ fn validate_worklist_plan_steps(
     if steps.iter().any(|s| plan_step_verb(s) == "feedback")
         && steps
             .iter()
-            .any(|s| matches!(plan_step_verb(s), "commit" | "start"))
+            .any(|s| matches!(plan_step_verb(s), "commit" | "start" | "resume"))
     {
         return Err(
-            "a plan can't both send feedback and commit or start: each starts an agent turn, \
-             so post them as separate plans"
+            "a plan can't both send feedback and commit, start or resume: each starts an agent \
+             turn, so post them as separate plans"
                 .to_string(),
         );
     }
@@ -99246,12 +99246,19 @@ fn validate_worklist_plan_steps(
     // (commit_too) is record-wide. So a start may share a plan only with
     // commits of applied items, which need no apply-and-commit consent;
     // otherwise the started item would gain consent to commit.
-    let has_start = steps.iter().any(|s| plan_step_verb(s) == "start");
+    // plan-resume-step: a resume goes as the same approval a start does (the
+    // row's Resume is the Start button on begun work), so it shares a start's
+    // mixing rules. Provider-neutral: plans and Do recommended are host and
+    // pane mechanics, the same for every agent.
+    let has_start = steps
+        .iter()
+        .any(|s| matches!(plan_step_verb(s), "start" | "resume"));
     for step in steps {
         let verb = plan_step_verb(step);
-        if verb != "drop" && verb != "commit" && verb != "feedback" && verb != "start" {
+        if !matches!(verb, "drop" | "commit" | "feedback" | "start" | "resume") {
             return Err(format!(
-                "step verb must be \"drop\", \"commit\", \"feedback\" or \"start\", got {:?}",
+                "step verb must be \"drop\", \"commit\", \"feedback\", \"start\" or \"resume\", \
+                 got {:?}",
                 verb
             ));
         }
@@ -99297,16 +99304,30 @@ fn validate_worklist_plan_steps(
                 if has_start && !applied {
                     return Err(format!(
                         "{} isn't applied, so committing it needs apply-and-commit consent that \
-                         a start in the same plan would share; post the commit first and the \
-                         start as its own plan",
+                         a start or resume in the same plan would share; post the commit first \
+                         and the start or resume as its own plan",
                         id
                     ));
                 }
             }
-            // Start is for work not yet begun; a begun item resumes from its row.
+            // Start is for work not yet begun; a begun item resumes.
             if verb == "start" && (applied || begun) {
                 return Err(format!(
-                    "{} has already begun, so there is nothing to start",
+                    "{} has already begun, so resume it instead of starting it",
+                    id
+                ));
+            }
+            // plan-resume-step: resume is for begun work that isn't applied yet
+            // (the row's Resume); an applied item's next step is commit.
+            if verb == "resume" && applied {
+                return Err(format!(
+                    "{} is applied, so there is nothing to resume; commit it",
+                    id
+                ));
+            }
+            if verb == "resume" && !begun {
+                return Err(format!(
+                    "{} hasn't begun, so there is nothing to resume; start it",
                     id
                 ));
             }
@@ -99439,6 +99460,48 @@ mod validate_worklist_plan_steps_tests {
             {"verb": "feedback", "ids": ["d"], "text": "x"}
         ]));
         assert!(fb.unwrap_err().contains("separate plans"));
+    }
+
+    // plan-resume-step
+    #[test]
+    fn resume_steps_name_begun_unapplied_items_with_starts_rules() {
+        let b = json!({"version": 3, "items": [
+            {"id": "a", "status": "proposed"},
+            {"id": "b", "status": "applied"},
+            {"id": "c", "status": "proposed", "begunAtMs": 1},
+            {"id": "e", "status": "proposed", "begunAtMs": 2},
+            {"id": "f", "status": "applied", "begunAtMs": 3}
+        ]});
+        let check = |steps: serde_json::Value| {
+            super::validate_worklist_plan_steps(steps.as_array().unwrap(), &b).map(|(s, _)| s)
+        };
+        assert!(check(json!([{"verb": "resume", "ids": ["c", "e"]}])).is_ok());
+        let unbegun = check(json!([{"verb": "resume", "ids": ["a"]}])).unwrap_err();
+        assert!(unbegun.contains("hasn't begun"), "{unbegun}");
+        let applied = check(json!([{"verb": "resume", "ids": ["f"]}])).unwrap_err();
+        assert!(applied.contains("is applied"), "{applied}");
+        // Mixing: a plain commit of an applied item is fine beside a resume,
+        // and so is a start; a commit of begun-unapplied work and feedback
+        // are refused, as beside a start.
+        assert!(
+            check(json!([{"verb": "commit", "ids": ["b"]}, {"verb": "resume", "ids": ["c"]}]))
+                .is_ok()
+        );
+        assert!(
+            check(json!([{"verb": "resume", "ids": ["c"]}, {"verb": "start", "ids": ["a"]}]))
+                .is_ok()
+        );
+        let consent =
+            check(json!([{"verb": "commit", "ids": ["e"]}, {"verb": "resume", "ids": ["c"]}]));
+        assert!(consent.unwrap_err().contains("apply-and-commit"));
+        let fb = check(json!([
+            {"verb": "resume", "ids": ["c"]},
+            {"verb": "feedback", "ids": ["a"], "text": "x"}
+        ]));
+        assert!(fb.unwrap_err().contains("separate plans"));
+        // The start refusal on begun work now points at resume.
+        let begun = check(json!([{"verb": "start", "ids": ["c"]}])).unwrap_err();
+        assert!(begun.contains("resume it"), "{begun}");
     }
 
     // issue-504-one-started-item-per-file

@@ -112,11 +112,19 @@
              its handoff brief into each begun item's draft, then posts the
              suggestion, which opens the Sessions tab's dialog pre-filled.
              https://www.xmlui.org/docs/reference/components/Button -->
-        <Button
-          label="Start a new session"
-          size="xs"
-          variant="outlined"
-          onClick="window.__bramSessionContextNewSession(ctx, $props.sessionTitle)" />
+        <!-- https://www.xmlui.org/docs/reference/components/Tooltip -->
+        <Tooltip>
+          <property name="tooltipTemplate">
+            <Markdown maxWidth="44ch" content="**Worklist handoff.** For each item you’ve started, the agent adds a note to its draft about what changed, what was checked, and what remains.
+
+**Session handoff.** The agent suggests a name and an opening brief for the next session. You can edit both before choosing **Create**." />
+          </property>
+          <Button
+            label="Start a new session"
+            size="xs"
+            variant="outlined"
+            onClick="window.__bramSessionContextNewSession(ctx, $props.sessionTitle)" />
+        </Tooltip>
         <Button
           label="✕"
           size="xs"

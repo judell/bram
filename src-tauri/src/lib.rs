@@ -27260,9 +27260,10 @@ fn switch_agent(
     } else {
         None
     };
-    let fresh_command = fresh
-        .as_ref()
-        .map(|(title, sid)| new_session_launch_command(provider_key, title, sid.as_deref()));
+    let fresh_command = fresh.as_ref().map(|(title, sid)| {
+        note_claude_launch_name(provider_key, sid.as_deref(), title);
+        new_session_launch_command(provider_key, title, sid.as_deref())
+    });
     let (base_command, pending_disposition) = provider_switch_launch(
         provider_key,
         has_session,
@@ -28051,6 +28052,8 @@ fn take_group_name<R: tauri::Runtime>(
         return;
     }
     let result = rename_session(app, id, Some(sp), name);
+    let launch_name = claude_launch_name(id);
+    let outcome = group_name_outcome(sp, launch_name.as_deref(), name, &result);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -28062,9 +28065,10 @@ fn take_group_name<R: tauri::Runtime>(
                 current.unwrap_or_default(),
                 name,
                 source,
-                match &result {
-                    Ok(_) => "ok".to_string(),
-                    Err(e) => format!("error detail={}", e),
+                match &outcome {
+                    GroupNameOutcome::Ok => "ok".to_string(),
+                    GroupNameOutcome::Pending => "pending reason=named-at-launch".to_string(),
+                    GroupNameOutcome::Failed(e) => format!("error detail={}", e),
                 }
             ),
         );
@@ -28072,7 +28076,7 @@ fn take_group_name<R: tauri::Runtime>(
     // agy-session-rename: a member that can't take the name looks wrong and
     // says nothing, which is how 2026-11-02's two Leaves happened. agy's title
     // file is a private format, so this can fail again.
-    if let Err(detail) = result {
+    if let GroupNameOutcome::Failed(detail) = outcome {
         emit_replayable_payload(
             app,
             "group-name-failed",
@@ -28084,6 +28088,66 @@ fn take_group_name<R: tauri::Runtime>(
             }),
         );
     }
+}
+
+// group-name-not-found-before-transcript: a fresh Claude partner is renamed
+// at launch confirm, before Claude writes its transcript, so the rename can't
+// find it (5 of 5 such renames through 2026-11-25). Its launch already passed
+// the name with `--name`, so that not-found is covered, not a failure. Every
+// other not-found still toasts: nothing renames a pending member later, and a
+// Codex rollout with no user turn yet is hidden from the list.
+#[derive(Debug, PartialEq)]
+enum GroupNameOutcome {
+    Ok,
+    Pending,
+    Failed(String),
+}
+
+const SESSION_NOT_FOUND: &str = "session not found";
+
+fn group_name_outcome<T>(
+    provider: SessionProvider,
+    launch_name: Option<&str>,
+    group_name: &str,
+    result: &Result<T, String>,
+) -> GroupNameOutcome {
+    match result {
+        Ok(_) => GroupNameOutcome::Ok,
+        Err(e)
+            if e == SESSION_NOT_FOUND
+                && provider == SessionProvider::Claude
+                && launch_name.map(str::trim) == Some(group_name.trim()) =>
+        {
+            GroupNameOutcome::Pending
+        }
+        Err(e) => GroupNameOutcome::Failed(e.clone()),
+    }
+}
+
+// The name each pre-allocated Claude id was launched with (`--name`), for
+// this run of Bram only: after a relaunch the rename falls back to the toast.
+fn claude_launch_names() -> &'static Mutex<HashMap<String, String>> {
+    static CELL: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn note_claude_launch_name(provider_key: &str, id: Option<&str>, name: &str) {
+    let (true, Some(id)) = (provider_key == "claude", id) else {
+        return;
+    };
+    let mut guard = match claude_launch_names().lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    guard.insert(id.to_string(), name.to_string());
+}
+
+fn claude_launch_name(id: &str) -> Option<String> {
+    let guard = match claude_launch_names().lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    guard.get(id).cloned()
 }
 
 // agy-session-rename: members that joined while Bram couldn't name Antigravity
@@ -30868,6 +30932,42 @@ mod pending_session_title_tests {
         assert_eq!(fresh_partner_reason(false, true), None);
     }
 
+    // group-name-not-found-before-transcript
+    #[test]
+    fn group_name_not_found_is_pending_only_when_the_launch_named_it() {
+        use crate::{group_name_outcome, GroupNameOutcome, SessionProvider::*, SESSION_NOT_FOUND};
+        let nf: Result<(), String> = Err(SESSION_NOT_FOUND.to_string());
+        let g = "Bram footer tooltip";
+        assert_eq!(
+            group_name_outcome(Claude, Some(g), g, &nf),
+            GroupNameOutcome::Pending
+        );
+        assert_eq!(
+            group_name_outcome(Claude, Some("Something else"), g, &nf),
+            GroupNameOutcome::Failed(SESSION_NOT_FOUND.to_string())
+        );
+        assert_eq!(
+            group_name_outcome(Claude, None, g, &nf),
+            GroupNameOutcome::Failed(SESSION_NOT_FOUND.to_string())
+        );
+        for p in [Codex, Opencode, Antigravity] {
+            assert_eq!(
+                group_name_outcome(p, Some(g), g, &nf),
+                GroupNameOutcome::Failed(SESSION_NOT_FOUND.to_string())
+            );
+        }
+        let other: Result<(), String> = Err("permission denied".to_string());
+        assert_eq!(
+            group_name_outcome(Claude, Some(g), g, &other),
+            GroupNameOutcome::Failed("permission denied".to_string())
+        );
+        let ok: Result<(), String> = Ok(());
+        assert_eq!(
+            group_name_outcome(Codex, None, g, &ok),
+            GroupNameOutcome::Ok
+        );
+    }
+
     #[test]
     fn fresh_partner_title_is_the_shared_name_without_an_agent_tag() {
         assert_eq!(
@@ -31149,6 +31249,7 @@ fn create_new_session(
     // Refresh now so /__sessions/list can expose the queued title as the
     // provisional current row while the launch waits on the prompt.
     emit_replayable_signal(&app, "sessions-list-changed");
+    note_claude_launch_name(provider_key, session_id.as_deref(), &trimmed);
     let launch = new_session_launch_command(provider_key, &trimmed, session_id.as_deref());
     // The shared launch routine gates on the shell's prompt. On timeout: no
     // prompt — the shell never came back, or no marker and a prompt shape the

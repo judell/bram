@@ -1840,9 +1840,26 @@
         borderTop="1px solid $color-info-200">
         <HStack gap="$space-2" verticalAlignment="center">
           <Text
+            when="{!window.__bramSendLedgerNoticeStatusTail(sendLedgerDs.value, sendNoticeDismissed)}"
             fontSize="$fontSize-sm"
             width="*"
             value="{window.__bramSendLedgerNotice(sendLedgerDs.value, sendNoticeDismissed)}" />
+          <!-- link-send-notices-to-status: notices that point at the send
+               ledger end in a real Link to /status.
+               https://www.xmlui.org/docs/reference/components/Link -->
+          <HStack
+            when="{window.__bramSendLedgerNoticeStatusTail(sendLedgerDs.value, sendNoticeDismissed)}"
+            width="*"
+            gap="$space-1"
+            wrapContent="true">
+            <Text
+              fontSize="$fontSize-sm"
+              value="{window.__bramSendLedgerNotice(sendLedgerDs.value, sendNoticeDismissed)}" />
+            <Link to="/status" label="Status" />
+            <Text
+              fontSize="$fontSize-sm"
+              value="{window.__bramSendLedgerNoticeStatusTail(sendLedgerDs.value, sendNoticeDismissed)}" />
+          </HStack>
           <Button
             label="✕"
             variant="ghost"

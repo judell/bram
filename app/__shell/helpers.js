@@ -18781,7 +18781,7 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
     // instructing the user to press Enter on an input that may be empty
     // (2026-09-06: "That's a lie. It wasn't back.").
     if (!staleTerminalInput)
-      return "Response interrupted — your message" + label + " was not restored to the terminal input. Its text is kept in the send ledger (Status tab) if you want it back.";
+      return "Response interrupted — your message" + label + " was not restored to the terminal input. Its text is kept in the send ledger on the";
     // Truthful semantics (2026-07-06 esc drill): the send landed as a
     // transport record but Esc made Claude Code retract and re-stage it
     // in the TERMINAL input, unanswered — and the copy there prepends
@@ -18795,9 +18795,18 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
     return "A lost send" + label + " was redelivered automatically.";
   }
   if (latest.state === "stranded" && latest.cause === "mechanical") {
-    return "A send" + label + " did not reach the agent; its text is kept in the send ledger (Status tab).";
+    return "A send" + label + " did not reach the agent; its text is kept in the send ledger on the";
   }
   return "";
+};
+
+// link-send-notices-to-status: the two notices that point at the send ledger
+// end at "...send ledger on the"; Main.xmlui follows that with a Link to
+// /status and this tail. Both read only their arguments (via the notice).
+window.__bramSendLedgerNoticeStatusTail = function (payload, dismissedKey) {
+  var n = window.__bramSendLedgerNotice(payload, dismissedKey);
+  if (!n || n.slice(-"send ledger on the".length) !== "send ledger on the") return "";
+  return n.indexOf("Response interrupted") === 0 ? "tab if you want it back." : "tab.";
 };
 
 // Apply a host `send-restore` event: the restored text goes into the

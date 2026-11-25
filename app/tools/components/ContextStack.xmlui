@@ -56,11 +56,14 @@
         color="$textColor-secondary"
         value="{window.__bramStackUnsupportedLine($props.stack)}" />
       <VStack when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}" gap="$space-2">
-      <HStack when="{$props.stack.provider === 'codex'}" gap="$space-1" verticalAlignment="center">
+      <!-- footer-context-refresh-after-settings-change: the threshold line
+           for every provider (Jon, 2026-11-25: "should be everywhere and
+           provider-independent"); the intro sentence it replaced is in the
+           About dialog. -->
+      <HStack gap="$space-1" verticalAlignment="center">
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackThresholdPrefix($props.stack, $props.settings)}" />
         <Link to="/settings?highlight=suggestAtContextShare" noIndicator="true" fontSize="$fontSize-sm">threshold</Link>
       </HStack>
-      <Text when="{$props.stack.provider !== 'codex'}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackIntro()}" />
       <!-- One thin stacked bar, a series per kind in the stack's colours; the
            legend is the chip row below, which wraps to the pane's width and
            doubles as the kind filter (ECharts' own legend wrapped over the

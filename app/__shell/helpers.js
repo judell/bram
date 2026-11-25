@@ -22488,7 +22488,14 @@ window.__bramSessionContextPick = function (pushValue, routeValue, currentSessio
     return routeValue.lastCallAtMs > push.lastCallAtMs ? routeValue : push;
   }
   if (routeValue.calls !== push.calls) return routeValue.calls > push.calls ? routeValue : push;
-  return routeValue.compactions > push.compactions ? routeValue : push;
+  if (routeValue.compactions !== push.compactions) {
+    return routeValue.compactions > push.compactions ? routeValue : push;
+  }
+  // footer-context-refresh-after-settings-change: the same call, so the
+  // usage agrees. The route is recomputed against the current settings on
+  // every fetch (including on settings-changed); the turn-end push keeps the
+  // threshold, state and offer from when the turn ended. Prefer the route.
+  return routeValue;
 };
 // The footer's current session as `<provider>:<id>`, the spelling pushed
 // readings carry; "" when there is none.

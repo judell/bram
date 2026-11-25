@@ -10,6 +10,10 @@
        https://www.xmlui.org/docs/reference/components/PushSource
        https://www.xmlui.org/docs/reference/components/DataSource -->
   <DataSource id="sessionSize" url="/__session-size" />
+  <PushSource id="contextSettingsEvt" initial="{null}" subscribe="{window.bramSubscribeTauriEvent('settings-changed')}" />
+  <ChangeListener
+    listenTo="{contextSettingsEvt.value &amp;&amp; contextSettingsEvt.value.tick}"
+    onDidChange="() => { sessionSize.refetch(); }" />
   <!-- List prices per model, a file the agent maintains (resources/
        model-rates.json, with asOf and source): not fetched live, not in
        the host (Jon, 2026-11-23). Served from the pane's own tree, so the

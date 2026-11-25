@@ -126,12 +126,22 @@ whose app is the point can launch Bram minimized with the app opened:
 
 When you mention a local file in chat, write it as a Markdown link with its
 absolute path, never a bare path, media included:
-`[take-3.mp4](/Users/jon/bram-studio/media/take-3.mp4)`. In Bram's
-Transcript the link opens in the user's browser, served by Bram, so video and
-audio play and seek, images and PDFs show, and text opens as plain text.
-Bram serves only files under the home folder or the project; hidden folders
-(`~/.ssh`, `~/.config`) and the project's `.bram/` are refused. Don't use
-`file://` links or `~/` paths.
+`[take-3.mp4](/Users/jon/bram-studio/media/take-3.mp4)`. That one form is
+right for every kind of file; Bram picks where a click opens it:
+
+- **Markdown, code and text open in Bram's own viewer**, in the pane:
+  Markdown rendered, code and text as source. This covers the project's
+  `.bram/` files, so cite a handoff or item draft the same way:
+  `[next-move-requires-plan](/Users/jon/bram/.bram/worklist-drafts/next-move-requires-plan.md)`.
+  A line anchor (`file.rs:42`) opens the viewer at that line.
+- **Video, audio, images and PDFs open in the user's browser**, served by
+  Bram, so they play, seek and zoom. The browser route serves only files
+  under the home folder or the project, and refuses hidden folders (`~/.ssh`,
+  `~/.config`) and the project's `.bram/`.
+
+A ⌘/Ctrl-click opens the other one. Don't use `file://` links, `~/` paths, or
+raw `http://127.0.0.1:<port>/__file?path=` URLs: that route is the pane's
+image shim, and serves Markdown as source.
 
 ## Live SQL views via `/query`
 

@@ -12700,26 +12700,36 @@ window.__bramLocalLinkAbsolutePath = function (path, info) {
   if (!info.root) return null;
   return info.root.replace(/[\\/]+$/, "") + sep + p.replace(/^\.\//, "");
 };
-// Click on a local-file link: open it in the default browser through the
-// host's /__file route; a meta/ctrl-click, or no token yet, keeps the in-pane
-// text preview.
+// internal-viewer-links-in-replies (Jon, 2026-11-25: "yes plain click, the
+// modifier is annoying"): media the browser plays or shows better than the
+// pane does goes to the browser; everything else (Markdown, code, text, no
+// extension) opens in the in-pane viewer, which renders Markdown and reads
+// the project's .bram/ drafts that the browser route refuses.
+window.__bramLocalLinkOpensInBrowser = function (ext) {
+  return /^(mp4|m4v|mov|webm|mkv|avi|mp3|m4a|wav|aac|ogg|oga|flac|opus|png|jpe?g|gif|webp|heic|avif|bmp|tiff?|svg|ico|pdf)$/.test(
+    String(ext || "").toLowerCase());
+};
+// Click on a local-file link: media opens in the default browser through the
+// host's token-gated /__open-file route; anything else opens the in-pane
+// viewer. A meta/ctrl-click does the other one. No token yet: the viewer.
 window.__bramOpenLocalLink = function (request, e) {
   var info = window.__bramFileLinkInfo;
   var ext = String((request && request.path) || "").replace(/^.*\./, "").toLowerCase();
   if (ext.length > 8 || /[\\/]/.test(ext)) ext = "";
   var modifier = !!(e && (e.metaKey || e.ctrlKey));
-  var abs = modifier ? null : window.__bramLocalLinkAbsolutePath(request && request.path, info);
+  var browser = window.__bramLocalLinkOpensInBrowser(ext) !== modifier;
+  var abs = browser ? window.__bramLocalLinkAbsolutePath(request && request.path, info) : null;
   if (!abs || typeof window.openExternal !== "function") {
     window.__bramIframeTrace("local-link", {
       op: "preview",
       ext: ext,
-      how: modifier ? "modifier" : info ? "unresolved" : "no-token",
+      how: !browser ? (modifier ? "modifier" : "text") : info ? "unresolved" : "no-token",
     });
     if (!info) window.__bramFileLinkInfoLoad();
     window.__bramOpenLocalLinkPreview(request);
     return;
   }
-  window.__bramIframeTrace("local-link", { op: "open-browser", ext: ext, how: "click" });
+  window.__bramIframeTrace("local-link", { op: "open-browser", ext: ext, how: modifier ? "modifier" : "click" });
   window.openExternal(
     "http://127.0.0.1:" + info.port + "/__open-file?path=" + encodeURIComponent(abs) +
       "&t=" + encodeURIComponent(info.token)

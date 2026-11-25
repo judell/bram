@@ -406,8 +406,9 @@ When referencing a file, route, or doc, name it
 (`<state>/worklist.json`, `/__worklist/resolve`,
 `.claude/bram-reference/diagnostics.md`) so the user can verify in one
 click. If you can't cite, say so. Local files, media included, go as
-links with absolute paths → `.claude/bram-reference/environment.md`
-(§Presenting local files).
+links with absolute paths; Markdown, code and text (`.bram/` drafts too)
+open in Bram's viewer, media in the browser →
+`.claude/bram-reference/environment.md` (§Presenting local files).
 
 ### Match terseness to the question
 

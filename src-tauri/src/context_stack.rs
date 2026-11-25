@@ -792,6 +792,15 @@ fn message_blocks(
                 let s = item.get("text").and_then(Value::as_str).unwrap_or("");
                 if s.trim_start().starts_with("<system-reminder>") {
                     out.extend(reminder_blocks(s, ts, *turn, call, root));
+                } else if let Some(label) = skill_label(s) {
+                    out.push(new_block(
+                        BlockKind::Attachment,
+                        label,
+                        s.to_string(),
+                        ts.cloned(),
+                        *turn,
+                        call,
+                    ));
                 } else {
                     if !counted_turn {
                         *turn += 1;

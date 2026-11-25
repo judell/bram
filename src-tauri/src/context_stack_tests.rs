@@ -710,6 +710,64 @@ fn the_request_chain_gives_the_exact_live_list_with_the_shape_first() {
 }
 
 #[test]
+fn a_skill_body_on_the_wire_is_an_attachment_and_counts_no_turn() {
+    use serde_json::json;
+    let skill_text =
+        "Base directory for this skill: /tmp/bundled-skills/x/claude-api\n\n# Building apps";
+    let skill = json!([{"type": "text", "text": skill_text}]);
+    let hello = json!("hello there");
+    let reply = json!([{"type": "text", "text": "hi"}]);
+    let hashes: Vec<String> = [
+        json!({"role": "user", "content": hello}),
+        json!({"role": "user", "content": skill}),
+        json!({"role": "assistant", "content": reply}),
+    ]
+    .iter()
+    .map(message_hash)
+    .collect();
+    let (_, skill_line) = blob_record(&json!({"role": "user", "content": skill}));
+    let lines = vec![
+        shape_record("sh1"),
+        user_record_json("2026-11-24T05:00:00.000Z", &hello),
+        skill_line,
+        request_record("r1", None, 0, &hashes, "2026-11-24T05:00:00.500Z"),
+        asst_record_json("msg_1", "2026-11-24T05:00:01.000Z", 1000, &reply),
+    ];
+    let s = build("claude", &lines.join("\n"), "s1", Some(Path::new("/p")));
+    assert_eq!(s.reader, Strategy::Requests);
+    let skill_block = s
+        .blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::Attachment)
+        .expect("skill attachment block");
+    assert_eq!(skill_block.label, "Skill: claude-api");
+    assert_eq!(
+        skill_block.turn, 1,
+        "no turn of its own: it rides the hello turn"
+    );
+    let user_block = s
+        .blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::User)
+        .expect("user block");
+    assert_eq!(user_block.label, "hello there");
+    assert_eq!(user_block.turn, 1);
+    let att = s
+        .by_kind
+        .iter()
+        .find(|k| k.kind == BlockKind::Attachment)
+        .unwrap();
+    assert_eq!(att.bytes, skill_text.len() as u64);
+    let usr = s
+        .by_kind
+        .iter()
+        .find(|k| k.kind == BlockKind::User)
+        .unwrap();
+    assert_eq!(usr.blocks, 1);
+    assert_eq!(usr.bytes, "hello there".len() as u64);
+}
+
+#[test]
 fn messages_a_later_request_drops_are_counted_and_a_summary_is_named() {
     let fx = wire_fixture();
     let mut lines = fx.lines.clone();

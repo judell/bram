@@ -123,6 +123,11 @@ component keeps the header outside its `height="*" overflowY="auto"` body.
 A splitter pane can bound a `height="100%"` column, whose inner columns
 still use `height="*"`. Do not omit the Page sizing: its default
 `min-height:100%` lets it grow with content, so the inner body never scrolls.
+A component mounted both in a Page and in a max-height box (the Worklist in
+the Footer's pane) takes the star only in the Page: under a maximum the star
+resolves to a fraction of the box with overflow visible, and the siblings
+after it pin to the box's edge over the spilled content
+(`worklist-footer-pane-gate-overlap`).
 See [the full-height layout how-to](https://www.xmlui.org/docs/howto/build-a-full-height-scroll-layout)
 and the browser reproduction in the pinned-header worklist draft. Transcript
 retains its measured List height; Search retains a sticky heading in its

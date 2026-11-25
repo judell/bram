@@ -197,7 +197,7 @@
   <VStack
     when="{enhanceMode.value &amp;&amp; enhanceMode.value.mode === 'freestyle'}"
     padding="$space-4"
-    height="*"
+    height="{$props.embedded ? 'auto' : '*'}"
     gap="$space-3">
     <Text>This folder is in freestyle mode: you work with the agent directly, in the message box or the terminal, with no Worklist in between. Switch to workflow when you want changes proposed and committed through one.</Text>
     <!-- worklist-freestyle-note-why-switch (Jon, 2026-11-23): the sentence
@@ -214,14 +214,22 @@
   <VStack
     when="{enhanceMode.value &amp;&amp; enhanceMode.value.mode === 'undecided'}"
     padding="$space-4"
-    height="*"
+    height="{$props.embedded ? 'auto' : '*'}"
     gap="$space-3">
     <Text>The Worklist starts once you choose how to work in this folder, at the top of this pane.</Text>
   </VStack>
+  <!-- worklist-footer-pane-gate-overlap (Jon, 2026-11-24, screenshot): the
+       star root is for the bounded Worklist Page. Mounted in the Footer's
+       max-height pane (Main.xmlui, embedded="{true}") the star resolved to a
+       fraction of the pane with overflow visible, so the gate bar sat at the
+       pane's bottom edge while the board ran on behind it (measured with the
+       vendored bundle in WebKit and Chromium; the item's draft has the
+       table). `auto` there restores the pre-sweep layout: the pane scrolls
+       as a whole and the gate bar follows the last row. -->
   <VStack
     when="{!(enhanceMode.value &amp;&amp; (enhanceMode.value.mode === 'freestyle' || enhanceMode.value.mode === 'undecided'))}"
     padding="$space-4"
-    height="*"
+    height="{$props.embedded ? 'auto' : '*'}"
     gap="$space-3">
     <PinnedHeader gap="$space-3">
     <property name="headerTemplate">

@@ -27,6 +27,25 @@ Transcript retains its measured List height and Search its sticky header
 inside a bounded route scroller. The failed sticky approaches and original
 app-wide switch rejection are recorded in `410d069f` and `e60fd6cf`.
 
+**The Footer's Worklist pane (`worklist-footer-pane-gate-overlap`,
+2026-11-24).** The sweep's star root on the Worklist, mounted under the
+Footer's `maxHeight="40vh"` pane, floated the gate bar over the board (Jon's
+screenshot, 21:14). Rebuilt with the vendored bundle in Playwright, a 40-row
+board in a 320px pane, WebKit and Chromium agreeing:
+
+| shape | Worklist root | gate bar | rows behind it |
+|---|---|---|---|
+| before the sweep | `0 0 auto`, 1387px | after the last row; the pane scrolls as a whole | 0 |
+| after, as shipped | `1 1 0%`, 256px, overflow visible | pinned at the pane's bottom edge | 2 |
+| after, root `auto` in the pane | `0 0 auto`, 1387px | after the last row; the pane scrolls as a whole | 0 |
+| after, pane `height="40vh"` | `1 1 0%`, 256px | docked, body capped at 198px and scrolling | 0 visible |
+
+Under a maximum the star is a fraction of the box, not of a size, and the
+uncapped body spills past the siblings. The Footer mount now passes
+`embedded="{true}"` and the Worklist's roots take `auto` for it; the fixed
+40vh docked layout was left as a separate UX decision
+(`worklist-pane-fits-its-content` rejected a fixed pane for a short board).
+
 ## The orientation site's engine lives in the template
 
 Bram's own orientation site (`orientation/`) is a copy of the template in

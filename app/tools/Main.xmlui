@@ -1413,7 +1413,9 @@
           automationId="worklist-pane"
           onMount="window.__bramWorklistPaneMounted()"
           onUnmount="window.__bramWorklistPaneUnmounted()">
-          <Worklist />
+          <!-- embedded: no star root under this max-height pane
+               (worklist-footer-pane-gate-overlap; the comment in Worklist.xmlui). -->
+          <Worklist embedded="{true}" />
           <WorklistGateBar />
         </VStack>
       </VStack>

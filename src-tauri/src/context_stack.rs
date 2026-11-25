@@ -988,6 +988,40 @@ mod requests {
         /// Every hash a record or blob can answer for, with its message.
         index: HashMap<String, (Value, Option<String>)>,
         root: Option<String>,
+        /// Each main-thread call in the order `/__token-accounting` counts
+        /// them (a non-synthetic assistant record with usage, once per
+        /// message id), by the `requestRef` naming the request it answered.
+        answered: Vec<Option<String>>,
+    }
+
+    /// The call each request's messages count against: the accounting's
+    /// index of the call that answered it. A request nothing answered (an
+    /// API error, an interrupt before the response; 16 of 893 on session
+    /// 15f71ae7) takes the next answered request's call, since that call is
+    /// the first the accounting measured carrying its messages; one after
+    /// the last answered takes the call not made yet (`answered.len()`).
+    /// Numbering by request index instead ran 4 to 15 calls past the Token
+    /// growth chart after such requests (context-stack-call-matches-accounting).
+    /// A file whose responses carry no `requestRef` keeps the request index;
+    /// the bool says whether the link was found.
+    fn call_of_request(reqs: &[Req], answered: &[Option<String>]) -> (Vec<usize>, bool) {
+        let by_ref: HashMap<&str, usize> = answered
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.as_deref().map(|r| (r, i)))
+            .collect();
+        if !reqs.iter().any(|q| by_ref.contains_key(q.id.as_str())) {
+            return ((0..reqs.len()).collect(), false);
+        }
+        let mut out = vec![0; reqs.len()];
+        let mut next = answered.len();
+        for (k, q) in reqs.iter().enumerate().rev() {
+            if let Some(&i) = by_ref.get(q.id.as_str()) {
+                next = i;
+            }
+            out[k] = next;
+        }
+        (out, true)
     }
 
     fn strip_signatures(blocks: &[Value]) -> Vec<Value> {
@@ -1022,6 +1056,8 @@ mod requests {
         let mut shapes: HashMap<String, Value> = HashMap::new();
         let mut recs: Vec<Rec> = Vec::new();
         let mut last_asst_id: Option<String> = None;
+        let mut answered: Vec<Option<String>> = Vec::new();
+        let mut answered_ids: HashSet<String> = HashSet::new();
         for line in text.lines() {
             let Ok(rec) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -1093,6 +1129,24 @@ mod requests {
                         .pointer("/message/id")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    // The accounting's call rule (token_accounting.rs,
+                    // ClaudeParser::assistant), so the indexes agree.
+                    let synthetic = rec.pointer("/message/model").and_then(Value::as_str)
+                        == Some("<synthetic>");
+                    let has_usage = rec.pointer("/message/usage").is_some_and(|u| !u.is_null());
+                    if !synthetic && has_usage {
+                        let fresh = match &id {
+                            Some(i) => answered_ids.insert(i.clone()),
+                            None => true,
+                        };
+                        if fresh {
+                            answered.push(
+                                rec.get("requestRef")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                            );
+                        }
+                    }
                     let blocks = rec
                         .pointer("/message/content")
                         .map(as_blocks)
@@ -1173,6 +1227,7 @@ mod requests {
             shapes,
             index,
             root: root.map(str::to_string),
+            answered,
         })
     }
 
@@ -1253,6 +1308,7 @@ mod requests {
             lists.push(list);
         }
         let last = r.reqs.len() - 1;
+        let (call_of, linked) = call_of_request(&r.reqs, &r.answered);
         let live = &lists[last];
         let live_set: HashSet<&str> = live.iter().map(String::as_str).collect();
 
@@ -1273,7 +1329,7 @@ mod requests {
         let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut turn = 0usize;
         for h in live {
-            let call = first_seen.get(h.as_str()).copied().unwrap_or(last);
+            let call = call_of[first_seen.get(h.as_str()).copied().unwrap_or(last)];
             match r.index.get(h) {
                 Some((message, ts)) => {
                     let ts = ts.as_ref().or(req_ts);
@@ -1380,14 +1436,27 @@ mod requests {
         let image_tokens = wire.images as u64 * IMAGE_TOKENS;
         let mut rows: Vec<(u64, u64, u64)> = Vec::new();
         // A request is recorded before its response, so mid-turn the file
-        // holds one request more than it has readings; rows stop at the
-        // last answered request. More than one unanswered means the
-        // readings and requests are out of step, and no row is trusted.
-        if r.reqs.len() >= contexts.len() && r.reqs.len() - contexts.len() <= 1 {
+        // holds one request more than it has readings. Where responses name
+        // their request (`linked`), each answered request pairs with its own
+        // reading, and a row needs the request before it answered by the
+        // call before. Without the link, rows pair by position, stop at the
+        // last answered request, and more than one unanswered means the two
+        // are out of step, so no row is trusted.
+        let answers = |k: usize| {
+            call_of[k] < contexts.len() && (k + 1 == call_of.len() || call_of[k + 1] != call_of[k])
+        };
+        if linked || (r.reqs.len() >= contexts.len() && r.reqs.len() - contexts.len() <= 1) {
             let mut prev_total = 0usize;
-            for (k, req) in r.reqs.iter().enumerate().take(contexts.len()) {
+            for (k, req) in r.reqs.iter().enumerate() {
                 let total = req.keep + req.tail.len();
-                if k >= 1 && req.keep == prev_total && contexts[k] > contexts[k - 1] {
+                let c = call_of[k];
+                if k >= 1
+                    && answers(k)
+                    && answers(k - 1)
+                    && c == call_of[k - 1] + 1
+                    && req.keep == prev_total
+                    && contexts[c] > contexts[c - 1]
+                {
                     let (mut text_b, mut opaque_b, mut images, mut ok) = (0u64, 0u64, 0usize, true);
                     let mut names: HashMap<String, String> = HashMap::new();
                     let mut t = 0usize;
@@ -1408,7 +1477,7 @@ mod requests {
                         }
                     }
                     if ok && images == 0 && text_b + opaque_b > 0 {
-                        rows.push((contexts[k] - contexts[k - 1], text_b, opaque_b));
+                        rows.push((contexts[c] - contexts[c - 1], text_b, opaque_b));
                     }
                 }
                 prev_total = total;

@@ -506,6 +506,17 @@ fn probe_a_real_session_file() {
         "compacted: {} blocks, {} bytes",
         s.compacted.blocks, s.compacted.bytes
     );
+    // The summary's call is the compaction drop's index on the Token growth
+    // chart (context-stack-call-matches-accounting).
+    println!(
+        "summary call {:?} · highest call {:?} · calls {}",
+        s.blocks
+            .iter()
+            .find(|b| b.kind == BlockKind::CompactionSummary)
+            .map(|b| b.call),
+        s.blocks.iter().map(|b| b.call).max(),
+        s.measured.calls
+    );
     for k in &s.by_kind {
         println!(
             "  {:<20} blocks {:>4}  bytes {:>9}  tokens {:>7}  share {:.3}",
@@ -1119,4 +1130,95 @@ fn a_compact_summary_record_stays_a_compaction_summary() {
     );
     let b = s.blocks.last().unwrap();
     assert_eq!(b.kind, BlockKind::CompactionSummary);
+}
+
+/// An assistant record naming the request it answered, as Claude Code writes
+/// it (`requestRef` = the `api-request` record's `id`).
+fn asst_answering(req: &str, id: &str, ts: &str, ctx: u64, content: &serde_json::Value) -> String {
+    let line = asst_record_json(id, ts, ctx, content);
+    format!(r#"{{"requestRef":"{req}",{}"#, &line[1..])
+}
+
+// context-stack-call-matches-accounting: a request nothing answered (an API
+// error, an interrupt) is not a call to /__token-accounting, so it must not
+// advance `call`. On session 15f71ae7, 16 such requests put the stack's call
+// numbers up to 15 past the Token growth chart's index.
+#[test]
+fn a_request_nothing_answered_does_not_advance_the_call_number() {
+    use serde_json::json;
+    let hello = json!("hello");
+    let hello_hash = message_hash(&json!({"role": "user", "content": hello}));
+    let asst1 = json!([{"type": "text", "text": "first"}]);
+    let asst1_hash = message_hash(&json!({"role": "assistant", "content": asst1}));
+    let asst2 = json!([{"type": "text", "text": "second"}]);
+    let asst2_hash = message_hash(&json!({"role": "assistant", "content": asst2}));
+    let more = json!("more");
+    let more_hash = message_hash(&json!({"role": "user", "content": more}));
+    let lines = [
+        shape_record("sh1"),
+        user_record_json("2026-11-24T05:00:00.000Z", &hello),
+        request_record("r1", None, 0, &[hello_hash], "2026-11-24T05:00:00.500Z"),
+        asst_answering("r1", "msg_1", "2026-11-24T05:00:01.000Z", 1000, &asst1),
+        user_record_json("2026-11-24T05:00:02.000Z", &more),
+        // Sent, and nothing came back.
+        request_record(
+            "r2",
+            Some("r1"),
+            1,
+            &[asst1_hash.clone(), more_hash.clone()],
+            "2026-11-24T05:00:02.500Z",
+        ),
+        // The retry carries the same list.
+        request_record("r3", Some("r2"), 3, &[], "2026-11-24T05:00:04.000Z"),
+        asst_answering("r3", "msg_2", "2026-11-24T05:00:05.000Z", 1200, &asst2),
+        request_record(
+            "r4",
+            Some("r3"),
+            3,
+            &[asst2_hash],
+            "2026-11-24T05:00:06.000Z",
+        ),
+        asst_answering(
+            "r4",
+            "msg_3",
+            "2026-11-24T05:00:07.000Z",
+            1300,
+            &json!([{"type": "text", "text": "third"}]),
+        ),
+        // Sent, not answered yet: its messages belong to the next call.
+        request_record("r5", Some("r4"), 4, &[], "2026-11-24T05:00:08.000Z"),
+    ];
+    let s = build("claude", &lines.join("\n"), "s1", None);
+    assert_eq!(s.reader, Strategy::Requests);
+    assert_eq!(
+        s.measured.calls, 3,
+        "three answered calls, as the accounting counts them"
+    );
+    let call_of = |label: &str| s.blocks.iter().find(|b| b.label == label).map(|b| b.call);
+    assert_eq!(call_of("hello"), Some(0));
+    assert_eq!(
+        call_of("first"),
+        Some(1),
+        "first sent on r2, which r3's answer measured"
+    );
+    assert_eq!(call_of("more"), Some(1));
+    assert_eq!(
+        call_of("second"),
+        Some(2),
+        "r4 is the third call, not the fourth request"
+    );
+}
+
+#[test]
+fn without_request_refs_the_request_index_stands() {
+    let fx = wire_fixture();
+    let s = build("claude", &fx.lines.join("\n"), "s1", None);
+    assert_eq!(
+        s.blocks.iter().find(|b| b.label == "hello").map(|b| b.call),
+        Some(0)
+    );
+    assert_eq!(
+        s.blocks.iter().find(|b| b.label == "ok").map(|b| b.call),
+        Some(1)
+    );
 }

@@ -25101,7 +25101,8 @@ window.__bramStackKindColor = function (kind) {
 // 2026-11-24: "where's the red?"); the tooltip says the true figure. The
 // unaccounted remainder, when it is a thousand tokens or more, is a grey
 // segment whose click clears the filter.
-window.__bramStackSegments = function (stack) {
+window.__bramStackSegments = function (stack, kinds) {
+  var set = window.__bramStackKindSet(kinds, stack);
   var byKind = (stack && stack.byKind) || [];
   var total = (stack && stack.measured && stack.measured.tokens) || 0;
   var floor = Math.ceil(total * 0.01);
@@ -25121,20 +25122,51 @@ window.__bramStackSegments = function (stack) {
       kind: p.kind,
       color: p.color,
       width: (Math.round((p.drawn / drawn) * 10000) / 100) + "%",
-      tip: p.title + ": " + window.__bramStackTokens(p.tokens) + " tokens (" + share + "%). " + window.__bramStackKindExplain(p.kind === "all" ? "unaccounted" : p.kind, stack.provider)
+      // The unaccounted segment is no category; a click on it releases.
+      opacity: p.kind === "all" || set.indexOf(p.kind) >= 0 ? "1" : "0.35",
+      tip: (p.kind === "all" ? (window.__bramStackAllShown(kinds, stack) ? "" : "**Show all categories**\n\n") : window.__bramStackFilterAction(set.indexOf(p.kind) >= 0) + "\n\n") + window.__bramStackTipMarkdown([
+        p.kind === "thinking" ? window.__bramStackThinkingLine(stack) : p.title + ": " + window.__bramStackTokens(p.tokens) + " tokens (" + share + "%).",
+        window.__bramStackKindExplain(p.kind === "all" ? "unaccounted" : p.kind, stack.provider)
+      ])
     };
   });
 };
-// A click on a segment filters like a chip; a second click on the same kind
-// clears the filter.
-window.__bramStackToggleKind = function (current, kind) {
-  return current === kind ? "all" : kind;
+// The kind filter is the set of kinds shown (Jon, 2026-11-25: "can we make
+// it multiselect?", then "default to all selected"). null is every kind in
+// the stack, the default; a click on a chip or segment hides its kind, a
+// second click shows it again; "all" (the unaccounted segment) shows every
+// kind again. An empty set shows none.
+window.__bramStackAllKinds = function (stack) {
+  return ((stack && stack.byKind) || []).map(function (k) { return k.kind; });
 };
-// The legend chips, which are also the kind filter: "All" first, then each
-// kind in the stack with its share; `active` marks the current filter.
-window.__bramStackLegend = function (stack, kind) {
+window.__bramStackKindSet = function (kinds, stack) {
+  if (Array.isArray(kinds)) return kinds;
+  if (kinds == null || kinds === "all") return window.__bramStackAllKinds(stack);
+  return [kinds];
+};
+// True when every kind in the stack is shown: no filter to speak of.
+window.__bramStackAllShown = function (kinds, stack) {
+  var set = window.__bramStackKindSet(kinds, stack);
+  return window.__bramStackAllKinds(stack).every(function (k) { return set.indexOf(k) >= 0; });
+};
+window.__bramStackToggleKind = function (current, kind, stack) {
+  if (kind === "all") return null;
+  var set = window.__bramStackKindSet(current, stack);
+  var next = set.indexOf(kind) >= 0 ? set.filter(function (k) { return k !== kind; }) : set.concat([kind]);
+  return window.__bramStackAllShown(next, stack) ? null : next;
+};
+// The legend chips, which are also the kind filter: each kind in the stack
+// with its share; `active` marks the current filter. No "All kinds" chip
+// (Jon, 2026-11-25: "all kinds should be unnecessary"): clicking the active
+// chip releases the filter, and its tooltip leads with which click it is.
+// Every kind starts shown, so a click hides or shows one.
+window.__bramStackFilterAction = function (shown) {
+  return shown ? "**Hide this category**" : "**Show this category**";
+};
+window.__bramStackLegend = function (stack, kinds) {
   var total = (stack && stack.measured && stack.measured.tokens) || 0;
-  var out = [{ kind: "all", label: "All kinds", color: null, active: !kind || kind === "all", tip: "Every block, in the order the model sees them or by size." }];
+  var set = window.__bramStackKindSet(kinds, stack);
+  var out = [];
   // Largest share first, the bar's order (Jon, 2026-11-24).
   var ordered = ((stack && stack.byKind) || []).slice().sort(function (a, b) { return b.tokens - a.tokens; });
   ordered.forEach(function (k) {
@@ -25143,39 +25175,271 @@ window.__bramStackLegend = function (stack, kind) {
       kind: k.kind,
       label: window.__bramStackKindTitle(k.kind, stack.provider) + " " + (pct >= 1 ? pct + "%" : "<1%"),
       color: window.__bramStackKindColor(k.kind),
-      active: kind === k.kind,
-      tip: window.__bramStackKindExplain(k.kind, stack.provider) + " " + k.blocks + (k.blocks === 1 ? " block, " : " blocks, ") + window.__bramStackTokens(k.tokens) + " tokens. Click to show only these."
+      active: set.indexOf(k.kind) >= 0,
+      tip: window.__bramStackFilterAction(set.indexOf(k.kind) >= 0) + "\n\n" + window.__bramStackTipMarkdown([
+        k.kind === "thinking" ? window.__bramStackThinkingLine(stack) : "",
+        window.__bramStackKindExplain(k.kind, stack.provider),
+        k.blocks + (k.blocks === 1 ? " block, " : " blocks, ") + window.__bramStackTokens(k.tokens) + " tokens."
+      ])
     });
   });
   return out;
 };
+// Context tab tooltips (Jon, 2026-11-25: "narrow the thinking tooltip").
+// Markdown paragraphs for a Tooltip's tooltipTemplate, whose Markdown has a
+// maxWidth, so the text wraps there (ContextStack.xmlui). The text is ours
+// and the labels are literal, so Markdown's specials are escaped.
+// https://www.xmlui.org/docs/reference/components/Tooltip
+window.__bramStackTipMarkdown = function (paragraphs) {
+  return (paragraphs || []).filter(function (p) { return p; }).map(function (p) {
+    return String(p).replace(/([\\`*_\[\]<>#|])/g, "\\$1");
+  }).join("\n\n");
+};
+// Every kind starts shown, so shown is the plain look and a hidden kind fades.
 window.__bramStackLegendWeight = function (entry) {
-  return entry && entry.active ? "$fontWeight-extra-bold" : "$fontWeight-normal";
+  return "$fontWeight-normal";
 };
 window.__bramStackLegendColor = function (entry) {
-  return entry && entry.active ? "$textColor-primary" : "$textColor-secondary";
+  return "$textColor-secondary";
 };
-window.__bramContextGrowthChart = function (history, session) {
+window.__bramStackLegendOpacity = function (entry) {
+  return entry && entry.active === false ? "0.35" : "1";
+};
+// context-growth-explains-jumps (Jon, 2026-11-25): each point of the Token
+// growth chart says what caused its jump. The blocks come from
+// /__context-stack, the user's words from /__turns (via __bramUserTurns).
+//
+// Blocks join to calls two ways, by what the reader gives (Provider parity):
+// Claude's reader numbers each block by the main-thread call that first
+// carried it (`call`, 0-based, the chart's index; fitted at offset 0 on four
+// uncompacted sessions). Codex's reader gives every block call 0
+// (context_stack.rs, the rollout carries no request records), so its blocks
+// join by time: everything before the model's first output is call 0's
+// preamble, and a later block enters at the call after the first one whose
+// atMs is at or past its ts (Codex writes a call's token reading after its
+// output and that output's tool results, so both enter at the next call;
+// fitted within ~400 tokens a call on rollouts 01a213ca and 01a213df).
+// OpenCode and Antigravity have no stack reader,
+// so their points keep the time and the token count.
+//
+// The guard: a call lists its blocks only when their tokens come within
+// max(500, half the jump) of the chart's change. On some compacted Claude
+// sessions the reader's call numbers drift past the chart's index (4 to 15
+// calls on 15f71ae7, 58633e4b, 09acc54d); a mismatch says so instead of
+// naming the wrong blocks. Blocks from before the last compaction are not in
+// the stack at all (only counted), for either provider.
+window.__bramStackTurnsQuery = function (session) {
+  var s = String(session || "");
+  var at = s.indexOf(":");
+  if (at <= 0) return null;
+  return { provider: s.slice(0, at), id: s.slice(at + 1) };
+};
+window.__bramUserTurns = function (result) {
+  var turns = (result && Array.isArray(result.turns)) ? result.turns : [];
+  var out = [];
+  turns.forEach(function (t) {
+    if (!t || t.role !== "user" || typeof t.text !== "string") return;
+    var ms = Date.parse(t.ts);
+    if (isFinite(ms)) out.push({ atMs: ms, text: t.text });
+  });
+  return out;
+};
+window.__bramStackUserCount = function (stack) {
+  var blocks = (stack && stack.blocks) || [];
+  var n = 0;
+  for (var i = 0; i < blocks.length; i++) if (blocks[i].kind === "user") n++;
+  return n;
+};
+window.__bramGrowthHtml = function (s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+};
+// A tool result's label is generic ("Bash result"); the call that asked for
+// it says what it was ("Bash: Search project history"). Pair them in order.
+window.__bramGrowthBlockLabels = function (blocks) {
+  var pending = {};
+  return blocks.map(function (b) {
+    var label = window.__bramStackRowLabel(b);
+    if (b.kind === "tool-call") {
+      var name = label.split(":")[0];
+      (pending[name] = pending[name] || []).push(label);
+    } else if (b.kind === "tool-result" && / result$/.test(label)) {
+      var q = pending[label.slice(0, -" result".length)];
+      if (q && q.length) return q.shift() + " → result";
+    }
+    return label;
+  });
+};
+window.__bramGrowthExplain = function (calls, stack, turns) {
+  var n = calls.length;
+  var at = calls.map(function (c) { return c.atMs; });
+  var ctx = calls.map(function (c) { return c.context; });
+  var blocks = (stack && Array.isArray(stack.blocks)) ? stack.blocks : [];
+  var labels = window.__bramGrowthBlockLabels(blocks);
+  var numbered = blocks.some(function (b) { return b.call > 0; });
+  var per = calls.map(function () { return []; });
+  var seenOutput = false;
+  blocks.forEach(function (b, j) {
+    if (b.kind === "agent" || b.kind === "tool-call" || b.kind === "thinking") seenOutput = true;
+    if (b.resent === false) return;
+    var k;
+    if (numbered) k = b.call;
+    else if (!seenOutput) k = 0;
+    else {
+      var t = Date.parse(b.ts);
+      if (!isFinite(t)) return;
+      k = 0;
+      while (k < n && at[k] < t) k++;
+      k += 1;
+    }
+    if (k >= 0 && k < n) per[k].push({ label: labels[j], kind: b.kind, tokens: b.tokens || 0 });
+  });
+  var compacted = !!(stack && stack.measured && stack.measured.compactions > 0);
+  var lastDrop = -1;
+  for (var d = 1; d < n; d++) if (ctx[d] < ctx[d - 1] * 0.6) lastDrop = d;
+  var us = (turns || []).slice().sort(function (a, b) { return a.atMs - b.atMs; });
+  return calls.map(function (c, k) {
+    var delta = k === 0 ? ctx[0] : ctx[k] - ctx[k - 1];
+    var u = null;
+    for (var i = 0; i < us.length && us[i].atMs <= at[k]; i++) u = us[i];
+    var startedHere = !!u && (k === 0 || u.atMs > at[k - 1]);
+    var got = per[k].slice().sort(function (a, b) { return b.tokens - a.tokens; });
+    var sum = got.reduce(function (s, b) { return s + b.tokens; }, 0);
+    var e = { atMs: at[k], context: ctx[k], delta: delta, first: k === 0,
+      message: u ? u.text : null, startedHere: startedHere, blocks: [], note: null, all: got };
+    if (k > 0 && delta < 0) {
+      e.note = ctx[k] < ctx[k - 1] * 0.6 ? "compacted" : "shrank";
+    } else if (compacted && lastDrop > 0 && k < lastDrop) {
+      e.note = "before-compaction";
+    } else if (Math.abs(sum - delta) <= Math.max(500, Math.abs(delta) / 2)) {
+      e.blocks = got.slice(0, 5);
+    } else {
+      e.note = "unmatched";
+    }
+    return e;
+  });
+};
+// `kind` is the Context tab's kind filter ("all" or absent for none); with
+// one, the head and the blocks are that kind's, and `kindNow` is its tokens
+// at this call (Jon, 2026-11-25: "the filter should govern the graph too").
+window.__bramGrowthTip = function (e, provider, kinds, kindNow) {
+  var H = window.__bramGrowthHtml, T = window.__bramStackTokens;
+  var when = new Date(e.atMs);
+  var hh = ("0" + when.getHours()).slice(-2) + ":" + ("0" + when.getMinutes()).slice(-2) + ":" + ("0" + when.getSeconds()).slice(-2);
+  var set = window.__bramStackKindSet(kinds);
+  var filtered = set.length > 0;
+  var head;
+  if (filtered && !e.note) {
+    var mine = e.all.filter(function (b) { return set.indexOf(b.kind) >= 0; });
+    var added = mine.reduce(function (s, b) { return s + b.tokens; }, 0);
+    var names = set.map(function (k) { return window.__bramStackKindTitle(k, provider); }).join(", ");
+    head = "<b>+" + T(added) + " tokens of " + H(names) + "</b>, " + T(kindNow) + " of them now, " + T(e.context) + " in all";
+    e = Object.assign({}, e, { blocks: mine.slice(0, 5) });
+  } else {
+    head = e.first ? "<b>" + T(e.context) + " tokens</b> at the first call"
+      : e.note === "compacted" ? "<b>Compacted: " + T(-e.delta) + " tokens fewer</b>, " + T(e.context) + " now"
+      : "<b>" + (e.delta >= 0 ? "+" : "−") + T(Math.abs(e.delta)) + " tokens</b>, " + T(e.context) + " now";
+  }
+  var out = [head + " <span style=\"opacity:.6\">" + hh + "</span>"];
+  if (e.message != null) {
+    var m = e.message.replace(/\s+/g, " ").trim();
+    if (m.length > 160) m = m.slice(0, 157) + "…";
+    out.push((e.startedHere ? "Your message: " : "While working on your message: ") + "“" + H(m) + "”");
+  }
+  if (e.note === "compacted") out.push("The earlier conversation was replaced by a summary.");
+  else if (e.note === "shrank") out.push("The harness dropped some earlier content.");
+  else if (e.note === "before-compaction") out.push("What came in here was compacted away later, so it can't be listed.");
+  else if (e.note === "unmatched") out.push("Bram couldn't match the context's blocks to this call.");
+  else if (e.blocks.length) {
+    // Numbers first, no bullets (Jon, 2026-11-25): a right-aligned column.
+    out.push((e.first ? "What it started with:" : "What came in:") +
+      "<table style=\"border-collapse:collapse;margin-top:2px\">" + e.blocks.map(function (b) {
+        return "<tr><td style=\"text-align:right;font-weight:bold;padding-right:8px;vertical-align:top;white-space:nowrap\">" + T(b.tokens) +
+          "</td><td>" + H(window.__bramStackKindTitle(b.kind, provider)) + ": " + H(b.label.length > 70 ? b.label.slice(0, 67) + "…" : b.label) + "</td></tr>";
+      }).join("") + "</table>");
+  }
+  return out.join("<br>");
+};
+window.__bramContextGrowthChart = function (history, session, stack, turns, kinds) {
   if (!history || !Array.isArray(history.calls) || !session) return null;
-  var points = history.calls
+  var calls = history.calls
     .filter(call => call.thread === "main" && call.provider + ":" + call.session === session &&
       Number.isFinite(call.atMs) && Number.isFinite(call.context))
-    .map(call => [call.atMs, call.context])
-    .sort((a, b) => a[0] - b[0]);
-  if (!points.length) return null;
+    .sort((a, b) => a.atMs - b.atMs);
+  if (!calls.length) return null;
+  var explain = stack && stack.supported && stack.session === session
+    ? window.__bramGrowthExplain(calls, stack, turns) : null;
+  var provider = stack && stack.provider;
+  // Ordered as the chips (largest first), so the stack's bands match them.
+  var set = window.__bramStackLegend(stack, kinds).filter(function (c) { return c.active; }).map(function (c) { return c.kind; });
+  var filtered = !!explain && set.length > 0;
+  var allShown = window.__bramStackAllShown(kinds, stack);
+  // With a kind filter, each selected kind's tokens at each call: its blocks
+  // summed up to that call. Before the last compaction those blocks are
+  // gone, so the lines start there (null leaves a gap).
+  var byKind = set.map(function () { return calls.map(function () { return null; }); });
+  var kindNow = calls.map(function () { return null; });
+  if (filtered) {
+    var runs = set.map(function () { return 0; });
+    explain.forEach(function (e, k) {
+      e.all.forEach(function (b) { var j = set.indexOf(b.kind); if (j >= 0) runs[j] += b.tokens; });
+      if (e.note === "before-compaction") return;
+      set.forEach(function (_, j) { byKind[j][k] = runs[j]; });
+      kindNow[k] = runs.reduce(function (s, r) { return s + r; }, 0);
+    });
+  }
+  var data = calls.map(function (c, k) {
+    return explain ? { value: [c.atMs, c.context], tip: window.__bramGrowthTip(explain[k], provider, filtered && !allShown ? set : null, kindNow[k]) } : [c.atMs, c.context];
+  });
+  var tooltip = { trigger: "axis" };
+  if (explain) {
+    tooltip = {
+      trigger: "axis",
+      confine: true,
+      extraCssText: "max-width:420px;white-space:normal;line-height:1.45;",
+      formatter: function (params) {
+        var p = Array.isArray(params) ? params[0] : params;
+        return (p && p.data && p.data.tip) || "";
+      }
+    };
+  }
+  var series = [{ type: "line", name: "Context tokens", showSymbol: calls.length === 1, data: data }];
+  if (filtered) {
+    // The whole context stays as a faint line for scale; each selected kind
+    // is a stacked area in its chip's colour, so the top edge is their sum.
+    // Every kind's points carry the same tip; the formatter shows one.
+    series = [
+      { type: "line", name: "All context", showSymbol: false, silent: true, data: calls.map(function (c) { return [c.atMs, c.context]; }),
+        lineStyle: { color: "#b8bec8", width: 1 }, itemStyle: { color: "#b8bec8" } }
+    ].concat(set.map(function (kind, j) {
+      var color = window.__bramStackKindColor(kind);
+      return { type: "line", name: window.__bramStackKindTitle(kind, provider), stack: "kinds", showSymbol: calls.length === 1,
+        data: calls.map(function (c, k) { return { value: [c.atMs, byKind[j][k]], tip: data[k].tip }; }),
+        lineStyle: { color: color, width: 1.5 }, itemStyle: { color: color },
+        areaStyle: { color: color, opacity: 0.35 } };
+    }));
+    tooltip.formatter = function (params) {
+      var list = Array.isArray(params) ? params : [params];
+      var p = list.filter(function (x) { return x && x.data && x.data.tip; })[0];
+      return (p && p.data.tip) || "";
+    };
+  }
   return {
     animation: false,
     grid: { top: 36, bottom: 36, left: 60, right: 24 },
-    legend: { top: 0, right: 24 },
-    tooltip: { trigger: "axis" },
+    // Stacked, the chips are the legend; ECharts' own would repeat them.
+    legend: { show: !filtered, top: 0, right: 24 },
+    tooltip: tooltip,
     xAxis: { type: "time" },
-    yAxis: { type: "value", name: "Context tokens", nameLocation: "end", nameGap: 12 },
-    series: [{ type: "line", name: "Context tokens", showSymbol: points.length === 1, data: points }]
+    yAxis: { type: "value" },
+    series: series
   };
 };
-window.__bramStackRows = function (stack, sort, kind) {
+window.__bramStackRows = function (stack, sort, kinds) {
   var blocks = (stack && stack.blocks) || [];
-  var rows = kind && kind !== "all" ? blocks.filter(function (b) { return b.kind === kind; }) : blocks.slice();
+  var set = window.__bramStackKindSet(kinds, stack);
+  var rows = window.__bramStackAllShown(kinds, stack) ? blocks.slice() : blocks.filter(function (b) { return set.indexOf(b.kind) >= 0; });
   if (sort === "size") {
     rows.sort(function (a, b) { return (b.tokens - a.tokens) || (b.bytes - a.bytes) || (a.i - b.i); });
   }

@@ -17,14 +17,23 @@
      https://www.xmlui.org/docs/reference/components/Stack
      https://www.xmlui.org/docs/reference/components/List
      https://www.xmlui.org/docs/howto/pass-a-template-slot-to-a-component -->
-<Component name="ContextStack" var.sort="order" var.kind="all" var.selectedI="{null}" var.picked="{null}">
+<Component name="ContextStack" var.sort="order" var.kinds="{null}" var.selectedI="{null}" var.picked="{null}">
   <DataSource id="history" when="{sort === 'growth' &amp;&amp; !!($props.stack &amp;&amp; $props.stack.session)}"
     url="/__token-accounting" queryParams="{{ session: $props.stack &amp;&amp; $props.stack.session, calls: 1 }}" />
   <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.measured &amp;&amp; $props.stack.measured.calls}"
     onDidChange="() => { if (sort === 'growth') history.refetch(); }" />
-  <variable name="growth" value="{window.__bramContextGrowthChart(history.value, $props.stack &amp;&amp; $props.stack.session)}" />
+  <!-- context-growth-explains-jumps: the user's words for each point, kept
+       as [{atMs, text}] (transformResult,
+       https://www.xmlui.org/docs/reference/components/DataSource), refetched
+       when the stack gains a user block, not on every call. -->
+  <DataSource id="userTurns" when="{sort === 'growth' &amp;&amp; !!($props.stack &amp;&amp; $props.stack.supported &amp;&amp; $props.stack.session)}"
+    url="/__turns" queryParams="{window.__bramStackTurnsQuery($props.stack &amp;&amp; $props.stack.session)}"
+    transformResult="{(r) => window.__bramUserTurns(r)}" />
+  <ChangeListener listenTo="{window.__bramStackUserCount($props.stack)}"
+    onDidChange="() => { if (sort === 'growth') userTurns.refetch(); }" />
+  <variable name="growth" value="{window.__bramContextGrowthChart(history.value, $props.stack &amp;&amp; $props.stack.session, $props.stack, userTurns.value, kinds)}" />
   <ChangeListener listenTo="{picked}" onDidChange="emitEvent('select', picked)" />
-  <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.session}" onDidChange="selectedI = null; kind = 'all'" />
+  <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.session}" onDidChange="selectedI = null; kinds = null" />
   <ModalDialog id="contextInfoDialog" title="About Context">
     <VStack gap="$space-3">
       <Text value="{($props.stack &amp;&amp; $props.stack.provider) === 'codex' ? 'The rollout records message text, base instructions, tool inputs and tool results. It can omit parts of the model request.' : window.__bramStackIntro()}" />
@@ -49,21 +58,38 @@
     <PinnedHeader gap="$space-2">
     <property name="headerTemplate">
     <VStack gap="$space-2">
-      <Heading level="h1">Context</Heading>
+      <!-- One title row (Jon, 2026-11-25: the threshold and the blocks /
+           tokens / calls go after the title), wrapping in a narrow pane.
+           footer-context-refresh-after-settings-change: the threshold
+           phrase is for every provider; the intro sentence it replaced is
+           in the About dialog. The rates and their provenance stay on the
+           route; the pane shows only the headline (Jon, 2026-11-24).
+           https://www.xmlui.org/docs/howto/wrap-items-across-multiple-rows -->
+      <HStack wrapContent="true" gap="$space-2" verticalAlignment="baseline">
+        <Heading level="h1">Context</Heading>
+        <HStack
+          when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
+          gap="$space-1"
+          verticalAlignment="baseline">
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackThresholdPrefix($props.stack, $props.settings)}" />
+          <Link to="/settings?highlight=suggestAtContextShare" noIndicator="true" fontSize="$fontSize-sm">threshold</Link>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="·" />
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackHeadline($props.stack)}" />
+        </HStack>
+      </HStack>
       <Text
         when="{!!window.__bramStackUnsupportedLine($props.stack)}"
         fontSize="$fontSize-sm"
         color="$textColor-secondary"
         value="{window.__bramStackUnsupportedLine($props.stack)}" />
       <VStack when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}" gap="$space-2">
-      <!-- footer-context-refresh-after-settings-change: the threshold line
-           for every provider (Jon, 2026-11-25: "should be everywhere and
-           provider-independent"); the intro sentence it replaced is in the
-           About dialog. -->
-      <HStack gap="$space-1" verticalAlignment="center">
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackThresholdPrefix($props.stack, $props.settings)}" />
-        <Link to="/settings?highlight=suggestAtContextShare" noIndicator="true" fontSize="$fontSize-sm">threshold</Link>
-      </HStack>
+      <!-- The segment and chip tooltips are Markdown in a Tooltip's
+           tooltipTemplate, 360px at most, so long explanations wrap instead
+           of spanning the pane (Jon, 2026-11-25: "narrow the thinking
+           tooltip"; "is there not a template for that?"). tooltipMarkdown
+           can't do this: a tooltip is as wide as its longest line.
+           https://www.xmlui.org/docs/reference/components/Tooltip
+           https://www.xmlui.org/docs/howto/show-a-multi-line-or-formatted-tooltip -->
       <!-- One thin stacked bar, a series per kind in the stack's colours; the
            legend is the chip row below, which wraps to the pane's width and
            doubles as the kind filter (ECharts' own legend wrapped over the
@@ -77,13 +103,18 @@
            filters to that kind, a second click clears it. ECharts was tried
            and withdrawn: overkill for one strip, and no click for markup. -->
       <HStack gap="0" width="100%" height="20px">
-        <Items data="{window.__bramStackSegments($props.stack)}">
-          <Stack
-            width="{$item.width}"
-            height="20px"
-            backgroundColor="{$item.color}"
-            tooltip="{$item.tip}"
-            onClick="kind = window.__bramStackToggleKind(kind, $item.kind)" />
+        <Items data="{window.__bramStackSegments($props.stack, kinds)}">
+          <Tooltip>
+            <property name="tooltipTemplate">
+              <Markdown maxWidth="360px" fontSize="$fontSize-sm" content="{$item.tip}" />
+            </property>
+            <Stack
+              width="{$item.width}"
+              height="20px"
+              backgroundColor="{$item.color}"
+              opacity="{$item.opacity}"
+              onClick="kinds = window.__bramStackToggleKind(kinds, $item.kind, $props.stack)" />
+          </Tooltip>
         </Items>
       </HStack>
       <!-- gap is both axes on a wrapping HStack; $space-2 keeps the wrapped
@@ -94,18 +125,23 @@
            the sideways spacing near 8px; the little-i's Theme drops the
            button padding that made its row taller than a chip. -->
       <HStack wrapContent="true" gap="0" verticalAlignment="center">
-        <Items data="{window.__bramStackLegend($props.stack, kind)}">
-          <Link onClick="kind = $item.kind" noIndicator="true" tooltip="{$item.tip}" paddingRight="$space-2">
-            <HStack gap="$space-1" verticalAlignment="center">
-              <Stack when="{$item.color}" width="10px" height="10px" backgroundColor="{$item.color}" />
-              <Text
-                fontSize="$fontSize-xs"
-                lineHeight="1.3"
-                color="{window.__bramStackLegendColor($item)}"
-                fontWeight="{window.__bramStackLegendWeight($item)}"
-                value="{$item.label}" />
-            </HStack>
-          </Link>
+        <Items data="{window.__bramStackLegend($props.stack, kinds)}">
+          <Tooltip>
+            <property name="tooltipTemplate">
+              <Markdown maxWidth="360px" fontSize="$fontSize-sm" content="{$item.tip}" />
+            </property>
+            <Link onClick="kinds = window.__bramStackToggleKind(kinds, $item.kind, $props.stack)" noIndicator="true" paddingRight="$space-2">
+              <HStack gap="$space-1" verticalAlignment="center" opacity="{window.__bramStackLegendOpacity($item)}">
+                <Stack when="{$item.color}" width="10px" height="10px" backgroundColor="{$item.color}" />
+                <Text
+                  fontSize="$fontSize-xs"
+                  lineHeight="1.3"
+                  color="{window.__bramStackLegendColor($item)}"
+                  fontWeight="{window.__bramStackLegendWeight($item)}"
+                  value="{$item.label}" />
+              </HStack>
+            </Link>
+          </Tooltip>
         </Items>
         <Theme paddingVertical-Button-sm="0" paddingHorizontal-Button-sm="$space-1">
           <Button
@@ -116,14 +152,8 @@
             onClick="contextInfoDialog.open()" />
         </Theme>
       </HStack>
-      <Text
-        when="{!!window.__bramStackThinkingLine($props.stack)}"
-        fontSize="$fontSize-sm"
-        value="{window.__bramStackThinkingLine($props.stack)}" />
-      <!-- The rates and their provenance stay on the route (bytesPerToken,
-           opaqueBytesPerToken, wire.fit); the pane shows only the headline
-           (Jon, 2026-11-24: "remove the items"). -->
-      <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{window.__bramStackHeadline($props.stack)}" />
+      <!-- The thinking sentence leads the Thinking chip's and segment's
+           tooltip now, not a line of its own (Jon, 2026-11-25). -->
       <Text
         when="{!!window.__bramStackCompactedLine($props.stack)}"
         fontSize="$fontSize-sm"
@@ -139,8 +169,15 @@
     </VStack>
     </property>
     <!-- https://www.xmlui.org/docs/reference/extensions/xmlui-echart/EChart -->
-    <VStack when="{sort === 'growth' &amp;&amp; $props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}">
-      <EChart when="{!!growth}" option="{growth}" height="280px" />
+    <!-- The chart takes the body's height (Jon, 2026-11-25: "use all
+         available vertical space"): a star column in PinnedHeader's bounded
+         body, the chart at 100% of it, 240px at least.
+         https://www.xmlui.org/docs/howto/build-a-full-height-scroll-layout -->
+    <VStack
+      when="{sort === 'growth' &amp;&amp; $props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
+      height="*"
+      minHeight="240px">
+      <EChart when="{!!growth}" option="{growth}" height="100%" />
       <Text when="{!growth}" color="$textColor-secondary" value="{history.inProgress ? 'Loading token history…' : history.error ? 'Could not load token history.' : 'No recorded calls for this session.'}" />
     </VStack>
     <!-- A List, not Items: a long session has many hundreds of blocks
@@ -148,7 +185,7 @@
          List is unbounded and delegates to PinnedHeader's body scroller. -->
     <List
       when="{sort !== 'growth' &amp;&amp; $props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
-      data="{window.__bramStackRows($props.stack, sort, kind)}">
+      data="{window.__bramStackRows($props.stack, sort, kinds)}">
       <Link onClick="selectedI = $item.i; picked = $item" noIndicator="true">
         <HStack
           gap="$space-2"

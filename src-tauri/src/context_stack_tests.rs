@@ -1004,3 +1004,61 @@ fn the_fit_runs_on_a_live_file_whose_last_request_has_no_response_yet() {
         s.bytes_per_token
     );
 }
+
+fn meta(ts: &str, text: &str) -> String {
+    format!(
+        r#"{{"type":"user","timestamp":"{ts}","isSidechain":false,"isMeta":true,"message":{{"role":"user","content":"{text}"}}}}"#
+    )
+}
+
+#[test]
+fn a_meta_skill_body_is_an_attachment_named_for_its_skill_and_adds_no_turn() {
+    let text = meta(
+        "2026-11-24T05:00:00.000Z",
+        r"Base directory for this skill: /tmp/bundled-skills/x/claude-api\n\n# Title",
+    );
+    let s = build("claude", &text, "s1", None);
+    let b = s
+        .blocks
+        .iter()
+        .find(|b| b.label.starts_with("Skill"))
+        .unwrap();
+    assert_eq!(b.kind, BlockKind::Attachment);
+    assert_eq!(b.label, "Skill: claude-api");
+    assert_eq!(b.turn, 0);
+}
+
+#[test]
+fn a_meta_string_companion_is_an_attachment_labelled_with_its_first_line() {
+    let text = meta("2026-11-24T05:00:00.000Z", "Pasted image companion");
+    let s = build("claude", &text, "s1", None);
+    let b = s.blocks.last().unwrap();
+    assert_eq!(b.kind, BlockKind::Attachment);
+    assert_eq!(b.label, "Pasted image companion");
+    assert_eq!(b.turn, 0);
+}
+
+#[test]
+fn a_plain_user_record_is_user_text_and_counts_a_turn() {
+    let s = build(
+        "claude",
+        &user("2026-11-24T05:00:00.000Z", "hello"),
+        "s1",
+        None,
+    );
+    let b = s.blocks.last().unwrap();
+    assert_eq!(b.kind, BlockKind::User);
+    assert_eq!(b.turn, 1);
+}
+
+#[test]
+fn a_compact_summary_record_stays_a_compaction_summary() {
+    let s = build(
+        "claude",
+        &summary("2026-11-24T05:00:00.000Z", "recap"),
+        "s1",
+        None,
+    );
+    let b = s.blocks.last().unwrap();
+    assert_eq!(b.kind, BlockKind::CompactionSummary);
+}

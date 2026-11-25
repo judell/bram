@@ -718,6 +718,19 @@ fn tool_call_label(name: &str, input: &Value) -> String {
     }
 }
 
+/// `Skill: <name>` for a harness-inserted skill body, which opens with
+/// `Base directory for this skill: <dir>`; the name is the directory's last segment.
+fn skill_label(s: &str) -> Option<String> {
+    let dir = s
+        .lines()
+        .next()?
+        .strip_prefix("Base directory for this skill:")?
+        .trim()
+        .trim_end_matches('/');
+    let name = dir.rsplit('/').next().unwrap_or(dir);
+    Some(format!("Skill: {name}"))
+}
+
 /// The first line of a text, trimmed and cut to 80 characters.
 pub fn first_line(s: &str) -> String {
     let line = s.trim().lines().next().unwrap_or("").trim();
@@ -1504,11 +1517,15 @@ mod records {
                         }
                         let kind = if is_compact {
                             BlockKind::CompactionSummary
+                        } else if is_meta {
+                            BlockKind::Attachment
                         } else {
                             BlockKind::User
                         };
                         let label = if is_compact {
                             "Compaction summary".to_string()
+                        } else if is_meta {
+                            skill_label(s).unwrap_or_else(|| first_line(s))
                         } else {
                             first_line(s)
                         };

@@ -1521,6 +1521,26 @@ extracting five fields that one derived struct and an enum replace. On
 an untyped `Value`, against 16 parsed to a struct. The audit is on
 [#487](https://github.com/judell/bram/issues/487).
 
+### Receipts: Provider parity
+
+Backs *Provider parity*.
+
+- `67302bcb` showed the Context tab's threshold line for Codex only. The next
+  commit, `eb2804ce`, had to make it show for every provider.
+- The Codex conventions pointer (item
+  `codex-instructions-name-source-repo-conventions`, 2026-11-25). Claude,
+  OpenCode and Antigravity read `app/__shell/conventions.md` in the source
+  repo. Codex's global `developer_instructions` named
+  `.claude/bram-conventions.md`, which the source repo doesn't have, and
+  Codex failed a handoff on it. A failure found it, not a check of the peers.
+- Older cases: [#119](https://github.com/judell/bram/issues/119) (a guard
+  matcher Codex covered and Claude didn't) and
+  [#387](https://github.com/judell/bram/issues/387) (parity gaps between the
+  guards).
+- A justified exception: `4784a002` treats a not-found group rename as
+  pending only for Claude, because only Claude takes a session id and name at
+  launch. The reason is in a comment at the branch.
+
 ### Receipts: Paths
 
 Backs *Paths: write for Windows too*.

@@ -171,6 +171,27 @@ New code follows the rule; old code converts when an item touches it, not in swe
 
 Receipts → [`docs/developing-bram-reference.md` §Receipts: Rust typed data](developing-bram-reference.md#receipts-rust-typed-data).
 
+## Provider parity
+
+If a thing can be provider-neutral, it must be (Jon, 2026-11-25). Bram
+supports Claude, Codex, OpenCode and Antigravity. A feature, check,
+instruction or fix built for one of them is built for all, through one
+code path that branches on the provider only where that provider's own
+CLI, file format or config forces it.
+
+- **When it can't be neutral, say why not.** Name the provider fact that
+  forces it ("only Claude takes a session id and name at launch") in a
+  comment at the branch, and in the item's draft and commit message.
+  "Did Codex first" is not a reason.
+- **A provider left out for later is a Worklist item now**, not a note.
+- **Drafts say what each provider gets.** An item's `# After` names how it
+  covers each provider, or which provider it can't cover and why.
+- **Check the peers before you ship.** When a fix lands for one provider,
+  look for the same gap in the other three, the way you look for the same
+  pattern in peer components.
+
+Receipts → [`docs/developing-bram-reference.md` §Receipts: Provider parity](developing-bram-reference.md#receipts-provider-parity).
+
 ## Paths: write for Windows too
 
 Path code that only the Mac's `cargo test` has seen fails on Windows.

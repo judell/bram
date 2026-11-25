@@ -63220,7 +63220,8 @@ const ENHANCE_SIDECAR_LEGACY_REL: &str = ".claude/xmlui-desktop-conventions.md";
 // opening "This repo is driven through Bram. The canonical worklist gate" is
 // load-bearing: codex_startup_context_text and the transcript bootstrap
 // markers recognize Bram's text by it, and agents_md_has_worklist_gate_intro
-// keys on its first sentence and `resources/worklist.json`.
+// keys on its first sentence and `.bram/worklist.json` (or the old
+// `resources/worklist.json`), and rejects the old intent/result paths.
 const ENHANCE_CODEX_AGENTS_REL: &str = "AGENTS.md";
 const ENHANCE_CODEX_BUNDLE_REL: &str = "shell/codex-startup-instructions.md";
 const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";
@@ -65542,11 +65543,22 @@ fn extract_marker_block<'a>(disk: &'a str, start: &str, end: &str) -> Option<&'a
 // to be hardcoded past in codex_agents_block_current's `is_source_repo`
 // branch, and that codex_agents_has_marker widens for in
 // compute_seed_currency_checks).
-const AGENTS_MD_INTRO_WORKLIST_PATH: &str = "resources/worklist.json"; // state-dir: literal ok (matches hand-authored AGENTS.md text)
+const AGENTS_MD_INTRO_WORKLIST_PATH: &str = ".bram/worklist.json";
+const AGENTS_MD_INTRO_WORKLIST_PATH_OLD: &str = "resources/worklist.json"; // state-dir: literal ok (old spelling stays accepted for hand-authored copies)
+
+// A block that still tells Codex to use the old filesystem channel is stale.
+const AGENTS_MD_STALE_CHANNEL_PATHS: [&str; 2] = [
+    "resources/.worklist-intent.json", // state-dir: literal ok (detecting the retired path)
+    "resources/.worklist-result.json", // state-dir: literal ok (detecting the retired path)
+];
 
 fn agents_md_has_worklist_gate_intro(disk: &str) -> bool {
     disk.contains("This repo is driven through Bram")
-        && disk.contains(AGENTS_MD_INTRO_WORKLIST_PATH)
+        && (disk.contains(AGENTS_MD_INTRO_WORKLIST_PATH)
+            || disk.contains(AGENTS_MD_INTRO_WORKLIST_PATH_OLD))
+        && !AGENTS_MD_STALE_CHANNEL_PATHS
+            .iter()
+            .any(|p| disk.contains(p))
 }
 
 // issue-303: pure predicate, same reasoning as
@@ -65758,7 +65770,7 @@ fn source_repo_status_rows<R: tauri::Runtime>(
             "action": "Restore the worklist-gate intro sentences in AGENTS.md",
             "state": if checks.codex_agents_has_marker { "present" } else { "absent" },
             "detail": if checks.codex_agents_has_marker {
-                "AGENTS.md contains the \"driven through Bram\" / resources/worklist.json intro sentences".to_string()
+                "AGENTS.md contains the \"driven through Bram\" / .bram/worklist.json intro sentences".to_string()
             } else {
                 "AGENTS.md does not contain the expected worklist-gate intro sentences".to_string()
             },
@@ -65805,6 +65817,26 @@ mod seed_currency_check_tests {
             "See resources/worklist.json for the gate."
         ));
         assert!(!agents_md_has_worklist_gate_intro(""));
+    }
+
+    #[test]
+    fn agents_md_intro_accepts_new_and_old_state_folder_spellings() {
+        assert!(agents_md_has_worklist_gate_intro(
+            "This repo is driven through Bram. Read .bram/worklist.json.\n"
+        ));
+        assert!(agents_md_has_worklist_gate_intro(
+            "This repo is driven through Bram. Read resources/worklist.json.\n" // state-dir: literal ok (old spelling)
+        ));
+    }
+
+    #[test]
+    fn agents_md_intro_fails_when_old_intent_or_result_path_remains() {
+        assert!(!agents_md_has_worklist_gate_intro(
+            "This repo is driven through Bram. Read .bram/worklist.json. Write resources/.worklist-intent.json.\n" // state-dir: literal ok (retired path)
+        ));
+        assert!(!agents_md_has_worklist_gate_intro(
+            "This repo is driven through Bram. Read .bram/worklist.json. Read resources/.worklist-result.json.\n" // state-dir: literal ok (retired path)
+        ));
     }
 
     #[test]

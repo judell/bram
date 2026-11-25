@@ -15,6 +15,7 @@
        new context reading at turn end (push over polling).
        https://www.xmlui.org/docs/reference/components/DataSource -->
   <DataSource id="stack" url="/__context-stack" queryParams="{{ provider: $props.activeProvider || '' }}" />
+  <PushSource id="contextSettings" initial="{null}" subscribe="{window.bramSubscribeTauriEvent('settings-changed')}" />
   <PushSource
     id="stackTick"
     initial="{null}"
@@ -51,6 +52,7 @@
            ContextStack's pinned header (pinned-header-standard-everywhere). -->
       <ContextStack
         stack="{stack.value}"
+        settings="{contextSettings.value &amp;&amp; contextSettings.value.payload}"
         onSelect="(b) => { selectedSession = stack.value.session; selectedBlock = b; selectedPath = null; selectedDisplay = null; }" />
     </VStack>
 

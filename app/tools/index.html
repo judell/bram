@@ -52,6 +52,8 @@
     <script>
       logToHost({ kind: "tools-boot", stage: "after-xmlui-load", at: new Date().toISOString() });
     </script>
+    <!-- xmlui-echart 0.1.6 registers with the standalone runtime. -->
+    <script src="/__vendor/xmlui-echart.js"></script>
     <style>
       /* XMLUI's vendored CSS sets `user-select: none` on ~92 selectors
          (the standalone bundle's CSS-module defaults), which kills

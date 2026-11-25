@@ -18,6 +18,11 @@
      https://www.xmlui.org/docs/reference/components/List
      https://www.xmlui.org/docs/howto/pass-a-template-slot-to-a-component -->
 <Component name="ContextStack" var.sort="order" var.kind="all" var.selectedI="{null}" var.picked="{null}">
+  <DataSource id="history" when="{sort === 'growth' &amp;&amp; !!($props.stack &amp;&amp; $props.stack.session)}"
+    url="/__token-accounting" queryParams="{{ session: $props.stack &amp;&amp; $props.stack.session, calls: 1 }}" />
+  <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.measured &amp;&amp; $props.stack.measured.calls}"
+    onDidChange="() => { if (sort === 'growth') history.refetch(); }" />
+  <variable name="growth" value="{window.__bramContextGrowthChart(history.value, $props.stack &amp;&amp; $props.stack.session)}" />
   <ChangeListener listenTo="{picked}" onDidChange="emitEvent('select', picked)" />
   <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.session}" onDidChange="selectedI = null; kind = 'all'" />
   <ModalDialog id="contextInfoDialog" title="About Context">
@@ -51,7 +56,11 @@
         color="$textColor-secondary"
         value="{window.__bramStackUnsupportedLine($props.stack)}" />
       <VStack when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}" gap="$space-2">
-      <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{$props.stack.provider === 'codex' ? 'Captured rollout text · ' + $props.stack.session : window.__bramStackIntro()}" />
+      <HStack when="{$props.stack.provider === 'codex'}" gap="$space-1" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackThresholdPrefix($props.stack, $props.settings)}" />
+        <Link to="/settings?highlight=suggestAtContextShare" noIndicator="true" fontSize="$fontSize-sm">threshold</Link>
+      </HStack>
+      <Text when="{$props.stack.provider !== 'codex'}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackIntro()}" />
       <!-- One thin stacked bar, a series per kind in the stack's colours; the
            legend is the chip row below, which wraps to the pane's width and
            doubles as the kind filter (ECharts' own legend wrapped over the
@@ -121,15 +130,21 @@
       <HStack gap="$space-2" verticalAlignment="center">
         <Button label="In order" size="xs" variant="{sort === 'order' ? 'solid' : 'ghost'}" tooltip="As the model sees them" onClick="sort = 'order'" />
         <Button label="By size" size="xs" variant="{sort === 'size' ? 'solid' : 'ghost'}" tooltip="What is eating the context" onClick="sort = 'size'" />
+        <Button label="Token growth" size="xs" variant="{sort === 'growth' ? 'solid' : 'ghost'}" onClick="sort = 'growth'" />
       </HStack>
       </VStack>
     </VStack>
     </property>
+    <!-- https://www.xmlui.org/docs/reference/extensions/xmlui-echart/EChart -->
+    <VStack when="{sort === 'growth' &amp;&amp; $props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}">
+      <EChart when="{!!growth}" option="{growth}" height="280px" />
+      <Text when="{!growth}" color="$textColor-secondary" value="{history.inProgress ? 'Loading token history…' : history.error ? 'Could not load token history.' : 'No recorded calls for this session.'}" />
+    </VStack>
     <!-- A List, not Items: a long session has many hundreds of blocks
          (#427's lesson on the Transcript), so the rows are virtualized. The
          List is unbounded and delegates to PinnedHeader's body scroller. -->
     <List
-      when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
+      when="{sort !== 'growth' &amp;&amp; $props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
       data="{window.__bramStackRows($props.stack, sort, kind)}">
       <Link onClick="selectedI = $item.i; picked = $item" noIndicator="true">
         <HStack

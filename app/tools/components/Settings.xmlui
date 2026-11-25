@@ -48,7 +48,7 @@
          (https://www.xmlui.org/docs/reference/components/ExpandableItem). -->
     <ChangeListener
       listenTo="{highlightKey}"
-      onDidChange="(change) => window.__bramSettingsOpenGroup(change.newValue, settingsGroupWorklist, settingsGroupUi, settingsGroupAi)" />
+      onDidChange="(change) => window.__bramSettingsOpenGroup(change.newValue, settingsGroupWorklist, settingsGroupUi, settingsGroupAi, settingsGroupSessions)" />
     <Timer
       interval="500"
       enabled="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'pending'}"
@@ -339,7 +339,7 @@
            through window.__bramSuggestSetting so the defaults (true/true/false)
            live in one place. https://www.xmlui.org/docs/reference/components/Checkbox -->
       <Theme paddingLeft-summary-ExpandableItem="0">
-        <ExpandableItem id="settingsGroupSessions" initiallyExpanded="{false}" iconPosition="start" summary="Suggest a fresh session · when the agent offers one">
+        <ExpandableItem id="settingsGroupSessions" initiallyExpanded="{highlightKey === 'suggestAtContextShare'}" iconPosition="start" summary="Suggest a fresh session · when the agent offers one">
       <VStack gap="$space-2">
         <HStack>
           <Button
@@ -390,6 +390,8 @@
              https://www.xmlui.org/docs/reference/components/ExpandableItem -->
         <HStack gap="$space-3" verticalAlignment="center">
           <NumberBox
+            automationId="setting-suggestAtContextShare"
+            backgroundColor="{highlightKey === 'suggestAtContextShare' ? '$color-primary-100' : 'transparent'}"
             width="110px"
             integersOnly="{true}"
             minValue="{0}"

@@ -20874,10 +20874,11 @@ window.__bramOpenAppValue = function (mode, page) {
 // (?highlight=<key>) re-targeted while Settings is showing opens the section
 // holding that key. Takes the ExpandableItem refs; an event handler, not a
 // binding.
-window.__bramSettingsOpenGroup = function (key, worklistGroup, uiGroup, aiGroup) {
+window.__bramSettingsOpenGroup = function (key, worklistGroup, uiGroup, aiGroup, sessionsGroup) {
   var group = key === "worklistEnforcement" ? worklistGroup
     : key === "tipsDismissInterval" ? uiGroup
     : key === "describeCommands" ? aiGroup
+    : key === "suggestAtContextShare" ? sessionsGroup
     : null;
   try { if (group && typeof group.expand === "function") group.expand(); } catch (e) {}
 };
@@ -22358,6 +22359,22 @@ window.__bramSuggestContextSetting = function (settings) {
   var n = s && s.suggestAtContextShare;
   if (typeof n === "number" && isFinite(n) && n >= 0) return Math.round(n);
   return 40;
+};
+window.__bramStackThresholdPrefix = function (stack, settings) {
+  var sessions = settings && settings.sessions;
+  var resolved = sessions && sessions.suggestResolved;
+  var provider = resolved && resolved.providers && resolved.providers[stack.provider];
+  if (!provider) return "Context";
+  var basis = (provider.byModel && provider.byModel[stack.model]) || provider;
+  var tokens = stack.measured && stack.measured.tokens;
+  if (sessions.suggestAtContextLegacy) {
+    if (!sessions.suggestAtContextTokens) return "No active";
+    var usage = tokens > 0 ? "at " + window.__bramTokenK(tokens) + " of " : "";
+    return usage + window.__bramTokenK(sessions.suggestAtContextTokens) + " token";
+  }
+  if (resolved.share === 0) return "No active";
+  var prefix = basis.point > 0 && tokens > 0 ? "at " + Math.round(100 * tokens / basis.point) + "% of " : "";
+  return prefix + resolved.share + "%";
 };
 window.__bramSuggestContextShare = function (v) {
   var n = Number(v);
@@ -25102,6 +25119,24 @@ window.__bramStackLegendWeight = function (entry) {
 };
 window.__bramStackLegendColor = function (entry) {
   return entry && entry.active ? "$textColor-primary" : "$textColor-secondary";
+};
+window.__bramContextGrowthChart = function (history, session) {
+  if (!history || !Array.isArray(history.calls) || !session) return null;
+  var points = history.calls
+    .filter(call => call.thread === "main" && call.provider + ":" + call.session === session &&
+      Number.isFinite(call.atMs) && Number.isFinite(call.context))
+    .map(call => [call.atMs, call.context])
+    .sort((a, b) => a[0] - b[0]);
+  if (!points.length) return null;
+  return {
+    animation: false,
+    grid: { top: 36, bottom: 36, left: 60, right: 24 },
+    legend: { top: 0, right: 24 },
+    tooltip: { trigger: "axis" },
+    xAxis: { type: "time" },
+    yAxis: { type: "value", name: "Context tokens", nameLocation: "end", nameGap: 12 },
+    series: [{ type: "line", name: "Context tokens", showSymbol: points.length === 1, data: points }]
+  };
 };
 window.__bramStackRows = function (stack, sort, kind) {
   var blocks = (stack && stack.blocks) || [];

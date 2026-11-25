@@ -796,9 +796,12 @@ session is where it gets discussed and created. Two steps, in one turn:
    draft already holds the earlier ones: point at them, don't restate
    them); what is verified and what is not, with times from the trace,
    not from memory; what remains; what to leave alone; how to verify a
-   change to this item. Pointers, not prose, for anything the new
-   session can read for itself. Facts about the session rather than the
-   item go in step 2, once. The new session negotiates the rest with the
+   change to this item. If a read settled a question the new session
+   would otherwise have to investigate again, include the smallest result
+   that settles it and say where it came from. For a live reading, give
+   the time it was observed. For code the new session will edit, name
+   the file and symbol so it can inspect the current version.
+   Session-level facts go in step 2, once. The new session negotiates the rest with the
    user. (Jon, 2026-11-24: "The handoff
    that you would write is nothing like the handoff that you write when
    you are dispatching to a subagent. It should be like that.")
@@ -809,8 +812,10 @@ session is where it gets discussed and created. Two steps, in one turn:
    created until the user clicks Create.** Say so: "I've filled in a
    suggested name and brief; edit them to say it your way, then click
    **Create**." Write `whatsNext` in the user's terms, framing the new
-   work, not as instructions from you: name the begun items and say each
-   draft ends with your brief, and carry the session-level facts here,
+   work. When handing over an open question, say what observation would
+   answer it. For a UI question, name the action, what the user expects
+   to see, and whether anyone has seen it happen. Name the begun items
+   and say each draft ends with your brief, and carry the session-level facts here,
    once, not in every draft (what is running or stopped, stashes,
    whether the pane has reloaded since the last edit, the checks that
    cover every item); with no begun item, put in it what this session

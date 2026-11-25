@@ -22731,7 +22731,30 @@ window.__bramSessionContextShowButton = function (ctx, dismissedBoundaryMs) {
   var b = ctx.boundaryAtMs || 0;
   return !(dismissedBoundaryMs && dismissedBoundaryMs === b);
 };
+// new-session-button-writes-the-brief (Jon, 2026-11-24: "wire the start new
+// session button to a convention that writes the brief"): the click asks the
+// agent to hand the work over, the way the Save as task button sends a
+// `save-task:` turn. The agent writes its handoff brief into each begun
+// item's draft and posts the suggestion itself, which opens the dialog
+// (conventions, §Suggest a fresh session). A plain toTurn, never
+// item-addressed, whatever row is ticked. Without a PTY bridge, fall back to
+// the pre-filled dialog with an empty brief, as before.
+window.__bramSessionContextNewSessionTurn = function () {
+  return (
+    "new-session: I clicked Start a new session. Hand the work over as the " +
+    "conventions say (§Suggest a fresh session, hand-over step): write your " +
+    "handoff brief into each begun Worklist item's draft, then post the New " +
+    "session suggestion. Don't start the work here."
+  );
+};
 window.__bramSessionContextNewSession = function (ctx, title) {
+  if (typeof window.toTurn === "function" && window.getTauriInvoke && window.getTauriInvoke()) {
+    try { window.__bramIframeTrace("new-session-client", { op: "brief-requested" }); } catch (e) {}
+    window.toTurn(window.__bramSessionContextNewSessionTurn());
+    window.__bramGateGoTranscript();
+    return;
+  }
+  try { window.__bramIframeTrace("new-session-client", { op: "brief-fallback" }); } catch (e) {}
   var name = "continue: " + (title || "this session");
   return window
     .fetch("/__sessions/suggest", {

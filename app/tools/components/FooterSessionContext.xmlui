@@ -103,15 +103,16 @@
         when="{window.__bramSessionContextShowButton(ctx, dismissedBoundaryMs)}"
         gap="$space-0_5"
         verticalAlignment="center">
-        <!-- Two statements, as the peer buttons do (Main.xmlui skills
-             dialog: a helper call, then navigate('/sessions')); the POST
-             makes the Sessions tab open its New session dialog pre-filled.
+        <!-- new-session-button-writes-the-brief: the click sends the agent a
+             `new-session:` turn and goes to the Transcript; the agent writes
+             its handoff brief into each begun item's draft, then posts the
+             suggestion, which opens the Sessions tab's dialog pre-filled.
              https://www.xmlui.org/docs/reference/components/Button -->
         <Button
           label="Start a new session"
           size="xs"
           variant="outlined"
-          onClick="window.__bramSessionContextNewSession(ctx, $props.sessionTitle); navigate('/sessions')" />
+          onClick="window.__bramSessionContextNewSession(ctx, $props.sessionTitle)" />
         <Button
           label="✕"
           size="xs"

@@ -152,7 +152,11 @@ the Alerts inbox key on that prefix.
 
 The draft file has two headings, `# Before` (what's there now, relevant
 context, rejected alternatives) and `# After` (what you'll change it
-to). The metadata item:
+to). A third heading, `# Handoff · <YYYY-MM-DD HH:MM> · written by the
+agent in <Provider> session <8-char id>`, is appended by the agent leaving
+a session while the item is begun: its handoff brief, written as it would
+brief a subagent (§Suggest a fresh session). Read it when resuming; don't
+edit or remove it; keep your own prose above it. The metadata item:
 
 ```json
 {
@@ -705,3 +709,4 @@ instead of a fix; for a plain change, just make it. Log-line shape →
 - **Windows refuses Bram or its hooks fail** → read `.claude/bram-reference/environment.md` (§Windows: Smart App Control).
 - **A `voice-setup:` turn arrives, or the user says voice input won't start** → offer to repair it: read `.claude/bram-reference/environment.md` (§Voice input setup).
 - **A `save-task:` turn arrives, or the project has a `Makefile`** → read `.claude/bram-reference/environment.md` (§Saving a task).
+- **A `new-session:` turn arrives** (the user clicked the footer's **Start a new session**) → hand the work over: read `.claude/bram-reference/environment.md` (§Suggest a fresh session, the hand-over step).

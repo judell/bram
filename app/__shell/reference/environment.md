@@ -778,18 +778,44 @@ about that topic, or until the next pause. Don't ask in a session that
 is still short. Ask **before** you propose the item or file the issue,
 not after.
 
-**On yes, hand the work over; don't start it here.** Do not propose the
-item or file the issue in this session: the new session is where it gets
-discussed and created. `POST /__sessions/suggest` with
-`{"name": …, "whatsNext": …}` (same curl shape as the other POST
-routes). The Sessions tab opens the New session dialog filled in with
-both. **They are suggestions for the user to edit, and nothing is
-created until the user clicks Create.** Say so: "I've filled in a
-suggested name and brief; edit them to say it your way, then click
-**Create**." Write `whatsNext` in the user's terms, framing the new
-work, not as instructions from you. Put in it what this session already
-settled about the work, so the new session doesn't have to rediscover
-it.
+**On yes, or when a `new-session:` turn arrives (the user clicked the
+footer's Start a new session), hand the work over; don't start it here.**
+Do not propose the item or file the issue in this session: the new
+session is where it gets discussed and created. Two steps, in one turn:
+
+1. **Write your handoff brief into each begun Worklist item's draft**
+   (`applied`, or started). Append to `<state>/worklist-drafts/<id>.md`
+   a section headed `# Handoff · <YYYY-MM-DD HH:MM> · written by the
+   agent in <Provider> session <8-char id>` (that grammar exactly; a
+   later reader parses it), written **as you would brief a subagent, in
+   one pass, with no negotiation**, about this item only: the goal; the
+   state on disk; pinned pointers (files and line regions, functions,
+   routes, trace lines; into the repo, the trace or the state folder,
+   never into a session's scratchpad, which a reboot clears); decisions
+   made since the draft's Before and After were written, and why (the
+   draft already holds the earlier ones: point at them, don't restate
+   them); what is verified and what is not, with times from the trace,
+   not from memory; what remains; what to leave alone; how to verify a
+   change to this item. Pointers, not prose, for anything the new
+   session can read for itself. Facts about the session rather than the
+   item go in step 2, once. The new session negotiates the rest with the
+   user. (Jon, 2026-11-24: "The handoff
+   that you would write is nothing like the handoff that you write when
+   you are dispatching to a subagent. It should be like that.")
+2. **Post the suggestion.** `POST /__sessions/suggest` with
+   `{"name": …, "whatsNext": …}` (same curl shape as the other POST
+   routes). The Sessions tab opens the New session dialog filled in with
+   both. **They are suggestions for the user to edit, and nothing is
+   created until the user clicks Create.** Say so: "I've filled in a
+   suggested name and brief; edit them to say it your way, then click
+   **Create**." Write `whatsNext` in the user's terms, framing the new
+   work, not as instructions from you: name the begun items and say each
+   draft ends with your brief, and carry the session-level facts here,
+   once, not in every draft (what is running or stopped, stashes,
+   whether the pane has reloaded since the last edit, the checks that
+   cover every item); with no begun item, put in it what this session
+   already settled about the work, so the new session doesn't have to
+   rediscover it.
 
 **On no**, carry on here: propose the item or file the issue as usual.
 

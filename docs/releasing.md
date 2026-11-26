@@ -56,16 +56,65 @@ dispatching the workflow against an existing tag, etc.
 
 **Who does what.** Jon runs `bump.sh`. The agent writes the notes in
 `~/Desktop/release.md`, keeping `# Bram v<VERSION>` as the title, and
-Jon pastes them into the GitHub release. The release body's fixed parts
-(prerequisite, install, troubleshooting) come from
-`.github/release-body-template.md`.
+Jon pastes them over the placeholder line at the top of the GitHub
+release. The rest of the body comes from
+`.github/release-body-template.md`, folded: Install (with the
+prerequisite), Audit-friendly manual install, All commits since the
+previous release, and Troubleshooting.
 
-**Shape.**
+**Shape: foldable** (Jon, v0.9.1: "Let's go with a foldable format for
+the release notes"). What a reader needs to decide whether to update
+stays visible; the detail folds, the way forge posts do
+(`.claude/bram-reference/environment.md` §Forge posts in details-summary
+form).
 
-1. A lead that says what the release means for users.
-2. Sections by user-facing change, not by commit.
-3. `### Known rough edges`.
-4. `### Credits`.
+1. **Visible:** a lead that says what the release means for users,
+   headed by the change that matters most to them. Then the commit count
+   and the issues it refs, any first-launch warning in bold, and a
+   numbered list with one bold claim per section.
+2. **Folded:** one `<details>` per section, by user-facing change, not
+   by commit, with `<summary><b>N. Name</b></summary>` numbered to match
+   the list. Then `<summary>Known rough edges</summary>` as the last
+   fold.
+3. **Visible:** `### Credits`.
+
+Leave a blank line after each `<summary>`, or GitHub won't render the
+Markdown inside. Write issue references as `[#N](url)`, and an upstream
+one as `[xmlui#N](url)`. A feature that grew over several releases is
+told whole, with a line saying which parts shipped before.
+
+```markdown
+# Bram v<VERSION>
+
+<lead paragraph(s)>
+
+<N> commits since v<PREV>. Refs [#N](https://github.com/judell/bram/issues/N).
+
+**<first-launch warning, if any>**
+
+1. **<claim for section 1>**
+2. **<claim for section 2>**
+
+<details>
+<summary><b>1. <Section name></b></summary>
+
+- **<bold claim>.** <detail>
+</details>
+
+<details>
+<summary>Known rough edges</summary>
+
+- **<rough edge>.** <detail>
+</details>
+
+### Credits
+
+- **<Display Name> (@login)** <what they did>
+```
+
+Preview before posting: render the notes through GitHub's own renderer
+(`gh api markdown` with `mode: gfm`) and open the HTML, so the folds are
+seen as GitHub draws them.
 
 **Readiness, before the notes are final:**
 

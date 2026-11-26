@@ -1,10 +1,11 @@
-## Prerequisite
+<!-- Release notes: paste ~/Desktop/release.md over this line (docs/releasing.md §Release notes). -->
 
-Run `bram` from a folder that is a git repository. A standalone local repository works; one hosted on GitHub or GitLab is better, because Bram's issue features (the Issues tab, closing issues on push) use the issues there.
+<details>
+<summary><b>Install</b></summary>
 
-## Install
+**Prerequisite.** Run `bram` from a folder that is a git repository. A standalone local repository works; one hosted on GitHub or GitLab is better, because Bram's issue features (the Issues tab, closing issues on push) use the issues there.
 
-### macOS / Linux
+#### macOS / Linux
 
 ```bash
 curl -fsSL https://github.com/judell/bram/releases/download/${TAG}/install.sh | bash
@@ -18,7 +19,7 @@ Confirm the install:
 bram --help
 ```
 
-### Windows
+#### Windows
 
 From PowerShell:
 
@@ -39,8 +40,10 @@ Confirm the install in a new PowerShell window:
 ```powershell
 bram --help
 ```
+</details>
 
-## Audit-friendly manual install
+<details>
+<summary><b>Audit-friendly manual install</b></summary>
 
 ```bash
 # Download artifact + checksums
@@ -60,12 +63,16 @@ xattr -d com.apple.quarantine bram
 ```
 
 On Windows, use `Expand-Archive` on `bram-windows-amd64.zip`, then move `bram.exe` to a directory on your `PATH`.
+</details>
 
-## Change log
+<details>
+<summary><b>All commits since the previous release</b></summary>
 
 ${CHANGELOG}
+</details>
 
-## Troubleshooting
+<details>
+<summary><b>Troubleshooting</b></summary>
 
 - **`bram` not found on PATH.** Re-run the install script, or follow its printed PATH advice.
 - **macOS Gatekeeper blocks first launch.** The install script clears the quarantine xattr automatically. For browser downloads, run the `xattr -d com.apple.quarantine` command above.
@@ -73,3 +80,4 @@ ${CHANGELOG}
 - **Tool Descriptions show nothing (trace says `reason=no-key`).** The optional Haiku-generated intent headers need `ai.describeCommands: true` in `.bram.json` **and** `ANTHROPIC_API_KEY` visible to Bram's own process. macOS/Linux: export it in your shell profile and launch `bram` from a terminal — a Dock/Finder-launched Bram doesn't read shell profiles. Windows: set a user-scoped environment variable — `setx ANTHROPIC_API_KEY "sk-ant-…"` (or System Properties → Environment Variables) — then restart Bram and any open terminals; a PowerShell `$PROFILE` export is not enough, because it reaches shell-launched processes only, not a GUI-launched Bram. One user-scoped variable serves Bram's description calls and the agent CLIs inside Bram's PTY alike. Note: when Claude Code notices the key and asks whether to use it, answer **No** — accepting switches the CLI from your claude.ai login (and disables claude.ai connectors) to pay-as-you-go API billing. The key is stored in plaintext (`HKCU\Environment` on Windows, your dotfile elsewhere) — same posture either way; treat it with dotfile-grade care.
 - **Update.** Re-run the install command.
 - **Uninstall.** Delete the binary from `/usr/local/bin/bram`, `~/.local/bin/bram`, or `~/bin/bram.exe`.
+</details>

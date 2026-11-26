@@ -197,6 +197,29 @@ bare term.
 A tooltip or dialog counts as its own surface. Don't send the reader to a
 separate glossary for a word the sentence needs.
 
+## Open what needs acting on
+
+When a pane surface (the inline Worklist, a dialog, a panel, a tab)
+receives something the user must act on, it opens by itself, so the
+action is in view without a click (Jon, 2026-11-25: "you want the inline
+Worklist [or anything] to open by itself when there's something to act
+on there").
+
+- **Only for something to act on.** A plan to approve, an item awaiting
+  commit, a question for the user. New information with no action stays
+  where it is: the same test as a warning.
+- **Once per arrival.** Open for each new thing, not on every render, and
+  never again for one already seen.
+- **A close is the user's.** A reload, a refetch or a stored copy of the
+  same thing doesn't reopen what the user closed; key the open to the
+  arrival (a `postedAtMs`, an id), and skip arrivals older than a short
+  window.
+- **Trace it** as `op=open cause=<what arrived>`.
+
+The pattern is ce94b0cd: a posted plan opens the Worklist pane
+(`__bramWorklistPaneOnPlan`, traced `transcript-worklist op=open
+cause=plan`).
+
 ## Rust: typed data, not hand-read JSON
 
 Data inside the host is typed (Jon, 2026-11-11, a standing rule):

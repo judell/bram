@@ -75,6 +75,52 @@ def trim(lines):
     return lines
 
 
+CODE = re.compile(r"`([^`]+)`")
+
+
+def fold_notes(lines):
+    """Each section of the notes becomes a numbered fold, as in v0.9.1:
+    the ### sections when the notes have any, else the ## sections when
+    there are two or more. Text before the first section stays visible, and
+    so does a shallower heading that ends a run of sections."""
+    def level(line):
+        m = re.match(r"^(#{2,6}) ", line)
+        return len(m.group(1)) if m else 0
+
+    fenced, levels = False, []
+    for line in lines:
+        if FENCE.match(line):
+            fenced = not fenced
+        elif not fenced and level(line):
+            levels.append(level(line))
+    if 3 in levels:
+        at = 3
+    elif levels.count(2) >= 2:
+        at = 2
+    else:
+        return lines
+    out, n, open_, fenced = [], 0, False, False
+    for line in lines:
+        if FENCE.match(line):
+            fenced = not fenced
+        lv = 0 if fenced else level(line)
+        if lv and lv <= at:
+            if open_:
+                out += ["", "</details>", ""]
+                open_ = False
+            # Credits stay visible, as in v0.9.1.
+            if lv == at and line[lv + 1:].strip() not in ("Credits", "Thanks"):
+                n += 1
+                title = CODE.sub(r"<code>\1</code>", line[lv + 1:].strip())
+                out += ["<details>", "<summary><b>%d. %s</b></summary>" % (n, title), ""]
+                open_ = True
+                continue
+        out.append(line)
+    if open_:
+        out += ["", "</details>"]
+    return out
+
+
 def refold(body):
     secs = sections(body)
     notes, folds = [], collections.defaultdict(list)
@@ -92,6 +138,7 @@ def refold(body):
             folds[key] += lines
     if not folds:
         return None
+    notes = fold_notes(notes)
     parts = ["\n".join(trim(notes))] if trim(notes) else []
     for key, summary in FOLDS:
         if key in folds:
@@ -110,7 +157,13 @@ def signature(body, refolded):
         if not s:
             continue
         if refolded:
-            if s in ("<details>", "</details>") or s.startswith("<summary><b>"):
+            if s in ("<details>", "</details>"):
+                continue
+            m = re.match(r"^<summary><b>(?:\d+\. )?(.*)</b></summary>$", s)
+            if m:
+                if s.startswith("<summary><b>") and re.match(r"^<summary><b>\d+\. ", s):
+                    # A notes section's heading, now the fold's summary.
+                    c[re.sub(r"<code>(.*?)</code>", r"`\1`", m.group(1))] += 1
                 continue
             if s.startswith("#### Prerequisite"):
                 continue

@@ -1569,6 +1569,23 @@ window.__bramSessionLeaveTooltip = function (item) {
   return g ? "Take this session out of its group; switching agents from the others no longer comes here" : "";
 };
 
+// sessions-search-all-providers: the Sessions tab's search rows. Each /__search
+// hit is joined to the listed row with the same id and provider, from whichever
+// provider's list holds it. A hit with no row (outside this project's list,
+// deleted, source gone) is kept as a plain row built from the hit, flagged
+// `unlisted`, never dropped. Reads only its arguments.
+window.__bramSessionsSearchRows = function (hits, lists) {
+  var rows = [];
+  (lists || []).forEach(function (l) { (l || []).forEach(function (r) { rows.push(r); }); });
+  return (hits || []).map(function (h) {
+    var row = rows.find(function (r) { return r.id === h.id && r.provider === h.provider; });
+    if (row) return row;
+    var src = String(h.source || "");
+    var cut = src.indexOf(" · ");
+    return { id: h.id, provider: h.provider, title: cut >= 0 ? src.slice(0, cut) : src, unlisted: true };
+  });
+};
+
 // search-index-opencode-sessions: the Search page queries only once the
 // index has completed a cycle (lastCycleMs), which is when /__search stops
 // refusing with 503.

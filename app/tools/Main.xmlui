@@ -1351,7 +1351,7 @@
       <Page height="*" minHeight="0" url="/log"><Log /></Page>
       <Page height="*" minHeight="0" url="/tasks"><Tasks /></Page>
       <Page height="*" minHeight="0" url="/settings"><Settings /></Page>
-      <Page height="*" minHeight="0" url="/sessions"><Sessions /></Page>
+      <Page height="*" minHeight="0" url="/sessions"><Sessions activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page height="*" minHeight="0" url="/tips"><Tips /></Page>
       <Page height="*" minHeight="0" url="/context"><Context activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page height="*" minHeight="0" url="/issues"><Issues /></Page>

@@ -47,6 +47,31 @@
     queryParams="{{ provider: currentProvider }}"
     when="{(sessionsExpanded || searchQuery.trim().length >= 2) &amp;&amp; !!currentProvider}" />
 
+  <!-- sessions-search-all-providers: while a query is active, every provider's
+       full list is fetched so a hit from any provider joins to its row. The
+       current provider's list is sessionsFull above, so it is not fetched
+       twice. https://www.xmlui.org/docs/reference/components/DataSource -->
+  <DataSource
+    id="searchListClaude"
+    url="/__sessions/list"
+    queryParams="{{ provider: 'claude' }}"
+    when="{searchReady &amp;&amp; currentProvider !== 'claude'}" />
+  <DataSource
+    id="searchListCodex"
+    url="/__sessions/list"
+    queryParams="{{ provider: 'codex' }}"
+    when="{searchReady &amp;&amp; currentProvider !== 'codex'}" />
+  <DataSource
+    id="searchListOpencode"
+    url="/__sessions/list"
+    queryParams="{{ provider: 'opencode' }}"
+    when="{searchReady &amp;&amp; currentProvider !== 'opencode'}" />
+  <DataSource
+    id="searchListAntigravity"
+    url="/__sessions/list"
+    queryParams="{{ provider: 'antigravity' }}"
+    when="{searchReady &amp;&amp; currentProvider !== 'antigravity'}" />
+
   <DataSource
     id="sessionsSearch"
     url="/__search"
@@ -62,13 +87,34 @@
     value="{((sessionsExpanded || searchQuery.trim().length >= 2) &amp;&amp; sessionsFull.value) ? sessionsFull.value : (sessionsFirstPage.value || [])}" />
   <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
   <variable name="searchReady" value="{searchNeedle.length >= 2}" />
+  <!-- sessions-search-all-providers: every provider's list is in (the current
+       one is sessionsFull) before hits are joined, so a hit is not shown as
+       unlisted just because its list is still loading. A list that failed
+       counts as settled (its hits show as unlisted rows), so one provider's
+       error can't blank the whole search. -->
+  <variable name="searchListsLoaded" value="{
+    (sessionsFull.loaded || !!sessionsFull.error)
+      &amp;&amp; (currentProvider === 'claude' || searchListClaude.loaded || !!searchListClaude.error)
+      &amp;&amp; (currentProvider === 'codex' || searchListCodex.loaded || !!searchListCodex.error)
+      &amp;&amp; (currentProvider === 'opencode' || searchListOpencode.loaded || !!searchListOpencode.error)
+      &amp;&amp; (currentProvider === 'antigravity' || searchListAntigravity.loaded || !!searchListAntigravity.error)
+  }" />
   <variable name="filteredSessions" value="{
     searchReady
-      ? (sessionsSearch.value || [])
-          .map(hit => (sessionsSource || []).find(s => s.id === hit.id &amp;&amp; s.provider === hit.provider))
-          .filter(s => !!s)
+      ? (searchListsLoaded &amp;&amp; sessionsSearch.value
+          ? window.__bramSessionsSearchRows(sessionsSearch.value, [sessionsFull.value, searchListClaude.value, searchListCodex.value, searchListOpencode.value, searchListAntigravity.value])
+          : [])
       : (searchNeedle ? [] : (sessionsSource || []))
   }" />
+
+  <!-- sessions-search-all-providers: the tab follows an agent switch. Meta's
+       onLoaded resets currentProvider (and the expansion) when the provider
+       differs; before this the tab got no prop and refetched meta only on
+       sessions-list-changed.
+       https://www.xmlui.org/docs/reference/components/ChangeListener -->
+  <ChangeListener
+    listenTo="{$props.activeProvider}"
+    onDidChange="sessionsMeta.refetch()" />
   <!-- sessions-delete-pending-self-heal: drop pending ids still present in the
        list so a stuck "pending" row re-enables. -->
   <ChangeListener
@@ -226,7 +272,7 @@
         boxWidth="22rem"
         placeholder="Filter sessions…"
         initialValue="{searchQuery}"
-        inProgress="{searchReady &amp;&amp; (sessionsSearch.inProgress || sessionsFull.inProgress)}"
+        inProgress="{searchReady &amp;&amp; (sessionsSearch.inProgress || sessionsFull.inProgress || searchListClaude.inProgress || searchListCodex.inProgress || searchListOpencode.inProgress || searchListAntigravity.inProgress)}"
         onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
         onClear="searchQuery = ''; setLastSearchQuery(''); expandedId = null" />
       <Button
@@ -236,11 +282,10 @@
         tooltip="Start a fresh session and make it current"
         onClick="newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; newSessionOpen = true" />
     </HStack>
-    <Text
-      when="{sessionsMeta.value}"
-      fontSize="$fontSize-sm"
-      color="$textColor-secondary"
-      value="{sessionsMeta.value.count > 0 ? ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (' + sessionsMeta.value.count + ' session' + (sessionsMeta.value.count === 1 ? '' : 's') + ')') : ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (no sessions yet)')}" />
+    <!-- sessions-search-all-providers (Jon, 2026-11-25): no provider header.
+         The tab follows the agent dropdown, so "Auto-detected provider" only
+         repeated it, and a "Matches across …" line under search was noise;
+         each search row names its provider. -->
     <VStack
       when="{sessionsMeta.value &amp;&amp; sessionsMeta.value.discoveryNotes &amp;&amp; sessionsMeta.value.discoveryNotes.length > 0}"
       gap="$space-1"
@@ -278,6 +323,7 @@
             opacity="{(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id)) ? 0.5 : 1}">
             <!-- sessions-switch-icon-and-land-on-transcript: icon-only switch/reload button -->
             <Button
+              when="{!$item.unlisted}"
               icon="{$item.current ? 'restart' : 'swap'}"
               variant="ghost"
               size="xs"
@@ -288,6 +334,7 @@
                  next to the switch button, the destructive one at the end.
                  Delete confirms before it sends. -->
             <Button
+              when="{!$item.unlisted}"
               label="✎"
               variant="ghost"
               size="xs"
@@ -295,6 +342,7 @@
               tooltip="{window.__bramSessionEditTooltip($item, 'rename', pendingDeletes, pendingRenames)}"
               onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
             <Button
+              when="{!$item.unlisted}"
               label="{deleteSessionAct.value &amp;&amp; deleteSessionAct.value.busy &amp;&amp; lastDeleteId === $item.id ? '…' : '✕'}"
               variant="ghost"
               size="xs"
@@ -318,7 +366,7 @@
               </Items>
             </DropdownMenu>
             <Link
-              when="{!$item.pending}"
+              when="{!$item.pending &amp;&amp; !$item.unlisted}"
               width="*"
               onClick="expandedId = (expandedId === $item.id) ? null : $item.id"
               noIndicator>
@@ -332,10 +380,17 @@
               width="*"
               color="$textColor-secondary"
               value="{window.__bramPendingSessionLabel($item)}" />
-            <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
-            <Text width="70px" fontSize="$fontSize-sm" color="{window.__bramSessionTokensCellColor($item.context, contextThresholdSettings.value, $item.provider)}" value="{window.__bramSessionTokensCell($item.context)}" />
-            <Text width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionTokensCell($item.floor)}" />
-            <Text width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionSizeLabel($item)}" />
+            <!-- sessions-search-all-providers: a hit with no listed row: title and
+                 a note, no actions -->
+            <VStack when="{$item.unlisted}" width="*" gap="0">
+              <Text width="100%" value="{$item.title || '(untitled)'}" />
+              <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Not in this project's session list" />
+            </VStack>
+            <Text when="{searchReady}" fontSize="$fontSize-xs" color="$textColor-secondary" value="{window.__bramProviderLabel($item.provider)}" />
+            <Text when="{!$item.unlisted}" width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
+            <Text when="{!$item.unlisted}" width="70px" fontSize="$fontSize-sm" color="{window.__bramSessionTokensCellColor($item.context, contextThresholdSettings.value, $item.provider)}" value="{window.__bramSessionTokensCell($item.context)}" />
+            <Text when="{!$item.unlisted}" width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionTokensCell($item.floor)}" />
+            <Text when="{!$item.unlisted}" width="70px" fontSize="$fontSize-sm" value="{window.__bramSessionSizeLabel($item)}" />
           </HStack>
           <!-- session-groups: the session's group (switching agents moves
                among its members), with Leave for when one has drifted. -->
@@ -357,7 +412,7 @@
               tooltip="{window.__bramSessionLeaveTooltip($item)}"
               onClick="window.__bramUnpairSession($item.provider, $item.id, toast)" />
           </HStack>
-          <VStack when="{expandedId === $item.id}" paddingBottom="$space-2">
+          <VStack when="{expandedId === $item.id &amp;&amp; !$item.unlisted}" paddingBottom="$space-2">
             <SessionDetail sessionId="{$item.id}" provider="{$item.provider}"
               height="600px" query="{searchQuery.trim()}" />
           </VStack>
@@ -389,7 +444,7 @@
         color="$textColor-secondary" fontSize="$fontSize-sm"
         value="Type at least 2 characters to search session transcripts." />
       <Text
-        when="{searchReady &amp;&amp; sessionsSearch.loaded &amp;&amp; sessionsFull.loaded &amp;&amp; !sessionsSearch.inProgress &amp;&amp; !sessionsFull.inProgress &amp;&amp; filteredSessions.length === 0}"
+        when="{searchReady &amp;&amp; sessionsSearch.loaded &amp;&amp; searchListsLoaded &amp;&amp; !sessionsSearch.inProgress &amp;&amp; !sessionsFull.inProgress &amp;&amp; filteredSessions.length === 0}"
         color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching sessions." />
    </PinnedHeader>
   </VStack>

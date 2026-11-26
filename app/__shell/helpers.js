@@ -24042,7 +24042,7 @@ window.__bramStoryTell = (function () {
       var who = ids.length ? linked(ids) : (d.count ? plural(d.count, "item") : "an item");
       if (tg === null) {
         if (!d.recorded) return;
-        s = "An approval for " + who + " was recorded, but I saw no click on the gate bar for it" +
+        s = "An approval for " + who + " was recorded, but I saw no click on the gate bar (the Start, Commit and Drop buttons) for it" +
           (d.handed ? "; the turn was handed to Claude" : "") + ".";
       } else if (tg === "drop") {
         s = "You clicked Drop on " + who + ".";

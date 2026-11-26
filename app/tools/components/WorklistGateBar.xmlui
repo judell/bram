@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateWaitTick="{0}"var.gateCloseTick="{0}" var.gateLastSessionTick="{0}" var.gateReleaseAsk="{[]}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}" var.gateWaitTick="{0}"var.gateCloseTick="{0}" var.gateReleaseAsk="{[]}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -58,16 +58,6 @@
   <ChangeListener
     listenTo="{gateClaimEvt.value &amp;&amp; gateClaimEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(gateClaimEvt.value, gateClaim)" />
-  <!-- item-last-session-switch-there: the current session, for the "Last
-       worked on in" line. The footer's small list fetch, refetched on the
-       same event, so a switch updates the line without a board refetch. -->
-  <DataSource id="gateSessions" url="/__sessions/list" queryParams="{{ limit: 20 }}" />
-  <PushSource
-    id="gateSessionsChanged"
-    subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
-  <ChangeListener
-    listenTo="{gateSessionsChanged.value}"
-    onDidChange="() => gateSessions.refetch()" />
   <!-- instrument-w2-selection-handoff (observe only, TRIPWIRE): the receiving
        half. `render` is the actual gate on the button row below - buttons are
        ABSENT when it is false, as opposed to greyed, since they gate on
@@ -169,30 +159,9 @@
         onClick="window.__bramAskSequence(gateSel.value)" />
     </Theme>
   </VStack>
-  <!-- item-last-session-switch-there: a ticked item last worked on in
-       another session offers to switch there. lastSession is computed by the
-       host from the state-mirror ledger; the switch is the Sessions tab's,
-       and lands on the Transcript. -->
-  <HStack
-    when="{!!window.__bramGateLastSession(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, gateLastSessionTick)}"
-    horizontalAlignment="center"
-    verticalAlignment="center"
-    gap="$space-2"
-    paddingHorizontal="$space-8"
-    paddingTop="$space-1">
-    <Text value="{window.__bramGateLastSessionLine(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, gateLastSessionTick)}" />
-    <Button
-      label="Switch there"
-      size="xs"
-      variant="outlined"
-      icon="swap"
-      onClick="window.__bramGateSwitchToLastSession(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, toast)" />
-    <!-- gate-last-session-line-dismissable: × declines the offer for this
-         selection and session; same ghost × as the composer's. -->
-    <Button label="×" variant="ghost" size="xs"
-      tooltip="Dismiss: stay in this session"
-      onClick="gateLastSessionTick = window.__bramGateLastSessionDismissClick(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, gateLastSessionTick)" />
-  </HStack>
+  <!-- remove-last-session-switch-offer (Jon, 2026-11-25: "has not proven
+       useful, is confusing, yank for now"): the "Last worked on in another
+       session … Switch there" line was here; see git history. -->
   <!-- gate-remove-commit-share-radio: the commit-time "One commit / A commit
        each" radio is gone. For disjoint selections it changed nothing (the
        payload was identical, one worklist-commit, one commit), one approval

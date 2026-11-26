@@ -160,7 +160,9 @@
     <HStack width="100%" gap="$space-2" verticalAlignment="center">
       <!-- composer-addressee-hugs-box (Jon): mic with Esc under it, one
            tight stack, centered on the box. -->
-      <VStack width="2.5rem" gap="$space-2" horizontalAlignment="center">
+      <!-- composer-mic-esc-spacing (Jon, 2026-11-25: "more vertical space
+           betw mic and esc"); still shorter than the 3-row box. -->
+      <VStack width="2.5rem" gap="$space-4" horizontalAlignment="center">
         <Button
           label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
           variant="ghost"

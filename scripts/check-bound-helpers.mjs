@@ -42,7 +42,6 @@ const READ_OK = {
   __bramWlAccepted: "set by transformResult from the /__worklist payload the binding also passes",
   __bramWlSeen: "version from that same /__worklist payload",
   __bramPaneAttributionLast: "trace de-dup only",
-  __bramGateLastSessionShown: "trace de-dup only",
   lastOddLogged: "trace de-dup only",
   __bramFooterIndexBucketLabels: "constant",
   __bramTipsRegistry: "constant",

@@ -17736,12 +17736,43 @@ fn pty_menu_clear_for_outcome<R: tauri::Runtime>(app: &AppHandle<R>, reason: &st
 // assistant record (ts > escape) makes this false and the live banner is left
 // alone. Pure for testability; the scheduler adds the quiet-window and
 // still-working guards around it.
+//
+// esc-interrupt-spinner-runs-on: an Esc right after a send, before Claude wrote
+// any assistant record for the turn, leaves the PRIOR turn's `end_turn` as the
+// last assistant record, so `jsonl_end_detected` was true and the scan never
+// fired (15 minutes of spinner, fa53e079, 2026-11-26). `end_is_stale` (that
+// record predates the turn's user message) discards such a detection; the
+// interrupted turn then has no assistant record of its own after the user
+// message, and the Esc is the last thing that happened. A continuation after
+// Esc writes a newer assistant record (ts > escape) and still vetoes.
 fn single_esc_soft_end_should_fire(
     jsonl_end_detected: bool,
+    end_is_stale: bool,
     last_assistant_ts_ms: Option<i64>,
     escape_ts_ms: i64,
 ) -> bool {
-    !jsonl_end_detected && matches!(last_assistant_ts_ms, Some(a) if a <= escape_ts_ms)
+    let end_detected = jsonl_end_detected && !end_is_stale;
+    !end_detected && matches!(last_assistant_ts_ms, Some(a) if a <= escape_ts_ms)
+}
+
+// Timestamp (ms) of the last genuine user message in a Claude session JSONL
+// (not a tool_result or notification). esc-interrupt-spinner-runs-on.
+fn claude_jsonl_last_genuine_user_ts_ms(content: &str) -> Option<i64> {
+    for line in content.lines().rev() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if entry.get("type").and_then(|v| v.as_str()) != Some("user")
+            || !claude_jsonl_is_genuine_user_message(&entry)
+        {
+            continue;
+        }
+        return entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso_to_ms);
+    }
+    None
 }
 
 // After a single Esc, wait out the post-escape quiet window and then drop the
@@ -17798,9 +17829,14 @@ fn schedule_single_esc_soft_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, esca
                 Some(path) => match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         scanned_bytes = content.len();
+                        let last_assistant = claude_jsonl_last_assistant_ts_ms(&content);
                         single_esc_soft_end_should_fire(
                             claude_jsonl_completion_decision(&content).detected,
-                            claude_jsonl_last_assistant_ts_ms(&content),
+                            claude_jsonl_end_is_stale(
+                                last_assistant,
+                                claude_jsonl_last_genuine_user_ts_ms(&content),
+                            ),
+                            last_assistant,
                             escape_ts_ms,
                         )
                     }
@@ -17870,20 +17906,87 @@ fn schedule_single_esc_soft_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, esca
 
 #[cfg(test)]
 mod single_esc_soft_end_tests {
-    use super::single_esc_soft_end_should_fire;
+    use super::*;
 
     #[test]
     fn fires_only_when_interrupted_then_idle() {
         // Non-final turn, Esc after the last assistant record -> interrupted, idle.
-        assert!(single_esc_soft_end_should_fire(false, Some(100), 200));
+        assert!(single_esc_soft_end_should_fire(
+            false,
+            false,
+            Some(100),
+            200
+        ));
         // Esc exactly at the record boundary still counts as terminal.
-        assert!(single_esc_soft_end_should_fire(false, Some(200), 200));
+        assert!(single_esc_soft_end_should_fire(
+            false,
+            false,
+            Some(200),
+            200
+        ));
         // CC continued: a newer assistant record postdates the Esc -> leave it.
-        assert!(!single_esc_soft_end_should_fire(false, Some(300), 200));
+        assert!(!single_esc_soft_end_should_fire(
+            false,
+            false,
+            Some(300),
+            200
+        ));
         // Turn ended normally (end_turn detected) -> nothing to soft-end.
-        assert!(!single_esc_soft_end_should_fire(true, Some(100), 200));
+        assert!(!single_esc_soft_end_should_fire(
+            true,
+            false,
+            Some(100),
+            200
+        ));
         // No assistant record at all -> fail closed.
-        assert!(!single_esc_soft_end_should_fire(false, None, 200));
+        assert!(!single_esc_soft_end_should_fire(false, false, None, 200));
+        // esc-interrupt-spinner-runs-on: prior turn's end_turn is stale.
+        assert!(single_esc_soft_end_should_fire(true, true, Some(100), 200));
+        // ...but a continuation after Esc still vetoes, stale end or not.
+        assert!(!single_esc_soft_end_should_fire(true, true, Some(300), 200));
+    }
+
+    fn rec(kind: &str, ts: &str, extra: &str) -> String {
+        format!(r#"{{"type":"{kind}","timestamp":"{ts}",{extra}}}"#)
+    }
+
+    // esc-interrupt-spinner-runs-on: fa53e079 shape -- prior turn end_turn,
+    // new user record at 01:59:00, Esc at 01:59:08, nothing written after.
+    #[test]
+    fn esc_after_send_with_no_agent_output_ends() {
+        let end = rec(
+            "assistant",
+            "2026-11-26T01:54:50.000Z",
+            r#""message":{"stop_reason":"end_turn"}"#,
+        );
+        let user = rec(
+            "user",
+            "2026-11-26T01:59:00.118Z",
+            r#""message":{"content":"approved: {}"}"#,
+        );
+        let content = format!("{end}\n{user}\n");
+        let escape = parse_iso_to_ms("2026-11-26T01:59:08.866Z").unwrap();
+        let decision = claude_jsonl_completion_decision(&content).detected;
+        assert!(decision, "prior end_turn is what the old scan vetoed on");
+        let last_a = claude_jsonl_last_assistant_ts_ms(&content);
+        let stale =
+            claude_jsonl_end_is_stale(last_a, claude_jsonl_last_genuine_user_ts_ms(&content));
+        assert!(single_esc_soft_end_should_fire(
+            decision, stale, last_a, escape
+        ));
+        // Agent keeps working after the Esc: a newer non-final assistant record.
+        let cont = rec(
+            "assistant",
+            "2026-11-26T01:59:12.000Z",
+            r#""message":{"stop_reason":null}"#,
+        );
+        let content = format!("{content}{cont}\n");
+        let last_a = claude_jsonl_last_assistant_ts_ms(&content);
+        let stale =
+            claude_jsonl_end_is_stale(last_a, claude_jsonl_last_genuine_user_ts_ms(&content));
+        assert!(!single_esc_soft_end_should_fire(
+            false, stale, last_a, escape
+        ));
     }
 }
 

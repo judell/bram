@@ -1909,94 +1909,9 @@ window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, 
   try { if (typeof window.__bramSetVisibleRange === "function") window.__bramSetVisibleRange(null); } catch (e) {}
   try { if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript(); } catch (e) {}
 };
-// item-last-session-switch-there: the session the ticked items were last
-// worked on in (the host's computed `lastSession`, from the state-mirror
-// ledger), when it is one session they all share and it is not the current
-// one. With several items ticked, any item with no record, or a different
-// session, means no line: offering one item's session would move the others
-// away from where they were worked on. null means the gate line renders
-// nothing. "Current" comes from the live /__sessions/list (refetched on
-// sessions-list-changed), so a switch updates the line without refetching
-// the board; the host's isCurrent is the fallback until that list loads.
-// gate-last-session-line-dismissable: the trailing `tick` is the gate bar's
-// reactive var, passed only so bindings re-evaluate after a dismissal.
-window.__bramGateLastSession = function (items, sel, sessions, tick) {
-  var ids = Array.isArray(sel) ? sel : [];
-  if (!ids.length) return null;
-  var byId = {};
-  (Array.isArray(items) ? items : []).forEach(function (it) { if (it && it.id) byId[it.id] = it; });
-  var shared = null;
-  for (var i = 0; i < ids.length; i++) {
-    var it = byId[ids[i]];
-    var ls = it && it.lastSession;
-    if (!ls || !ls.sessionId) return null;
-    if (shared && (ls.sessionId !== shared.sessionId || ls.provider !== shared.provider)) return null;
-    if (!shared || (ls.atMs || 0) > (shared.atMs || 0)) shared = ls;
-  }
-  var cur = Array.isArray(sessions) && sessions.length ? window.__bramCurrentSessionOf(sessions) : null;
-  if (cur ? shared.sessionId === cur.id : shared.isCurrent) return null;
-  var b = { id: ids.join(","), provider: shared.provider, sessionId: shared.sessionId, atMs: shared.atMs, title: shared.title };
-  if (window.__bramGateLastSessionDismissedMap()[b.id + ":" + b.sessionId]) return null;
-  return b;
-};
-// Dismissals are focus (what is ticked right now), so sessionStorage, keyed
-// per project; null key means neither read nor write.
-window.__bramGateLastSessionDismissedMap = function () {
-  try {
-    var k = window.__bramProjectScopedKey("bram.gateLastSessionDismissed");
-    if (!k) return {};
-    var m = JSON.parse(window.sessionStorage.getItem(k) || "{}");
-    return m && typeof m === "object" ? m : {};
-  } catch (e) { return {}; }
-};
-window.__bramGateLastSessionDismissClick = function (items, sel, sessions, tick) {
-  var b = window.__bramGateLastSession(items, sel, sessions);
-  if (!b) return tick || 0;
-  window.__bramIframeTrace("worklist-last-session", { op: "dismiss", id: b.id, session: b.sessionId, provider: b.provider });
-  try {
-    var k = window.__bramProjectScopedKey("bram.gateLastSessionDismissed");
-    if (k) {
-      var m = window.__bramGateLastSessionDismissedMap();
-      m[b.id + ":" + b.sessionId] = 1;
-      window.sessionStorage.setItem(k, JSON.stringify(m));
-    }
-  } catch (e) {}
-  return (tick || 0) + 1;
-};
-var __bramGateLastSessionShown = {};
-window.__bramGateLastSessionLine = function (items, sel, sessions, tick) {
-  var b = window.__bramGateLastSession(items, sel, sessions, tick);
-  if (!b) return "";
-  var key = b.id + ":" + b.sessionId;
-  if (!__bramGateLastSessionShown[key]) {
-    __bramGateLastSessionShown[key] = true;
-    window.__bramIframeTrace("worklist-last-session", { op: "shown", id: b.id, session: b.sessionId, provider: b.provider });
-  }
-  // item-last-session-names-provider-and-session: name the agent when it's
-  // the other one ("by Codex"), and show the session's own name. Paired
-  // sessions carry a provider suffix ("General (Oct 5, 0.7.3) (Codex)");
-  // drop it here, where the line already names the provider, so the shared
-  // name reads the same from both sides.
-  var cur = Array.isArray(sessions) && sessions.length ? window.__bramCurrentSessionOf(sessions) : null;
-  var prov = String(b.provider || "").toLowerCase();
-  var provName = window.__bramProviderKey(prov) ? window.__bramProviderLabel(prov) : String(b.provider || "");
-  var otherAgent = !!(cur && cur.provider && String(cur.provider).toLowerCase() !== prov);
-  var title = String(b.title || "").replace(/\s*\((?:Codex|Claude|OpenCode)\)\s*$/i, "").trim();
-  if (otherAgent) {
-    return title
-      ? "Last worked on by " + provName + " in '" + title + "'."
-      : "Last worked on by " + provName + " in another session.";
-  }
-  return title
-    ? "Last worked on in another session: '" + title + "'."
-    : "Last worked on in another " + provName + " session.";
-};
-window.__bramGateSwitchToLastSession = function (items, sel, sessions, toastApi) {
-  var b = window.__bramGateLastSession(items, sel, sessions);
-  if (!b) return;
-  window.__bramIframeTrace("worklist-last-session", { op: "switch-click", id: b.id, session: b.sessionId, provider: b.provider });
-  window.__bramReloadAgentSessionClick(b.provider, b.sessionId, toastApi);
-};
+// remove-last-session-switch-offer (Jon, 2026-11-25: "has not proven useful,
+// is confusing, yank for now"): the gate bar's "Last worked on in another
+// session … Switch there" helpers were removed here; see git history.
 window.__bramReloadAgentSessionClick = function (provider, sessionId, toastApi) {
   var key = window.__bramProviderKey(provider) || "claude";
   var id = String(sessionId || "");

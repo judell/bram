@@ -57213,6 +57213,27 @@ mod send_ledger_rebuilt_corpus_tests {
     }
 }
 
+/// esc-notice-skips-tool-results: Claude writes each tool result as a
+/// `type: "user"` record whose content is all `tool_result` blocks. It is
+/// not a message the user sent, so it neither lands a send nor counts as
+/// the last user turn an Esc interrupted (demo 2026-11-26 07:45:
+/// `op=aborted-skip reason=not-last-user-turn` after an Esc mid-tool-call).
+/// Claude only: Codex's tool output is `function_call_output`, which the
+/// delivery matcher already ignores.
+fn claude_record_is_tool_results_only(r: &serde_json::Value) -> bool {
+    let Some(blocks) = r
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return false;
+    };
+    !blocks.is_empty()
+        && blocks
+            .iter()
+            .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+}
+
 fn send_ledger_line_delivers(line: &str) -> Option<bool> {
     let Ok(r) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
         return None;
@@ -57224,7 +57245,7 @@ fn send_ledger_line_delivers(line: &str) -> Option<bool> {
     };
     match r.get("type").and_then(|v| v.as_str()) {
         Some("user") => {
-            if is_synthetic(&r) {
+            if is_synthetic(&r) || claude_record_is_tool_results_only(&r) {
                 return None;
             }
             Some(false)
@@ -86915,6 +86936,28 @@ mod session_turn_tests {
                 r#"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#
             ),
             None
+        );
+        // esc-notice-skips-tool-results: a Claude tool result is a user
+        // record but not a delivery (shape from demo session 499354bb).
+        assert_eq!(
+            super::send_ledger_line_delivers(
+                r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01","type":"tool_result","content":"README.md\ndemo/"}]}}"#
+            ),
+            None
+        );
+        // Text beside a tool result still delivers.
+        assert_eq!(
+            super::send_ledger_line_delivers(
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"x"},{"type":"text","text":"hello there"}]}}"#
+            ),
+            Some(false)
+        );
+        // A text-block user record still delivers.
+        assert_eq!(
+            super::send_ledger_line_delivers(
+                r#"{"type":"user","message":{"content":[{"type":"text","text":"hello there"}]}}"#
+            ),
+            Some(false)
         );
         assert_eq!(
             super::send_ledger_line_delivers(

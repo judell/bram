@@ -13792,6 +13792,12 @@ window.__bramWorklistPaneOnPlan = function (board, open) {
   var at = window.__bramPlanPostedAt(board);
   if (!at || !__bramPlanSteps(board).length) return open;
   if (Date.now() - at > 60000) return open;
+  // plan-open-only-when-shown (developing-bram.md §Open what needs acting
+  // on): open only when Do recommended will show for this selection. A plan
+  // the pane withholds (few rows ticked, or one of its ids unticked) would
+  // open it onto nothing to act on. Event handler, not a binding, so the
+  // selection store is read here.
+  if (!window.__bramPlanVisible(board, window.__bramW2Selection || [])) return open;
   var KEY = "bram.worklistPaneOpenedForPlan";
   if (__bramReadSS(KEY, "") === String(at)) return open;
   __bramWriteSS(KEY, String(at));

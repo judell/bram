@@ -721,6 +721,19 @@
     <NavLink label="Commits" to="/commits" tooltip="Recent commits, and pushing them" />
     <NavLink label="Queue" to="/queue" tooltip="Notes you&apos;re holding to send the agent when it&apos;s free" />
     <NavLink label="Search" to="/search" tooltip="Search the project&apos;s history: sessions, commits, issues, worklist" />
+    <!-- context-stack-viewer (Jon, 2026-11-24): Context comes back out of
+         More. nav-order-search-first (Jon, 2026-11-25): "search / context /
+         history / files / cost / log / settings"; nav-order-alerts-out-of-run
+         (Jon, 2026-11-25): "cost / alerts / log". -->
+    <NavLink label="Context" to="/context" tooltip="What the model holds right now, block by block, and what the agent runs under" />
+    <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
+    <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
+    <!-- git-tab-freestyle: shown only in freestyle mode. `when` is a universal
+         component property (https://www.xmlui.org/docs/reference/components/NavLink). -->
+    <NavLink label="Git" to="/git" tooltip="What&apos;s changed in this folder, and commit it" when="{window.__bramStoryFreestyle(enhanceStatus.value)}" />
+    <!-- promote-accounting-to-nav (Jon, 2026-11-23): Token accounting leaves
+         the Status tab for its own page, between Files and Settings. -->
+    <NavLink label="Cost" to="/accounting" tooltip="What the agents&apos; model calls used, this session and every session, and what a fresh session would have saved" />
     <!-- alerts-pulse-and-startup-check: a dot beside the label pulses, like
          the transcript's new chip, while Needs-you-now holds something unseen
          this session. The first cut pulsed the whole link, and `fadein`
@@ -736,18 +749,6 @@
       <NavLink label="Alerts" to="/needs-you" tooltip="Everything waiting on your decision, in one list" />
       <AlertsPulse />
     </HStack>
-    <!-- context-stack-viewer (Jon, 2026-11-24): Context comes back out of
-         More. nav-order-search-first (Jon, 2026-11-25): "search / context /
-         history / files / cost / log / settings". -->
-    <NavLink label="Context" to="/context" tooltip="What the model holds right now, block by block, and what the agent runs under" />
-    <NavLink label="History" to="/history" tooltip="Every worklist item that was committed or dropped, and why" />
-    <NavLink label="Files" to="/files" tooltip="Browse and search this repo&apos;s files" />
-    <!-- git-tab-freestyle: shown only in freestyle mode. `when` is a universal
-         component property (https://www.xmlui.org/docs/reference/components/NavLink). -->
-    <NavLink label="Git" to="/git" tooltip="What&apos;s changed in this folder, and commit it" when="{window.__bramStoryFreestyle(enhanceStatus.value)}" />
-    <!-- promote-accounting-to-nav (Jon, 2026-11-23): Token accounting leaves
-         the Status tab for its own page, between Files and Settings. -->
-    <NavLink label="Cost" to="/accounting" tooltip="What the agents&apos; model calls used, this session and every session, and what a fresh session would have saved" />
     <NavLink label="Log" to="/log" tooltip="What Bram did around your work, newest first" />
     <NavLink label="Settings" to="/settings" tooltip="Project and personal settings for Bram" />
     <!-- nav-primary-list-and-more-group: less-used pages, collapsed by

@@ -1393,7 +1393,8 @@
         backgroundColor="$color-secondary-50">
         <HStack verticalAlignment="center" gap="0">
           <WorklistBarButton width="*" open="{worklistOpen}"
-            onToggle="worklistOpen = window.__bramSetWorklistPaneOpen(!worklistOpen, 'bar')" />
+            onToggle="worklistOpen = window.__bramSetWorklistPaneOpen(!worklistOpen, 'bar')"
+            onPlanPosted="(board) => worklistOpen = window.__bramWorklistPaneOnPlan(board, worklistOpen)" />
           <!-- Pop out: the full Worklist page. Arriving there closes the pane
                (the $pathname listener above). -->
           <!-- A labeled, outlined button with room from the edge: the bare

@@ -13689,6 +13689,26 @@ window.__bramSetWorklistPaneOpen = function (next, cause) {
   });
   return open;
 };
+// worklist-pane-opens-on-plan (Jon, 2026-11-25: "autoopen worklist inline so
+// i can see and do directly"): a plan the agent just posted opens the pane,
+// so Do recommended is in view. __bramPlanPostedAt is the binding WorklistBarButton
+// watches (reads only its argument); __bramWorklistPaneOnPlan is the handler.
+// Opens once per plan, and only for one posted in the last minute, so a
+// pane reload with a stored plan doesn't reopen a pane the user closed. The
+// last plan opened for is FOCUS (sessionStorage).
+window.__bramPlanPostedAt = function (board) {
+  return (board && board.plan && Number(board.plan.postedAtMs)) || 0;
+};
+window.__bramWorklistPaneOnPlan = function (board, open) {
+  var at = window.__bramPlanPostedAt(board);
+  if (!at || !__bramPlanSteps(board).length) return open;
+  if (Date.now() - at > 60000) return open;
+  var KEY = "bram.worklistPaneOpenedForPlan";
+  if (__bramReadSS(KEY, "") === String(at)) return open;
+  __bramWriteSS(KEY, String(at));
+  if (open) return open;
+  return window.__bramSetWorklistPaneOpen(true, "plan");
+};
 // The Worklist routes show the full page, so no bar there.
 window.__bramIsWorklistRoute = function (pathname) {
   return pathname === "/worklist2" || pathname === "/worklist" || pathname === "/";

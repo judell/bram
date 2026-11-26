@@ -7,6 +7,9 @@
          props   open (whether the Worklist pane is open; Main.xmlui owns it)
          events  toggle — the parent flips its own var; a component can't
                  write its parent's var
+                 planPosted(board) — the board's plan changed
+                 (worklist-pane-opens-on-plan); the parent decides whether
+                 to open
                  (https://docs.xmlui.org/howto/emit-a-custom-event-from-a-component,
                  same shape as FindBar.xmlui's needleChange). -->
   <DataSource id="twlBoard" url="/__worklist" />
@@ -15,6 +18,10 @@
   <ChangeListener
     listenTo="{twlWorklistEvt.value &amp;&amp; twlWorklistEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(twlWorklistEvt.value, twlBoard)" />
+  <!-- https://www.xmlui.org/docs/reference/components/ChangeListener -->
+  <ChangeListener
+    listenTo="{window.__bramPlanPostedAt(twlBoard.value)}"
+    onDidChange="() => emitEvent('planPosted', twlBoard.value)" />
   <PushSource id="twlGitEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
   <ChangeListener

@@ -24974,6 +24974,10 @@ window.__bramStackKindExplain = function (kind, provider) {
       : "Instructions recorded for this session.";
     if (kind === "thinking") return "Reasoning recorded for this session.";
   }
+  // The texts below are Claude's. Only Claude's stack reader produces
+  // thinking blocks: Claude Code sends Anthropic's encrypted thinking back on
+  // every call. Codex rollouts carry encrypted reasoning items too, which its
+  // reader doesn't read yet (codex-stack-reads-reasoning).
   var text = {
     harness: "The system prompt Claude Code sends first on every call, and the definitions of the tools the agent may call.",
     instructions: "CLAUDE.md and the files it imports, sent on every call.",
@@ -24989,8 +24993,14 @@ window.__bramStackKindExplain = function (kind, provider) {
   };
   return text[kind] || "";
 };
-window.__bramStackKindGlossary = function (provider) {
+// The About dialog's kinds: only those this session's stack holds, so a
+// provider is never told about kinds its reader doesn't produce (Codex's has
+// no memory, attachment or thinking blocks; Provider parity, Jon 2026-11-25).
+window.__bramStackKindGlossary = function (stack) {
+  var provider = stack && stack.provider;
+  var present = ((stack && stack.byKind) || []).filter(function (k) { return k.tokens > 0; }).map(function (k) { return k.kind; });
   return ["harness", "instructions", "memory", "user", "agent", "tool-call", "tool-result", "attachment", "thinking", "compaction-summary"]
+    .filter(function (k) { return present.indexOf(k) >= 0; })
     .map(function (k) {
       var title = window.__bramStackKindTitle(k, provider);
       var explain = window.__bramStackKindExplain(k, provider);
@@ -25048,7 +25058,34 @@ window.__bramStackLabelFont = function (block) {
 // What the tab is, in one sentence; the figures line says what this
 // session's stack measures.
 window.__bramStackIntro = function () {
-  return "Every block the model is sent in this session, since the last compaction, sized to the measured total.";
+  return "Every block (one piece of what the model is sent: a message, a tool call or its result, an instruction file, a bout of reasoning) in this session, since the last compaction, sized to the measured total.";
+};
+// The About dialog's opening lines, per provider (Provider parity, Jon
+// 2026-11-25: "prep for opencode/antigravity/others"). Each provider says
+// what its session record holds and how block sizes are measured, because
+// those differ by CLI: Claude's session file is sized by a bytes-per-token
+// rate measured on the session; Codex's rollout by four bytes a token. A
+// provider without its own lines (OpenCode, Antigravity, any later one)
+// gets the neutral pair; add its branch when its stack reader lands.
+window.__bramStackAboutLines = function (stack) {
+  var provider = stack && stack.provider;
+  var block = "Every block (one piece of what the model is sent: a message, a tool call or its result, an instruction file";
+  if (provider === "claude") {
+    return [
+      window.__bramStackIntro(),
+      "Sizes are the bytes each block takes in the session file, scaled by a bytes-per-token figure measured on this session so they total the context the last call reported. The remainder no block accounts for is shown as such."
+    ];
+  }
+  if (provider === "codex") {
+    return [
+      block + ") the Codex rollout records: message text, base instructions, tool inputs and tool results. It can omit parts of the model request.",
+      "Each block is weighed at one token per four text bytes. The last call’s token count comes from Codex usage records."
+    ];
+  }
+  return [
+    block + ") this session's record holds, since the last compaction.",
+    "Sizes are estimated from the session's own record; the remainder no block accounts for is shown as such."
+  ];
 };
 // The one sentence that answered "what are thinking tokens?" (Jon,
 // 2026-11-24: "finally a clear answer. include that prominently").
@@ -25123,19 +25160,16 @@ window.__bramStackSegments = function (stack, kinds) {
       color: p.color,
       width: (Math.round((p.drawn / drawn) * 10000) / 100) + "%",
       // The unaccounted segment is no category; a click on it releases.
-      opacity: p.kind === "all" || set.indexOf(p.kind) >= 0 ? "1" : "0.35",
-      tip: (p.kind === "all" ? (window.__bramStackAllShown(kinds, stack) ? "" : "**Show all categories**\n\n") : window.__bramStackFilterAction(set.indexOf(p.kind) >= 0) + "\n\n") + window.__bramStackTipMarkdown([
+      opacity: p.kind === "all" || set.indexOf(p.kind) >= 0 ? "1" : "0.2",
+      tip: (p.kind === "all" ? (kinds ? "**Release filter**\n\n" : "") : window.__bramStackFilterAction(kinds, p.kind) + "\n\n") + window.__bramStackTipMarkdown([
         p.kind === "thinking" ? window.__bramStackThinkingLine(stack) : p.title + ": " + window.__bramStackTokens(p.tokens) + " tokens (" + share + "%).",
         window.__bramStackKindExplain(p.kind === "all" ? "unaccounted" : p.kind, stack.provider)
       ])
     };
   });
 };
-// The kind filter is the set of kinds shown (Jon, 2026-11-25: "can we make
-// it multiselect?", then "default to all selected"). null is every kind in
-// the stack, the default; a click on a chip or segment hides its kind, a
-// second click shows it again; "all" (the unaccounted segment) shows every
-// kind again. An empty set shows none.
+// The kind filter: null is every kind in the stack, the default; an array
+// is the selected kinds, shown alone (context-kind-toggle-vivid).
 window.__bramStackAllKinds = function (stack) {
   return ((stack && stack.byKind) || []).map(function (k) { return k.kind; });
 };
@@ -25149,19 +25183,31 @@ window.__bramStackAllShown = function (kinds, stack) {
   var set = window.__bramStackKindSet(kinds, stack);
   return window.__bramStackAllKinds(stack).every(function (k) { return set.indexOf(k) >= 0; });
 };
-window.__bramStackToggleKind = function (current, kind, stack) {
+// context-kind-toggle-vivid (Jon, 2026-11-25: "bring back multiselect"): the
+// selection is the kinds shown, null when none is selected (all shown). A
+// click adds a kind or removes it; the last one removed, the grey unaccounted
+// segment ("all") or the × releases to all. It takes no stack: in the
+// Tooltip-wrapped handler `$props.stack` did not resolve, so the earlier
+// toggle saw no kinds and returned null on every click (trace 2026-11-26
+// 02:37:21-23, kind=thinking, next=null).
+window.__bramStackToggleKind = function (current, kind) {
   if (kind === "all") return null;
-  var set = window.__bramStackKindSet(current, stack);
+  var set = Array.isArray(current) ? current : (current ? [current] : []);
   var next = set.indexOf(kind) >= 0 ? set.filter(function (k) { return k !== kind; }) : set.concat([kind]);
-  return window.__bramStackAllShown(next, stack) ? null : next;
+  return next.length ? next : null;
+};
+// True when `kind` is among the user's selected kinds (not merely shown).
+window.__bramStackSelected = function (kinds, kind) {
+  return Array.isArray(kinds) ? kinds.indexOf(kind) >= 0 : kinds === kind;
 };
 // The legend chips, which are also the kind filter: each kind in the stack
 // with its share; `active` marks the current filter. No "All kinds" chip
 // (Jon, 2026-11-25: "all kinds should be unnecessary"): clicking the active
 // chip releases the filter, and its tooltip leads with which click it is.
-// Every kind starts shown, so a click hides or shows one.
-window.__bramStackFilterAction = function (shown) {
-  return shown ? "**Hide this category**" : "**Show this category**";
+// Every kind starts shown; clicks add kinds to the filter or remove them.
+window.__bramStackFilterAction = function (kinds, kind) {
+  if (!kinds) return "**Filter to this category**";
+  return window.__bramStackSelected(kinds, kind) ? "**Remove from filter**" : "**Add to filter**";
 };
 window.__bramStackLegend = function (stack, kinds) {
   var total = (stack && stack.measured && stack.measured.tokens) || 0;
@@ -25176,7 +25222,8 @@ window.__bramStackLegend = function (stack, kinds) {
       label: window.__bramStackKindTitle(k.kind, stack.provider) + " " + (pct >= 1 ? pct + "%" : "<1%"),
       color: window.__bramStackKindColor(k.kind),
       active: set.indexOf(k.kind) >= 0,
-      tip: window.__bramStackFilterAction(set.indexOf(k.kind) >= 0) + "\n\n" + window.__bramStackTipMarkdown([
+      filter: window.__bramStackSelected(kinds, k.kind),
+      tip: window.__bramStackFilterAction(kinds, k.kind) + "\n\n" + window.__bramStackTipMarkdown([
         k.kind === "thinking" ? window.__bramStackThinkingLine(stack) : "",
         window.__bramStackKindExplain(k.kind, stack.provider),
         k.blocks + (k.blocks === 1 ? " block, " : " blocks, ") + window.__bramStackTokens(k.tokens) + " tokens."
@@ -25195,15 +25242,25 @@ window.__bramStackTipMarkdown = function (paragraphs) {
     return String(p).replace(/([\\`*_\[\]<>#|])/g, "\\$1");
   }).join("\n\n");
 };
-// Every kind starts shown, so shown is the plain look and a hidden kind fades.
+// On and off must read at a glance (Jon, 2026-11-25: "the label's
+// distinction between toggled and not should be vivid"). With no filter every
+// chip is on: filled swatch, plain label. Filtered, the chosen chips are bold in
+// the primary colour and the rest are off: hollow swatch, struck-through
+// label in the secondary colour, half opacity.
 window.__bramStackLegendWeight = function (entry) {
-  return "$fontWeight-normal";
+  return entry && entry.filter ? "$fontWeight-bold" : "$fontWeight-normal";
 };
 window.__bramStackLegendColor = function (entry) {
-  return "$textColor-secondary";
+  return entry && entry.active === false ? "$textColor-secondary" : "$textColor-primary";
 };
 window.__bramStackLegendOpacity = function (entry) {
-  return entry && entry.active === false ? "0.35" : "1";
+  return entry && entry.active === false ? "0.5" : "1";
+};
+window.__bramStackLegendDecoration = function (entry) {
+  return entry && entry.active === false ? "line-through" : "none";
+};
+window.__bramStackSwatchFill = function (entry) {
+  return entry && entry.active === false ? "transparent" : (entry && entry.color) || "transparent";
 };
 // context-growth-explains-jumps (Jon, 2026-11-25): each point of the Token
 // growth chart says what caused its jump. The blocks come from
@@ -25223,11 +25280,13 @@ window.__bramStackLegendOpacity = function (entry) {
 // so their points keep the time and the token count.
 //
 // The guard: a call lists its blocks only when their tokens come within
-// max(500, half the jump) of the chart's change. On some compacted Claude
-// sessions the reader's call numbers drift past the chart's index (4 to 15
-// calls on 15f71ae7, 58633e4b, 09acc54d); a mismatch says so instead of
-// naming the wrong blocks. Blocks from before the last compaction are not in
-// the stack at all (only counted), for either provider.
+// max(500, half the jump) of the chart's change. It covers the time join
+// (Codex) and any call whose blocks don't add up to its change, as on some
+// post-compaction points of 09acc54d even after becd44b0 aligned the Claude
+// reader's call numbers with the chart's index; a mismatch says so
+// ("unmatched") instead of naming the wrong blocks. Blocks from before the
+// last compaction are not in the stack at all (only counted), for either
+// provider.
 window.__bramStackTurnsQuery = function (session) {
   var s = String(session || "");
   var at = s.indexOf(":");

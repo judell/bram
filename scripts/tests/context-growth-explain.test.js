@@ -176,14 +176,28 @@ const call = (k, context) => ({ provider: "claude", session: "s", thread: "main"
   assert.strictEqual(two.series[1].stack, "kinds");
   const tip2 = two.tooltip.formatter(two.series.map((s) => ({ data: s.data[4] })));
   assert.ok(tip2.includes("+900 tokens of") && tip2.includes("1.4k of them now"), tip2);
-  // The toggle hides and shows; showing every kind again is the default.
-  const toggle = (cur, k) => JSON.parse(JSON.stringify(real.__bramStackToggleKind(cur, k, stack)));
-  eq(toggle(null, "agent"), ["harness", "compaction-summary", "tool-result"]);
-  eq(toggle(["tool-result"], "agent"), ["tool-result", "agent"]);
-  eq(toggle(["harness", "compaction-summary", "tool-result"], "agent"), null, "all shown again is null");
+  // Multiselect: clicks add and remove kinds; none selected (null) shows all.
+  const toggle = (cur, k) => JSON.parse(JSON.stringify(real.__bramStackToggleKind(cur, k)));
+  eq(toggle(null, "agent"), ["agent"]);
+  eq(toggle(["agent"], "tool-result"), ["agent", "tool-result"], "a second kind adds");
+  eq(toggle(["agent", "tool-result"], "agent"), ["tool-result"], "a selected kind removes");
+  eq(toggle(["agent"], "agent"), null, "the last one removed shows all");
   eq(toggle(["agent"], "all"), null);
   eq(real.__bramStackRows(stack, "order", null).length, 5);
   eq(real.__bramStackRows(stack, "order", ["agent"]).length, 1);
+  // The legend: every chip on with no filter; filtered, selected bold, the rest off.
+  const legend = (k) => JSON.parse(JSON.stringify(real.__bramStackLegend(stack, k)));
+  eq(legend(null).every((c) => c.active && !c.filter), true);
+  assert.ok(legend(null)[0].tip.startsWith("**Filter to this category**"));
+  const on = legend(["agent"]);
+  eq(on.filter((c) => c.filter).map((c) => c.kind), ["agent"]);
+  eq(on.filter((c) => c.active).map((c) => c.kind), ["agent"]);
+  assert.ok(on.find((c) => c.kind === "agent").tip.startsWith("**Remove from filter**"));
+  assert.ok(on.find((c) => c.kind === "harness").tip.startsWith("**Add to filter**"));
+  const off = on.find((c) => c.kind === "harness");
+  eq(real.__bramStackLegendDecoration(off), "line-through");
+  eq(real.__bramStackSwatchFill(off), "transparent");
+  eq(real.__bramStackLegendWeight(on.find((c) => c.kind === "agent")), "$fontWeight-bold");
 }
 
 // 4. No stack reader (OpenCode, Antigravity): today's plain tooltip.
@@ -192,6 +206,19 @@ const call = (k, context) => ({ provider: "claude", session: "s", thread: "main"
   const opt = chart({ calls }, "claude:s", { supported: false, session: "claude:s", blocks: [] }, []);
   eq(opt.tooltip, { trigger: "axis" });
   eq(opt.series[0].data, [[calls[0].atMs, 1000]]);
+}
+
+// 4b. The About dialog's lines: Claude and Codex their own, any other
+// provider the neutral pair (Provider parity).
+{
+  const about = (p) => JSON.parse(JSON.stringify(real.__bramStackAboutLines({ provider: p })));
+  assert.ok(about("claude")[1].startsWith("Sizes are the bytes"));
+  assert.ok(about("codex")[0].includes("Codex rollout"));
+  for (const p of ["opencode", "antigravity", "someday"]) {
+    const lines = about(p);
+    eq(lines.length, 2);
+    assert.ok(!/Claude|Codex|Anthropic/.test(lines.join(" ")), p);
+  }
 }
 
 // 5. The turns query splits the stack's session.

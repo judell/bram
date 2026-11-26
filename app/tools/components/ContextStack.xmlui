@@ -36,14 +36,17 @@
   <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.session}" onDidChange="selectedI = null; kinds = null" />
   <ModalDialog id="contextInfoDialog" title="About Context">
     <VStack gap="$space-3">
-      <Text value="{($props.stack &amp;&amp; $props.stack.provider) === 'codex' ? 'The rollout records message text, base instructions, tool inputs and tool results. It can omit parts of the model request.' : window.__bramStackIntro()}" />
-      <Text when="{($props.stack &amp;&amp; $props.stack.provider) === 'codex'}" value="Block weights estimate one token per four text bytes. The last call’s token count comes from Codex usage records." />
-      <Text when="{($props.stack &amp;&amp; $props.stack.provider) !== 'codex'}" value="Sizes are the bytes each block takes in the session file, scaled by a bytes-per-token figure measured on this session so they total the context the last call reported. The remainder no block accounts for is shown as such." />
+      <!-- Provider parity: one helper says, per provider, what its session
+           record holds and how sizes are measured; a provider with no
+           reader of its own gets the neutral lines. -->
+      <Items data="{window.__bramStackAboutLines($props.stack)}">
+        <Text value="{$item}" />
+      </Items>
       <!-- One line per kind, the way the tables say what their columns
            mean (table-headers-explained). -->
       <VStack gap="$space-1">
         <Text fontWeight="$fontWeight-bold" value="What the kinds are" />
-        <Items data="{window.__bramStackKindGlossary($props.stack &amp;&amp; $props.stack.provider)}">
+        <Items data="{window.__bramStackKindGlossary($props.stack)}">
           <HStack gap="$space-2" verticalAlignment="start">
             <Stack width="10px" height="10px" backgroundColor="{$item.color}" marginTop="$space-1" />
             <Text fontSize="$fontSize-sm" width="*" value="{$item.line}" />
@@ -65,17 +68,26 @@
            in the About dialog. The rates and their provenance stay on the
            route; the pane shows only the headline (Jon, 2026-11-24).
            https://www.xmlui.org/docs/howto/wrap-items-across-multiple-rows -->
-      <HStack wrapContent="true" gap="$space-2" verticalAlignment="baseline">
+      <!-- Centered, with the About ⓘ at the end (Jon, 2026-11-25). -->
+      <HStack wrapContent="true" gap="$space-2" verticalAlignment="center">
         <Heading level="h1">Context</Heading>
         <HStack
           when="{$props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
           gap="$space-1"
-          verticalAlignment="baseline">
+          verticalAlignment="center">
           <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackThresholdPrefix($props.stack, $props.settings)}" />
           <Link to="/settings?highlight=suggestAtContextShare" noIndicator="true" fontSize="$fontSize-sm">threshold</Link>
           <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="·" />
           <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{window.__bramStackHeadline($props.stack)}" />
         </HStack>
+        <Theme paddingVertical-Button-sm="0" paddingHorizontal-Button-sm="$space-1">
+          <Button
+            label="ⓘ"
+            variant="ghost"
+            size="sm"
+            tooltip="About Context"
+            onClick="contextInfoDialog.open()" />
+        </Theme>
       </HStack>
       <Text
         when="{!!window.__bramStackUnsupportedLine($props.stack)}"
@@ -113,7 +125,7 @@
               height="20px"
               backgroundColor="{$item.color}"
               opacity="{$item.opacity}"
-              onClick="kinds = window.__bramStackToggleKind(kinds, $item.kind, $props.stack)" />
+              onClick="kinds = window.__bramStackToggleKind(kinds, $item.kind)" />
           </Tooltip>
         </Items>
       </HStack>
@@ -130,26 +142,41 @@
             <property name="tooltipTemplate">
               <Markdown maxWidth="360px" fontSize="$fontSize-sm" content="{$item.tip}" />
             </property>
-            <Link onClick="kinds = window.__bramStackToggleKind(kinds, $item.kind, $props.stack)" noIndicator="true" paddingRight="$space-2">
+            <!-- context-kind-toggle-vivid: an off chip is a hollow swatch
+                 (border in the kind's colour) and a struck-through label.
+                 https://www.xmlui.org/docs/styles-and-themes/layout-props -->
+            <Link onClick="kinds = window.__bramStackToggleKind(kinds, $item.kind)" noIndicator="true" paddingRight="$space-2">
               <HStack gap="$space-1" verticalAlignment="center" opacity="{window.__bramStackLegendOpacity($item)}">
-                <Stack when="{$item.color}" width="10px" height="10px" backgroundColor="{$item.color}" />
+                <Stack
+                  when="{$item.color}"
+                  width="10px"
+                  height="10px"
+                  backgroundColor="{window.__bramStackSwatchFill($item)}"
+                  borderWidth="1.5px"
+                  borderStyle="solid"
+                  borderColor="{$item.color}" />
                 <Text
                   fontSize="$fontSize-xs"
                   lineHeight="1.3"
                   color="{window.__bramStackLegendColor($item)}"
                   fontWeight="{window.__bramStackLegendWeight($item)}"
+                  textDecorationLine="{window.__bramStackLegendDecoration($item)}"
                   value="{$item.label}" />
               </HStack>
             </Link>
           </Tooltip>
         </Items>
+        <!-- context-kind-toggle-vivid (Jon, 2026-11-25): the × replaces the
+             About dialog; it shows while any kind is selected and releases
+             the whole selection. -->
         <Theme paddingVertical-Button-sm="0" paddingHorizontal-Button-sm="$space-1">
           <Button
-            label="ⓘ"
+            when="{!!kinds}"
+            label="×"
             variant="ghost"
             size="sm"
-            tooltip="About Context"
-            onClick="contextInfoDialog.open()" />
+            tooltip="Release filter, show all"
+            onClick="kinds = null" />
         </Theme>
       </HStack>
       <!-- The thinking sentence leads the Thinking chip's and segment's

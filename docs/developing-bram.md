@@ -157,6 +157,17 @@ stays in the trace, not on the surface.
 
 Receipts → [`docs/developing-bram-reference.md` §Receipts: Warning color](developing-bram-reference.md#receipts-warning-color).
 
+## Define a term where it first appears
+
+When pane text uses a glossary-like term (a word with a meaning
+specific to Bram or to the agent, such as *block*, *call*, *compaction*,
+*claim*), define it in parentheses right after its first mention on that
+surface: "Every block (one piece of what the model is sent: a message, a
+tool call or its result, an instruction file, a bout of reasoning) …"
+(Jon, 2026-11-25). Later mentions on the same surface use the bare term.
+A tooltip or dialog counts as its own surface. Don't send the reader to a
+separate glossary for a word the sentence needs.
+
 ## Rust: typed data, not hand-read JSON
 
 Data inside the host is typed (Jon, 2026-11-11, a standing rule):

@@ -99902,6 +99902,15 @@ fn handle_audit_direct_edit<R: tauri::Runtime>(
 // The pending flag carries its kind ("feedback", "chat" or "item"); GET names
 // a chat flag's ref as turnRef.
 //
+// flag-chat accepts when the running turn is chat. Chat turns delete
+// .turn-context.json, so an absent file (or kind general / turn-end, or no
+// addressedIds) reads as chat; only a present context with addressed ids and
+// another kind (iterate, approved, drop) refuses, because feedback and gate
+// turns write no outbound record and the newest record may be an older chat
+// message. The record must be a plain message (empty mode, so not
+// skip-worklist), the newest, with no `<ms>-inline` ledger send after it
+// (those write no record). See misaddressed_flag_chat_verdict.
+//
 // footer-selection-label-follows-selection: a third kind. Feedback ticked on
 // item X that is plainly about item Y (typically the work Y's subagent is
 // doing):
@@ -99926,6 +99935,111 @@ fn misaddressed_turn_ref_ok(turn_ref: &str) -> bool {
         Some(ms) => !ms.is_empty() && ms.chars().all(|c| c.is_ascii_digit()),
         None => false,
     }
+}
+
+// The running turn's addressing, as emit_turn_context writes it. The file is
+// absent for a chat turn (no ids), so absence reads as chat.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct TurnContextFile {
+    kind: String,
+    addressed_ids: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum FlagChatRefusal {
+    BadRef,
+    NoTurn,
+    NotChat,
+    NotNewest,
+    NotChatTurn,
+    NotOnBoard,
+}
+
+impl FlagChatRefusal {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::BadRef => "bad-ref",
+            Self::NoTurn => "no-turn",
+            Self::NotChat => "not-chat",
+            Self::NotNewest => "not-newest",
+            Self::NotChatTurn => "not-chat-turn",
+            Self::NotOnBoard => "not-on-board",
+        }
+    }
+    fn status(self) -> u16 {
+        if self == Self::BadRef {
+            400
+        } else {
+            409
+        }
+    }
+    fn error(self) -> &'static str {
+        match self {
+            Self::BadRef => "bad turnRef",
+            Self::NoTurn => "no outbound turn with that ref",
+            Self::NotChat => "that turn was not sent as chat",
+            Self::NotNewest => "that is not the message being answered",
+            Self::NotChatTurn => "the running turn is not a chat turn",
+            Self::NotOnBoard => "that item is not on the board",
+        }
+    }
+}
+
+// True when a ledger entry of an inline send (`<ms>-inline`, which writes no
+// outbound-turns record) was injected after the turnRef's `<ms>`: the flagged
+// ref is then not the message being answered. `entries` is (id, injected ms).
+fn misaddressed_newer_inline_send(turn_ref: &str, entries: &[(String, i64)]) -> bool {
+    let Some(ms) = turn_ref
+        .strip_suffix("-turn")
+        .and_then(|m| m.parse::<i64>().ok())
+    else {
+        return false;
+    };
+    entries
+        .iter()
+        .any(|(id, at)| id.ends_with("-inline") && *at > ms)
+}
+
+// Whether flag-chat accepts. A chat turn is the outbound record being a plain
+// message (no mode, so not skip-worklist), the newest record with no inline
+// send after it, and the running turn not addressed: the turn-context file
+// is absent (chat turns delete it), "general" or "turn-end", or has no ids.
+fn misaddressed_flag_chat_verdict(
+    turn_ref: &str,
+    record: Option<&serde_json::Value>,
+    newest: Option<&str>,
+    ctx: Option<&TurnContextFile>,
+    on_board: bool,
+    newer_send: bool,
+) -> Result<(), FlagChatRefusal> {
+    if !misaddressed_turn_ref_ok(turn_ref) {
+        return Err(FlagChatRefusal::BadRef);
+    }
+    let Some(record) = record else {
+        return Err(FlagChatRefusal::NoTurn);
+    };
+    let is_chat = record.get("kind").and_then(|v| v.as_str()) == Some("message")
+        && record
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty();
+    if !is_chat {
+        return Err(FlagChatRefusal::NotChat);
+    }
+    if newest != Some(turn_ref) || newer_send {
+        return Err(FlagChatRefusal::NotNewest);
+    }
+    if let Some(c) = ctx {
+        if !c.addressed_ids.is_empty() && c.kind != "general" && c.kind != "turn-end" {
+            return Err(FlagChatRefusal::NotChatTurn);
+        }
+    }
+    if !on_board {
+        return Err(FlagChatRefusal::NotOnBoard);
+    }
+    Ok(())
 }
 
 // The note sent with a chat message resent as feedback, so the item's
@@ -100166,43 +100280,11 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if !misaddressed_turn_ref_ok(&turn_ref) {
-                trace("op=flag-chat-refused reason=bad-ref".to_string());
-                return misaddressed_json(400, serde_json::json!({ "error": "bad turnRef" }));
-            }
-            // The turn must be a plain chat message (not skip-worklist, not a
-            // gate action), and the newest one: the message being answered.
             let dir = outbound_turns_dir(app);
             let record = dir
                 .as_ref()
                 .and_then(|d| std::fs::read_to_string(d.join(format!("{}.json", turn_ref))).ok())
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-            let Some(record) = record else {
-                trace(format!(
-                    "op=flag-chat-refused reason=no-turn ref={}",
-                    turn_ref
-                ));
-                return misaddressed_json(
-                    409,
-                    serde_json::json!({ "error": "no outbound turn with that ref" }),
-                );
-            };
-            let is_chat = record.get("kind").and_then(|v| v.as_str()) == Some("message")
-                && record
-                    .get("mode")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .is_empty();
-            if !is_chat {
-                trace(format!(
-                    "op=flag-chat-refused reason=not-chat ref={}",
-                    turn_ref
-                ));
-                return misaddressed_json(
-                    409,
-                    serde_json::json!({ "error": "that turn was not sent as chat" }),
-                );
-            }
             let newest = dir
                 .as_ref()
                 .and_then(|d| std::fs::read_dir(d).ok())
@@ -100218,37 +100300,23 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
                         .map(|(_, stem)| stem)
                 })
                 .unwrap_or(None);
-            if newest.as_deref() != Some(turn_ref.as_str()) {
-                trace(format!(
-                    "op=flag-chat-refused reason=not-newest ref={}",
-                    turn_ref
-                ));
-                return misaddressed_json(
-                    409,
-                    serde_json::json!({ "error": "that is not the message being answered" }),
-                );
-            }
-            let ctx_general = project_root(Some(app))
+            let ctx = project_root(Some(app))
                 .and_then(|root| {
                     std::fs::read_to_string(resource_relative_path(&root, TURN_CONTEXT_REL)).ok()
                 })
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|c| {
-                    c.get("kind")
-                        .and_then(|k| k.as_str())
-                        .map(|k| k == "general")
+                .and_then(|s| serde_json::from_str::<TurnContextFile>(&s).ok());
+            // None when the ledger can't be read: don't refuse on this ground.
+            let newer_send = send_ledger_cell()
+                .lock()
+                .ok()
+                .map(|ledger| {
+                    let ids: Vec<(String, i64)> = ledger
+                        .iter()
+                        .map(|e| (e.id.clone(), e.injected_at_ms))
+                        .collect();
+                    misaddressed_newer_inline_send(&turn_ref, &ids)
                 })
                 .unwrap_or(false);
-            if !ctx_general {
-                trace(format!(
-                    "op=flag-chat-refused reason=not-chat-turn ref={}",
-                    turn_ref
-                ));
-                return misaddressed_json(
-                    409,
-                    serde_json::json!({ "error": "the running turn is not a chat turn" }),
-                );
-            }
             let on_board = worklist_file(app)
                 .and_then(|p| std::fs::read(p).ok())
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
@@ -100259,15 +100327,31 @@ fn handle_worklist_misaddressed<R: tauri::Runtime>(
                         })
                     })
                 })
-                .unwrap_or(false);
-            if item_id.is_empty() || !on_board {
-                trace(format!(
-                    "op=flag-chat-refused reason=not-on-board ref={} item={}",
-                    turn_ref, item_id
-                ));
+                .unwrap_or(false)
+                && !item_id.is_empty();
+            if let Err(refusal) = misaddressed_flag_chat_verdict(
+                &turn_ref,
+                record.as_ref(),
+                newest.as_deref(),
+                ctx.as_ref(),
+                on_board,
+                newer_send,
+            ) {
+                if refusal == FlagChatRefusal::NotOnBoard {
+                    trace(format!(
+                        "op=flag-chat-refused reason=not-on-board ref={} item={}",
+                        turn_ref, item_id
+                    ));
+                } else {
+                    trace(format!(
+                        "op=flag-chat-refused reason={} ref={}",
+                        refusal.reason(),
+                        turn_ref
+                    ));
+                }
                 return misaddressed_json(
-                    409,
-                    serde_json::json!({ "error": "that item is not on the board" }),
+                    refusal.status(),
+                    serde_json::json!({ "error": refusal.error() }),
                 );
             }
             if let Ok(mut g) = misaddressed_cell().lock() {
@@ -100484,6 +100568,112 @@ mod misaddressed_feedback_tests {
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    use super::{
+        misaddressed_flag_chat_verdict, misaddressed_newer_inline_send, FlagChatRefusal,
+        TurnContextFile,
+    };
+
+    const REF: &str = "1795637875585-turn";
+
+    fn chat_record() -> serde_json::Value {
+        serde_json::json!({ "kind": "message", "mode": "" })
+    }
+
+    fn ctx(kind: &str, ids: &[&str]) -> TurnContextFile {
+        TurnContextFile {
+            kind: kind.to_string(),
+            addressed_ids: ids.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn verdict(
+        record: Option<&serde_json::Value>,
+        newest: Option<&str>,
+        c: Option<&TurnContextFile>,
+        on_board: bool,
+        newer_send: bool,
+    ) -> Result<(), FlagChatRefusal> {
+        misaddressed_flag_chat_verdict(REF, record, newest, c, on_board, newer_send)
+    }
+
+    #[test]
+    fn flag_chat_accepts_chat_turn_with_no_turn_context() {
+        let r = chat_record();
+        assert_eq!(verdict(Some(&r), Some(REF), None, true, false), Ok(()));
+    }
+
+    #[test]
+    fn flag_chat_accepts_general_context() {
+        let r = chat_record();
+        let c = ctx("general", &[]);
+        assert_eq!(verdict(Some(&r), Some(REF), Some(&c), true, false), Ok(()));
+        let c = ctx("turn-end", &[]);
+        assert_eq!(verdict(Some(&r), Some(REF), Some(&c), true, false), Ok(()));
+    }
+
+    #[test]
+    fn flag_chat_refuses_iterate_context_with_ids() {
+        let r = chat_record();
+        let c = ctx("iterate", &["item-x"]);
+        let e = verdict(Some(&r), Some(REF), Some(&c), true, false).unwrap_err();
+        assert_eq!(e, FlagChatRefusal::NotChatTurn);
+        assert_eq!(e.reason(), "not-chat-turn");
+        assert_eq!(e.status(), 409);
+    }
+
+    #[test]
+    fn flag_chat_refuses_stale_ref() {
+        let r = chat_record();
+        let e = verdict(Some(&r), Some("1795637875999-turn"), None, true, false).unwrap_err();
+        assert_eq!(e, FlagChatRefusal::NotNewest);
+        assert_eq!(e.reason(), "not-newest");
+    }
+
+    #[test]
+    fn flag_chat_refuses_when_a_newer_inline_send_exists() {
+        let r = chat_record();
+        let entries = vec![
+            ("1795637875000-inline".to_string(), 1795637875000),
+            ("1795637880000-inline".to_string(), 1795637880000),
+        ];
+        let newer = misaddressed_newer_inline_send(REF, &entries);
+        assert!(newer);
+        assert_eq!(
+            verdict(Some(&r), Some(REF), None, true, newer),
+            Err(FlagChatRefusal::NotNewest)
+        );
+        assert!(!misaddressed_newer_inline_send(
+            REF,
+            &[("1795637875000-inline".to_string(), 1795637875000)]
+        ));
+    }
+
+    #[test]
+    fn flag_chat_refuses_skip_worklist_mode() {
+        let r = serde_json::json!({ "kind": "message", "mode": "skip-worklist" });
+        assert_eq!(
+            verdict(Some(&r), Some(REF), None, true, false),
+            Err(FlagChatRefusal::NotChat)
+        );
+    }
+
+    #[test]
+    fn flag_chat_refuses_item_not_on_board_and_bad_inputs() {
+        let r = chat_record();
+        let e = verdict(Some(&r), Some(REF), None, false, false).unwrap_err();
+        assert_eq!(e, FlagChatRefusal::NotOnBoard);
+        assert_eq!(e.reason(), "not-on-board");
+        assert_eq!(
+            verdict(None, Some(REF), None, true, false),
+            Err(FlagChatRefusal::NoTurn)
+        );
+        assert_eq!(
+            misaddressed_flag_chat_verdict("../x", None, None, None, true, false),
+            Err(FlagChatRefusal::BadRef)
+        );
+        assert_eq!(FlagChatRefusal::BadRef.status(), 400);
     }
 
     #[test]

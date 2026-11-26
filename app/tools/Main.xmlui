@@ -1860,6 +1860,15 @@
               fontSize="$fontSize-sm"
               value="{window.__bramSendLedgerNoticeStatusTail(sendLedgerDs.value, sendNoticeDismissed)}" />
           </HStack>
+          <!-- interrupted-notice-resend-button: Go on asks for the answer to
+               an interrupted reply; the agent already has the message.
+               https://www.xmlui.org/docs/reference/components/Button -->
+          <Button
+            when="{window.__bramSendLedgerNoticeGoOn(sendLedgerDs.value, sendNoticeDismissed)}"
+            label="Go on"
+            size="xs"
+            tooltip="Ask the agent to answer the message the Esc interrupted"
+            onClick="sendNoticeDismissed = window.__bramSendLedgerGoOn(sendLedgerDs.value)" />
           <Button
             label="✕"
             variant="ghost"

@@ -250,8 +250,11 @@ submission for this turn.
 **Edit only the authorized items' files, with Edit / Write.** Addressed
 feedback establishes the relevant claim. **Chat edits with no claim
 belong to no item**, even when a begun item declares the path. When the
-user redirects begun work in chat without a live grant, ask for it as
-feedback on the item.
+user redirects begun work in chat without a live grant, flag the message
+as feedback on that item (`.claude/bram-reference/worklist-mechanics.md`
+§Chat that should have been feedback) so
+the pane offers **Resend as feedback**; don't ask the user to tick the item
+and send it again.
 
 - **Payload shapes, resolve's responses, the per-status iterate rules in full, feedback-draft fallbacks** → read `.claude/bram-reference/worklist-mechanics.md` (§What each button sends; §Feedback payload details).
 - **Recommending Drop / Commit / Start on named items, or "What's my next move?"** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
@@ -341,7 +344,7 @@ feedback plainly about something else makes the record **false**:
 **flag it, say so in one line, and stop**.
 
 - **Feedback plainly about something else** → read `.claude/bram-reference/worklist-mechanics.md` (§Flagging feedback that drifts from its item) before replying.
-- **Chat that is plainly feedback on an item on the board** (the other direction) → read `.claude/bram-reference/worklist-mechanics.md` (§Chat that should have been feedback).
+- **Chat that is plainly feedback on an item on the board** (the other direction), including a short one-line message → read `.claude/bram-reference/worklist-mechanics.md` (§Chat that should have been feedback) before replying, and flag it.
 
 ### Authoring conventions
 

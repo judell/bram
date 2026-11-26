@@ -18751,7 +18751,6 @@ window.__bramWithdrawIssueClose = function (queueDs, commitsDs, issue, commitSha
 window.__bramSendLedgerNotice = function (payload, dismissedKey) {
   var entries = (payload && payload.entries) || [];
   var nowMs = (payload && payload.nowMs) || Date.now();
-  var staleTerminalInput = !!(payload && payload.staleTerminalInput);
   // antigravity-error-state-surfaced: agy took the send and refused it. Said
   // here, in the footer notice, where the ledger used to call the same send
   // "did not reach the agent" (2026-11-03). No age cutoff: the host clears
@@ -18784,19 +18783,22 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
     return "Your message" + label + " was interrupted before the agent took it — it's back in the composer.";
   }
   if (latest.state === "landed" && latest.cause === "aborted") {
-    // interrupted-banner-verifies-restore: staleTerminalInput is now a
-    // VERIFIED claim (host matched the message fragment after the tail's
-    // last composer marker — a transcript echo no longer counts). When the
-    // text was not observed in the composer, say that truth instead of
-    // instructing the user to press Enter on an input that may be empty
-    // (2026-09-06: "That's a lie. It wasn't back.").
-    if (!staleTerminalInput)
-      return "Response interrupted — your message" + label + " was not restored to the terminal input. Its text is kept in the send ledger on the";
-    // Truthful semantics (2026-07-06 esc drill): the send landed as a
-    // transport record but Esc made Claude Code retract and re-stage it
-    // in the TERMINAL input, unanswered — and the copy there prepends
-    // onto the next terminal-submitted send if not cleared.
-    return "Response interrupted — your message" + label + " is back in the terminal input, unanswered. Press Enter there to resend it, or clear it before sending anything new.";
+    // interrupted-notice-resend-button: the message reached the agent before
+    // the Esc, so nothing is lost and a resend would send a duplicate
+    // (session fa53e079: the same approved: line at 01:59:00 and, after
+    // up-arrow + Enter, again at 02:14:01). Name the pane action instead,
+    // with no resend button and no terminal ("needing a resend button is a smell
+    // we should make go away", Jon 2026-07-03; "if we can we should",
+    // 2026-11-25). The wording doesn't branch on staleTerminalInput: the
+    // pane clears a leftover terminal copy before its next send
+    // (pane-send-clears-stale-terminal-input), for every provider.
+    if (/^approved:/.test(String(latest.preview || "")))
+      // The host marks the item begun when the approval is recorded, before
+      // the turn is delivered, so after the Esc its gate button reads Resume.
+      return "Response interrupted, which withdrew your approval. To run it, tick the item and click Resume.";
+    // A gate line's preview is wire JSON, so name it instead of quoting it.
+    var what = /^iterate:/.test(String(latest.preview || "")) ? "your feedback" : "your message" + label;
+    return "Response interrupted. The agent has " + what + "; Go on gets its answer.";
   }
   if (latest.state === "landed" && latest.cause === "agent-error") {
     return "Antigravity took your message" + label + " but reported an error instead of replying.";
@@ -18813,10 +18815,24 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
 // link-send-notices-to-status: the two notices that point at the send ledger
 // end at "...send ledger on the"; Main.xmlui follows that with a Link to
 // /status and this tail. Both read only their arguments (via the notice).
+// interrupted-notice-resend-button: the interrupted-reply notice carries a
+// Go on button (Jon, 2026-11-25: "this should be a Go on button not an
+// invitation to type words in the box"). It sends "go on" as chat, whatever
+// is ticked, and dismisses the notice. Not a resend: the agent already has
+// the message.
+window.__bramSendLedgerNoticeGoOn = function (payload, dismissedKey) {
+  var n = window.__bramSendLedgerNotice(payload, dismissedKey);
+  return !!n && n.indexOf("Response interrupted. The agent has") === 0;
+};
+window.__bramSendLedgerGoOn = function (payload) {
+  window.__bramIframeTrace("click", { target: "notice-go-on", op: "act" });
+  window.__bramPrepareWorklistMessageSubmission({ text: "go on", mode: "", voiceTarget: "message-agent" });
+  return window.__bramDismissSendNotice(window.__bramSendLedgerNoticeKey(payload));
+};
 window.__bramSendLedgerNoticeStatusTail = function (payload, dismissedKey) {
   var n = window.__bramSendLedgerNotice(payload, dismissedKey);
   if (!n || n.slice(-"send ledger on the".length) !== "send ledger on the") return "";
-  return n.indexOf("Response interrupted") === 0 ? "tab if you want it back." : "tab.";
+  return "tab.";
 };
 
 // Apply a host `send-restore` event: the restored text goes into the

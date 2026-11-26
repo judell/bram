@@ -1105,8 +1105,10 @@ usually a follow-up on work you just did for it. Answering it as chat files
 it under no item and grants no edits.
 
 1. Flag it. The `turnRef` is the outbound turn you were handed (the
-   `<ms>-turn` in `Read and follow this Bram turn: @<state>/outbound-turns/<ms>-turn.json`);
-   `id` is the item. Build the body in its own call, then:
+   `<ms>-turn` in `Read and follow this Bram turn: @<state>/outbound-turns/<ms>-turn.json`).
+   A short one-line message arrives as plain text with no such line; its
+   `turnRef` is the newest entry's `id` (`<ms>-inline`) from
+   `GET /__send-ledger`. `id` is the item. Build the body in its own call, then:
 
    ```
    curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST \
@@ -1115,8 +1117,9 @@ it under no item and grants no edits.
    ```
 
    with `{"op":"flag-chat","turnRef":"<ms>-turn","id":"<item-id>"}`.
-   The host accepts it only for the running chat turn's own record (the
-   newest one, sent as chat, not `skip-worklist`) and an item on the board.
+   The host accepts it only for the running chat turn's own message (the
+   newest send, sent as chat, not `skip-worklist` or a gate line) and an
+   item on the board.
 2. Reply with one line: "That reads as feedback on `<item-id>`." The message
    box now offers **Resend as feedback**, which ticks that item alone and
    sends the same text and images to it as feedback, noting that it was

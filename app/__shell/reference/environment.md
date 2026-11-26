@@ -769,6 +769,12 @@ session's existing line gets no question from those three. Ask in prose,
 whichever agent you are: a provider's own question tool would make
 Claude and Codex behave differently.
 
+**Ask yes or no; don't send the user to a button.** End the offer with a
+plain question ("Continue in a fresh session? yes or no") and do the
+hand-over yourself on yes. Name the footer's **Start a new session** only
+when it is showing, which is once the context is past the Settings
+threshold; before that it isn't there to click (Jon, 2026-11-25).
+
 **The context trigger is about cost, not topic.** Each call re-sends the
 whole live context, so a long session pays for its history on every
 turn; "same line of work" is no exemption. Once the context is past the

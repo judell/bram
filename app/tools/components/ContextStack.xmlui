@@ -31,7 +31,13 @@
     transformResult="{(r) => window.__bramUserTurns(r)}" />
   <ChangeListener listenTo="{window.__bramStackUserCount($props.stack)}"
     onDidChange="() => { if (sort === 'growth') userTurns.refetch(); }" />
-  <variable name="growth" value="{window.__bramContextGrowthChart(history.value, $props.stack &amp;&amp; $props.stack.session, $props.stack, userTurns.value, kinds)}" />
+  <!-- growth-chart-date-slider: the zoom range the user last set, kept across
+       new options. Stopgap for xmlui-org/xmlui#3977 (helpers.js
+       __bramGrowthZoomAttach). https://www.xmlui.org/docs/reference/components/PushSource -->
+  <PushSource id="growthZoom" initial="{null}" subscribe="{window.__bramGrowthZoomSource}" />
+  <variable name="growth" value="{window.__bramContextGrowthChart(history.value, $props.stack &amp;&amp; $props.stack.session, $props.stack, userTurns.value, kinds, growthZoom.value)}" />
+  <ChangeListener listenTo="{growth}"
+    onDidChange="() => window.__bramGrowthZoomAttach(() => growthChart, $props.stack &amp;&amp; $props.stack.session)" />
   <ChangeListener listenTo="{picked}" onDidChange="emitEvent('select', picked)" />
   <ChangeListener listenTo="{$props.stack &amp;&amp; $props.stack.session}" onDidChange="selectedI = null; kinds = null" />
   <ModalDialog id="contextInfoDialog" title="About Context">
@@ -107,7 +113,8 @@
            doubles as the kind filter (ECharts' own legend wrapped over the
            bar in a narrow pane).
            https://www.xmlui.org/docs/howto/wrap-items-across-multiple-rows -->
-      <!-- The strip: percentage-width segments, largest kind first, in the
+      <!-- The strip: percentage-width segments, smallest kind first (to read as
+           the Token growth chart's bands do, top to bottom), in the
            chips' colours. Percentages that sum to 100 need gap 0
            (https://www.xmlui.org/docs/howto/control-item-spacing-with-gap);
            a Stack takes a click and a tooltip
@@ -204,7 +211,7 @@
       when="{sort === 'growth' &amp;&amp; $props.stack &amp;&amp; !window.__bramStackUnsupportedLine($props.stack)}"
       height="*"
       minHeight="240px">
-      <EChart when="{!!growth}" option="{growth}" height="100%" />
+      <EChart id="growthChart" when="{!!growth}" option="{growth}" height="100%" />
       <Text when="{!growth}" color="$textColor-secondary" value="{history.inProgress ? 'Loading token history…' : history.error ? 'Could not load token history.' : 'No recorded calls for this session.'}" />
     </VStack>
     <!-- A List, not Items: a long session has many hundreds of blocks

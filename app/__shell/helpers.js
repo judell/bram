@@ -25129,8 +25129,11 @@ window.__bramStackSegments = function (stack, kinds) {
   var byKind = (stack && stack.byKind) || [];
   var total = (stack && stack.measured && stack.measured.tokens) || 0;
   var floor = Math.ceil(total * 0.01);
+  // Smallest share first, so the strip reads left to right as the Token
+  // growth chart's bands read top to bottom (Jon, 2026-11-25: "reverse the
+  // order of the bar items to match the chart"). Unaccounted stays last.
   var parts = byKind.filter(function (k) { return k.tokens > 0; }).slice()
-    .sort(function (a, b) { return b.tokens - a.tokens; })
+    .sort(function (a, b) { return a.tokens - b.tokens; })
     .map(function (k) {
       return { kind: k.kind, color: window.__bramStackKindColor(k.kind), tokens: k.tokens, drawn: Math.max(k.tokens, floor), title: window.__bramStackKindTitle(k.kind, stack.provider) };
     });
@@ -25199,8 +25202,9 @@ window.__bramStackLegend = function (stack, kinds) {
   var total = (stack && stack.measured && stack.measured.tokens) || 0;
   var set = window.__bramStackKindSet(kinds, stack);
   var out = [];
-  // Largest share first, the bar's order (Jon, 2026-11-24).
-  var ordered = ((stack && stack.byKind) || []).slice().sort(function (a, b) { return b.tokens - a.tokens; });
+  // The bar's order: smallest share first, matching the Token growth chart's
+  // bands top to bottom (Jon, 2026-11-25; was largest first, 2026-11-24).
+  var ordered = ((stack && stack.byKind) || []).slice().sort(function (a, b) { return a.tokens - b.tokens; });
   ordered.forEach(function (k) {
     var pct = total ? Math.round((k.tokens / total) * 100) : 0;
     out.push({
@@ -25406,7 +25410,79 @@ window.__bramGrowthTip = function (e, provider, kinds, kindNow) {
   }
   return out.join("<br>");
 };
-window.__bramContextGrowthChart = function (history, session, stack, turns, kinds) {
+// growth-chart-date-slider (Jon, 2026-11-25: "i really want data zoom"):
+// keep the date range when the chart gets a new option. The wrapper applies
+// each option with notMerge, and `growth` rebuilds on every stack refetch, so
+// an unkept range resets on every model call.
+// STOPGAP for xmlui-org/xmlui#3977: EChart's onDatazoom handler fires only
+// while xsVerbose is on, so this listens on the ECharts instance through
+// getEchartsInstance().on, the route #3976 called not the XMLUI way. Retire
+// it with reminder-retire-growth-zoom-listener-3977 once #3977 lands.
+// The range reaches the chart through a PushSource (displayed state stays in
+// XMLUI): __bramGrowthZoomSource is its subscribe; __bramGrowthZoomAttach
+// binds the listener once per chart instance. Debounced, so a drag pushes
+// once when it settles rather than rebuilding the option mid-drag.
+var __bramGrowthZoomSubs = new Set();
+var __bramGrowthZoomTick = 0;
+var __bramGrowthZoomBound = new WeakMap();
+var __bramGrowthZoomTimer = null;
+window.__bramGrowthZoomSource = function (emit) {
+  var fire = function (snap) { emit(snap); };
+  __bramGrowthZoomSubs.add(fire);
+  return function () { __bramGrowthZoomSubs.delete(fire); };
+};
+// getChart returns the EChart's component API (it may not exist yet when the
+// chart is still mounting, so this retries briefly); session is the
+// "<provider>:<id>" the chart shows, so a range never carries to another one.
+// getChart is an arrow written in markup, and an xs arrow called from here
+// returns a Promise, not its value (trace 2026-11-26 06:46: chart "object",
+// no getEchartsInstance), so its result is awaited.
+window.__bramGrowthZoomAttach = function (getChart, session, tries) {
+  var n = tries || 0;
+  var got = null;
+  try { got = typeof getChart === "function" ? getChart() : getChart; } catch (e) { got = null; }
+  var thenable = !!(got && typeof got.then === "function");
+  Promise.resolve(got).then(function (chart) {
+    __bramGrowthZoomBind(chart, getChart, session, n, thenable);
+  }, function (e) {
+    __bramGrowthZoomBind(null, getChart, session, n, thenable, String((e && e.message) || e));
+  });
+};
+function __bramGrowthZoomBind(chart, getChart, session, n, thenable, err) {
+  var inst = null;
+  try {
+    inst = chart && chart.getEchartsInstance ? chart.getEchartsInstance() : null;
+  } catch (e) { inst = null; err = String((e && e.message) || e); }
+  if (n === 0) {
+    window.__bramIframeTrace("growth-zoom", { op: "attach-try", getter: typeof getChart, thenable: thenable,
+      chart: typeof chart, api: !!(chart && chart.getEchartsInstance), inst: !!inst, err: err || "" });
+  }
+  if (!inst || typeof inst.on !== "function") {
+    if (n < 30) setTimeout(function () { window.__bramGrowthZoomAttach(getChart, session, n + 1); }, 100);
+    else window.__bramIframeTrace("growth-zoom", { op: "attach-gave-up", thenable: thenable, chart: typeof chart,
+      api: !!(chart && chart.getEchartsInstance), err: err || "" });
+    return;
+  }
+  var rec = __bramGrowthZoomBound.get(inst);
+  if (rec) { rec.session = session; return; }
+  rec = { session: session };
+  __bramGrowthZoomBound.set(inst, rec);
+  window.__bramIframeTrace("growth-zoom", { op: "attach", tries: n });
+  inst.on("datazoom", function () {
+    var dz = null;
+    try { dz = (inst.getOption().dataZoom || [])[0]; } catch (e) { dz = null; }
+    if (!dz || !Number.isFinite(dz.start) || !Number.isFinite(dz.end)) return;
+    var range = { session: rec.session, start: dz.start, end: dz.end };
+    clearTimeout(__bramGrowthZoomTimer);
+    __bramGrowthZoomTimer = setTimeout(function () {
+      __bramGrowthZoomTick += 1;
+      var snap = { tick: __bramGrowthZoomTick, range: range };
+      __bramGrowthZoomSubs.forEach(function (fn) { try { fn(snap); } catch (e) {} });
+      window.__bramIframeTrace("growth-zoom", { op: "keep", start: Math.round(range.start), end: Math.round(range.end) });
+    }, 250);
+  });
+}
+window.__bramContextGrowthChart = function (history, session, stack, turns, kinds, zoom) {
   if (!history || !Array.isArray(history.calls) || !session) return null;
   var calls = history.calls
     .filter(call => call.thread === "main" && call.provider + ":" + call.session === session &&
@@ -25416,8 +25492,10 @@ window.__bramContextGrowthChart = function (history, session, stack, turns, kind
   var explain = stack && stack.supported && stack.session === session
     ? window.__bramGrowthExplain(calls, stack, turns) : null;
   var provider = stack && stack.provider;
-  // Ordered as the chips (largest first), so the stack's bands match them.
-  var set = window.__bramStackLegend(stack, kinds).filter(function (c) { return c.active; }).map(function (c) { return c.kind; });
+  // Largest first: ECharts stacks the first series at the bottom, so the
+  // bands read smallest to largest from the top, as the chips (smallest
+  // first) read left to right. The chips' order, reversed.
+  var set = window.__bramStackLegend(stack, kinds).filter(function (c) { return c.active; }).map(function (c) { return c.kind; }).reverse();
   var filtered = !!explain && set.length > 0;
   var allShown = window.__bramStackAllShown(kinds, stack);
   // With a kind filter, each selected kind's tokens at each call: its blocks
@@ -25470,14 +25548,30 @@ window.__bramContextGrowthChart = function (history, session, stack, turns, kind
       return (p && p.data.tip) || "";
     };
   }
+  // The range kept from the last zoom on this session (the PushSource's
+  // snapshot), else the full span.
+  var r = zoom && zoom.range;
+  var kept = r && r.session === session ? { start: r.start, end: r.end } : {};
   return {
     animation: false,
-    grid: { top: 36, bottom: 36, left: 60, right: 24 },
+    // growth-chart-date-slider: the bottom grows to fit the date slider under
+    // the axis labels.
+    grid: { top: 36, bottom: 76, left: 60, right: 24 },
     // Stacked, the chips are the legend; ECharts' own would repeat them.
     legend: { show: !filtered, top: 0, right: 24 },
     tooltip: tooltip,
     xAxis: { type: "time" },
     yAxis: { type: "value" },
+    // growth-chart-date-slider (Jon, 2026-11-25: ECharts' own control, not an
+    // XMLUI Slider): a two-handled date range under the axis, plus wheel and
+    // drag zoom on the plot. filterMode "none" keeps the stacked kinds lined
+    // up while zoomed. Pattern: the dataZoom example in
+    // https://www.xmlui.org/docs/wrap-component/echarts; options:
+    // https://echarts.apache.org/en/option.html#dataZoom-slider
+    dataZoom: [
+      Object.assign({ type: "slider", xAxisIndex: 0, filterMode: "none", bottom: 10 }, kept),
+      Object.assign({ type: "inside", xAxisIndex: 0, filterMode: "none" }, kept)
+    ],
     series: series
   };
 };

@@ -133,6 +133,17 @@ and the browser reproduction in the pinned-header worklist draft. Transcript
 retains its measured List height; Search retains a sticky heading in its
 bounded route scroller.
 
+### Demo first, unit tests when a demo can't reach it
+
+Verify a change by reproducing it on a demo instance
+(`scripts/demo-instance.sh`; see the reference's synthetic-testbed
+section) and reading its trace. Write a unit test only when the behavior
+can't easily be reproduced there: another platform's paths, a race or
+timing window, a provider screen you can't summon on demand, a regression
+already pinned as a fixture (Jon, 2026-11-25). A passing unit test is not a
+substitute for seeing the change work, and a draft's verification plan says
+which demo steps show it.
+
 ### Peer-pattern check before designing
 
 Before introducing a new mechanism in the pane, grep 2–3 peer components for the same problem and run `xmlui_search_howto`. If peers share one pattern and the misbehaving component hand-rolls another, the outlier is where the bug lives: refit to the canonical pattern before adding instrumentation.

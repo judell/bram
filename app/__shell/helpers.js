@@ -25058,7 +25058,7 @@ window.__bramStackLabelFont = function (block) {
 // What the tab is, in one sentence; the figures line says what this
 // session's stack measures.
 window.__bramStackIntro = function () {
-  return "Every block (one piece of what the model is sent: a message, a tool call or its result, an instruction file, a bout of reasoning) in this session, since the last compaction, sized to the measured total.";
+  return "Every block in this session, since the last compaction, sized to the measured total. A block is one piece of what the model is sent: a message, a tool call or its result, an instruction file, a bout of reasoning.";
 };
 // The About dialog's opening lines, per provider (Provider parity, Jon
 // 2026-11-25: "prep for opencode/antigravity/others"). Each provider says
@@ -25069,7 +25069,7 @@ window.__bramStackIntro = function () {
 // gets the neutral pair; add its branch when its stack reader lands.
 window.__bramStackAboutLines = function (stack) {
   var provider = stack && stack.provider;
-  var block = "Every block (one piece of what the model is sent: a message, a tool call or its result, an instruction file";
+  var defined = " A block is one piece of what the model is sent: a message, a tool call or its result, an instruction file.";
   if (provider === "claude") {
     return [
       window.__bramStackIntro(),
@@ -25078,12 +25078,12 @@ window.__bramStackAboutLines = function (stack) {
   }
   if (provider === "codex") {
     return [
-      block + ") the Codex rollout records: message text, base instructions, tool inputs and tool results. It can omit parts of the model request.",
+      "Every block the Codex rollout records: message text, base instructions, tool inputs and tool results. It can omit parts of the model request." + defined,
       "Each block is weighed at one token per four text bytes. The last call’s token count comes from Codex usage records."
     ];
   }
   return [
-    block + ") this session's record holds, since the last compaction.",
+    "Every block this session's record holds, since the last compaction." + defined,
     "Sizes are estimated from the session's own record; the remainder no block accounts for is shown as such."
   ];
 };

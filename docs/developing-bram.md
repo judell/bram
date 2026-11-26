@@ -161,10 +161,13 @@ Receipts → [`docs/developing-bram-reference.md` §Receipts: Warning color](dev
 
 When pane text uses a glossary-like term (a word with a meaning
 specific to Bram or to the agent, such as *block*, *call*, *compaction*,
-*claim*), define it in parentheses right after its first mention on that
-surface: "Every block (one piece of what the model is sent: a message, a
-tool call or its result, an instruction file, a bout of reasoning) …"
-(Jon, 2026-11-25). Later mentions on the same surface use the bare term.
+*claim*), define it in the sentence right after its first mention on that
+surface: "Every block in this session, since the last compaction, sized to
+the measured total. A block is one piece of what the model is sent: a
+message, a tool call or its result, an instruction file, a bout of
+reasoning." (Jon, 2026-11-25). Use parentheses only for a short gloss that
+doesn't interrupt the sentence. Later mentions on the same surface use the
+bare term.
 A tooltip or dialog counts as its own surface. Don't send the reader to a
 separate glossary for a word the sentence needs.
 

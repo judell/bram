@@ -78,6 +78,8 @@ form).
    fold.
 3. **Visible:** `### Credits`.
 
+Open with `# Bram v<VERSION>`, never a "Release notes" heading: the page
+is the release notes, so the heading names the release (Jon, 2026-11-26).
 Leave a blank line after each `<summary>`, or GitHub won't render the
 Markdown inside. Write issue references as `[#N](url)`, and an upstream
 one as `[xmlui#N](url)`. A feature that grew over several releases is

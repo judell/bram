@@ -49,6 +49,12 @@ def sections(body):
             out.append((head, cur))
             head, cur = line[3:].strip(), []
             continue
+        if not fenced and line.startswith("# "):
+            # A "# Bram vX" title starts the notes, wherever it sits; left
+            # in the section before it, it would fold away with Install.
+            out.append((head, cur))
+            head, cur = None, [line]
+            continue
         cur.append(line)
     out.append((head, cur))
     return out
@@ -84,6 +90,9 @@ def fold_notes(lines):
     there are two or more. Text before the first section stays visible, and
     so does a shallower heading that ends a run of sections."""
     def level(line):
+        # A "Release notes" heading is not a section; retitle() replaces it.
+        if line.strip() in ("## Release notes", "## Release note"):
+            return 0
         m = re.match(r"^(#{2,6}) ", line)
         return len(m.group(1)) if m else 0
 
@@ -173,6 +182,25 @@ def signature(body, refolded):
     return c
 
 
+def retitle(body, tag):
+    """Every page opens with "# Bram <tag>", never a "Release notes"
+    heading (Jon, 2026-11-26: "standardize on this")."""
+    # Pages open with the title, "Release notes", both (in either order),
+    # or neither: drop whichever lead them, then put the title first.
+    title = "# Bram " + tag
+    drop = {title, "## Release notes", "## Release note"}
+    lines = body.split("\n")
+    def leading(s):
+        # An older title ("# Bram 2.3 release notes") is replaced too.
+        return s in drop or (s.startswith("# Bram ") and title in drop)
+
+    while lines and (not lines[0].strip() or leading(lines[0].strip())):
+        s = lines[0].strip()
+        drop.discard(title if s.startswith("# Bram ") else s)
+        lines = lines[1:]
+    return title + "\n\n" + "\n".join(lines)
+
+
 def main(src, dst):
     src, dst = pathlib.Path(src), pathlib.Path(dst)
     dst.mkdir(parents=True, exist_ok=True)
@@ -183,7 +211,16 @@ def main(src, dst):
         if new is None:
             print("skip\t%s\tno fixed sections" % f.stem)
             continue
-        if signature(body, False) != signature(new, True):
+        new = retitle(new, f.stem)
+        old_sig, new_sig = signature(body, False), signature(new, True)
+        for s in ("Release notes", "Release note"):
+            old_sig.pop(s, None)
+        # The title appears exactly once, whether or not the page had it,
+        # in place of any older one.
+        for k in [k for k in old_sig if k.startswith("Bram ") and k in new_sig.keys() ^ old_sig.keys()]:
+            old_sig.pop(k)
+        old_sig["Bram " + f.stem] = 1
+        if old_sig != new_sig:
             bad += 1
             print("FAIL\t%s\tlines differ" % f.stem)
             continue

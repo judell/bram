@@ -300,7 +300,10 @@ pub fn build(provider: &'static str, text: &str, session_id: &str, root: Option<
     }
 }
 
-fn codex_item(item: &Value, mut emit: impl FnMut(BlockKind, &str, &str)) {
+/// One Codex `response_item` as blocks. `emit` takes the kind, the label, the
+/// readable text, and how many further bytes of the block are encrypted
+/// (only their size is known).
+fn codex_item(item: &Value, mut emit: impl FnMut(BlockKind, &str, &str, u64)) {
     match item["type"].as_str() {
         Some("message") => {
             let (kind, role) = match item["role"].as_str() {
@@ -312,7 +315,7 @@ fn codex_item(item: &Value, mut emit: impl FnMut(BlockKind, &str, &str)) {
             };
             for part in item["content"].as_array().into_iter().flatten() {
                 if let Some(text) = part["text"].as_str() {
-                    emit(kind, &format!("{role} · {}", first_line(text)), text);
+                    emit(kind, &format!("{role} · {}", first_line(text)), text, 0);
                 }
             }
         }
@@ -325,6 +328,7 @@ fn codex_item(item: &Value, mut emit: impl FnMut(BlockKind, &str, &str)) {
                     BlockKind::ToolCall,
                     item["name"].as_str().unwrap_or("Tool call"),
                     input,
+                    0,
                 );
             }
         }
@@ -332,14 +336,71 @@ fn codex_item(item: &Value, mut emit: impl FnMut(BlockKind, &str, &str)) {
             let output = &item["output"];
             let label = item["call_id"].as_str().unwrap_or("Tool result");
             if let Some(text) = output.as_str() {
-                emit(BlockKind::ToolResult, label, text);
+                emit(BlockKind::ToolResult, label, text, 0);
             } else if let Some(parts) = output.as_array() {
                 for part in parts {
                     if let Some(text) = part["text"].as_str() {
-                        emit(BlockKind::ToolResult, label, text);
+                        emit(BlockKind::ToolResult, label, text, 0);
                     }
                 }
             }
+        }
+        Some("reasoning") => {
+            // The body is `encrypted_content`; `summary` was empty in every
+            // November 2026 rollout, but read it in case a later Codex fills it.
+            let summary = item["summary"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let opaque = item["encrypted_content"].as_str().map_or(0, str::len) as u64;
+            if summary.is_empty() && opaque == 0 {
+                return;
+            }
+            let label = if summary.is_empty() {
+                "Thinking (encrypted)".to_string()
+            } else {
+                format!("Thinking: {}", first_line(&summary))
+            };
+            emit(BlockKind::Thinking, &label, &summary, opaque);
+        }
+        Some("additional_tools") => {
+            // Tool lists added mid-session: namespaces holding tools.
+            let mut names = Vec::new();
+            for ns in item["tools"].as_array().into_iter().flatten() {
+                match ns["tools"].as_array() {
+                    Some(inner) => names.extend(inner.iter().filter_map(|t| t["name"].as_str())),
+                    None => names.extend(ns["name"].as_str()),
+                }
+            }
+            let body = serde_json::to_string(&item["tools"]).unwrap_or_default();
+            let label = if names.is_empty() {
+                "Tools added".to_string()
+            } else {
+                format!("Tools added: {}", names.join(", "))
+            };
+            emit(BlockKind::Attachment, &label, &body, 0);
+        }
+        Some("agent_message") => {
+            let mut text = String::new();
+            let mut opaque = 0;
+            for part in item["content"].as_array().into_iter().flatten() {
+                if let Some(t) = part["text"].as_str() {
+                    text.push_str(t);
+                } else if let Some(e) = part["encrypted_content"].as_str() {
+                    opaque += e.len() as u64;
+                }
+            }
+            let author = item["author"].as_str().unwrap_or("agent");
+            let recipient = item["recipient"].as_str().unwrap_or("agent");
+            emit(
+                BlockKind::Agent,
+                &format!("Agent message: {author} to {recipient}"),
+                &text,
+                opaque,
+            );
         }
         _ => {}
     }
@@ -378,7 +439,7 @@ fn codex_stack(text: &str, fallback_id: &str) -> Stack {
         }
         let is_first_block = stack.blocks.is_empty();
         let mut part = 0;
-        let mut push = |kind, label: &str, body: &str| {
+        let mut push = |kind, label: &str, body: &str, opaque: u64| {
             let mut b = new_block(
                 kind,
                 label.to_string(),
@@ -387,6 +448,8 @@ fn codex_stack(text: &str, fallback_id: &str) -> Stack {
                 turn,
                 0,
             );
+            b.bytes += opaque;
+            b.opaque_bytes = opaque;
             b.record_key = Some(format!("{line}.{part}"));
             part += 1;
             stack.blocks.push(b);
@@ -394,7 +457,7 @@ fn codex_stack(text: &str, fallback_id: &str) -> Stack {
         match kind {
             Some("session_meta") if is_first_block => {
                 if let Some(body) = p.pointer("/base_instructions/text").and_then(Value::as_str) {
-                    push(BlockKind::Harness, "Base instructions", body);
+                    push(BlockKind::Harness, "Base instructions", body, 0);
                     base_len = stack.blocks.len();
                 }
             }
@@ -406,7 +469,12 @@ fn codex_stack(text: &str, fallback_id: &str) -> Stack {
                         codex_item(item, &mut push);
                     }
                 } else if let Some(summary) = p["message"].as_str() {
-                    push(BlockKind::CompactionSummary, "Compaction summary", summary);
+                    push(
+                        BlockKind::CompactionSummary,
+                        "Compaction summary",
+                        summary,
+                        0,
+                    );
                 }
             }
             _ => {}

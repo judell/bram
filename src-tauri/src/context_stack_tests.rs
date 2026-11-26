@@ -437,6 +437,34 @@ fn codex_rollout_preserves_text_and_record_identity() {
 }
 
 #[test]
+fn codex_reasoning_tools_and_agent_messages_become_blocks() {
+    let text = r#"{"type":"session_meta","payload":{"id":"abc"}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"gAAAAABq0123456789","id":"rs_1"}}
+{"type":"response_item","payload":{"type":"additional_tools","id":"at_1","role":"developer","tools":[{"type":"namespace","name":"functions","description":"","tools":[{"type":"custom","name":"exec","description":"x"}]},{"type":"namespace","name":"clock","tools":[{"type":"function","name":"now"}]}]}}
+{"type":"response_item","payload":{"type":"agent_message","id":"amsg_1","author":"/root/a","recipient":"/root","content":[{"type":"input_text","text":"Message Type: MESSAGE\n"},{"type":"encrypted_content","encrypted_content":"abcdef"}]}}
+{"type":"response_item","payload":{"type":"configuration_update","settings":{}}}"#;
+    let s = build("codex", text, "fallback", None);
+    assert_eq!(s.blocks.len(), 3);
+    let r = &s.blocks[0];
+    assert_eq!(r.kind, BlockKind::Thinking);
+    assert_eq!(r.label, "Thinking (encrypted)");
+    assert_eq!(r.opaque_bytes, 18);
+    assert_eq!(r.bytes, 18);
+    let t = &s.blocks[1];
+    assert_eq!(t.kind, BlockKind::Attachment);
+    assert_eq!(t.label, "Tools added: exec, now");
+    let a = &s.blocks[2];
+    assert_eq!(a.kind, BlockKind::Agent);
+    assert_eq!(a.label, "Agent message: /root/a to /root");
+    assert_eq!(a.opaque_bytes, 6);
+    assert_eq!(a.bytes, 22 + 6);
+    let with_summary = r#"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Plan it\nmore"}],"encrypted_content":"xyz"}}"#;
+    let s = build("codex", with_summary, "fallback", None);
+    assert_eq!(s.blocks[0].label, "Thinking: Plan it");
+    assert_eq!(s.blocks[0].opaque_bytes, 3);
+}
+
+#[test]
 fn partial_codex_rollout_keeps_session_scope() {
     for (id, text) in [("a", ""), ("b", "{broken\n{}")] {
         let s = build("codex", text, id, None);

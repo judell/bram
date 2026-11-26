@@ -24993,12 +24993,13 @@ window.__bramStackKindExplain = function (kind, provider) {
     if (kind === "instructions") return provider === "codex"
       ? "Developer messages captured in the Codex rollout."
       : "Instructions recorded for this session.";
-    if (kind === "thinking") return "Reasoning recorded for this session.";
+    if (kind === "thinking") return provider === "codex"
+      ? "Codex's reasoning, which it records encrypted, so only its size is shown. Whether it is sent again on later calls can't be told from the session record."
+      : "Reasoning recorded for this session.";
   }
   // The texts below are Claude's. Claude Code sends Anthropic's encrypted
-  // thinking back on every call; OpenCode's and Antigravity's thinking texts
-  // are above. Codex rollouts carry encrypted reasoning items too, which its
-  // reader doesn't read yet (codex-stack-reads-reasoning).
+  // thinking back on every call; OpenCode's, Antigravity's and Codex's thinking
+  // texts are above.
   var text = {
     harness: "The system prompt Claude Code sends first on every call, and the definitions of the tools the agent may call.",
     instructions: "CLAUDE.md and the files it imports, sent on every call.",

@@ -3048,7 +3048,7 @@ fn abspath_of(p: &Path) -> PathBuf {
     abspath(&p.to_string_lossy())
 }
 
-fn find_project_root(start: &str) -> Option<PathBuf> {
+pub(crate) fn find_project_root(start: &str) -> Option<PathBuf> {
     let mut cur = abspath(start);
     loop {
         // issue-469: Bram's `.bram/` at each level, so a nested instance's
@@ -3470,6 +3470,184 @@ fn live_authorization_ids(project_root: &Path) -> Option<HashSet<String>> {
         .map(String::from)
         .collect();
     (!ids.is_empty()).then_some(ids)
+}
+
+// --- esc-strand-missed-arrow-in-message: a withdrawn approval is not authority
+// On 2026-11-26 an Esc withdrew an approval (auth-record op=invalidate
+// reason=pty-escape) and put the message back in Claude Code's input box; the
+// item was then dropped. Fifteen minutes later up arrow and Enter in the
+// terminal re-sent it, and the agent edited a file under an item that no
+// longer existed: the guard read the turn as addressed from its text, and a
+// Start turn needs no `resolve`. The record decides, never the text.
+//
+// Each provider checks a submitted `approved:` prompt where the prompt first
+// becomes visible, through this one function: Claude's UserPromptSubmit and
+// Antigravity's PreInvocation (in the guard), Codex's new user record and
+// OpenCode's `session.inbox.delivered` (in the host). Codex registers no
+// prompt hook: a new Codex hook event raises its "Hooks need review" prompt.
+// A withdrawn approval writes this sidecar; any other prompt clears it. While
+// it stands, the guard denies file edits outside the worklist and its drafts.
+pub(crate) const WITHDRAWN_APPROVAL_LEAF: &str = ".withdrawn-approval.json";
+// A fallback bound: the next prompt or the turn's end clears the sidecar.
+const WITHDRAWN_APPROVAL_MAX_AGE_MS: i64 = 30 * 60 * 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WithdrawnReason {
+    /// The record was invalidated (an Esc, an agent switch).
+    Interrupted,
+    /// The record on disk is for something else: a drop, or later approval.
+    Replaced,
+    /// An approved id is no longer on the board (dropped or committed).
+    NotOnBoard,
+    /// There is no record at all.
+    NoRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WithdrawnApproval {
+    pub ids: Vec<String>,
+    pub reason: WithdrawnReason,
+    #[serde(default)]
+    pub interrupted_at_ms: Option<i64>,
+    pub at_ms: i64,
+    pub source: String,
+}
+
+// The parts of `.worklist-authorization.json` this check reads. Consumption
+// is deliberately not one: a `resolve` read marks the record consumed while
+// the approval stays usable for advance and commit.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AuthRecordView {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(default)]
+    interrupted_at_ms: Option<f64>,
+}
+
+/// The ids of an `approved:` prompt, or None for any other prompt. The JSON
+/// is read as the first value after the prefix, so trailing text is ignored.
+pub(crate) fn approved_prompt_ids(prompt: &str) -> Option<Vec<String>> {
+    let rest = prompt.trim_start().strip_prefix("approved:")?.trim_start();
+    let mut de = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+    let v = de.next()?.ok()?;
+    let ids: Vec<String> = v
+        .get("items")?
+        .as_array()?
+        .iter()
+        .filter_map(|it| it.get("id").and_then(|x| x.as_str()))
+        .map(String::from)
+        .collect();
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// Why this approval is no longer live, or None when it is.
+pub(crate) fn withdrawn_reason(
+    project_root: &Path,
+    ids: &[String],
+) -> Option<(WithdrawnReason, Option<i64>)> {
+    let Ok(text) = std::fs::read_to_string(state_path(project_root, AUTH_LEAF)) else {
+        return Some((WithdrawnReason::NoRecord, None));
+    };
+    let rec: AuthRecordView = serde_json::from_str(&text).unwrap_or_default();
+    if rec.kind != "approved" || !ids.iter().all(|id| rec.ids.contains(id)) {
+        return Some((WithdrawnReason::Replaced, None));
+    }
+    if let Some(at) = rec.interrupted_at_ms {
+        return Some((WithdrawnReason::Interrupted, Some(at as i64)));
+    }
+    let on_board: HashSet<String> = codex_items_by_id(&current_worklist_text(project_root))
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    if !ids.iter().all(|id| on_board.contains(id)) {
+        return Some((WithdrawnReason::NotOnBoard, None));
+    }
+    None
+}
+
+/// Check a submitted prompt: write the sidecar when it is a withdrawn
+/// approval, clear it for any other prompt. Returns the withdrawn approval.
+pub(crate) fn note_submitted_prompt(
+    project_root: &Path,
+    prompt: &str,
+    source: &str,
+) -> Option<WithdrawnApproval> {
+    let path = state_path(project_root, WITHDRAWN_APPROVAL_LEAF);
+    let withdrawn = approved_prompt_ids(prompt).and_then(|ids| {
+        withdrawn_reason(project_root, &ids).map(|(reason, interrupted_at_ms)| WithdrawnApproval {
+            ids,
+            reason,
+            interrupted_at_ms,
+            at_ms: now_ms() as i64,
+            source: source.to_string(),
+        })
+    });
+    match &withdrawn {
+        Some(w) => {
+            if let Ok(text) = serde_json::to_string(w) {
+                let _ = std::fs::write(&path, text);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    withdrawn
+}
+
+/// The standing withdrawn approval, if any and not past the fallback bound.
+pub(crate) fn active_withdrawn_approval(project_root: &Path) -> Option<WithdrawnApproval> {
+    let text = std::fs::read_to_string(state_path(project_root, WITHDRAWN_APPROVAL_LEAF)).ok()?;
+    let w: WithdrawnApproval = serde_json::from_str(&text).ok()?;
+    (now_ms() as i64 - w.at_ms <= WITHDRAWN_APPROVAL_MAX_AGE_MS).then_some(w)
+}
+
+/// Clear the sidecar at a turn's end, unless it was written in the last 2 s
+/// (the turn-end detector can fire on the previous turn's end record, as
+/// end_turn_context_unless_fresh guards against). Returns whether it cleared.
+pub(crate) fn clear_withdrawn_approval_at_turn_end(project_root: &Path) -> bool {
+    let path = state_path(project_root, WITHDRAWN_APPROVAL_LEAF);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    if let Ok(w) = serde_json::from_str::<WithdrawnApproval>(&text) {
+        if now_ms() as i64 - w.at_ms < 2000 {
+            return false;
+        }
+    }
+    std::fs::remove_file(&path).is_ok()
+}
+
+fn withdrawn_reason_words(w: &WithdrawnApproval) -> &'static str {
+    match w.reason {
+        WithdrawnReason::Interrupted => "it was withdrawn when the turn was interrupted",
+        WithdrawnReason::Replaced => "a later Worklist action replaced it",
+        WithdrawnReason::NotOnBoard => "the item is no longer on the Worklist",
+        WithdrawnReason::NoRecord => "Bram has no record of it",
+    }
+}
+
+/// The note the agent gets with the prompt (where the provider can take one).
+pub(crate) fn withdrawn_approval_context(w: &WithdrawnApproval) -> String {
+    format!(
+        "Bram: this `approved:` message for {} is not authorization: {}. It was probably re-sent from the terminal. Don't edit files for it; tell the user to tick the item and click Start again if they still want the work.",
+        w.ids.join(", "),
+        withdrawn_reason_words(w)
+    )
+}
+
+/// The guard's deny text while a withdrawn approval stands.
+pub(crate) fn withdrawn_approval_body(w: &WithdrawnApproval) -> String {
+    format!(
+        "Blocked: this turn's `approved:` message for {} is not authorization ({}). File edits are refused for the rest of this turn. Tell the user what you would have done and ask them to tick the item and click Start again if they still want it.",
+        w.ids.join(", "),
+        withdrawn_reason_words(w)
+    )
 }
 
 fn trace_would_deny_unaddressed(project_root: &Path, provider: &str, tool: &str, rel: &str) {
@@ -4299,6 +4477,16 @@ fn bash_branch(caller: &str, payload: &Value) -> ShadowVerdict {
     {
         return allow("bram-lifecycle-channel", "-");
     }
+    if let Some(w) = active_withdrawn_approval(&project_root) {
+        return deny_msg(
+            "withdrawn-approval",
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &withdrawn_approval_body(&w),
+        );
+    }
     let covered = worklist_covered_files(&project_root);
     if !covered.is_empty() || fresh_bypass(&project_root, "*") {
         // issue-387: this is the coarse "does ANY item cover the worklist"
@@ -4515,6 +4703,18 @@ fn write_edit_branch(caller: &str, payload: &Value, tool_name: &str) -> ShadowVe
     let worklist_rel = state_rel(&project_root, WORKLIST_LEAF);
     if rel != worklist_rel && is_lifecycle_path(&project_root, &rel) {
         return allow("bram-lifecycle-channel", rel);
+    }
+    if rel != worklist_rel && !is_worklist_draft(&project_root, &rel) {
+        if let Some(w) = active_withdrawn_approval(&project_root) {
+            return deny_msg(
+                "withdrawn-approval",
+                rel.clone(),
+                tool_name,
+                &rel,
+                &hook_cwd,
+                &withdrawn_approval_body(&w),
+            );
+        }
     }
 
     if rel == worklist_rel {
@@ -5844,6 +6044,11 @@ verify coverage."
             // non-terminal, so it is not the breadcrumb's decision.
             continue;
         }
+        if let Some(w) = active_withdrawn_approval(cwd) {
+            let mut v = deny("withdrawn-approval", &trace_target);
+            v.message = withdrawn_approval_body(&w);
+            return v;
+        }
         let (is_covered, worktree) = coverage_verdict(covered, &rel);
         if is_covered || codex_fresh_bypass(cwd, &rel) {
             if is_covered {
@@ -5999,6 +6204,11 @@ and retry. See judell/bram#277.",
             return codex_allow("intent-stale-overwrite", "-");
         }
         return codex_allow("passed-checks", "-");
+    }
+    if let Some(w) = active_withdrawn_approval(cwd) {
+        let mut v = deny("withdrawn-approval", "-");
+        v.message = withdrawn_approval_body(&w);
+        return v;
     }
     if !covered.is_empty() || codex_fresh_bypass(cwd, "*") {
         // issue-387: same coarse-allow refinement as the Claude Bash branch.

@@ -25123,6 +25123,18 @@ fn end_turn_context_unless_fresh<R: tauri::Runtime>(app: &AppHandle<R>, source: 
         }
     }
     emit_turn_context(app, &[], "turn-end");
+    // esc-strand-missed-arrow-in-message: a withdrawn approval's refusal lasts
+    // for its turn.
+    if let Some(root) = project_root(Some(app)) {
+        if crate::guard_policy::clear_withdrawn_approval_at_turn_end(&root) && bram_trace_enabled()
+        {
+            append_bram_trace_line(
+                app,
+                "withdrawn-approval",
+                &format!("op=clear source={}", source),
+            );
+        }
+    }
 }
 
 /// Stamp the submitted turn's addressing. Prefix parse mirrors
@@ -25173,6 +25185,10 @@ fn cleanup_stale_turn_context<R: tauri::Runtime>(app: &AppHandle<R>) {
                 append_bram_trace_line(app, "turn-context", "op=clear reason=startup-stale");
             }
         }
+        let _ = std::fs::remove_file(crate::guard_policy::state_path(
+            &root,
+            crate::guard_policy::WITHDRAWN_APPROVAL_LEAF,
+        ));
     }
 }
 
@@ -56159,7 +56175,7 @@ fn send_ledger_tail_fragment(preview: &str) -> String {
 // send_ledger_payload_in_tail_detail for the basis.
 #[cfg(test)]
 fn send_ledger_payload_in_tail_of(tail: &str, preview: &str) -> bool {
-    send_ledger_payload_in_composer_of(tail, preview).0
+    send_ledger_payload_in_composer_of(tail, preview, "").0
 }
 
 // interrupted-banner-verifies-restore: tail-contains is NOT composer-holds.
@@ -56172,16 +56188,64 @@ fn send_ledger_payload_in_tail_of(tail: &str, preview: &str) -> bool {
 // an echo above an empty composer classifies `echo-only` and does not
 // latch. No marker at all (TUI shape drift) falls back to the old
 // whole-tail behavior rather than never latching, and says so.
-fn send_ledger_payload_in_composer_of(tail: &str, preview: &str) -> (bool, &'static str) {
+// esc-strand-missed-arrow-in-message: a marker inside the message is not the
+// composer. The tail is collapsed (no line breaks), so a marker can't be
+// anchored to a row; the 2026-11-26 01:59 approval carried `dd0ddf62 ->
+// search`, whose `> ` was taken as the composer's start and read a real
+// restore as echo-only. A candidate marker is skipped when the text around it
+// (SEND_LEDGER_MARKER_CONTEXT chars each side) appears in what was sent:
+// that marker is the message's own text. The real composer marker sits among
+// rules, status text or the end of an echo, which the message doesn't hold.
+// Rows were the first plan, but the host keeps no rendered screen (the
+// esc-capture grid is the parent webview's xterm, app/main.js).
+// Markers, from docs/agent-specimens/: Claude `❯ `; Codex `› ` (today) and
+// `│ > ` (older builds); Antigravity a bare `>` on its own row. OpenCode's
+// composer is a `┃ ` box whose LAST row is `┃ Build · <model>`, below the
+// text, so a `┃ ` marker would put the start after the message; OpenCode
+// stays on the no-marker fallback.
+const SEND_LEDGER_COMPOSER_MARKERS: [&str; 4] = ["│ > ", "❯ ", "› ", "> "];
+const SEND_LEDGER_MARKER_CONTEXT: usize = 8;
+
+fn send_ledger_marker_is_message_text(tail: &str, at: usize, marker: &str, sent: &str) -> bool {
+    if sent.is_empty() {
+        return false;
+    }
+    let lo = tail[..at]
+        .char_indices()
+        .rev()
+        .nth(SEND_LEDGER_MARKER_CONTEXT - 1)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let after = at + marker.len();
+    let hi = tail[after..]
+        .char_indices()
+        .nth(SEND_LEDGER_MARKER_CONTEXT)
+        .map(|(i, _)| after + i)
+        .unwrap_or(tail.len());
+    sent.contains(&tail[lo..hi])
+}
+
+fn send_ledger_payload_in_composer_of(
+    tail: &str,
+    preview: &str,
+    sent: &str,
+) -> (bool, &'static str) {
     let frag_owned = send_ledger_tail_fragment(preview);
     let frag = frag_owned.trim();
     if frag.is_empty() {
         return (false, "empty-preview");
     }
-    const MARKERS: [&str; 3] = ["│ > ", "❯ ", "> "];
+    // Collapse what was sent the way the tail is collapsed, so the context
+    // windows compare like with like. An entry with no payload falls back to
+    // its preview.
+    let sent_src = if sent.is_empty() { preview } else { sent };
+    let sent_collapsed = collapse_tail(sent_src.as_bytes(), usize::MAX);
     let mut start: Option<usize> = None;
-    for m in MARKERS {
-        if let Some(i) = tail.rfind(m) {
+    for m in SEND_LEDGER_COMPOSER_MARKERS {
+        for (i, _) in tail.match_indices(m) {
+            if send_ledger_marker_is_message_text(tail, i, m, &sent_collapsed) {
+                continue;
+            }
             let cand = i + m.len();
             if start.map(|s| cand > s).unwrap_or(true) {
                 start = Some(cand);
@@ -56208,12 +56272,12 @@ fn send_ledger_payload_in_composer_of(tail: &str, preview: &str) -> (bool, &'sta
     }
 }
 
-fn send_ledger_payload_in_tail(preview: &str) -> bool {
-    send_ledger_payload_in_tail_detail(preview).0
+fn send_ledger_payload_in_tail(preview: &str, sent: &str) -> bool {
+    send_ledger_payload_in_tail_detail(preview, sent).0
 }
 
-fn send_ledger_payload_in_tail_detail(preview: &str) -> (bool, &'static str) {
-    send_ledger_payload_in_composer_of(&pty_tail_snippet(400), preview)
+fn send_ledger_payload_in_tail_detail(preview: &str, sent: &str) -> (bool, &'static str) {
+    send_ledger_payload_in_composer_of(&pty_tail_snippet(400), preview, sent)
 }
 
 // issue-372 ask 2, step A: the /__send-ledger row shape, pulled out of the
@@ -56226,7 +56290,8 @@ fn send_ledger_payload_in_tail_detail(preview: &str) -> (bool, &'static str) {
 // rotated trace archives can never answer (they only ever recorded this
 // value at the 60s/120s verdict, never at T+200ms).
 fn send_ledger_entry_to_json(e: &SendLedgerEntry) -> serde_json::Value {
-    let (payload_in_tail, payload_in_tail_basis) = send_ledger_payload_in_tail_detail(&e.preview);
+    let (payload_in_tail, payload_in_tail_basis) =
+        send_ledger_payload_in_tail_detail(&e.preview, &e.payload);
     serde_json::json!({
         "id": e.id,
         "kind": e.kind,
@@ -56277,7 +56342,7 @@ mod send_ledger_payload_in_tail_tests {
     // the last marker) must.
     #[test]
     fn transcript_echo_above_an_empty_composer_does_not_latch() {
-        use super::send_ledger_payload_in_composer_of as c;
+        let c = |t: &str, p: &str| super::send_ledger_payload_in_composer_of(t, p, "");
         let echo_only = "> Now can you render it as a PDF? ⎿ Interrupted · nothing staged │ > ";
         assert_eq!(
             c(echo_only, "Now can you render it as a PDF?"),
@@ -56297,6 +56362,62 @@ mod send_ledger_payload_in_tail_tests {
                 "Now can you render it as a PDF"
             ),
             (true, "tail-fallback")
+        );
+    }
+
+    // esc-strand-missed-arrow-in-message: the 2026-11-26 01:59 approval. Its
+    // feedback held `dd0ddf62 -> search`; the `> ` of the arrow was taken as
+    // the composer's start, so a message genuinely back in the composer read
+    // echo-only (trace basis=echo-only, no notice, no stale-input latch).
+    #[test]
+    fn a_marker_inside_the_message_is_not_the_composer() {
+        use super::send_ledger_payload_in_composer_of as c;
+        let sent = r#"approved: {"items":[{"id":"growth-guard-comment-after-call-fix","feedback":" The suspect is the tooltip wrapper dd0ddf62 -> search history and xmljui map","gate":"to apply"}]}"#;
+        let preview: String = sent.chars().take(60).collect();
+        let restored = super::collapse_tail(
+            format!(
+                "⎿ Interrupted · What should Claude do instead?\n────────────\n❯ {}\n────────────\n  ⏵⏵ accept edits on",
+                sent
+            )
+            .as_bytes(),
+            400,
+        );
+        assert_eq!(c(&restored, &preview, sent), (true, "composer"));
+        // Without the sent text (the old predicate's knowledge) the arrow
+        // still fools it: this is the bug, kept as the contrast.
+        assert_eq!(c(&restored, &preview, ""), (false, "echo-only"));
+
+        // The same message echoed above an EMPTY composer stays echo-only:
+        // the 66228b35 guarantee holds with an arrow in the message.
+        let echo = super::collapse_tail(
+            format!(
+                "> {}\n⎿ Interrupted\n────────────\n❯ \n────────────\n  ? for shortcuts",
+                sent
+            )
+            .as_bytes(),
+            400,
+        );
+        assert_eq!(c(&echo, &preview, sent), (false, "echo-only"));
+
+        // A quoted line and a `❯` inside the message, restored.
+        let quoted = "Please fix this:\n> the old line\nand ❯ the prompt glyph too";
+        let qprev: String = quoted.chars().take(60).collect();
+        let qtail = super::collapse_tail(format!("──────\n❯ {}\n──────", quoted).as_bytes(), 400);
+        assert_eq!(c(&qtail, &qprev, quoted), (true, "composer"));
+
+        // Codex's composer marker today is `› ` (docs/agent-specimens/codex).
+        let codex_tail = super::collapse_tail(
+            "• Working (1s • esc to interrupt)\n\n› compare a -> b please\n\n  GPT-6-Astra high"
+                .as_bytes(),
+            400,
+        );
+        assert_eq!(
+            c(
+                &codex_tail,
+                "compare a -> b please",
+                "compare a -> b please"
+            ),
+            (true, "composer")
         );
     }
 }
@@ -60549,7 +60670,7 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 // keys on it too (#306).
                 // esc-abort-stale-input-latch-unverified: was an inline copy;
                 // now the shared predicate the abort branch uses too.
-                let payload_in_tail = send_ledger_payload_in_tail(&entry.preview);
+                let payload_in_tail = send_ledger_payload_in_tail(&entry.preview, &entry.payload);
                 {
                     let tail = pty_tail_snippet(400);
                     let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
@@ -60801,7 +60922,7 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                             // the terminal input" (basis=echo-only is exactly
                             // that false claim, caught and not latched).
                             let (payload_in_tail, basis) =
-                                send_ledger_payload_in_tail_detail(&entry.preview);
+                                send_ledger_payload_in_tail_detail(&entry.preview, &entry.payload);
                             if payload_in_tail {
                                 set_stale_terminal_input_latched_at(now);
                             }
@@ -78804,6 +78925,11 @@ fn codex_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
 }
 
 fn codex_latest_user_message_ts_ms(content: &str) -> Option<i64> {
+    codex_latest_user_message(content).and_then(|(ts, _)| ts)
+}
+
+// The newest real user message: its timestamp and its joined input text.
+fn codex_latest_user_message(content: &str) -> Option<(Option<i64>, String)> {
     for line in content.lines().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -78839,12 +78965,45 @@ fn codex_latest_user_message_ts_ms(content: &str) -> Option<i64> {
         if !content_has_user_input {
             continue;
         }
-        return entry
+        let text = payload
+            .get("content")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|c| c.get("type").and_then(|v| v.as_str()) == Some("input_text"))
+                    .filter_map(|c| c.get("text").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let ts = entry
             .get("timestamp")
             .and_then(|v| v.as_str())
             .and_then(parse_iso_to_ms);
+        return Some((ts, text));
     }
     None
+}
+
+// esc-strand-missed-arrow-in-message: Codex registers no prompt hook (a new
+// Codex hook event raises its "Hooks need review" prompt), so the host checks
+// each new user record as the rollout records it. Once per record: checked
+// later, an approval the agent has since committed would read as withdrawn.
+fn codex_last_checked_user_record_cell() -> &'static Mutex<Option<(String, i64)>> {
+    static CELL: OnceLock<Mutex<Option<(String, i64)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn codex_user_record_is_new(path: &Path, ts: i64) -> bool {
+    let key = (path.to_string_lossy().into_owned(), ts);
+    let Ok(mut g) = codex_last_checked_user_record_cell().lock() else {
+        return false;
+    };
+    if g.as_ref() == Some(&key) {
+        return false;
+    }
+    *g = Some(key);
+    true
 }
 
 fn jsonl_completion_decision(
@@ -79154,11 +79313,19 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 .ok()
                 .and_then(|g| g.as_ref().map(|s| s.user_ts_ms)),
         );
-    let latest_codex_user_ts_ms = if provider == JsonlCompletionProvider::Codex {
-        codex_latest_user_message_ts_ms(&content)
+    let latest_codex_user = if provider == JsonlCompletionProvider::Codex {
+        codex_latest_user_message(&content)
     } else {
         None
     };
+    let latest_codex_user_ts_ms = latest_codex_user.as_ref().and_then(|(ts, _)| *ts);
+    if let Some((Some(ts), text)) = &latest_codex_user {
+        if !is_subagent_transcript_path(path) && codex_user_record_is_new(path, *ts) {
+            if let Some(root) = project_root(Some(app)) {
+                note_prompt_for_withdrawn_approval(app, &root, text, "codex-user-record");
+            }
+        }
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -109484,6 +109651,55 @@ fn opencode_input_delivered(sid: &str, at_ms: i64) {
     }
 }
 
+// esc-strand-missed-arrow-in-message: OpenCode's plugin sees only tool
+// calls, and `session.inbox.delivered` carries the message id, not its text
+// (docs/agent-specimens/opencode/hooks/session.inbox.delivered.json). The
+// delivered message is the session's newest user row in OpenCode's store.
+fn opencode_newest_user_text_in(conn: &rusqlite::Connection, sid: &str) -> Option<String> {
+    let data: String = conn
+        .query_row(
+            "SELECT data FROM session_message WHERE session_id = ?1 AND type = 'user' ORDER BY seq DESC LIMIT 1",
+            rusqlite::params![sid],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let d: serde_json::Value = serde_json::from_str(&data).ok()?;
+    d.get("text").and_then(|v| v.as_str()).map(String::from)
+}
+
+fn opencode_note_delivered_prompt<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    let Some(text) = opencode_open_db().and_then(|c| opencode_newest_user_text_in(&c, sid)) else {
+        return;
+    };
+    note_prompt_for_withdrawn_approval(app, &root, &text, "opencode-inbox-delivered");
+}
+
+// The host-side callers' shared step: check, and trace a withdrawn approval.
+fn note_prompt_for_withdrawn_approval<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    text: &str,
+    source: &str,
+) {
+    if let Some(w) = crate::guard_policy::note_submitted_prompt(root, text, source) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "withdrawn-approval",
+                &format!(
+                    "op=set source={} reason={:?} ids={}",
+                    source,
+                    w.reason,
+                    w.ids.join(",")
+                ),
+            );
+        }
+    }
+}
+
 // opencode-esc-interrupt: what a user Esc does under Claude (pty_menu_clear),
 // done when OpenCode reports the interrupt instead of at the keystroke. The
 // claim clear and H4's fail-closed revocation happen for any interrupt. The
@@ -112732,7 +112948,10 @@ fn handle_opencode_event<R: tauri::Runtime>(
     }
     match kind.as_str() {
         "session.execution.started" => opencode_turn_started(app, &sid, at_ms),
-        "session.inbox.delivered" => opencode_input_delivered(&sid, at_ms),
+        "session.inbox.delivered" => {
+            opencode_input_delivered(&sid, at_ms);
+            opencode_note_delivered_prompt(app, &sid);
+        }
         "session.execution.succeeded" | "session.execution.failed" => {
             opencode_turn_ended(app, &sid, at_ms)
         }

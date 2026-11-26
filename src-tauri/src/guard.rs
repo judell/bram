@@ -92,6 +92,7 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
         }
         "antigravity-session" => {
             session_report("antigravity", &payload);
+            antigravity_note_prompt(&payload);
             0
         }
         other => {
@@ -101,6 +102,37 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
             eprintln!("bram guard: unknown hook '{}'", other);
             0
         }
+    }
+}
+
+// esc-strand-missed-arrow-in-message: agy's PreInvocation is its prompt
+// surface. `lastUserInput` repeats on every invocation of a turn
+// (docs/agent-specimens/antigravity/hooks/payloads/PreInvocation.jsonl), so
+// only the first is the submission; a subagent's carries none. Whether agy
+// takes context back from this hook isn't recorded, so it prints nothing:
+// the guard's deny carries the explanation.
+fn antigravity_note_prompt(payload: &serde_json::Value) {
+    if payload.get("invocationNum").and_then(|v| v.as_i64()) != Some(0) {
+        return;
+    }
+    let prompt = str_field(payload, "lastUserInput");
+    if prompt.is_empty() {
+        return;
+    }
+    let root = resolve_project_root("antigravity-rs", payload);
+    let Some(root) = crate::guard_policy::find_project_root(&root.to_string_lossy()) else {
+        return;
+    };
+    if let Some(w) =
+        crate::guard_policy::note_submitted_prompt(&root, &prompt, "antigravity-pre-invocation")
+    {
+        append_breadcrumb(
+            &root,
+            "antigravity-rs",
+            "PreInvocation",
+            "",
+            &format!("action=withdrawn-approval ids={}", w.ids.join(",")),
+        );
     }
 }
 
@@ -1161,14 +1193,9 @@ fn authority_menu_hook(
         } else {
             std::path::PathBuf::from(cwd_s)
         };
+        let mut context: Vec<String> = Vec::new();
         if crate::guard_policy::claude_enforcement_paused(&cwd) {
-            let out = serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": event,
-                    "additionalContext": crate::guard_policy::enforcement_paused_context(),
-                }
-            });
-            println!("{}", out);
+            context.push(crate::guard_policy::enforcement_paused_context().to_string());
             let root = resolve_project_root(provider, payload);
             append_breadcrumb(
                 &root,
@@ -1177,6 +1204,37 @@ fn authority_menu_hook(
                 "",
                 "action=enforcement-paused-context",
             );
+        }
+        // esc-strand-missed-arrow-in-message: an `approved:` prompt whose
+        // approval is no longer live (re-sent from the terminal after an Esc
+        // or a drop) gets a note, and the guard refuses edits for the turn.
+        if event == "UserPromptSubmit" {
+            if let Some(root) = crate::guard_policy::find_project_root(&cwd.to_string_lossy()) {
+                let prompt = str_field(payload, "prompt");
+                if let Some(w) = crate::guard_policy::note_submitted_prompt(
+                    &root,
+                    &prompt,
+                    "claude-prompt-submit",
+                ) {
+                    context.push(crate::guard_policy::withdrawn_approval_context(&w));
+                    append_breadcrumb(
+                        &root,
+                        provider,
+                        &event,
+                        "",
+                        &format!("action=withdrawn-approval ids={}", w.ids.join(",")),
+                    );
+                }
+            }
+        }
+        if !context.is_empty() {
+            let out = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": event,
+                    "additionalContext": context.join("\n\n"),
+                }
+            });
+            println!("{}", out);
         }
         return 0;
     }

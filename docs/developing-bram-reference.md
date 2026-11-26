@@ -1804,7 +1804,30 @@ no compaction: the harness clears, too. The single largest tool result was
 
 **Adding a provider.** `reader_for` maps the session's provider label to a
 `Reader`; a provider without one answers `supported: false` and the pane
-says so in the provider's name.
+says so in the provider's name. The pane's words for a provider live in
+`__bramStackAboutLines` and `__bramStackKindExplain` (`helpers.js`); a
+provider without a branch there gets neutral lines.
+
+**OpenCode and Antigravity** (`context-stack-opencode-antigravity`,
+2026-11-25). Both read the provider's own record, not Bram's Claude-shaped
+export, which drops the per-call token counts: `context_stack_response`
+opens OpenCode's SQLite store (`opencode_records`: the
+`instruction_state` → `instruction_blob` values first, then
+`session_message` rows in `seq` order) and Antigravity's
+`brain/<id>/.system_generated/logs/transcript_full.jsonl`
+(`antigravity_transcript`: the full file, else its chunks, else the compact
+`transcript.jsonl`). The measured total is the latest call's context as
+token accounting reads it (`opencode_call`, `agy_call`). Block weights come
+from `growth_rates`, which regresses each call's growth on the bytes of the
+blocks it first carried, thinking apart (`fit_rates`), falling back to four
+bytes a token; the remainder stays unaccounted, as with Codex. Neither
+record holds the CLI's own system prompt or tool schemas, so those tokens
+are always unaccounted (on Antigravity about the first call's floor,
+22–23k). OpenCode stores no reasoning text for Anthropic models, so their
+hidden reasoning is unaccounted too. An Antigravity `CHECKPOINT` is read as
+a compaction summary by inference: no local transcript had one. Probes:
+`probe_a_real_opencode_session` (`BRAM_OPENCODE_SESSION`) and
+`probe_a_real_antigravity_session` (`BRAM_AGY_SESSION`), both ignored.
 
 **Codex rollouts.** The Context tab identifies the rollout by session ID.
 It shows the text of `session_meta.payload.base_instructions`, message

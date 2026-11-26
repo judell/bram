@@ -393,7 +393,7 @@ fn labels_are_first_lines_cut_to_eighty_characters() {
 #[test]
 fn a_provider_without_a_reader_gets_the_unsupported_stack_whatever_the_file_holds() {
     let text = plain().join("\n");
-    for provider in ["opencode", "antigravity", "someday"] {
+    for provider in ["someday", "gemini"] {
         assert_eq!(reader_for(provider), None, "{provider}");
         let s = build(provider, &text, "s1", None);
         assert!(!s.supported, "{provider}");
@@ -402,6 +402,11 @@ fn a_provider_without_a_reader_gets_the_unsupported_stack_whatever_the_file_hold
         assert_eq!(s.measured.calls, 0);
     }
     assert_eq!(reader_for("claude"), Some(Reader::ClaudeJsonl));
+    assert_eq!(reader_for("opencode"), Some(Reader::OpenCodeRecords));
+    assert_eq!(
+        reader_for("antigravity"),
+        Some(Reader::AntigravityTranscript)
+    );
 }
 
 #[test]
@@ -487,6 +492,11 @@ fn probe_a_real_session_file() {
     let text = std::fs::read_to_string(&path).expect("readable session file");
     let provider = crate::projected_turns_provider_label(Path::new(&path));
     let s = build(provider, &text, "probe", root.as_deref().map(Path::new));
+    print_probe(&s);
+}
+
+fn print_probe(s: &Stack) {
+    println!("session {} · model {}", s.session, s.model);
     println!(
         "blocks {} · measured {} · floor {} · base {} · calls {} · compactions {} · bytes/token {:.2} text, {:.2} opaque ({}, fit rows {}) · accounted {} · unaccounted {}",
         s.blocks.len(),
@@ -538,6 +548,44 @@ fn probe_a_real_session_file() {
             b.label
         );
     }
+}
+
+/// The OpenCode probe: a session of this machine's `opencode.db`, read-only.
+///
+/// BRAM_OPENCODE_SESSION=<ses_…> BRAM_STACK_ROOT=<project root> \
+///   cargo test --manifest-path src-tauri/Cargo.toml --lib \
+///   context_stack::tests::probe_a_real_opencode_session -- --ignored --nocapture
+#[test]
+#[ignore]
+fn probe_a_real_opencode_session() {
+    let Ok(sid) = std::env::var("BRAM_OPENCODE_SESSION") else {
+        return;
+    };
+    let root = std::env::var("BRAM_STACK_ROOT").ok();
+    let conn = crate::opencode_open_db().expect("opencode.db");
+    let text = opencode_records(&conn, &sid).expect("session records");
+    print_probe(&build(
+        "opencode",
+        &text,
+        &sid,
+        root.as_deref().map(Path::new),
+    ));
+}
+
+/// The Antigravity probe: a conversation under `~/.gemini/antigravity-cli`.
+///
+/// BRAM_AGY_SESSION=<conversation id> cargo test --manifest-path \
+///   src-tauri/Cargo.toml --lib \
+///   context_stack::tests::probe_a_real_antigravity_session -- --ignored --nocapture
+#[test]
+#[ignore]
+fn probe_a_real_antigravity_session() {
+    let Ok(id) = std::env::var("BRAM_AGY_SESSION") else {
+        return;
+    };
+    let dir = crate::antigravity_data_dir().expect("agy data dir");
+    let text = antigravity_transcript(&dir, &id).expect("transcript");
+    print_probe(&build("antigravity", &text, &id, None));
 }
 
 // --- the requests strategy ---------------------------------------------------
@@ -1221,4 +1269,358 @@ fn without_request_refs_the_request_index_stands() {
         s.blocks.iter().find(|b| b.label == "ok").map(|b| b.call),
         Some(1)
     );
+}
+
+// --- OpenCode: the database rows -------------------------------------------
+
+/// An in-memory `opencode.db` with the three tables the reader reads, in
+/// OpenCode's own schema, and one session the way OpenCode writes it: the
+/// instruction values as hashes into `instruction_blob`, a user message, an
+/// assistant step with reasoning, text and a tool, a step that errored, and
+/// the turn's `idle`.
+fn opencode_db() -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL, seq integer NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
+         CREATE TABLE instruction_blob (hash text PRIMARY KEY, value text);
+         CREATE TABLE instruction_state (session_id text PRIMARY KEY, epoch_start integer NOT NULL, through_seq integer NOT NULL, initial_values text NOT NULL, current_values text NOT NULL);",
+    )
+    .unwrap();
+    let blobs = [
+        (
+            "h-code",
+            r#"{"total":1,"shown":1,"namespaces":[{"name":"opencode"}]}"#,
+        ),
+        (
+            "h-skill",
+            r#"[{"id":"loop","name":"loop","description":"Run a prompt"}]"#,
+        ),
+        (
+            "h-instr",
+            r##"[{"path":"/p/AGENTS.md","content":"# Rules\nBe brief."},{"path":"/p/docs/more.md","content":"More rules."}]"##,
+        ),
+        ("h-date", r#""Mon Nov 23 2026""#),
+        ("h-env", r#""<env>\n  Working directory: /p\n</env>""#),
+    ];
+    for (h, v) in blobs {
+        conn.execute(
+            "INSERT INTO instruction_blob VALUES (?1, ?2)",
+            rusqlite::params![h, v],
+        )
+        .unwrap();
+    }
+    let values = r#"{"core/codemode":"h-code","core/skill-guidance":"h-skill","core/instructions":"h-instr","core/date":"h-date","core/environment":"h-env"}"#;
+    conn.execute(
+        "INSERT INTO instruction_state VALUES ('ses_1', 3, 3, ?1, ?1)",
+        rusqlite::params![values],
+    )
+    .unwrap();
+    let messages = [
+        ("m1", "user", 4, r#"{"time":{"created":1795495462263},"text":"Read the notes","files":[],"agents":[]}"#.to_string()),
+        ("m2", "assistant", 5, r#"{"time":{"created":1795495462277,"completed":1795495465501},"agent":"build","model":{"id":"tidepool-alpha-free","providerID":"opencode"},"content":[{"type":"reasoning","text":"Let me read it."},{"type":"text","text":"Reading the notes."},{"type":"tool","id":"call_1","name":"read","state":{"status":"completed","input":{"path":"/p/notes.md"},"content":[{"type":"text","text":"1: hello"}]}}],"finish":"tool-calls","tokens":{"input":34085,"output":125,"reasoning":205,"cache":{"read":1968,"write":0}}}"#.to_string()),
+        ("m3", "assistant", 6, r#"{"time":{"created":1795495465507,"completed":1795495472573},"model":{"id":"tidepool-alpha-free"},"content":[{"type":"tool","id":"call_2","name":"bash","state":{"status":"error","input":{"command":"false"},"error":{"message":"exit 1"}}},{"type":"text","text":"It failed."}],"finish":"stop","tokens":{"input":10,"output":40,"cache":{"read":36400,"write":20}}}"#.to_string()),
+        ("m4", "idle", 7, r#"{"time":{"created":1795495472575},"outcome":"succeeded"}"#.to_string()),
+        ("x1", "user", 1, r#"{"time":{"created":1},"text":"another session"}"#.to_string()),
+    ];
+    for (id, ty, seq, data) in messages {
+        let sid = if id == "x1" { "ses_2" } else { "ses_1" };
+        conn.execute(
+            "INSERT INTO session_message VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
+            rusqlite::params![id, sid, ty, seq, data],
+        )
+        .unwrap();
+    }
+    conn
+}
+
+#[test]
+fn opencode_rows_become_the_instructions_then_the_conversation() {
+    let conn = opencode_db();
+    let text = opencode_records(&conn, "ses_1").unwrap();
+    let s = build("opencode", &text, "ses_1", Some(Path::new("/p")));
+    assert!(s.supported);
+    assert_eq!(s.session, "opencode:ses_1");
+    assert_eq!(s.model, "tidepool-alpha-free");
+    use BlockKind::*;
+    assert_eq!(
+        kinds(&s),
+        [
+            Harness,
+            Harness,
+            Harness,
+            Instructions,
+            Instructions,
+            Attachment,
+            User,
+            Thinking,
+            Agent,
+            ToolCall,
+            ToolResult,
+            ToolCall,
+            ToolResult,
+            Agent
+        ]
+    );
+    let labels: Vec<&str> = s.blocks.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(
+        &labels[..7],
+        [
+            "Tool namespaces",
+            "Environment",
+            "Date",
+            "AGENTS.md",
+            "docs/more.md",
+            "Skills list",
+            "Read the notes"
+        ]
+    );
+    assert_eq!(s.blocks[3].on_disk.as_deref(), Some("/p/AGENTS.md"));
+    assert_eq!(s.blocks[3].text, "# Rules\nBe brief.");
+    assert_eq!(s.blocks[2].text, "Mon Nov 23 2026");
+    // OpenCode's own tool input is the text; the label is the Transcript's.
+    assert_eq!(s.blocks[9].text, r#"{"path":"/p/notes.md"}"#);
+    assert_eq!(s.blocks[9].label, "Read: /p/notes.md");
+    assert_eq!(s.blocks[10].label, "Read result");
+    assert_eq!(s.blocks[10].text, "1: hello");
+    assert!(s.blocks[12].is_error);
+    assert_eq!(s.blocks[12].text, "exit 1");
+    assert_eq!(s.blocks[12].label, "Bash result");
+    // Calls: the instructions and the user's words go with call 0, each
+    // step's output with the call after it.
+    let calls: Vec<usize> = s.blocks.iter().map(|b| b.call).collect();
+    assert_eq!(calls, [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2]);
+    assert_eq!(s.blocks[6].turn, 1);
+    assert_eq!(s.blocks[6].ts.as_deref(), Some("2026-11-24T04:44:22.263Z"));
+    // context = input + cache.read + cache.write
+    assert_eq!(s.measured.calls, 2);
+    assert_eq!(s.measured.floor, 34085 + 1968);
+    assert_eq!(s.measured.tokens, 10 + 36400 + 20);
+    // Two calls give nothing to fit: four bytes a token, and the remainder
+    // (OpenCode's own prompt and tool definitions) unaccounted.
+    assert!(!s.calibrated);
+    assert_eq!(s.bytes_per_token, FALLBACK_BYTES_PER_TOKEN);
+    assert_eq!(
+        s.unaccounted_tokens,
+        s.measured.tokens as i64 - s.accounted_tokens as i64
+    );
+    assert!(s.blocks.iter().all(|b| b.opaque_bytes == 0));
+    let keys: HashSet<_> = s.blocks.iter().map(|b| b.record_key.clone()).collect();
+    assert_eq!(keys.len(), s.blocks.len(), "record keys are unique");
+}
+
+#[test]
+fn opencode_without_instruction_tables_reads_the_messages_alone() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session_message (id text, session_id text, type text, seq integer, time_created integer, time_updated integer, data text);
+         INSERT INTO session_message VALUES ('m1','s','user',1,0,0,'{\"text\":\"hi\"}');",
+    )
+    .unwrap();
+    let text = opencode_records(&conn, "s").unwrap();
+    let s = build("opencode", &text, "s", None);
+    assert_eq!(kinds(&s), [BlockKind::User]);
+    assert_eq!(s.measured.calls, 0);
+}
+
+// --- Antigravity: the transcript -------------------------------------------
+
+fn agy_input(step: u64, ts: &str, text: &str) -> String {
+    serde_json::json!({"step_index": step, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "created_at": ts,
+        "content": format!("<USER_REQUEST>\n{text}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: x.\n</ADDITIONAL_METADATA>")})
+    .to_string()
+}
+
+fn agy_response(
+    step: u64,
+    ts: &str,
+    input: u64,
+    cache: u64,
+    content: &str,
+    thinking: &str,
+    calls: serde_json::Value,
+) -> String {
+    serde_json::json!({"step_index": step, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": ts,
+        "input_tokens": input, "cache_read_tokens": cache, "output_tokens": 10, "model": "gemini-4-neon-high",
+        "content": content, "thinking": thinking, "tool_calls": calls})
+    .to_string()
+}
+
+fn agy_generic(step: u64, ts: &str, status: &str, text: &str) -> String {
+    serde_json::json!({"step_index": step, "source": "MODEL", "type": "GENERIC", "status": status, "created_at": ts, "content": text})
+        .to_string()
+}
+
+#[test]
+fn antigravity_steps_become_blocks_with_results_paired_to_their_calls() {
+    let lines = [
+        agy_input(0, "2026-11-20T03:50:50Z", "Read the digest"),
+        agy_response(
+            1,
+            "2026-11-20T03:50:50Z",
+            23217,
+            0,
+            "I'll read it.",
+            "Thinking it through.",
+            serde_json::json!([{"name": "read_file", "args": {"Path": "/p/a.md"}}, {"name": "run_command", "args": {"CommandLine": "false"}}]),
+        ),
+        agy_generic(2, "2026-11-20T03:50:55Z", "DONE", "1: # A"),
+        agy_generic(3, "2026-11-20T03:50:55Z", "ERROR", "exit 1"),
+        serde_json::json!({"step_index": 4, "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-20T03:50:56Z",
+            "content": "A background task finished.\n\n<SYSTEM_MESSAGE>\nTask 7 done\n</SYSTEM_MESSAGE>"}).to_string(),
+        agy_response(5, "2026-11-20T03:50:56Z", 4956, 23218, "Done.", "", serde_json::json!(null)),
+        "{\"unfinished\":".to_string(),
+    ];
+    let s = build("antigravity", &lines.join("\n"), "c8a5", None);
+    assert!(s.supported);
+    assert_eq!(s.session, "antigravity:c8a5");
+    assert_eq!(s.model, "gemini-4-neon-high");
+    use BlockKind::*;
+    assert_eq!(
+        kinds(&s),
+        [User, Thinking, Agent, ToolCall, ToolCall, ToolResult, ToolResult, Attachment, Agent]
+    );
+    // The user's block is what agy sent, wrapper and all; its label the request.
+    assert!(s.blocks[0].text.starts_with("<USER_REQUEST>"));
+    assert_eq!(s.blocks[0].label, "Read the digest");
+    assert_eq!(s.blocks[0].turn, 1);
+    assert_eq!(s.blocks[3].label, "Read: /p/a.md");
+    assert_eq!(s.blocks[3].text, r#"{"Path":"/p/a.md"}"#);
+    assert_eq!(s.blocks[5].label, "Read result");
+    assert_eq!(s.blocks[6].label, "Bash result");
+    assert!(s.blocks[6].is_error && !s.blocks[5].is_error);
+    assert_eq!(s.blocks[7].label, "Task 7 done");
+    let calls: Vec<usize> = s.blocks.iter().map(|b| b.call).collect();
+    assert_eq!(calls, [0, 1, 1, 1, 1, 1, 1, 1, 2]);
+    assert_eq!(s.measured.calls, 2);
+    assert_eq!(s.measured.floor, 23217);
+    assert_eq!(s.measured.tokens, 4956 + 23218);
+    assert!(!s.calibrated);
+    // No block holds agy's own prompt or tools: they are the remainder.
+    assert!(s.unaccounted_tokens > 20_000);
+}
+
+#[test]
+fn antigravity_a_step_written_twice_counts_once_and_the_later_record_wins() {
+    let lines = [
+        agy_input(0, "2026-11-20T03:50:50Z", "hi"),
+        agy_response(
+            1,
+            "2026-11-20T03:50:50Z",
+            100,
+            0,
+            "first draft",
+            "",
+            serde_json::json!(null),
+        ),
+        agy_response(
+            1,
+            "2026-11-20T03:50:51Z",
+            120,
+            0,
+            "final",
+            "",
+            serde_json::json!(null),
+        ),
+    ];
+    let s = build("antigravity", &lines.join("\n"), "c", None);
+    assert_eq!(s.measured.calls, 1);
+    assert_eq!(s.measured.tokens, 120);
+    let texts: Vec<&str> = s.blocks.iter().map(|b| b.text.as_str()).collect();
+    assert_eq!(texts[1..], ["final"]);
+}
+
+#[test]
+fn antigravity_a_checkpoint_replaces_the_conversation_with_its_summary() {
+    let lines = [
+        agy_input(0, "2026-11-20T03:50:50Z", "hi"),
+        agy_response(1, "2026-11-20T03:50:50Z", 100, 0, "hello", "", serde_json::json!(null)),
+        serde_json::json!({"step_index": 2, "type": "CHECKPOINT", "status": "DONE", "created_at": "2026-11-20T04:00:00Z", "content": "We said hello."}).to_string(),
+        agy_input(3, "2026-11-20T04:00:01Z", "again"),
+    ];
+    let s = build("antigravity", &lines.join("\n"), "c", None);
+    assert_eq!(s.measured.compactions, 1);
+    assert_eq!(s.compacted.blocks, 2);
+    use BlockKind::*;
+    assert_eq!(kinds(&s), [CompactionSummary, User]);
+    assert_eq!(s.blocks[0].text, "We said hello.");
+}
+
+#[test]
+fn antigravity_rates_are_fitted_on_its_growth_thinking_apart() {
+    // Each call adds what the step before it wrote: text at 2.8 bytes a
+    // token, thinking at 1.5, as this machine's sessions read.
+    let mut lines = vec![agy_input(0, "2026-11-20T03:50:50Z", "go")];
+    let mut ctx = 20_000u64;
+    let steps = [
+        (2800, 0),
+        (5600, 1500),
+        (1400, 3000),
+        (8400, 300),
+        (2800, 4500),
+        (11200, 0),
+        (4200, 1500),
+    ];
+    let mut prev: Option<(usize, usize)> = None;
+    for (i, (t, h)) in steps.iter().enumerate() {
+        if let Some((pt, ph)) = prev {
+            ctx += (pt as f64 / 2.8 + ph as f64 / 1.5).round() as u64;
+        }
+        lines.push(agy_response(
+            1 + i as u64,
+            &format!("2026-11-20T03:51:{:02}Z", i),
+            ctx,
+            0,
+            &"a".repeat(*t),
+            &"b".repeat(*h),
+            serde_json::json!(null),
+        ));
+        prev = Some((*t, *h));
+    }
+    let s = build("antigravity", &lines.join("\n"), "c", None);
+    assert!(s.calibrated, "fit on {} calls", s.measured.calls);
+    assert!(
+        (s.bytes_per_token - 2.8).abs() < 0.05,
+        "{}",
+        s.bytes_per_token
+    );
+    assert!(
+        (s.opaque_bytes_per_token - 1.5).abs() < 0.05,
+        "{}",
+        s.opaque_bytes_per_token
+    );
+    let think = s
+        .blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::Thinking)
+        .unwrap();
+    assert_eq!(think.opaque_bytes, 0, "readable thinking is not opaque");
+    assert_eq!(
+        think.tokens,
+        (think.bytes as f64 / s.opaque_bytes_per_token).round() as u64
+    );
+}
+
+#[test]
+fn antigravity_transcript_prefers_the_full_file_then_its_chunks() {
+    let dir = std::env::temp_dir().join(format!("bram-agy-stack-{}", std::process::id()));
+    let logs = dir
+        .join("brain")
+        .join("c1")
+        .join(".system_generated")
+        .join("logs");
+    let chunks = logs.join("chunks").join("transcript_full");
+    std::fs::create_dir_all(&chunks).unwrap();
+    std::fs::write(chunks.join("00000001.jsonl"), "b\n").unwrap();
+    std::fs::write(chunks.join("00000000.jsonl"), "a").unwrap();
+    assert_eq!(
+        antigravity_transcript(&dir, "c1").as_deref(),
+        Some("a\nb\n")
+    );
+    std::fs::write(logs.join("transcript_full.jsonl"), "full\n").unwrap();
+    assert_eq!(
+        antigravity_transcript(&dir, "c1").as_deref(),
+        Some("full\n")
+    );
+    assert_eq!(antigravity_transcript(&dir, "missing"), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }

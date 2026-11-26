@@ -32,6 +32,11 @@
 //!   latest `prompt_snapshot` attachment as the harness block and a
 //!   bytes-per-token figure calibrated on the growth between readings.
 //!
+//! Codex, OpenCode and Antigravity record no request list, so their readers
+//! walk the records in order (`codex_stack`, `opencode_stack`,
+//! `antigravity_stack`) and leave what the record lacks (each CLI's own
+//! system prompt and tool definitions, at least) as unaccounted.
+//!
 //! Everything after a reader (scaling, by-kind totals) is provider-neutral.
 
 use serde::Serialize;
@@ -245,11 +250,17 @@ pub fn empty(provider: &'static str, supported: bool) -> Stack {
 /// The readers Bram has, one per provider whose session records it turns
 /// into blocks. A provider missing here gets `supported: false` from the
 /// routes; adding one means a walk over its records and a `Measured` from
-/// its accounting parser (`parse_codex_text` already reads Codex rollouts).
+/// its accounting parser (`parse_codex_text` for Codex rollouts,
+/// `opencode_call` for OpenCode messages, `agy_call` for agy's steps).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reader {
     ClaudeJsonl,
     CodexRollout,
+    /// OpenCode's `session_message` rows and instruction values, as
+    /// `opencode_records` reads them from its database.
+    OpenCodeRecords,
+    /// agy's `transcript_full.jsonl`, as `antigravity_transcript` reads it.
+    AntigravityTranscript,
 }
 
 /// The provider labels are the ones `/__turns` and the sessions routes use.
@@ -257,6 +268,8 @@ pub fn reader_for(provider: &str) -> Option<Reader> {
     match provider {
         "claude" => Some(Reader::ClaudeJsonl),
         "codex" => Some(Reader::CodexRollout),
+        "opencode" => Some(Reader::OpenCodeRecords),
+        "antigravity" => Some(Reader::AntigravityTranscript),
         _ => None,
     }
 }
@@ -281,6 +294,8 @@ pub fn build(provider: &'static str, text: &str, session_id: &str, root: Option<
             }
         }
         Some(Reader::CodexRollout) => codex_stack(text, session_id),
+        Some(Reader::OpenCodeRecords) => opencode_stack(text, session_id, root),
+        Some(Reader::AntigravityTranscript) => antigravity_stack(text, session_id),
         None => empty(provider, false),
     }
 }
@@ -405,6 +420,614 @@ fn codex_stack(text: &str, fallback_id: &str) -> Stack {
         latest,
     );
     stack.unaccounted_tokens = latest as i64 - stack.accounted_tokens as i64;
+    stack
+}
+
+// --- readers without a request list: OpenCode and Antigravity --------------
+
+/// Rates for a reader whose records hold no request list (OpenCode's
+/// database, Antigravity's transcript): the context each call added (its
+/// reading less the previous) regressed on the bytes of the blocks that call
+/// first carried, thinking apart from the rest, through `fit_rates`. Rows
+/// start after the last compaction summary, since what came before it is no
+/// longer in the stack. Measured on this machine's sessions: Antigravity
+/// 2.81 and 2.83 bytes a token for text, 1.55 and 1.53 for its thinking
+/// (whose recorded text is shorter than what the model carries), on two
+/// sessions of 11 and 33 rows; OpenCode on `tidepool-alpha-free` 3.2 and
+/// 3.3. Four bytes a token, uncalibrated, when the fit is refused.
+fn growth_rates(blocks: &[Block], contexts: &[u64]) -> Result<(f64, f64), &'static str> {
+    let n = contexts.len();
+    let mut text = vec![0u64; n];
+    let mut thinking = vec![0u64; n];
+    let mut start = 1;
+    for b in blocks.iter().filter(|b| b.resent) {
+        if b.kind == BlockKind::CompactionSummary {
+            start = start.max(b.call + 1);
+        }
+        if b.call < n {
+            if b.kind == BlockKind::Thinking {
+                thinking[b.call] += b.bytes;
+            } else {
+                text[b.call] += b.bytes;
+            }
+        }
+    }
+    let rows: Vec<(u64, u64, u64)> = (start..n)
+        .filter(|&k| contexts[k] > contexts[k - 1])
+        .map(|k| (contexts[k] - contexts[k - 1], text[k], thinking[k]))
+        .collect();
+    fit_rates(&rows)
+}
+
+/// Size the blocks of a reader without a request list and total them. The
+/// thinking rate is applied by marking thinking blocks opaque for the scale,
+/// then unmarking them: their text is readable, not an encrypted signature,
+/// so the block keeps `opaqueBytes: 0`. No scaling to the measured figure:
+/// neither record holds the CLI's own system prompt or tool definitions, so
+/// the remainder is shown as unaccounted, as Codex's is.
+fn size_unrequested(stack: &mut Stack, contexts: &[u64]) {
+    let (text_rate, thinking_rate) = match growth_rates(&stack.blocks, contexts) {
+        Ok(rates) => {
+            stack.calibrated = true;
+            rates
+        }
+        Err(_) => (FALLBACK_BYTES_PER_TOKEN, FALLBACK_BYTES_PER_TOKEN),
+    };
+    stack.bytes_per_token = text_rate;
+    stack.opaque_bytes_per_token = thinking_rate;
+    for b in stack.blocks.iter_mut() {
+        if b.kind == BlockKind::Thinking {
+            b.opaque_bytes = b.bytes;
+        }
+    }
+    let latest = stack.measured.tokens;
+    (stack.accounted_tokens, stack.by_kind) =
+        scale(&mut stack.blocks, text_rate, thinking_rate, latest);
+    for b in stack.blocks.iter_mut() {
+        if b.kind == BlockKind::Thinking {
+            b.opaque_bytes = 0;
+        }
+    }
+    stack.unaccounted_tokens = latest as i64 - stack.accounted_tokens as i64;
+}
+
+fn compact_json(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// One line of the text the OpenCode reader takes, as `opencode_records`
+/// writes it: a `session_message` row of OpenCode's database (`type` user,
+/// assistant or idle; `data` OpenCode's own message JSON), or first, with
+/// `type` "instructions", the session's instruction values (`data` an object
+/// from key to value). OpenCode keeps no session file: its records live in
+/// `opencode.db`, and Bram's Claude-shaped export of a session drops the
+/// per-call token counts and the instructions.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
+pub struct OpenCodeRecord {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub seq: i64,
+    #[serde(default)]
+    pub data: Value,
+}
+
+pub const OPENCODE_INSTRUCTIONS: &str = "instructions";
+
+/// The value of one instruction hash, as OpenCode stored it (JSON text).
+fn opencode_blob(conn: &rusqlite::Connection, hash: &str) -> Option<Value> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM instruction_blob WHERE hash = ?1",
+            rusqlite::params![hash],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let raw = raw?;
+    Some(serde_json::from_str(&raw).unwrap_or(Value::String(raw)))
+}
+
+/// An OpenCode session's records as JSONL, read-only from its database: the
+/// instructions it sends now (`instruction_state.current_values`, each a hash
+/// into `instruction_blob`), then its messages in `seq` order. A database
+/// without the instruction tables (an older OpenCode) gives the messages
+/// alone.
+pub fn opencode_records(conn: &rusqlite::Connection, sid: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let line = |rec: &OpenCodeRecord, out: &mut String| {
+        if let Ok(s) = serde_json::to_string(rec) {
+            out.push_str(&s);
+            out.push('\n');
+        }
+    };
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT current_values FROM instruction_state WHERE session_id = ?1",
+            rusqlite::params![sid],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(hashes) = current
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(s).ok())
+    {
+        let mut values = serde_json::Map::new();
+        for (key, hash) in hashes {
+            if let Some(v) = opencode_blob(conn, &hash) {
+                values.insert(key, v);
+            }
+        }
+        line(
+            &OpenCodeRecord {
+                kind: OPENCODE_INSTRUCTIONS.to_string(),
+                data: Value::Object(values),
+                ..Default::default()
+            },
+            &mut out,
+        );
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, type, seq, data FROM session_message WHERE session_id = ?1 ORDER BY seq",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![sid], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for (id, kind, seq, data) in rows.flatten() {
+        let data = serde_json::from_str(&data).unwrap_or(Value::Null);
+        line(
+            &OpenCodeRecord {
+                kind,
+                id,
+                seq,
+                data,
+            },
+            &mut out,
+        );
+    }
+    Ok(out)
+}
+
+/// The block an OpenCode instruction key becomes, and where it sorts: the
+/// harness's own parts first, then the instruction files, then the skills
+/// list (which Claude's reader counts as a note, too).
+fn opencode_instruction_kind(key: &str) -> (u8, BlockKind, String) {
+    match key {
+        "core/codemode" => (0, BlockKind::Harness, "Tool namespaces".to_string()),
+        "core/environment" => (1, BlockKind::Harness, "Environment".to_string()),
+        "core/date" => (2, BlockKind::Harness, "Date".to_string()),
+        "core/instructions" => (4, BlockKind::Instructions, String::new()),
+        "core/skill-guidance" => (5, BlockKind::Attachment, "Skills list".to_string()),
+        other => (3, BlockKind::Harness, other.to_string()),
+    }
+}
+
+/// One block of a reader that numbers its own parts (`<record>.<part>`), so
+/// the block route can find it again across rebuilds. Returns its index.
+#[allow(clippy::too_many_arguments)]
+fn push_part(
+    stack: &mut Stack,
+    record: &str,
+    part: &mut usize,
+    kind: BlockKind,
+    label: String,
+    body: String,
+    ts: &Option<String>,
+    turn: usize,
+    call: usize,
+) -> usize {
+    let mut b = new_block(kind, label, body, ts.clone(), turn, call);
+    b.record_key = Some(format!("{record}.{part}"));
+    *part += 1;
+    stack.blocks.push(b);
+    stack.blocks.len() - 1
+}
+
+/// OpenCode: the provider fact that sets this reader apart is that its
+/// session record is rows of a database, not a file, and that it records
+/// the instructions it sends (`core/instructions`: each AGENTS.md with its
+/// path and content; the environment, the date, the skills and tool
+/// namespaces) but not its own system prompt or tool definitions, which stay
+/// unaccounted. Each assistant message with `tokens` is one call; its
+/// context is `input + cache.read + cache.write` (token accounting's
+/// `opencode_call`).
+fn opencode_stack(text: &str, session_id: &str, root: Option<&Path>) -> Stack {
+    let root = root.map(|p| p.to_string_lossy().trim_end_matches('/').to_string());
+    let mut stack = empty("opencode", true);
+    stack.session = format!("opencode:{session_id}");
+    stack.reader = Strategy::Records;
+    let mut contexts: Vec<u64> = Vec::new();
+    let mut turn = 0;
+    for raw in text.lines() {
+        let Ok(rec) = serde_json::from_str::<OpenCodeRecord>(raw) else {
+            continue;
+        };
+        let d = &rec.data;
+        let ts = d
+            .pointer("/time/created")
+            .and_then(Value::as_i64)
+            .map(crate::format_iso_utc_ms);
+        let record = rec.seq.to_string();
+        let mut part = 0;
+        match rec.kind.as_str() {
+            OPENCODE_INSTRUCTIONS => {
+                let Some(values) = d.as_object() else {
+                    continue;
+                };
+                let mut keys: Vec<(&String, &Value)> = values.iter().collect();
+                keys.sort_by_key(|(k, _)| opencode_instruction_kind(k).0);
+                for (key, value) in keys {
+                    let (_, kind, label) = opencode_instruction_kind(key);
+                    if kind != BlockKind::Instructions {
+                        let body = compact_json(value);
+                        push_part(&mut stack, &record, &mut part, kind, label, body, &ts, 0, 0);
+                        continue;
+                    }
+                    for file in value.as_array().into_iter().flatten() {
+                        let path = file["path"].as_str().unwrap_or("");
+                        let body = file["content"].as_str().unwrap_or("").to_string();
+                        let label = relative(root.as_deref(), path);
+                        let i =
+                            push_part(&mut stack, &record, &mut part, kind, label, body, &ts, 0, 0);
+                        if !path.is_empty() {
+                            stack.blocks[i].on_disk = Some(path.to_string());
+                        }
+                    }
+                }
+            }
+            "user" => {
+                turn += 1;
+                let t = d["text"].as_str().unwrap_or("");
+                let call = contexts.len();
+                push_part(
+                    &mut stack,
+                    &record,
+                    &mut part,
+                    BlockKind::User,
+                    first_line(t),
+                    t.to_string(),
+                    &ts,
+                    turn,
+                    call,
+                );
+            }
+            "assistant" => {
+                // What this message wrote is first carried by the call after
+                // it, which is the next one's index.
+                let created = d.pointer("/time/created").and_then(Value::as_i64);
+                if let Ok(Some(c)) =
+                    crate::token_accounting::opencode_call(&d.to_string(), created.unwrap_or(0))
+                {
+                    contexts.push(c.context);
+                    stack.model = c.model;
+                }
+                let call = contexts.len();
+                for p in d["content"].as_array().into_iter().flatten() {
+                    let t = p["text"].as_str().unwrap_or("");
+                    let mut add = |stack: &mut Stack, kind, label: String, body: String| {
+                        push_part(
+                            stack, &record, &mut part, kind, label, body, &ts, turn, call,
+                        )
+                    };
+                    match p["type"].as_str() {
+                        Some("text") if !t.is_empty() => {
+                            add(&mut stack, BlockKind::Agent, first_line(t), t.to_string());
+                        }
+                        Some("reasoning") if !t.is_empty() => {
+                            let label = format!("Thinking: {}", first_line(t));
+                            add(&mut stack, BlockKind::Thinking, label, t.to_string());
+                        }
+                        Some("tool") => {
+                            let name = p["name"].as_str().unwrap_or("tool");
+                            let state = &p["state"];
+                            let input = &state["input"];
+                            // The label in the Transcript's tool names; the
+                            // text is what OpenCode sent.
+                            let (shown, shown_input) = crate::opencode_tool_as_claude(name, input);
+                            let label = tool_call_label(&shown, &shown_input);
+                            add(&mut stack, BlockKind::ToolCall, label, compact_json(input));
+                            let errored = state["status"].as_str() == Some("error");
+                            let output = if errored {
+                                state
+                                    .pointer("/error/message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string()
+                            } else {
+                                tool_result_text(state).0
+                            };
+                            let label = format!("{shown} result");
+                            let i = add(&mut stack, BlockKind::ToolResult, label, output);
+                            stack.blocks[i].is_error = errored;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    stack.measured.tokens = contexts.last().copied().unwrap_or(0);
+    stack.measured.floor = contexts.first().copied().unwrap_or(0);
+    stack.measured.base = stack.measured.floor;
+    stack.measured.calls = contexts.len();
+    size_unrequested(&mut stack, &contexts);
+    stack
+}
+
+/// The transcript the Antigravity reader takes for a conversation, read-only
+/// from agy's data directory: `transcript_full.jsonl` (untruncated records,
+/// native JSON tool args), else its chunks in order, else the compact
+/// `transcript.jsonl`. The same order token accounting reads them in.
+pub fn antigravity_transcript(data_dir: &Path, id: &str) -> Option<String> {
+    let logs = data_dir
+        .join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs");
+    let nonempty = |p: &Path| {
+        std::fs::read_to_string(p)
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+    };
+    if let Some(text) = nonempty(&logs.join("transcript_full.jsonl")) {
+        return Some(text);
+    }
+    let mut chunks: Vec<std::path::PathBuf> =
+        std::fs::read_dir(logs.join("chunks").join("transcript_full"))
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                    .collect()
+            })
+            .unwrap_or_default();
+    chunks.sort();
+    let mut text = String::new();
+    for chunk in chunks {
+        if let Some(t) = nonempty(&chunk) {
+            text.push_str(&t);
+            if !t.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+    }
+    if !text.is_empty() {
+        return Some(text);
+    }
+    nonempty(&logs.join("transcript.jsonl"))
+}
+
+/// Antigravity: the provider fact that sets this reader apart is that agy's
+/// transcript records steps, not requests, and holds nothing of its system
+/// prompt, its tool definitions or the instruction files it loads
+/// (AGENTS.md, GEMINI.md, rules): the first call's ~22k tokens on this
+/// machine's sessions are all unaccounted. Each `PLANNER_RESPONSE` is one
+/// call (`input_tokens + cache_read_tokens`, token accounting's `agy_call`,
+/// a step written twice counting once); `GENERIC` records are the results of
+/// its tool calls in order; `SYSTEM_MESSAGE` records are agy's notes; a
+/// `CHECKPOINT` is a compaction whose content is the summary.
+fn antigravity_stack(text: &str, session_id: &str) -> Stack {
+    let mut stack = empty("antigravity", true);
+    stack.session = format!("antigravity:{session_id}");
+    stack.reader = Strategy::Records;
+    let mut contexts: Vec<u64> = Vec::new();
+    let mut steps: HashMap<String, usize> = HashMap::new();
+    let mut last_at_ms = 0i64;
+    let mut pending: std::collections::VecDeque<String> = Default::default();
+    let mut turn = 0;
+    for (line, raw) in text.lines().enumerate() {
+        let Ok(rec) = serde_json::from_str::<Value>(raw) else {
+            continue;
+        };
+        let record = match &rec["step_index"] {
+            Value::Number(n) => format!("s{n}"),
+            Value::String(s) => format!("s{}", s.trim()),
+            _ => format!("l{line}"),
+        };
+        let kind = rec["type"].as_str().unwrap_or("");
+        let content = rec["content"].as_str().unwrap_or("");
+        let ts = rec["created_at"].as_str().map(str::to_owned);
+        let mut part = 0;
+        // A record before any call is carried first by call 0; what a
+        // response wrote, and the results that follow it, by the next call.
+        let mut call = contexts.len();
+        match kind {
+            "USER_INPUT" => {
+                pending.clear();
+                turn += 1;
+                let label = first_line(crate::antigravity_user_text(content));
+                let body = content.to_string();
+                push_part(
+                    &mut stack,
+                    &record,
+                    &mut part,
+                    BlockKind::User,
+                    label,
+                    body,
+                    &ts,
+                    turn,
+                    call,
+                );
+            }
+            "PLANNER_RESPONSE" => {
+                pending.clear();
+                if let Ok(Some(c)) = crate::token_accounting::agy_call(raw) {
+                    last_at_ms = c.at_ms;
+                    match steps.get(&c.key) {
+                        // A step written twice is one call: the later record
+                        // replaces the earlier one's blocks.
+                        Some(&k) => {
+                            contexts[k] = c.context;
+                            call = k + 1;
+                            let prefix = format!("{record}.");
+                            stack.blocks.retain(|b| {
+                                !b.record_key
+                                    .as_deref()
+                                    .is_some_and(|r| r.starts_with(&prefix))
+                            });
+                        }
+                        None => {
+                            steps.insert(c.key.clone(), contexts.len());
+                            contexts.push(c.context);
+                            call = contexts.len();
+                        }
+                    }
+                }
+                if let Some(m) = rec["model"].as_str().filter(|m| !m.is_empty()) {
+                    stack.model = m.to_string();
+                }
+                let mut add = |stack: &mut Stack, kind, label: String, body: String| {
+                    push_part(
+                        stack, &record, &mut part, kind, label, body, &ts, turn, call,
+                    )
+                };
+                if let Some(t) = rec["thinking"].as_str().filter(|t| !t.trim().is_empty()) {
+                    let label = format!("Thinking: {}", first_line(t));
+                    add(&mut stack, BlockKind::Thinking, label, t.to_string());
+                }
+                if !content.is_empty() {
+                    add(
+                        &mut stack,
+                        BlockKind::Agent,
+                        first_line(content),
+                        content.to_string(),
+                    );
+                }
+                for c in rec["tool_calls"].as_array().into_iter().flatten() {
+                    let name = c["name"].as_str().unwrap_or("tool");
+                    let args = &c["args"];
+                    // The compact transcript stringifies args; the full one
+                    // keeps them as JSON.
+                    let parsed = match args {
+                        Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+                        other => other.clone(),
+                    };
+                    let (shown, shown_input) =
+                        crate::antigravity_translate_tool_call(name, &parsed);
+                    let label = tool_call_label(&shown, &shown_input);
+                    add(&mut stack, BlockKind::ToolCall, label, compact_json(args));
+                    pending.push_back(shown);
+                }
+            }
+            "GENERIC" => match pending.pop_front() {
+                Some(name) => {
+                    let label = format!("{name} result");
+                    let body = content.to_string();
+                    let i = push_part(
+                        &mut stack,
+                        &record,
+                        &mut part,
+                        BlockKind::ToolResult,
+                        label,
+                        body,
+                        &ts,
+                        turn,
+                        call,
+                    );
+                    stack.blocks[i].is_error = rec["status"].as_str() == Some("ERROR");
+                }
+                None if !content.is_empty() => {
+                    let label = first_line(content);
+                    let body = content.to_string();
+                    push_part(
+                        &mut stack,
+                        &record,
+                        &mut part,
+                        BlockKind::Attachment,
+                        label,
+                        body,
+                        &ts,
+                        turn,
+                        call,
+                    );
+                }
+                None => {}
+            },
+            "SYSTEM_MESSAGE" => {
+                let label = first_line(crate::antigravity_system_message(content));
+                let body = content.to_string();
+                push_part(
+                    &mut stack,
+                    &record,
+                    &mut part,
+                    BlockKind::Attachment,
+                    label,
+                    body,
+                    &ts,
+                    turn,
+                    call,
+                );
+            }
+            // What agy sends in place of the conversation before it. No
+            // checkpoint was among this machine's transcripts; the reading
+            // follows the Transcript's ("Antigravity compacted this
+            // conversation") and token accounting's compaction count.
+            "CHECKPOINT" => {
+                pending.clear();
+                stack.measured.compactions += 1;
+                for old in stack.blocks.drain(..) {
+                    stack.compacted.blocks += 1;
+                    stack.compacted.bytes += old.bytes;
+                }
+                let label = "Compaction summary".to_string();
+                let body = content.to_string();
+                push_part(
+                    &mut stack,
+                    &record,
+                    &mut part,
+                    BlockKind::CompactionSummary,
+                    label,
+                    body,
+                    &ts,
+                    turn,
+                    call,
+                );
+            }
+            _ if !content.is_empty() => {
+                let label = humanize(&kind.to_ascii_lowercase());
+                let body = content.to_string();
+                push_part(
+                    &mut stack,
+                    &record,
+                    &mut part,
+                    BlockKind::Attachment,
+                    label,
+                    body,
+                    &ts,
+                    turn,
+                    call,
+                );
+            }
+            _ => {}
+        }
+    }
+    if stack.model.is_empty() && last_at_ms > 0 {
+        // Older transcripts name no model; agy's own selection log does, as
+        // token accounting reads it.
+        if let Some(dir) = crate::home_dir().map(|h| h.join(".gemini").join("antigravity-cli")) {
+            let selections = crate::token_accounting::agy_model_selections_in(&dir);
+            stack.model = crate::token_accounting::agy_model_at(&selections, last_at_ms);
+        }
+    }
+    stack.measured.tokens = contexts.last().copied().unwrap_or(0);
+    stack.measured.floor = contexts.first().copied().unwrap_or(0);
+    stack.measured.base = stack.measured.floor;
+    stack.measured.calls = contexts.len();
+    size_unrequested(&mut stack, &contexts);
     stack
 }
 

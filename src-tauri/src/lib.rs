@@ -65123,20 +65123,37 @@ fn context_stack_response<R: tauri::Runtime>(
             None => json(&context_stack::empty(label, false)),
         };
     }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) if label == "codex" => {
-            return match block {
-                Some(_) => Ok((404, TEXT, b"rollout unavailable".to_vec())),
-                None => json(&context_stack::empty(label, true)),
-            }
-        }
-        Err(e) => return Err(e.to_string()),
-    };
     let sid = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
+    // OpenCode's and Antigravity's session paths are Bram's Claude-shaped
+    // exports, which drop the per-call token counts; their readers take the
+    // provider's own records (the database rows, agy's transcript).
+    let read = match label {
+        "opencode" => opencode_open_db()
+            .and_then(|conn| context_stack::opencode_records(&conn, &sid).ok())
+            .ok_or_else(|| "OpenCode session unavailable".to_string()),
+        "antigravity" => antigravity_data_dir()
+            .and_then(|dir| context_stack::antigravity_transcript(&dir, &sid))
+            .ok_or_else(|| "Antigravity transcript unavailable".to_string()),
+        _ => std::fs::read_to_string(&path).map_err(|e| e.to_string()),
+    };
+    let text = match read {
+        Ok(text) => text,
+        Err(_) if label != "claude" => {
+            let missing: &[u8] = if label == "codex" {
+                b"rollout unavailable"
+            } else {
+                b"session record unavailable"
+            };
+            return match block {
+                Some(_) => Ok((404, TEXT, missing.to_vec())),
+                None => json(&context_stack::empty(label, true)),
+            };
+        }
+        Err(e) => return Err(e),
+    };
     let root = project_root(Some(app));
     let stack = context_stack::build(label, &text, &sid, root.as_deref());
     match block {

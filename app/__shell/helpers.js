@@ -24965,6 +24965,27 @@ window.__bramStackKindLabel = function (kind) {
 // About dialog (Jon, 2026-11-24: "don't understand. what are thinking
 // tokens?").
 window.__bramStackKindExplain = function (kind, provider) {
+  // OpenCode's database records what it adds beside the instruction files
+  // (its tool namespaces, environment, date and skills list), and its
+  // reasoning in readable text; agy's transcript records its own notes and
+  // a readable account of its thinking (context-stack-opencode-antigravity).
+  if (provider === "opencode") {
+    var oc = {
+      harness: "What OpenCode adds to its own prompt for this session: the tool namespaces, the environment and the date. Its base prompt and tool definitions aren't recorded.",
+      instructions: "The AGENTS.md files OpenCode loaded for this session, sent on every call.",
+      attachment: "The skills list OpenCode sends beside the instructions.",
+      thinking: "The model's reasoning before a step, as OpenCode recorded it. It is sent again on later calls, so it takes context room like anything else."
+    };
+    if (oc[kind]) return oc[kind];
+  }
+  if (provider === "antigravity") {
+    var agy = {
+      attachment: "Messages Antigravity adds to the conversation, such as a background task's notice.",
+      thinking: "Antigravity's account of the model's reasoning before a step. The model carries more reasoning than the account shows, so each block is sized at its own rate.",
+      "compaction-summary": "What Antigravity's checkpoint left of the conversation before it."
+    };
+    if (agy[kind]) return agy[kind];
+  }
   if (provider !== "claude") {
     if (kind === "harness") return provider === "codex"
       ? "Base instructions and system messages captured in the Codex rollout."
@@ -24974,9 +24995,9 @@ window.__bramStackKindExplain = function (kind, provider) {
       : "Instructions recorded for this session.";
     if (kind === "thinking") return "Reasoning recorded for this session.";
   }
-  // The texts below are Claude's. Only Claude's stack reader produces
-  // thinking blocks: Claude Code sends Anthropic's encrypted thinking back on
-  // every call. Codex rollouts carry encrypted reasoning items too, which its
+  // The texts below are Claude's. Claude Code sends Anthropic's encrypted
+  // thinking back on every call; OpenCode's and Antigravity's thinking texts
+  // are above. Codex rollouts carry encrypted reasoning items too, which its
   // reader doesn't read yet (codex-stack-reads-reasoning).
   var text = {
     harness: "The system prompt Claude Code sends first on every call, and the definitions of the tools the agent may call.",
@@ -25064,8 +25085,9 @@ window.__bramStackIntro = function () {
 // 2026-11-25: "prep for opencode/antigravity/others"). Each provider says
 // what its session record holds and how block sizes are measured, because
 // those differ by CLI: Claude's session file is sized by a bytes-per-token
-// rate measured on the session; Codex's rollout by four bytes a token. A
-// provider without its own lines (OpenCode, Antigravity, any later one)
+// rate measured on the session; Codex's rollout by four bytes a token;
+// OpenCode's and Antigravity's records by rates fitted on the session's
+// call-to-call growth. A provider without its own lines (any later one)
 // gets the neutral pair; add its branch when its stack reader lands.
 window.__bramStackAboutLines = function (stack) {
   var provider = stack && stack.provider;
@@ -25080,6 +25102,18 @@ window.__bramStackAboutLines = function (stack) {
     return [
       "Every block the Codex rollout records: message text, base instructions, tool inputs and tool results. It can omit parts of the model request." + defined,
       "Each block is weighed at one token per four text bytes. The last call’s token count comes from Codex usage records."
+    ];
+  }
+  if (provider === "opencode") {
+    return [
+      "Every block OpenCode's session record holds: the AGENTS.md files and other instructions it sends, your messages, the model's words, reasoning and tool calls, and the tool results. OpenCode doesn't record its own base prompt or tool definitions." + defined,
+      "Sizes are the bytes of each block at a bytes-per-token rate measured on this session's growth from call to call, or one token per four bytes when the session is too short to measure. The last call's token count comes from OpenCode's own record; what no block accounts for is shown as such."
+    ];
+  }
+  if (provider === "antigravity") {
+    return [
+      "Every block Antigravity's transcript holds: your messages, the model's words, its thinking and tool calls, the tool results, and Antigravity's own notes. The transcript doesn't record Antigravity's prompt, its tool definitions or the instruction files it loads." + defined,
+      "Sizes are the bytes of each block at bytes-per-token rates measured on this session's growth from call to call, one for thinking and one for everything else, or one token per four bytes when the session is too short to measure. The last call's token count comes from Antigravity's transcript; what no block accounts for is shown as such."
     ];
   }
   return [
@@ -25523,6 +25557,9 @@ window.__bramStackBlockBody = function (block, payload) {
   if (block.label === "Pasted image" || (block.onDisk && /\.(png|jpe?g|gif|webp|bmp)$/i.test(block.onDisk))) {
     return "(image data, " + window.__bramStackBytes(block.bytes) + ")";
   }
+  // Only a block with an encrypted part (Claude's signatures) has more than
+  // its text; OpenCode's and Antigravity's thinking is all readable.
+  if (block.kind === "thinking" && !(block.opaqueBytes > 0) && text.trim()) return text;
   if (block.kind === "thinking") {
     var encrypted = "(" + window.__bramStackBytes(block.opaqueBytes || block.bytes) + " of encrypted reasoning the model carries forward; there is nothing more to read)";
     return text.trim() ? text + "\n\n" + encrypted : encrypted;

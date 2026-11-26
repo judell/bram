@@ -208,17 +208,48 @@ const call = (k, context) => ({ provider: "claude", session: "s", thread: "main"
   eq(opt.series[0].data, [[calls[0].atMs, 1000]]);
 }
 
-// 4b. The About dialog's lines: Claude and Codex their own, any other
-// provider the neutral pair (Provider parity).
+// 4b. The About dialog's lines: Claude, Codex, OpenCode and Antigravity
+// their own, any other provider the neutral pair (Provider parity). Each
+// defines a block in the sentence after the first.
 {
   const about = (p) => JSON.parse(JSON.stringify(real.__bramStackAboutLines({ provider: p })));
+  const defined = "A block is one piece of what the model is sent";
   assert.ok(about("claude")[1].startsWith("Sizes are the bytes"));
   assert.ok(about("codex")[0].includes("Codex rollout"));
-  for (const p of ["opencode", "antigravity", "someday"]) {
-    const lines = about(p);
-    eq(lines.length, 2);
-    assert.ok(!/Claude|Codex|Anthropic/.test(lines.join(" ")), p);
-  }
+  const oc = about("opencode");
+  eq(oc.length, 2);
+  assert.ok(oc[0].startsWith("Every block OpenCode's session record holds"));
+  assert.ok(oc[0].includes(defined));
+  assert.ok(oc[1].includes("measured on this session's growth"));
+  assert.ok(!/Claude|Codex|Anthropic|Antigravity/.test(oc.join(" ")));
+  const agy = about("antigravity");
+  eq(agy.length, 2);
+  assert.ok(agy[0].startsWith("Every block Antigravity's transcript holds"));
+  assert.ok(agy[0].includes(defined));
+  assert.ok(agy[1].includes("one for thinking"));
+  assert.ok(!/Claude|Codex|Anthropic|OpenCode/.test(agy.join(" ")));
+  const other = about("someday");
+  eq(other.length, 2);
+  assert.ok(other[0].includes(defined));
+  assert.ok(!/Claude|Codex|Anthropic|OpenCode|Antigravity/.test(other.join(" ")));
+}
+
+// 4c. Kind texts: OpenCode and Antigravity their own where their kinds
+// differ, Claude's for the rest; readable thinking shows without the
+// encrypted note, Claude's signed thinking with it.
+{
+  const why = real.__bramStackKindExplain;
+  assert.ok(why("instructions", "opencode").includes("AGENTS.md"));
+  assert.ok(why("attachment", "opencode").includes("skills list"));
+  assert.ok(why("harness", "opencode").includes("aren't recorded"));
+  assert.ok(why("thinking", "antigravity").includes("its own rate"));
+  assert.ok(why("compaction-summary", "antigravity").includes("checkpoint"));
+  eq(why("tool-result", "antigravity"), why("tool-result", "claude"));
+  eq(why("harness", "someday"), "System instructions recorded for this session.");
+  const body = real.__bramStackBlockBody;
+  eq(body({ kind: "thinking", bytes: 12, opaqueBytes: 0 }, { text: "I will read." }), "I will read.");
+  assert.ok(body({ kind: "thinking", bytes: 900, opaqueBytes: 880 }, { text: "note" }).includes("encrypted reasoning"));
+  assert.ok(body({ kind: "thinking", bytes: 900, opaqueBytes: 900 }, { text: "" }).includes("encrypted reasoning"));
 }
 
 // 5. The turns query splits the stack's session.

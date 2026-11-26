@@ -3155,7 +3155,11 @@ window.__bramMisaddressedResend = function (ds) {
   if (pending && pending.kind === "chat") return window.__bramMisaddressedResendAsFeedback(ds, pending);
   if (pending && pending.kind === "item") return window.__bramMisaddressedResendToItem(ds, pending);
   if (!pending || !pending.feedbackRef) return;
-  window.__bramIframeTrace("click", { target: "resend-as-chat", op: "act", item: String(pending.itemId || "") });
+  // action-buttons-send-box-words: the words in the box at the click go after
+  // the resent message; the box clears only once the resend is sent, so a
+  // refusal leaves them there.
+  var words = window.__bramBoxWords();
+  window.__bramIframeTrace("click", { target: "resend-as-chat", op: "act", item: String(pending.itemId || ""), text: words.length });
   __bramMisaddressedPost({ op: "resend", feedbackRef: pending.feedbackRef }).then(function (res) {
     window.__bramMisaddressedPending = null;
     if (ds && typeof ds.refetch === "function") ds.refetch();
@@ -3165,7 +3169,8 @@ window.__bramMisaddressedResend = function (ds) {
     }
     var sel = (window.__bramW2Selection || []).filter(function (id) { return id !== res.itemId; });
     if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection(sel);
-    window.__bramPrepareWorklistMessageSubmission({ text: res.text, mode: "", voiceTarget: "message-agent" });
+    window.__bramPrepareWorklistMessageSubmission({ text: window.__bramWithBoxWords(res.text, words), mode: "", voiceTarget: "message-agent" });
+    if (words) window.__bramClearComposer();
   });
 };
 // The chat direction: the host returns the chat turn's text, its images and
@@ -3175,7 +3180,8 @@ window.__bramMisaddressedResend = function (ds) {
 // as after any feedback send.
 window.__bramMisaddressedResendAsFeedback = function (ds, pending) {
   if (!pending || !pending.turnRef) return;
-  window.__bramIframeTrace("click", { target: "resend-as-feedback", op: "act", item: String(pending.itemId || "") });
+  var words = window.__bramBoxWords();
+  window.__bramIframeTrace("click", { target: "resend-as-feedback", op: "act", item: String(pending.itemId || ""), text: words.length });
   __bramMisaddressedPost({ op: "resend-as-feedback", turnRef: pending.turnRef }).then(function (res) {
     window.__bramMisaddressedPending = null;
     if (ds && typeof ds.refetch === "function") ds.refetch();
@@ -3185,8 +3191,10 @@ window.__bramMisaddressedResendAsFeedback = function (ds, pending) {
     }
     var markers = (res.images || []).map(function (p) { return "Read this screenshot: @" + p + "\n[Image: source: " + p + "]"; }).join("\n");
     var body = (markers ? markers + "\n\n" : "") + (res.text || "") + (res.note || "");
+    body = window.__bramWithBoxWords(body, words ? window.__bramWithStagedImageMarkers(words, "feedback") : "");
     if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection([res.itemId]);
     window.__bramWorklist2BatchIterate([res.itemId], body);
+    if (words) window.__bramClearComposer();
     if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript();
   });
 };
@@ -3196,7 +3204,8 @@ window.__bramMisaddressedResendAsFeedback = function (ds, pending) {
 // as feedback through the same path as the chat direction.
 window.__bramMisaddressedResendToItem = function (ds, pending) {
   if (!pending || !pending.feedbackRef) return;
-  window.__bramIframeTrace("click", { target: "resend-to-item", op: "act", item: String(pending.itemId || ""), from: String(pending.fromId || "") });
+  var words = window.__bramBoxWords();
+  window.__bramIframeTrace("click", { target: "resend-to-item", op: "act", item: String(pending.itemId || ""), from: String(pending.fromId || ""), text: words.length });
   __bramMisaddressedPost({ op: "resend-to-item", feedbackRef: pending.feedbackRef }).then(function (res) {
     window.__bramMisaddressedPending = null;
     if (ds && typeof ds.refetch === "function") ds.refetch();
@@ -3204,9 +3213,10 @@ window.__bramMisaddressedResendToItem = function (ds, pending) {
       window.__bramIframeTrace("click", { target: "resend-to-item", op: "refused", reason: String((res && res.error) || "no-response") });
       return;
     }
-    var body = res.text + (res.note || "");
+    var body = window.__bramWithBoxWords(res.text + (res.note || ""), words ? window.__bramWithStagedImageMarkers(words, "feedback") : "");
     if (typeof window.__bramW2SetSelection === "function") window.__bramW2SetSelection([res.itemId]);
     window.__bramWorklist2BatchIterate([res.itemId], body);
+    if (words) window.__bramClearComposer();
     if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript();
   });
 };
@@ -3513,12 +3523,32 @@ window.__bramNextMoveSlot = function (board, sel, claim, pred) {
   if (window.__bramSelectionTakeLine(pred, sel, board)) return "take";
   return "own";
 };
+// action-buttons-send-box-words (Jon, 2026-11-26: "we should send the words
+// with any action button"): the words in the message box at the click, ""
+// when it holds only whitespace. Each action button sends them with its own
+// turn and then clears the box; on a refusal the box keeps them. Screenshot
+// markers are added per path, since a chat send and a feedback send consume
+// different paste targets.
+window.__bramBoxWords = function () {
+  var t = String(window.__bramMessageAgentText || "");
+  return t.trim() ? t : "";
+};
+window.__bramWithBoxWords = function (text, words) {
+  if (!words) return text;
+  return text ? text + "\n\n" + words : words;
+};
 window.__bramAskSequence = function (sel) {
   var ids = (sel || []).slice();
-  window.__bramIframeTrace("click", { target: "gatebar-sequence", selected: ids.length });
+  var words = window.__bramBoxWords();
+  window.__bramIframeTrace("click", { target: "gatebar-sequence", selected: ids.length, text: words.length });
   if (typeof window.toTurn === "function") {
-    window.toTurn(window.__bramSequenceQuestion + (ids.length ? " (" + ids.join(", ") + ")" : ""));
+    // The words and their screenshots go AFTER the question: the host
+    // recognizes it by its prefix (inline_chat_text's NOT_CHAT) and parses
+    // the ids from "What's my next move? (".
+    var q = window.__bramSequenceQuestion + (ids.length ? " (" + ids.join(", ") + ")" : "");
+    window.toTurn(window.__bramWithBoxWords(q, words ? window.__bramWithStagedImageMarkers(words, "message-agent") : ""));
   }
+  if (words) window.__bramClearComposer();
   window.__bramGateGoTranscript();
 };
 // Runs the plan through the gate buttons' own paths, for exactly the named
@@ -3550,6 +3580,10 @@ window.__bramDoRecommended = function (board, claim) {
     }
     else if (s.verb === "feedback" && ids.length && s.text) feedbackSteps.push(s);
   });
+  // action-buttons-send-box-words: the words in the box go with whichever
+  // turn the plan produces. Starts alone and commits alone already take them
+  // through __bramGateAct, which reads the box itself.
+  var words = window.__bramBoxWords();
   window.__bramIframeTrace("click", {
     target: "gatebar-do-recommended",
     drop: dropIds.length,
@@ -3557,6 +3591,7 @@ window.__bramDoRecommended = function (board, claim) {
     start: startIds.length - resumeCount,
     resume: resumeCount,
     feedback: feedbackSteps.length,
+    text: words.length,
   });
   var items = (board && board.items) || [];
   // After any drops, like commits. The host refuses a plan that mixes
@@ -3571,7 +3606,7 @@ window.__bramDoRecommended = function (board, claim) {
     // every item apply-and-commit as soon as one isn't applied.
     if (startIds.length && commitIds.length) {
       var ids = commitIds.concat(startIds);
-      var body = "";
+      var body = words ? window.__bramWithStagedImageMarkers(words, "feedback") : "";
       var r = window.__bramPrepareBatchWorklistActionSubmission({
         items: items,
         selectedIds: ids,
@@ -3581,17 +3616,28 @@ window.__bramDoRecommended = function (board, claim) {
         closeMap: window.__bramW2CloseMap,
       });
       window.__bramW2SetSelection(startIds);
+      if (words) window.__bramClearComposer();
       window.__bramWorklistActApply(r);
       window.__bramGateGoTranscript();
       return;
     }
     if (startIds.length) window.__bramGateAct("start", items, startIds, claim);
     if (commitIds.length) window.__bramGateAct("commit", items, commitIds, claim);
-    feedbackSteps.forEach(function (s) {
-      window.__bramWorklist2BatchIterate(s.ids, String(s.text));
-    });
+    if (feedbackSteps.length) {
+      var extra = words ? window.__bramWithStagedImageMarkers(words, "feedback") : "";
+      feedbackSteps.forEach(function (s) {
+        window.__bramWorklist2BatchIterate(s.ids, window.__bramWithBoxWords(String(s.text), extra));
+      });
+      if (words) window.__bramClearComposer();
+    }
   };
   window.__bramDismissPlan();
+  // A plan of drops alone, with words in the box: the drops go as a drop:
+  // turn carrying them, as Drop with words does, so the agent can answer.
+  if (dropIds.length && words && !startIds.length && !commitIds.length && !feedbackSteps.length) {
+    window.__bramGateAct("drop", items, dropIds, claim);
+    return;
+  }
   if (!dropIds.length) {
     commit();
     return;
@@ -3679,12 +3725,12 @@ window.__bramGateAct = function (kind, items, sel, claim, opt) {
       kind: kind,
       items: window.__bramPlainCopy(items),
       sel: ids0.slice(),
-      text: String(window.__bramMessageAgentText || ""),
+      text: window.__bramBoxWords(),
     });
     window.__bramClearComposer();
     return;
   }
-  var text = opt.now && opt.text != null ? String(opt.text) : String(window.__bramMessageAgentText || "");
+  var text = opt.now && opt.text != null ? String(opt.text) : window.__bramBoxWords();
   // issue-345: this trace is the soak evidence that the user SAW the
   // don't-close warning and submitted the commit anyway -- fires only when
   // the detector still returns a contradiction for THIS submission (i.e.
@@ -18803,8 +18849,12 @@ window.__bramSendLedgerNoticeGoOn = function (payload, dismissedKey) {
   return !!n && n.indexOf("Response interrupted. The agent has") === 0;
 };
 window.__bramSendLedgerGoOn = function (payload) {
-  window.__bramIframeTrace("click", { target: "notice-go-on", op: "act" });
-  window.__bramPrepareWorklistMessageSubmission({ text: "go on", mode: "", voiceTarget: "message-agent" });
+  // action-buttons-send-box-words: "go on", then the words in the box (the
+  // chat send adds their screenshots).
+  var words = window.__bramBoxWords();
+  window.__bramIframeTrace("click", { target: "notice-go-on", op: "act", text: words.length });
+  window.__bramPrepareWorklistMessageSubmission({ text: window.__bramWithBoxWords("go on", words), mode: "", voiceTarget: "message-agent" });
+  if (words) window.__bramClearComposer();
   return window.__bramDismissSendNotice(window.__bramSendLedgerNoticeKey(payload));
 };
 window.__bramSendLedgerNoticeStatusTail = function (payload, dismissedKey) {

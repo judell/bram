@@ -294,10 +294,8 @@
              page was entered via a deep link (q in the URL). Worklist expansion
              state persists via the window-side UI-state store, so a plain
              navigate restores the item the user replayed from. -->
-        <Link when="{!!$queryParams.q}" noIndicator tooltip="Back to the Worklist, restoring the open item"
-          onClick="navigate('/worklist')">
-          <Text value="← Worklist" />
-        </Link>
+        <BackLink when="{!!$queryParams.q}" label="Worklist" to="/worklist"
+          tooltip="Back to the Worklist, restoring the open item" />
         <Heading level="h2">Search</Heading>
         <Theme paddingHorizontal-Button-xs="$space-0_5">
           <Button

@@ -143,6 +143,15 @@ A ⌘/Ctrl-click opens the other one. Don't use `file://` links, `~/` paths, or
 raw `http://127.0.0.1:<port>/__file?path=` URLs: that route is the pane's
 image shim, and serves Markdown as source.
 
+## Linking a session
+
+When you mention a session, link it instead of quoting an id:
+`[<title or short id>](/sessions?session=<provider>:<id>)`. The provider is
+lowercase (`claude`, `codex`, `opencode`, `antigravity`) and the id is that
+provider's full session id. Use `/context?session=<provider>:<id>` to show what
+the model was sent in that session. The link opens in the pane and does not
+switch the agent to that session.
+
 ## Live SQL views via `/query`
 
 When a managed project keeps data in SQLite, its target app (or the

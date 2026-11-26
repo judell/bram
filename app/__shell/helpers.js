@@ -1091,6 +1091,32 @@ window.__bramProviderLabel = function (provider) {
     : key === "antigravity" ? "Antigravity"
     : "Claude";
 };
+// session-links-by-id: a session address is `<provider>:<id>` (the provider's
+// lowercase key, then its own full session id). Pure: reads only its argument.
+window.__bramSessionAddress = function (addr) {
+  var s = String(addr || "");
+  var at = s.indexOf(":");
+  if (at <= 0) return null;
+  var provider = window.__bramProviderKey(s.slice(0, at));
+  var id = s.slice(at + 1);
+  return provider && id ? { provider: provider, id: id } : null;
+};
+// The /__context-stack query: the linked session when the route has one, else
+// the active provider's current session.
+window.__bramStackQuery = function (linked, activeProvider) {
+  if (linked) return { provider: linked.provider, id: linked.id };
+  return { provider: activeProvider || "" };
+};
+window.__bramLinkedSessionLabel = function (linked) {
+  if (!linked) return "";
+  return window.__bramProviderLabel(linked.provider) + " session " + String(linked.id).slice(0, 8);
+};
+// The row for a linked session in that provider's /__sessions/list, or null.
+window.__bramLinkedSessionRow = function (rows, linked) {
+  if (!linked || !Array.isArray(rows)) return null;
+  for (var i = 0; i < rows.length; i++) if (rows[i] && rows[i].id === linked.id) return rows[i];
+  return null;
+};
 window.__bramAgentSwitcherLabel = function (provider) {
   return window.__bramProviderLabel(provider);
 };

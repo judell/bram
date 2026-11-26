@@ -20,6 +20,18 @@
   var.lastRenameOriginalTitle=""
   var.lastRenameTitle="">
 
+  <!-- session-links-by-id: /sessions?session=<provider>:<id> shows that
+       session in a panel above the list, whatever the active provider.
+       Derived <variable>s, not var.s, so they follow the route as it changes.
+       https://docs.xmlui.org/howto/deep-link-to-a-tab-or-section -->
+  <variable name="linked" value="{window.__bramSessionAddress($queryParams.session)}" />
+  <variable name="linkedRow" value="{window.__bramLinkedSessionRow(linkedList.value, linked)}" />
+  <DataSource
+    id="linkedList"
+    url="/__sessions/list"
+    queryParams="{{ provider: linked &amp;&amp; linked.provider }}"
+    when="{!!linked}" />
+
   <!-- Browse list with full-text filtering through the shared SQLite index and
        inline SessionDetail. Search hits are joined back to the lightweight
        session metadata rows so browse actions and columns remain available. -->
@@ -263,10 +275,7 @@
     <property name="headerTemplate">
      <VStack gap="$space-3">
     <HStack gap="$space-3" verticalAlignment="center">
-      <Link when="{$queryParams.from === 'tip'}" noIndicator
-        tooltip="Back to where you were" onClick="navigate(-1)">
-        <Text value="← Back" />
-      </Link>
+      <BackLink when="{$queryParams.from === 'tip' || !!linked}" />
       <Heading level="h2">Sessions</Heading>
       <SearchBox
         boxWidth="22rem"
@@ -313,6 +322,16 @@
       </HStack>
      </VStack>
     </property>
+      <VStack when="{!!linked}" gap="$space-2" padding="$space-3" borderBottom="1px solid $borderColor">
+        <!-- session-links-by-id: labelled as the Context tab labels it; the
+             way back is the header's BackLink, as on Context. -->
+        <Text fontWeight="$fontWeight-bold" value="{window.__bramLinkedSessionLabel(linked)}" />
+        <Text when="{!!linkedRow}" value="{linkedRow &amp;&amp; linkedRow.title}" />
+        <Text when="{linkedList.loaded &amp;&amp; !linkedRow}" fontSize="$fontSize-sm" color="$textColor-secondary"
+          value="Not in this project's session list" />
+        <SessionDetail when="{!!linkedRow || linkedList.loaded}" sessionId="{linked &amp;&amp; linked.id}" provider="{linked &amp;&amp; linked.provider}"
+          height="600px" />
+      </VStack>
       <Items data="{filteredSessions}">
         <VStack gap="0" borderBottom="1px solid $borderColor">
           <HStack

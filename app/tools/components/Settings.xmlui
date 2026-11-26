@@ -59,10 +59,7 @@
      <VStack gap="$space-5" paddingBottom="$space-5">
     <!-- issue-231: tip arrivals carry from=tip; the back link returns to
          wherever the tip was clicked. Hidden on normal visits. -->
-    <Link when="{$queryParams.from === 'tip'}" noIndicator
-      tooltip="Back to where you were" onClick="navigate(-1)">
-      <Text value="← Back" />
-    </Link>
+    <BackLink when="{$queryParams.from === 'tip'}" />
     <!-- The page's blurb sits behind an info button, like each setting's
          (companion-app-settings, Jon 2026-11-17). -->
     <HStack verticalAlignment="center" gap="$space-1">

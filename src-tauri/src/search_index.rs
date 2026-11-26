@@ -65,7 +65,10 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // stay unsearchable while the index reported itself healthy. Not a shape
 // change, and still correctly a rebuild -- exactly the case the comment below
 // names.
-const SCHEMA_VERSION: i64 = 14;
+// session-links-by-id: bumped 14 -> 15. A session row's `link` became
+// `/sessions?session=<provider>:<id>` (was the bare `/sessions`); rows already
+// stored keep the old link, and the mtime/size gate never rewrites them.
+const SCHEMA_VERSION: i64 = 15;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema

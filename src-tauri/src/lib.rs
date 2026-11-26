@@ -11032,6 +11032,25 @@ fn turn_state_note_pty_activity() {
     }
 }
 
+/// session-links-by-id: the pane route for one session, `<provider>:<id>`
+/// with the provider's lowercase key and its own session id. Ids are UUIDs
+/// or `ses_`-style tokens; the query value is encoded only where a reserved
+/// character would break it.
+fn session_pane_link(provider: SessionProvider, id: &str) -> String {
+    let mut enc = String::new();
+    for c in id.chars() {
+        match c {
+            '&' | '#' | '?' | ' ' | '%' | '+' => enc.push_str(&format!("%{:02X}", c as u32)),
+            _ => enc.push(c),
+        }
+    }
+    format!(
+        "/sessions?session={}:{}",
+        session_provider_label(provider),
+        enc
+    )
+}
+
 fn session_provider_label(provider: SessionProvider) -> &'static str {
     match provider {
         SessionProvider::Claude => "claude",
@@ -42081,6 +42100,8 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         }
         let path_str = path.to_string_lossy().to_string();
         let extract_started = std::time::Instant::now();
+        // session-links-by-id: built before `id` moves into the title fallback.
+        let link = session_pane_link(provider, &id);
         let title = known_title
             .or_else(|| claude_session_title(&path).ok().flatten())
             .unwrap_or(id);
@@ -42121,9 +42142,11 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             // every other session (a ms value read as seconds dated the
             // burndown hit 58793-02-18).
             date: search_row_date(provider, mtime),
-            // Internal tab route; exact-session deep-link is deferred. The
-            // expander derives id from the doc key (file basename) for /__turns.
-            link: "/sessions".to_string(),
+            // session-links-by-id: the pane route that opens this session,
+            // `<provider>:<id>` with the id /__sessions/list reports (the
+            // discovery id carried in the tuple, not the file basename).
+            // The expander still derives id from the doc key for /__turns.
+            link,
             content: extracted.content,
             intent,
             file: path_str,
@@ -42299,7 +42322,8 @@ fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
                 size / 1024
             ),
             date: mtime.to_string(),
-            link: "/sessions".to_string(),
+            // session-links-by-id: same address as the other providers.
+            link: session_pane_link(s.provider, &s.id),
             content: extracted.content,
             intent,
             file: path_str,

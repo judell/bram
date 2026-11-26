@@ -1,0 +1,28 @@
+<!-- BackLink (session-links-by-id; Jon, 2026-11-25: "it belongs on the left
+     preceded by left arrow ... Standardize!"). The pane's one back control:
+     "← <label>", placed first in a page's header row, before the heading.
+     Contract:
+       props  label    default "Back"
+              to       optional route; omitted, it goes back to where the
+                       user was (navigate(-1)), which is what "back" means.
+                       Pass `to` only when a fixed destination is the point
+                       (Search's "← Worklist").
+              tooltip  optional; default "Back to where you were" without `to`
+     Rule in docs/developing-bram.md §Back controls. Defaults use `??`, the
+     only mechanism user-defined components have.
+     https://www.xmlui.org/docs/howto/create-a-reusable-component
+     https://www.xmlui.org/docs/howto/set-default-property-values
+     https://www.xmlui.org/docs/howto/add-breadcrumb-navigation (same Link + Text shape)
+     https://www.xmlui.org/docs/reference/components/Link -->
+<Component name="BackLink">
+  <Link when="{!$props.to}" noIndicator
+    tooltip="{$props.tooltip ?? 'Back to where you were'}"
+    onClick="navigate(-1)">
+    <Text value="{'← ' + ($props.label ?? 'Back')}" />
+  </Link>
+  <Link when="{!!$props.to}" noIndicator
+    tooltip="{$props.tooltip ?? ''}"
+    onClick="navigate($props.to)">
+    <Text value="{'← ' + ($props.label ?? 'Back')}" />
+  </Link>
+</Component>

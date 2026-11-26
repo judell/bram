@@ -133,6 +133,21 @@ and the browser reproduction in the pinned-header worklist draft. Transcript
 retains its measured List height; Search retains a sticky heading in its
 bounded route scroller.
 
+### Back controls
+
+A page reached from somewhere else (a tip, a session link, a deep link)
+offers the way back with `<BackLink />` (`app/tools/components/BackLink.xmlui`):
+`← Back`, first in the header row, before the heading (Jon, 2026-11-25: "it
+belongs on the left preceded by left arrow ... Standardize!").
+
+- **Back means where the user was:** `navigate(-1)`, the default. Pass `to`
+  only when a fixed destination is the point, and then name it in `label`
+  (Search's `← Worklist`).
+- **Don't hand-roll one,** and don't put a "Close" or "Back to …" link on the
+  right: one control, one place, one meaning across the pane.
+- Show it with `when` only when the page was reached that way
+  (`$queryParams.from === 'tip'`, a linked session).
+
 ### Demo first, unit tests when a demo can't reach it
 
 Verify a change by reproducing it on a demo instance

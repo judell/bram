@@ -10,11 +10,17 @@
   var.selectedDisplay="{null}"
   var.selectedSession=""
   var.selectedBlock="{null}">
+  <!-- session-links-by-id: /context?session=<provider>:<id> shows that
+       session's stack without switching the agent; no param, the active one.
+       A derived <variable>, not a var., so it follows the route as it changes
+       (Back, or another session link) without a remount.
+       https://docs.xmlui.org/howto/deep-link-to-a-tab-or-section -->
+  <variable name="linked" value="{window.__bramSessionAddress($queryParams.session)}" />
 
   <!-- The stack for the active session; refetched when the host samples a
        new context reading at turn end (push over polling).
        https://www.xmlui.org/docs/reference/components/DataSource -->
-  <DataSource id="stack" url="/__context-stack" queryParams="{{ provider: $props.activeProvider || '' }}" />
+  <DataSource id="stack" url="/__context-stack" queryParams="{window.__bramStackQuery(linked, $props.activeProvider)}" />
   <PushSource id="contextSettings" initial="{null}" subscribe="{window.bramSubscribeTauriEvent('settings-changed')}" />
   <PushSource
     id="stackTick"
@@ -48,6 +54,13 @@
       height="100%"
       onInit="registerContextMemorySelector((basename) => { let memorySection = ((ctxList.value &amp;&amp; ctxList.value.sections) || []).find((s) => s.key === 'memory'); let f = ((memorySection &amp;&amp; memorySection.items) || []).find((x) => x.display === basename); if (f) { selectedPath = f.path; selectedDisplay = f.display; selectedBlock = null; } })"
       onCleanup="clearContextMemorySelector()">
+      <!-- session-links-by-id: which session a linked view shows, with the
+           pane's back control first (BackLink, back to where the link was
+           clicked; Jon, 2026-11-25: "on the left preceded by left arrow"). -->
+      <HStack when="{!!linked}" verticalAlignment="center" gap="$space-3">
+        <BackLink />
+        <Text fontWeight="$fontWeight-bold" value="{window.__bramLinkedSessionLabel(linked)}" />
+      </HStack>
       <!-- The title, the About dialog and its little-i live in
            ContextStack's pinned header (pinned-header-standard-everywhere). -->
       <ContextStack

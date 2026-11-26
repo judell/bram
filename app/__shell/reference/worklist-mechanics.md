@@ -649,6 +649,10 @@ routes.
 - **The host checks it and refuses, naming the id,** if an id isn't on the
   board, a commit id hasn't started (nothing to commit), or an id is named
   in more than one step.
+- **The host checks that you posted one.** When a turn answering "What's my
+  next move? (a, b, ...)" for two or more items ends with no plan posted
+  for those items, the host sends one follow-up turn asking for a plan, or
+  one line on why none applies. It is sent once per question.
 - **The pane shows it above the gate row** as "Recommended: Drop a, b ·
   Commit c", with **Do recommended** and a dismiss ×. It's shown only while
   two or more items are ticked, every item the plan names is among them, and

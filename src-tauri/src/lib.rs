@@ -25123,6 +25123,8 @@ fn end_turn_context_unless_fresh<R: tauri::Runtime>(app: &AppHandle<R>, source: 
         }
     }
     emit_turn_context(app, &[], "turn-end");
+    // next-move-requires-plan: every provider's turn end passes through here.
+    next_move_check_at_turn_end(app, source);
     // esc-strand-missed-arrow-in-message: a withdrawn approval's refusal lasts
     // for its turn.
     if let Some(root) = project_root(Some(app)) {
@@ -99925,6 +99927,204 @@ fn handle_worklist_plan<R: tauri::Runtime>(
         serde_json::to_vec(&serde_json::json!({ "ok": true, "version": version }))
             .unwrap_or_default(),
     )
+}
+
+// next-move-requires-plan: a multi-item "What's my next move? (a, b)" is
+// answered in chat AND with a posted plan (Do recommended). Agents missed the
+// plan (2026-11-25), so when a turn ends the host checks, and sends the agent
+// ONE follow-up per question. Provider-neutral: it hooks
+// end_turn_context_unless_fresh, which every provider's turn end calls.
+#[derive(Debug, Clone, PartialEq)]
+struct NextMoveQuestion {
+    /// The send-ledger id of the question; keys the sent-once latch.
+    ledger_id: String,
+    injected_at_ms: i64,
+    ids: Vec<String>,
+}
+
+/// The slice of `.worklist-plan.json` this check reads.
+#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PlanRecord {
+    posted_at_ms: i64,
+    steps: Vec<PlanRecordStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+#[serde(default)]
+struct PlanRecordStep {
+    ids: Vec<String>,
+}
+
+/// The ids in a gate-bar question text ("What's my next move? (a, b)"), found
+/// anywhere in the text since host notes may precede it.
+fn parse_next_move_ids(text: &str) -> Option<Vec<String>> {
+    const Q: &str = "What's my next move? (";
+    let rest = &text[text.find(Q)? + Q.len()..];
+    let inner = &rest[..rest.find(')')?];
+    let ids: Vec<String> = inner
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids)
+    }
+}
+
+/// Pure decision: the follow-up text to send, or None. A plan covers the
+/// question when it was posted at or after the question was delivered and
+/// names at least one of its items (a plan may rightly leave some out).
+fn next_move_follow_up(
+    question: Option<&NextMoveQuestion>,
+    plan: Option<&PlanRecord>,
+    already_sent: bool,
+) -> Option<String> {
+    let q = question?;
+    if already_sent || q.ids.len() < 2 || next_move_plan_covers(q, plan) {
+        return None;
+    }
+    Some(format!(
+        // Not in the `[bram: …]` form: agents read that as a fact, never a request.
+        "Bram follow-up: you answered What's my next move? for {} without posting a plan, so Do recommended isn't showing. Post one now (.claude/bram-reference/worklist-mechanics.md, Recommending next steps), or say in one line why none applies.",
+        q.ids.join(", ")
+    ))
+}
+
+fn next_move_plan_covers(q: &NextMoveQuestion, plan: Option<&PlanRecord>) -> bool {
+    plan.map_or(false, |p| {
+        p.posted_at_ms >= q.injected_at_ms
+            && p.steps
+                .iter()
+                .any(|st| st.ids.iter().any(|id| q.ids.contains(id)))
+    })
+}
+
+fn next_move_question_from_ledger<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(NextMoveQuestion, &'static str)> {
+    let e = send_ledger_cell().lock().ok()?.last()?.clone();
+    let text = if e.kind == "framed" {
+        let path = outbound_turn_path(&outbound_turns_dir(app)?, &e.id)?;
+        let env: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        env.get("text")?.as_str()?.to_string()
+    } else {
+        e.payload.clone()
+    };
+    let ids = parse_next_move_ids(&text)?;
+    // Landing is confirmed by the JSONL showing the send, so a turn end seen
+    // before it can't be the answer to this question.
+    let verdict = if e.state != "landed" {
+        "not-landed"
+    } else if unix_now_ms().saturating_sub(e.injected_at_ms) < 2000 {
+        "too-fresh"
+    } else {
+        ""
+    };
+    Some((
+        NextMoveQuestion {
+            ledger_id: e.id,
+            injected_at_ms: e.injected_at_ms,
+            ids,
+        },
+        verdict,
+    ))
+}
+
+fn next_move_check_at_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) {
+    static SENT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let Some((q, not_ready)) = next_move_question_from_ledger(app) else {
+        return;
+    };
+    let ids = q.ids.join(",");
+    let trace = |msg: String| append_bram_trace_line(app, "next-move-plan", &msg);
+    if !not_ready.is_empty() {
+        trace(format!(
+            "op=skip reason={} id={} source={}",
+            not_ready, q.ledger_id, source
+        ));
+        return;
+    }
+    if q.ids.len() < 2 {
+        trace(format!(
+            "op=skip reason=single-item id={} ids={}",
+            q.ledger_id, ids
+        ));
+        return;
+    }
+    let plan: Option<PlanRecord> = project_resource_path(app, WORKLIST_PLAN_FILE)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let set = SENT.get_or_init(|| Mutex::new(HashSet::new()));
+    let already = set.lock().map_or(true, |g| g.contains(&q.ledger_id));
+    match next_move_follow_up(Some(&q), plan.as_ref(), already) {
+        None if already => trace(format!(
+            "op=skip reason=already-sent id={} ids={}",
+            q.ledger_id, ids
+        )),
+        None => trace(format!("op=covered id={} ids={}", q.ledger_id, ids)),
+        Some(text) => {
+            if let Ok(mut g) = set.lock() {
+                g.insert(q.ledger_id.clone());
+            }
+            trace(format!(
+                "op=follow-up id={} ids={} source={}",
+                q.ledger_id, ids, source
+            ));
+            // A short wait lets the CLI redraw its idle composer first.
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let state = app.state::<AppState>();
+                let _ = write_pty_turn_intent(&app, &state, &text);
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod next_move_requires_plan_tests {
+    use super::*;
+
+    fn q(ids: &[&str]) -> NextMoveQuestion {
+        NextMoveQuestion {
+            ledger_id: "1-inline".into(),
+            injected_at_ms: 1000,
+            ids: ids.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+    fn plan(at: i64, ids: &[&str]) -> PlanRecord {
+        PlanRecord {
+            posted_at_ms: at,
+            steps: vec![PlanRecordStep {
+                ids: ids.iter().map(|s| s.to_string()).collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn follow_up_cases() {
+        let two = q(&["a", "b"]);
+        let text = next_move_follow_up(Some(&two), None, false).unwrap();
+        assert!(text.contains("a, b"), "{text}");
+        assert!(next_move_follow_up(Some(&two), Some(&plan(2000, &["a", "b"])), false).is_none());
+        // a plan from before the question does not count
+        assert!(next_move_follow_up(Some(&two), Some(&plan(500, &["a", "b"])), false).is_some());
+        assert!(next_move_follow_up(Some(&two), None, true).is_none());
+        assert!(next_move_follow_up(Some(&q(&["a"])), None, false).is_none());
+        assert!(next_move_follow_up(None, None, false).is_none());
+    }
+
+    #[test]
+    fn parses_ids_after_host_notes() {
+        assert_eq!(
+            parse_next_move_ids("[bram: x]\nWhat's my next move? (a, b-c)"),
+            Some(vec!["a".to_string(), "b-c".to_string()])
+        );
+        assert_eq!(parse_next_move_ids("What's my next move?"), None);
+    }
 }
 
 // message-box-on-draft-editor-pattern: the message box's draft file, under

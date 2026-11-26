@@ -44733,6 +44733,7 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     }
     let first_run = status["firstRun"].as_bool().unwrap_or(false);
+    let presence = ProviderPresence::detect();
     match run_enhance(app, false) {
         Ok(body) => {
             let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -44742,8 +44743,9 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
                 app,
                 "auto-setup",
                 &format!(
-                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} antigravityNeeded={} wrote={} skipped={}",
-                    first_run, claude_needs, codex_needs, opencode_needs, antigravity_needs, wrote, skipped
+                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} opencodeNeeded={} antigravityNeeded={} codexPresent={} opencodePresent={} antigravityPresent={} wrote={} skipped={}",
+                    first_run, claude_needs, codex_needs, opencode_needs, antigravity_needs,
+                    presence.codex, presence.opencode, presence.antigravity, wrote, skipped
                 ),
             );
             if first_run && wrote > 0 {
@@ -66852,10 +66854,19 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         || !hook_registered
         || !menu_hook_registered
         || (!is_source_repo && !claude_docs_current);
-    let codex_needs_setup = !core_installed
-        || !codex_hook_block_current
-        || !codex_instr_current
-        || (!is_source_repo && !codex_docs_current);
+    // setup-skips-absent-provider-cli: with Codex absent Setup no longer
+    // writes its home config, so that config can't count as missing, or
+    // Setup would re-run (and the banner show) on every launch.
+    let codex_home_ok = !codex_home_wanted(
+        agent_cli_on_path(provider_cli_name(SessionProvider::Codex)),
+        current_provider(app),
+        codex_config_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false),
+    ) || (codex_hook_block_current && codex_instr_current);
+    let codex_needs_setup =
+        !core_installed || !codex_home_ok || (!is_source_repo && !codex_docs_current);
     // opencode-worklist-guard: OpenCode's install is the project plugin plus
     // the `instructions` entry in .opencode/opencode.json
     // (opencode-signature-and-conventions). Only where OpenCode can run;
@@ -68524,21 +68535,35 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
 
     // Codex user-global hook install. Runs unconditionally (incl. source repo)
     // because the install is keyed to $HOME, not the project.
-    let codex_hook_install = install_codex_worklist_guard(app)?;
-    for path in &codex_hook_install.wrote {
-        wrote.push(path.clone());
+    // setup-skips-absent-provider-cli: only where Codex is installed (#513).
+    let presence = ProviderPresence::detect();
+    let codex_config_exists = home_dir()
+        .map(|h| h.join(ENHANCE_CODEX_CONFIG_REL).exists())
+        .unwrap_or(false);
+    let mut codex_hook_install: Option<CodexHookInstall> = None;
+    if codex_home_gate(
+        codex_home_wanted(presence.codex, current_provider(app), codex_config_exists),
+        &mut skipped,
+    ) {
+        let codex_hook_install = codex_hook_install.insert(install_codex_worklist_guard(app)?);
+        for path in &codex_hook_install.wrote {
+            wrote.push(path.clone());
+        }
+        for path in &codex_hook_install.skipped {
+            skipped.push(path.clone());
+        }
+        // Developer-instructions install — top-level config.toml scalar carrying
+        // the gate prose. Replaced the per-turn UserPromptSubmit injection after
+        // verifying developer-role context is salient enough on its own.
+        install_codex_developer_instructions()?;
     }
-    for path in &codex_hook_install.skipped {
-        skipped.push(path.clone());
-    }
-    // Developer-instructions install — top-level config.toml scalar carrying
-    // the gate prose. Replaced the per-turn UserPromptSubmit injection after
-    // verifying developer-role context is salient enough on its own.
-    install_codex_developer_instructions()?;
     // opencode-worklist-guard: the OpenCode guard plugin. Runs on the source
     // repo too: it is the guard's registration, not a seeded doc.
     seed_opencode_plugin(app, &proj, &mut wrote, &mut skipped)?;
-    if opencode_plugin_wanted(app, &proj) {
+    if !opencode_plugin_wanted(app, &proj) {
+        // setup-skips-absent-provider-cli: say so, as for Codex.
+        skipped.push("opencode: not installed".to_string());
+    } else {
         seed_opencode_instructions(&proj, is_source_repo, &mut wrote, &mut skipped)?;
         apply_self_ignore(
             app,
@@ -68557,7 +68582,10 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // rules, under the same "wanted" rule. The source repo gets them too, cut
     // from app/__shell/conventions.md (its .gitignore covers them), as
     // OpenCode's `instructions` there name that file.
-    if antigravity_hooks_wanted(app, &proj) {
+    if !antigravity_hooks_wanted(app, &proj) {
+        // setup-skips-absent-provider-cli: say so, as for Codex.
+        skipped.push("antigravity: not installed".to_string());
+    } else {
         if let Some(command) = expected_antigravity_guard_command() {
             seed_antigravity_hooks(&proj, &command, &mut wrote, &mut skipped)?;
         }
@@ -68624,15 +68652,17 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // running agent session predates the instructions. Pane state alone
     // forgot it on every reload.
     record_last_setup(&wrote, "run");
+    // Skipped Codex (absent): the hook was not installed, no paths to name.
+    let codex_hook_installed = codex_hook_install.as_ref().map_or(false, |c| c.installed);
     let body = serde_json::json!({
         "enhanced": true,
         "isSourceRepo": is_source_repo,
         "wrote": wrote,
         "divergedSkipped": skipped,
-        "codexHookInstalled": codex_hook_install.installed,
-        "codexHookScriptPath": codex_hook_install.script_path,
-        "codexConfigPath": codex_hook_install.config_path,
-        "codexHookNeedsTrust": codex_hook_install.installed,
+        "codexHookInstalled": codex_hook_installed,
+        "codexHookScriptPath": codex_hook_install.as_ref().map(|c| c.script_path.as_str()).unwrap_or(""),
+        "codexConfigPath": codex_hook_install.as_ref().map(|c| c.config_path.as_str()).unwrap_or(""),
+        "codexHookNeedsTrust": codex_hook_installed,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
@@ -68790,6 +68820,74 @@ fn apply_self_ignore<R: tauri::Runtime>(
             outcome.as_str()
         ),
     );
+}
+
+// setup-skips-absent-provider-cli: the gate on Codex's home config, tested
+// with stubbed presence. Nothing here touches the real home folder: the gate
+// is pure and the install it guards is never called.
+#[cfg(test)]
+mod absent_provider_gate_tests {
+    use super::{
+        codex_home_gate, codex_home_wanted, provider_needs_setup_for, ProviderPresence,
+        SessionProvider,
+    };
+
+    #[test]
+    fn absent_codex_skips_the_home_config_and_names_it() {
+        let presence = ProviderPresence {
+            codex: false,
+            opencode: false,
+            antigravity: false,
+        };
+        let mut skipped = Vec::new();
+        let wanted = codex_home_wanted(presence.codex, None, false);
+        assert!(!codex_home_gate(wanted, &mut skipped));
+        assert_eq!(skipped, vec!["codex: not installed".to_string()]);
+    }
+
+    #[test]
+    fn present_codex_writes_as_before() {
+        let mut skipped = Vec::new();
+        assert!(codex_home_gate(
+            codex_home_wanted(true, None, false),
+            &mut skipped
+        ));
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn an_existing_config_or_the_active_agent_keeps_it_wanted() {
+        assert!(codex_home_wanted(false, None, true));
+        assert!(codex_home_wanted(
+            false,
+            Some(SessionProvider::Codex),
+            false
+        ));
+        assert!(!codex_home_wanted(
+            false,
+            Some(SessionProvider::Claude),
+            false
+        ));
+    }
+
+    // Later install: launching Codex makes it the active provider, so the
+    // gate opens and provider_needs_setup_for (codex_needs still true) runs
+    // Setup for it.
+    #[test]
+    fn a_later_codex_launch_still_triggers_and_passes_the_gate() {
+        assert!(provider_needs_setup_for(
+            Some(SessionProvider::Codex),
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(codex_home_wanted(
+            false,
+            Some(SessionProvider::Codex),
+            false
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -69027,6 +69125,48 @@ mod self_ignore_tests {
             ]
         );
     }
+}
+
+// setup-skips-absent-provider-cli: which provider CLIs this machine has, by
+// the launcher's own probe (agent_cli_on_path, the resolver the startup
+// switch uses), so Setup and the launcher agree. Claude is never gated.
+// Injectable: tests build the struct, so they don't depend on this PATH.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProviderPresence {
+    codex: bool,
+    opencode: bool,
+    antigravity: bool,
+}
+
+impl ProviderPresence {
+    fn detect() -> Self {
+        Self {
+            codex: agent_cli_on_path(provider_cli_name(SessionProvider::Codex)),
+            opencode: agent_cli_on_path(provider_cli_name(SessionProvider::Opencode)),
+            antigravity: agent_cli_on_path(provider_cli_name(SessionProvider::Antigravity)),
+        }
+    }
+}
+
+// setup-skips-absent-provider-cli: Codex's home config (~/.codex/config.toml)
+// is written only where Codex can run: its CLI is present, it is the active
+// agent (the host PATH can be poorer than the PTY's), or Bram's config is
+// already there and so kept current. Same shape as opencode_plugin_wanted.
+fn codex_home_wanted(
+    codex_present: bool,
+    active: Option<SessionProvider>,
+    config_exists: bool,
+) -> bool {
+    codex_present || active == Some(SessionProvider::Codex) || config_exists
+}
+
+// The gate step: true to proceed with the write, false after recording the
+// skip with its reason in `skipped`.
+fn codex_home_gate(wanted: bool, skipped: &mut Vec<String>) -> bool {
+    if !wanted {
+        skipped.push("codex: not installed".to_string());
+    }
+    wanted
 }
 
 // opencode-worklist-guard: seed the plugin only where OpenCode can run (its

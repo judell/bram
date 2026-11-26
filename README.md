@@ -202,6 +202,8 @@ A healthy Codex hook screen should show Bram's installed lifecycle hooks as both
 
 When you choose Workflow, Setup checks what the current provider needs in this folder and installs what is missing; later launches find it in place.
 
+Setup writes a provider's own files only where that provider is installed (its CLI on your PATH, the active agent, or its files already in place): Codex's `~/.codex/config.toml`, OpenCode's `.opencode/`, Antigravity's `.agents/`. A provider it skips is named in the run's skipped list (`codex: not installed`), and installing it later and launching it in the folder runs Setup for it then. Claude's files are always written.
+
 Current behavior:
 
 - **Claude in a fresh workflow folder** — Setup installs the provider-neutral core plus the Claude-specific adapter.

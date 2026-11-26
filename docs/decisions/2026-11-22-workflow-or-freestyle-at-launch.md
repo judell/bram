@@ -32,4 +32,4 @@ The choice is per folder and per machine (Walt's case is "not managed on this Ma
 
 **Revisit when:** a freestyle user reports what they missed, #466's pause is reconciled with the per-machine choice, or the harness scenarios for first wake (`setup-harness.sh`) are rewritten for the two modes (`harness-two-modes`).
 
-Left open: the exact wording of the two cards (Jon's, on the demo instance), and whether Codex's home config write is gated on the mode or on the CLI being present.
+Left open: the exact wording of the two cards (Jon's, on the demo instance). Settled by `setup-skips-absent-provider-cli` (#513): Codex's home config write is gated on the CLI being present as well as on the mode.
